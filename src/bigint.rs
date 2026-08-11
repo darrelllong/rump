@@ -221,6 +221,53 @@ impl BigUint {
         out
     }
 
+    /// Encode as big-endian bytes at a fixed width, zero-padded on the
+    /// left — the shape wire formats and share serializations want.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value does not fit in `byte_width` bytes.
+    /// `byte_width = 0` is legal only for zero (and yields an empty vector).
+    #[must_use]
+    pub fn to_be_bytes_padded(&self, byte_width: usize) -> Vec<u8> {
+        if self.is_zero() {
+            return vec![0u8; byte_width];
+        }
+        let minimal = self.bits().div_ceil(8);
+        assert!(
+            minimal <= byte_width,
+            "value does not fit in {byte_width} bytes"
+        );
+        let mut out = vec![0u8; byte_width];
+        let bytes = self.to_be_bytes();
+        out[byte_width - bytes.len()..].copy_from_slice(&bytes);
+        out
+    }
+
+    /// The low 128 bits as a `u128`; bits above position 127 are silently
+    /// dropped. For callers that have already pinned their operand range
+    /// (fixed-field reductions and the like).
+    #[must_use]
+    pub fn low_u128(&self) -> u128 {
+        let lo = self.limbs.first().copied().unwrap_or(0);
+        let hi = self.limbs.get(1).copied().unwrap_or(0);
+        u128::from(lo) | (u128::from(hi) << 64)
+    }
+
+    /// The low `k` bits as a fresh value — `self mod 2^k`, splitting at any
+    /// bit boundary, limb-aligned or not.
+    #[must_use]
+    pub fn low_bits(&self, k: usize) -> Self {
+        let full_limbs = k / 64;
+        let partial_bits = k % 64;
+        let take = self.limbs.len().min(k.div_ceil(64));
+        let mut limbs: Vec<u64> = self.limbs[..take].to_vec();
+        if partial_bits != 0 && limbs.len() > full_limbs {
+            limbs[full_limbs] &= (1u64 << partial_bits) - 1;
+        }
+        Self::from_limbs(limbs)
+    }
+
     /// Return whether the value is zero.
     #[must_use]
     pub fn is_zero(&self) -> bool {
@@ -1767,6 +1814,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn padded_bytes_and_low_windows() {
+        let value = BigUint::from_u64(0x0102);
+        assert_eq!(value.to_be_bytes_padded(2), vec![0x01, 0x02]); // exact fit
+        assert_eq!(value.to_be_bytes_padded(5), vec![0, 0, 0, 0x01, 0x02]);
+        assert_eq!(BigUint::zero().to_be_bytes_padded(3), vec![0, 0, 0]);
+        assert!(BigUint::zero().to_be_bytes_padded(0).is_empty());
+
+        let wide = BigUint::from_u128((0xABCD_u128 << 64) | 0x1234);
+        assert_eq!(wide.low_u128(), (0xABCD_u128 << 64) | 0x1234);
+        // Bits above 127 drop silently.
+        let mut tall = BigUint::zero();
+        tall.set_bit(200);
+        tall.set_bit(3);
+        assert_eq!(tall.low_u128(), 8);
+
+        // Limb-aligned and mid-limb splits, and a window wider than the value.
+        assert_eq!(wide.low_bits(64), BigUint::from_u64(0x1234));
+        assert_eq!(
+            wide.low_bits(68),
+            BigUint::from_u128((0xD_u128 << 64) | 0x1234)
+        );
+        assert_eq!(wide.low_bits(4), BigUint::from_u64(4));
+        assert!(wide.low_bits(0).is_zero());
+        assert_eq!(wide.low_bits(500), wide);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not fit")]
+    fn padded_bytes_reject_overflow() {
+        let _ = BigUint::from_u64(0x0102).to_be_bytes_padded(1);
     }
 
     #[test]

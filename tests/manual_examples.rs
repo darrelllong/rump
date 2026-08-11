@@ -23,6 +23,15 @@ fn manual_biguint_construction_and_bytes() {
     let value = BigUint::from_be_bytes(&[0x01, 0x00]);
     assert_eq!(value, BigUint::from_u64(256));
     assert_eq!(value.to_be_bytes(), vec![0x01, 0x00]);
+
+    // Fixed-width output pads on the left — the shape share and wire
+    // serializations want; a value that does not fit panics.
+    assert_eq!(value.to_be_bytes_padded(4), vec![0x00, 0x00, 0x01, 0x00]);
+
+    // Range-pinned callers can read the low bits directly.
+    let wide = BigUint::from_u128((7u128 << 64) | 9);
+    assert_eq!(wide.low_u128(), (7u128 << 64) | 9);
+    assert_eq!(wide.low_bits(64), BigUint::from_u64(9)); // wide mod 2^64
 }
 
 #[test]
