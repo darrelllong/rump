@@ -69,10 +69,9 @@ pub fn random_nonzero_below<R: Rng + ?Sized>(
 
 /// Draw a random integer in `[1, upper_exclusive)` that is coprime to `coprime_to`.
 ///
-/// This is the nonce sampler used by schemes such as Paillier that need a
-/// fresh random unit modulo `n`: rejection-sample in `[1, upper_exclusive)`
-/// until the candidate lands in the multiplicative group with respect to
-/// `coprime_to`.
+/// Rejection-sample in `[1, upper_exclusive)` until the candidate lands in
+/// the multiplicative group with respect to `coprime_to` — the shape needed
+/// for drawing a fresh random unit modulo `n`.
 #[must_use]
 pub fn random_coprime_below<R: Rng + ?Sized>(
     rng: &mut R,

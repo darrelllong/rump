@@ -8,33 +8,7 @@
 
 use crate::bigint::{BigInt, BigUint, MontgomeryCtx};
 
-/// Fixed Miller-Rabin witness set used by the bigint probable-prime test.
-///
-/// These twelve small prime bases give a deterministic, repeatable witness
-/// schedule. They are the classic "small prime" bases through `37`.
-///
-/// Notes on determinism:
-/// - For all odd `n < 2^64`, published smaller witness sets are already
-///   deterministic; this superset is therefore deterministic in that range.
-/// - For larger `BigUint` candidates this remains a strong fixed-basis
-///   probable-prime test, but not a proof of primality.
-const MR_BASES: [u64; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
-
-/// Trial-division sieve primes checked before the Miller-Rabin stage.
-///
-/// Cheap remainders here discard most composites before the code pays for any
-/// modular exponentiation.
-const SMALL_TRIAL_PRIMES: [u16; 168] = [
-    2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
-    101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193,
-    197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257, 263, 269, 271, 277, 281, 283, 293, 307,
-    311, 313, 317, 331, 337, 347, 349, 353, 359, 367, 373, 379, 383, 389, 397, 401, 409, 419, 421,
-    431, 433, 439, 443, 449, 457, 461, 463, 467, 479, 487, 491, 499, 503, 509, 521, 523, 541, 547,
-    557, 563, 569, 571, 577, 587, 593, 599, 601, 607, 613, 617, 619, 631, 641, 643, 647, 653, 659,
-    661, 673, 677, 683, 691, 701, 709, 719, 727, 733, 739, 743, 751, 757, 761, 769, 773, 787, 797,
-    809, 811, 821, 823, 827, 829, 839, 853, 857, 859, 863, 877, 881, 883, 887, 907, 911, 919, 929,
-    937, 941, 947, 953, 967, 971, 977, 983, 991, 997,
-];
+// ─── Divisibility ──────────────────────────────────────────────────────────────
 
 /// Greatest common divisor by Euclid's algorithm.
 #[must_use]
@@ -47,6 +21,46 @@ pub fn gcd(lhs: &BigUint, rhs: &BigUint) -> BigUint {
         next = remainder;
     }
     current
+}
+
+/// Extended Euclid: `(g, s, t)` with `g = gcd(a, b) = a·s + b·t`.
+///
+/// The classic iterative form tracking both Bézout coefficient pairs;
+/// [`mod_inverse`] is the thin wrapper that keeps only `s`.
+///
+/// ```
+/// use rump::{gcd_extended, BigInt, BigUint};
+///
+/// let (a, b) = (BigUint::from_u64(240), BigUint::from_u64(46));
+/// let (g, s, t) = gcd_extended(&a, &b);
+/// assert_eq!(g, BigUint::from_u64(2));
+/// let bezout = s.mul_biguint_ref(&a).add_ref(&t.mul_biguint_ref(&b));
+/// assert_eq!(bezout, BigInt::from_biguint(g));
+/// ```
+#[must_use]
+pub fn gcd_extended(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
+    let mut old_r = a.clone();
+    let mut r = b.clone();
+    let mut old_s = BigInt::from_biguint(BigUint::one());
+    let mut s = BigInt::zero();
+    let mut old_t = BigInt::zero();
+    let mut t = BigInt::from_biguint(BigUint::one());
+
+    while !r.is_zero() {
+        let (quotient, remainder) = old_r.div_rem(&r);
+        old_r = r;
+        r = remainder;
+
+        let next_s = old_s.sub_ref(&s.mul_biguint_ref(&quotient));
+        old_s = s;
+        s = next_s;
+
+        let next_t = old_t.sub_ref(&t.mul_biguint_ref(&quotient));
+        old_t = t;
+        t = next_t;
+    }
+
+    (old_r, old_s, old_t)
 }
 
 /// Least common multiple.
@@ -67,6 +81,8 @@ pub fn lcm(lhs: &BigUint, rhs: &BigUint) -> BigUint {
     quotient.mul_ref(rhs)
 }
 
+// ─── Quadratic-residue symbols ─────────────────────────────────────────────────
+
 /// Jacobi symbol `(a/n)` for odd `n`, or `None` when `n` is even or zero.
 ///
 /// Binary algorithm via quadratic reciprocity (Menezes, van Oorschot &
@@ -79,6 +95,15 @@ pub fn lcm(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 /// For prime `n` this is the Legendre symbol: `1` for quadratic residues,
 /// `-1` for non-residues, `0` when `n` divides `a`. `(a/1) = 1` by the
 /// empty-product convention.
+///
+/// ```
+/// use rump::{jacobi, BigUint};
+///
+/// let nine = BigUint::from_u64(9);
+/// assert_eq!(jacobi(&BigUint::from_u64(2), &nine), Some(1)); // 9 ≡ 1 (mod 8)
+/// assert_eq!(jacobi(&BigUint::from_u64(3), &nine), Some(0)); // shared factor
+/// assert_eq!(jacobi(&nine, &BigUint::from_u64(4)), None); // even modulus
+/// ```
 #[must_use]
 pub fn jacobi(a: &BigUint, n: &BigUint) -> Option<i8> {
     if n.is_zero() || !n.is_odd() {
@@ -122,6 +147,58 @@ pub fn jacobi(a: &BigUint, n: &BigUint) -> Option<i8> {
     }
 }
 
+/// Legendre symbol `(a/p)` for an odd prime `p`, or `None` when `p` is even
+/// or zero.
+///
+/// For prime `p` the Jacobi and Legendre symbols coincide, so this delegates
+/// to [`jacobi`]; it exists so call sites can say what they mean. Primality
+/// of `p` is the caller's contract — for an odd composite the value returned
+/// is the Jacobi symbol, which no longer decides quadratic residuosity.
+#[must_use]
+pub fn legendre(a: &BigUint, p: &BigUint) -> Option<i8> {
+    jacobi(a, p)
+}
+
+/// Kronecker symbol `(a/n)`, the total extension of [`jacobi`] to every
+/// modulus (Cohen, *A Course in Computational Algebraic Number Theory*,
+/// Algorithm 1.4.10, restricted to non-negative arguments).
+///
+/// Factor `n = 2^v · m` with `m` odd; then `(a/n) = (a/2)^v · (a/m)` where
+/// the supplement `(a/2)` is `0` for even `a` and `(-1)^((a^2 - 1)/8)`
+/// otherwise, and `(a/m)` is the Jacobi symbol. By convention `(a/0)` is `1`
+/// when `a = 1` and `0` otherwise. Agrees with [`jacobi`] whenever that is
+/// defined.
+#[must_use]
+pub fn kronecker(a: &BigUint, n: &BigUint) -> i8 {
+    if n.is_zero() {
+        return i8::from(a.is_one());
+    }
+
+    // Strip n's factors of two, paying the (a/2) supplement per factor: zero
+    // if a is even, and a sign that depends on a mod 8 — but only the parity
+    // of v can matter.
+    let mut twos = 0usize;
+    while !n.bit(twos) {
+        twos += 1;
+    }
+    let mut sign = 1i8;
+    if twos > 0 {
+        if !a.is_odd() {
+            return 0;
+        }
+        if twos % 2 == 1 && matches!(a.rem_u64(8), 3 | 5) {
+            sign = -sign;
+        }
+    }
+
+    let mut m = n.clone();
+    m.shr_bits(twos);
+    let j = jacobi(a, &m).expect("m is odd by construction");
+    sign * j
+}
+
+// ─── Modular arithmetic ────────────────────────────────────────────────────────
+
 /// `base^exponent mod modulus` by repeated squaring.
 ///
 /// # Panics
@@ -148,17 +225,221 @@ pub fn mod_pow(base: &BigUint, exponent: &BigUint, modulus: &BigUint) -> BigUint
     result
 }
 
+/// Multiplicative inverse `a^{-1} mod n`, if it exists.
+///
+/// The gcd must be one; the Bézout coefficient of `a` from [`gcd_extended`]
+/// is then the inverse, mapped into `[0, n)`.
+#[must_use]
+pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
+    if n.is_zero() {
+        return None;
+    }
+
+    let (g, s, _) = gcd_extended(&a.modulo(n), n);
+    if !g.is_one() {
+        return None;
+    }
+    Some(s.modulo_positive(n))
+}
+
+/// Write `n - 1 = d * 2^s` with `d` odd: the 2-adic split shared by the
+/// Miller-Rabin witness test and the Tonelli–Shanks descent.
 fn decompose_n_minus_one(n: &BigUint) -> (BigUint, usize) {
     let mut odd_factor = n.sub_ref(&BigUint::one());
     let mut two_adic_exponent = 0usize;
-    // Write `n - 1 = d * 2^s` with `d` odd. Miller-Rabin uses `d` as the
-    // first exponent and then squares through the `2^s` chain.
     while !odd_factor.is_odd() {
         odd_factor.shr1();
         two_adic_exponent += 1;
     }
     (odd_factor, two_adic_exponent)
 }
+
+/// Modular square root by Tonelli–Shanks: some `r` with `r^2 ≡ a (mod p)`
+/// for an odd prime `p`, or `None` when `a` is a non-residue.
+///
+/// References: Cohen, Algorithm 1.5.1 (the general 2-adic descent);
+/// *Handbook of Applied Cryptography*, §3.5.1 for the `p ≡ 3 (mod 4)`
+/// shortcut `a^((p+1)/4)`. The quadratic non-residue the descent needs is
+/// found by scanning `2, 3, 4, …` — deterministic, and expected to end
+/// within a couple of draws since half of all residues qualify.
+///
+/// The other root is `p - r`. `p = 2` and `a ≡ 0` return `a mod p` and zero
+/// respectively. Primality of `p` is the caller's contract, but the result
+/// is verified by squaring before it is returned, so a composite `p` yields
+/// `None` rather than garbage.
+///
+/// ```
+/// use rump::{sqrt_mod, BigUint};
+///
+/// let p = BigUint::from_u64(41); // 41 ≡ 1 (mod 8): the general descent
+/// let two = BigUint::from_u64(2);
+/// let root = sqrt_mod(&two, &p).expect("2 is a residue mod 41");
+/// assert_eq!(BigUint::mod_mul(&root, &root, &p), two);
+/// assert_eq!(sqrt_mod(&BigUint::from_u64(3), &p), None); // non-residue
+/// ```
+#[must_use]
+pub fn sqrt_mod(a: &BigUint, p: &BigUint) -> Option<BigUint> {
+    if p.is_zero() {
+        return None;
+    }
+    let a = a.modulo(p);
+    if !p.is_odd() {
+        // The only even prime: 0 and 1 are their own square roots mod 2.
+        return if p == &BigUint::from_u64(2) {
+            Some(a)
+        } else {
+            None
+        };
+    }
+    if a.is_zero() {
+        return Some(BigUint::zero());
+    }
+    if jacobi(&a, p) != Some(1) {
+        return None;
+    }
+
+    let one = BigUint::one();
+    let ctx = MontgomeryCtx::new(p).expect("p is odd and non-zero");
+
+    let candidate = if p.rem_u64(4) == 3 {
+        // a^((p+1)/4): squaring it gives a^((p+1)/2) = a · a^((p-1)/2) = a
+        // by Euler's criterion.
+        let mut exponent = p.add_ref(&one);
+        exponent.shr_bits(2);
+        ctx.pow(&a, &exponent)
+    } else {
+        // General descent on p - 1 = q · 2^s with q odd.
+        let (q, s) = decompose_n_minus_one(p);
+
+        // Any quadratic non-residue drives the descent.
+        let mut z = BigUint::from_u64(2);
+        while jacobi(&z, p) != Some(-1) {
+            z = z.add_ref(&one);
+        }
+
+        let mut m = s;
+        let mut c = ctx.pow(&z, &q);
+        let mut t = ctx.pow(&a, &q);
+        let mut r = {
+            let mut half = q.add_ref(&one);
+            half.shr1();
+            ctx.pow(&a, &half)
+        };
+
+        while t != one {
+            // Least i with t^(2^i) = 1; it exists below m while p is prime.
+            let mut i = 0usize;
+            let mut probe = t.clone();
+            while probe != one && i < m {
+                probe = ctx.square(&probe);
+                i += 1;
+            }
+            if i == m {
+                // Reachable only for composite p; the final check below
+                // would also catch it, but there is nothing left to descend.
+                return None;
+            }
+
+            let mut b = c;
+            for _ in 0..(m - i - 1) {
+                b = ctx.square(&b);
+            }
+            m = i;
+            c = ctx.square(&b);
+            t = ctx.mul(&t, &c);
+            r = ctx.mul(&r, &b);
+        }
+        r
+    };
+
+    // The square is the contract; verifying it makes composite p yield None
+    // instead of a value that merely looks plausible.
+    if ctx.square(&candidate) == a {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// Chinese remaindering: the unique `x` below the product of the moduli with
+/// `x ≡ rᵢ (mod mᵢ)` for every pair, or `None` when the moduli are not
+/// pairwise coprime (or the input is empty or contains a zero modulus).
+///
+/// Incremental Garner recombination (*Handbook of Applied Cryptography*,
+/// Algorithm 14.71): fold each congruence into the solution-so-far by
+/// solving `x + M·k ≡ rᵢ (mod mᵢ)` for `k`. Residues may be unreduced.
+///
+/// Sunzi's classic: what leaves 2 mod 3, 3 mod 5, and 2 mod 7?
+///
+/// ```
+/// use rump::{crt_combine, BigUint};
+///
+/// let x = crt_combine(&[
+///     (BigUint::from_u64(2), BigUint::from_u64(3)),
+///     (BigUint::from_u64(3), BigUint::from_u64(5)),
+///     (BigUint::from_u64(2), BigUint::from_u64(7)),
+/// ])
+/// .expect("moduli are pairwise coprime");
+/// assert_eq!(x, BigUint::from_u64(23));
+/// ```
+#[must_use]
+pub fn crt_combine(congruences: &[(BigUint, BigUint)]) -> Option<BigUint> {
+    let (first_residue, first_modulus) = congruences.first()?;
+    if first_modulus.is_zero() {
+        return None;
+    }
+
+    let mut solution = first_residue.modulo(first_modulus);
+    let mut product = first_modulus.clone();
+
+    for (residue, modulus) in &congruences[1..] {
+        if modulus.is_zero() {
+            return None;
+        }
+        // k = (residue - solution) · product⁻¹ (mod modulus); a missing
+        // inverse is exactly the non-coprime case.
+        let inverse = mod_inverse(&product.modulo(modulus), modulus)?;
+        let residue = residue.modulo(modulus);
+        // The bias by `modulus` keeps the subtraction in range; mod_mul
+        // reduces the product, so no further reduction is needed here.
+        let difference = residue.add_ref(modulus).sub_ref(&solution.modulo(modulus));
+        let k = BigUint::mod_mul(&difference, &inverse, modulus);
+        solution = solution.add_ref(&product.mul_ref(&k));
+        product = product.mul_ref(modulus);
+    }
+
+    Some(solution)
+}
+
+// ─── Primality ─────────────────────────────────────────────────────────────────
+
+/// Fixed Miller-Rabin witness set used by the bigint probable-prime test.
+///
+/// These twelve small prime bases give a deterministic, repeatable witness
+/// schedule. They are the classic "small prime" bases through `37`.
+///
+/// Notes on determinism:
+/// - For all odd `n < 2^64`, published smaller witness sets are already
+///   deterministic; this superset is therefore deterministic in that range.
+/// - For larger `BigUint` candidates this remains a strong fixed-basis
+///   probable-prime test, but not a proof of primality.
+const MR_BASES: [u64; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
+
+/// Trial-division sieve primes checked before the Miller-Rabin stage.
+///
+/// Cheap remainders here discard most composites before the code pays for any
+/// modular exponentiation.
+const SMALL_TRIAL_PRIMES: [u16; 168] = [
+    2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
+    101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193,
+    197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257, 263, 269, 271, 277, 281, 283, 293, 307,
+    311, 313, 317, 331, 337, 347, 349, 353, 359, 367, 373, 379, 383, 389, 397, 401, 409, 419, 421,
+    431, 433, 439, 443, 449, 457, 461, 463, 467, 479, 487, 491, 499, 503, 509, 521, 523, 541, 547,
+    557, 563, 569, 571, 577, 587, 593, 599, 601, 607, 613, 617, 619, 631, 641, 643, 647, 653, 659,
+    661, 673, 677, 683, 691, 701, 709, 719, 727, 733, 739, 743, 751, 757, 761, 769, 773, 787, 797,
+    809, 811, 821, 823, 827, 829, 839, 853, 857, 859, 863, 877, 881, 883, 887, 907, 911, 919, 929,
+    937, 941, 947, 953, 967, 971, 977, 983, 991, 997,
+];
 
 fn is_witness(
     base: &BigUint,
@@ -277,235 +558,6 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
     }
 
     true
-}
-
-/// Multiplicative inverse `a^{-1} mod n`, if it exists.
-///
-/// The gcd must be one; the Bézout coefficient of `a` from [`gcd_extended`]
-/// is then the inverse, mapped into `[0, n)`.
-#[must_use]
-pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
-    if n.is_zero() {
-        return None;
-    }
-
-    let (g, s, _) = gcd_extended(&a.modulo(n), n);
-    if !g.is_one() {
-        return None;
-    }
-    Some(s.modulo_positive(n))
-}
-/// Legendre symbol `(a/p)` for an odd prime `p`, or `None` when `p` is even
-/// or zero.
-///
-/// For prime `p` the Jacobi and Legendre symbols coincide, so this delegates
-/// to [`jacobi`]; it exists so call sites can say what they mean. Primality
-/// of `p` is the caller's contract — for an odd composite the value returned
-/// is the Jacobi symbol, which no longer decides quadratic residuosity.
-#[must_use]
-pub fn legendre(a: &BigUint, p: &BigUint) -> Option<i8> {
-    jacobi(a, p)
-}
-
-/// Kronecker symbol `(a/n)`, the total extension of [`jacobi`] to every
-/// modulus (Cohen, *A Course in Computational Algebraic Number Theory*,
-/// Algorithm 1.4.10, restricted to non-negative arguments).
-///
-/// Factor `n = 2^v · m` with `m` odd; then `(a/n) = (a/2)^v · (a/m)` where
-/// the supplement `(a/2)` is `0` for even `a` and `(-1)^((a^2 - 1)/8)`
-/// otherwise, and `(a/m)` is the Jacobi symbol. By convention `(a/0)` is `1`
-/// when `a = 1` and `0` otherwise. Agrees with [`jacobi`] whenever that is
-/// defined.
-#[must_use]
-pub fn kronecker(a: &BigUint, n: &BigUint) -> i8 {
-    if n.is_zero() {
-        return i8::from(a.is_one());
-    }
-
-    // Strip n's factors of two, paying the (a/2) supplement per factor: zero
-    // if a is even, and a sign that depends on a mod 8 — but only the parity
-    // of v can matter.
-    let mut twos = 0usize;
-    while !n.bit(twos) {
-        twos += 1;
-    }
-    let mut sign = 1i8;
-    if twos > 0 {
-        if !a.is_odd() {
-            return 0;
-        }
-        if twos % 2 == 1 && matches!(a.rem_u64(8), 3 | 5) {
-            sign = -sign;
-        }
-    }
-
-    let mut m = n.clone();
-    m.shr_bits(twos);
-    let j = jacobi(a, &m).expect("m is odd by construction");
-    sign * j
-}
-
-/// Modular square root by Tonelli–Shanks: some `r` with `r^2 ≡ a (mod p)`
-/// for an odd prime `p`, or `None` when `a` is a non-residue.
-///
-/// References: Cohen, Algorithm 1.5.1 (the general 2-adic descent);
-/// *Handbook of Applied Cryptography*, §3.5.1 for the `p ≡ 3 (mod 4)`
-/// shortcut `a^((p+1)/4)`. The quadratic non-residue the descent needs is
-/// found by scanning `2, 3, 4, …` — deterministic, and expected to end
-/// within a couple of draws since half of all residues qualify.
-///
-/// The other root is `p - r`. `p = 2` and `a ≡ 0` return `a mod p` and zero
-/// respectively. Primality of `p` is the caller's contract, but the result
-/// is verified by squaring before it is returned, so a composite `p` yields
-/// `None` rather than garbage.
-#[must_use]
-pub fn sqrt_mod(a: &BigUint, p: &BigUint) -> Option<BigUint> {
-    if p.is_zero() {
-        return None;
-    }
-    let a = a.modulo(p);
-    if !p.is_odd() {
-        // The only even prime: 0 and 1 are their own square roots mod 2.
-        return if p == &BigUint::from_u64(2) {
-            Some(a)
-        } else {
-            None
-        };
-    }
-    if a.is_zero() {
-        return Some(BigUint::zero());
-    }
-    if jacobi(&a, p) != Some(1) {
-        return None;
-    }
-
-    let one = BigUint::one();
-    let ctx = MontgomeryCtx::new(p).expect("p is odd and non-zero");
-
-    let candidate = if p.rem_u64(4) == 3 {
-        // a^((p+1)/4): squaring it gives a^((p+1)/2) = a · a^((p-1)/2) = a
-        // by Euler's criterion.
-        let mut exponent = p.add_ref(&one);
-        exponent.shr_bits(2);
-        ctx.pow(&a, &exponent)
-    } else {
-        // General descent on p - 1 = q · 2^s with q odd.
-        let (q, s) = decompose_n_minus_one(p);
-
-        // Any quadratic non-residue drives the descent.
-        let mut z = BigUint::from_u64(2);
-        while jacobi(&z, p) != Some(-1) {
-            z = z.add_ref(&one);
-        }
-
-        let mut m = s;
-        let mut c = ctx.pow(&z, &q);
-        let mut t = ctx.pow(&a, &q);
-        let mut r = {
-            let mut half = q.add_ref(&one);
-            half.shr1();
-            ctx.pow(&a, &half)
-        };
-
-        while t != one {
-            // Least i with t^(2^i) = 1; it exists below m while p is prime.
-            let mut i = 0usize;
-            let mut probe = t.clone();
-            while probe != one && i < m {
-                probe = ctx.square(&probe);
-                i += 1;
-            }
-            if i == m {
-                // Reachable only for composite p; the final check below
-                // would also catch it, but there is nothing left to descend.
-                return None;
-            }
-
-            let mut b = c;
-            for _ in 0..(m - i - 1) {
-                b = ctx.square(&b);
-            }
-            m = i;
-            c = ctx.square(&b);
-            t = ctx.mul(&t, &c);
-            r = ctx.mul(&r, &b);
-        }
-        r
-    };
-
-    // The square is the contract; verifying it makes composite p yield None
-    // instead of a value that merely looks plausible.
-    if ctx.square(&candidate) == a {
-        Some(candidate)
-    } else {
-        None
-    }
-}
-
-/// Extended Euclid: `(g, s, t)` with `g = gcd(a, b) = a·s + b·t`.
-///
-/// The classic iterative form tracking both Bézout coefficient pairs;
-/// [`mod_inverse`] is the thin wrapper that keeps only `s`.
-#[must_use]
-pub fn gcd_extended(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
-    let mut old_r = a.clone();
-    let mut r = b.clone();
-    let mut old_s = BigInt::from_biguint(BigUint::one());
-    let mut s = BigInt::zero();
-    let mut old_t = BigInt::zero();
-    let mut t = BigInt::from_biguint(BigUint::one());
-
-    while !r.is_zero() {
-        let (quotient, remainder) = old_r.div_rem(&r);
-        old_r = r;
-        r = remainder;
-
-        let next_s = old_s.sub_ref(&s.mul_biguint_ref(&quotient));
-        old_s = s;
-        s = next_s;
-
-        let next_t = old_t.sub_ref(&t.mul_biguint_ref(&quotient));
-        old_t = t;
-        t = next_t;
-    }
-
-    (old_r, old_s, old_t)
-}
-
-/// Chinese remaindering: the unique `x` below the product of the moduli with
-/// `x ≡ rᵢ (mod mᵢ)` for every pair, or `None` when the moduli are not
-/// pairwise coprime (or the input is empty or contains a zero modulus).
-///
-/// Incremental Garner recombination (*Handbook of Applied Cryptography*,
-/// Algorithm 14.71): fold each congruence into the solution-so-far by
-/// solving `x + M·k ≡ rᵢ (mod mᵢ)` for `k`. Residues may be unreduced.
-#[must_use]
-pub fn crt_combine(congruences: &[(BigUint, BigUint)]) -> Option<BigUint> {
-    let (first_residue, first_modulus) = congruences.first()?;
-    if first_modulus.is_zero() {
-        return None;
-    }
-
-    let mut solution = first_residue.modulo(first_modulus);
-    let mut product = first_modulus.clone();
-
-    for (residue, modulus) in &congruences[1..] {
-        if modulus.is_zero() {
-            return None;
-        }
-        // k = (residue - solution) · product⁻¹ (mod modulus); a missing
-        // inverse is exactly the non-coprime case.
-        let inverse = mod_inverse(&product.modulo(modulus), modulus)?;
-        let residue = residue.modulo(modulus);
-        // The bias by `modulus` keeps the subtraction in range; mod_mul
-        // reduces the product, so no further reduction is needed here.
-        let difference = residue.add_ref(modulus).sub_ref(&solution.modulo(modulus));
-        let k = BigUint::mod_mul(&difference, &inverse, modulus);
-        solution = solution.add_ref(&product.mul_ref(&k));
-        product = product.mul_ref(modulus);
-    }
-
-    Some(solution)
 }
 
 #[cfg(test)]

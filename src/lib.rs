@@ -15,9 +15,8 @@
 //!
 //! Two properties carried over from the parent crate:
 //!
-//! - **Variable-time.** Operations take data-dependent paths; do not use them
-//!   where timing must not leak. The parent crate makes this explicit by
-//!   namespace (`vt::`).
+//! - **Variable-time.** Operations take data-dependent paths; do not use
+//!   them where timing must not leak secrets.
 //! - **Scrubbed memory.** Every [`BigUint`] wipes its limbs on drop, and the
 //!   Montgomery exponentiation ladder wipes its workspaces on exit, so
 //!   values do not linger in freed heap memory.
@@ -25,6 +24,21 @@
 //! Safety policy: `#![deny(unsafe_code)]` crate-wide; the sole audited
 //! exception is the volatile-write scrub helper in `scrub`, which cannot be
 //! expressed in safe Rust.
+//!
+//! ```
+//! use rump::{is_probable_prime, jacobi, mod_pow, BigUint};
+//!
+//! let p = BigUint::from_u64(1_000_000_007);
+//! assert!(is_probable_prime(&p));
+//!
+//! // Fermat: a^(p-1) ≡ 1 (mod p) for prime p.
+//! let a = BigUint::from_u64(31_337);
+//! let e = p.sub_ref(&BigUint::one());
+//! assert!(mod_pow(&a, &e, &p).is_one());
+//!
+//! // Euler's criterion, read off the Jacobi symbol.
+//! assert_eq!(jacobi(&a, &p), Some(1));
+//! ```
 
 #![deny(unsafe_code)]
 

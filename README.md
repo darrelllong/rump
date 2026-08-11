@@ -27,9 +27,15 @@ enforcing a clean API.
   per-round primitive `miller_rabin_witness` for callers that bring their
   own witness schedule.
 
-Everything here is a deterministic function of its inputs. Randomized prime
-generation and adversarially hardened primality testing live with their
-consumers, where the entropy source and hash belong.
+- **Sampling** — `random_below`, `random_nonzero_below`,
+  `random_coprime_below`, and `random_probable_prime`, driven entirely by a
+  caller-supplied `Rng` (one method: `fill_bytes`). rump chooses no entropy
+  source; output quality is exactly source quality, so cryptographic callers
+  must supply a CSPRNG.
+
+The arithmetic and number theory are deterministic functions of their
+inputs. Adversarially hardened primality testing lives with its consumer
+(the cryptography crate), where the hash belongs.
 
 ## Properties
 

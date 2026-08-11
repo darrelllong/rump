@@ -37,7 +37,7 @@ pub struct BigUint {
     limbs: Vec<u64>,
 }
 
-/// Signed multiprecision integer used by later public-key helpers.
+/// Signed multiprecision integer: a sign joined to a [`BigUint`] magnitude.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BigInt {
     sign: Sign,
@@ -46,10 +46,11 @@ pub struct BigInt {
 
 /// Montgomery arithmetic context for a fixed odd modulus.
 ///
-/// Public-key schemes spend most of their time doing repeated modular
-/// multiplication under one long-lived odd modulus. Precomputing the
-/// Montgomery constants once avoids paying the setup cost on every multiply
-/// while keeping the scheme code readable.
+/// Long computations — exponentiation ladders, field arithmetic — spend
+/// most of their time doing repeated modular multiplication under one
+/// long-lived odd modulus. Precomputing the Montgomery constants once avoids
+/// paying the setup cost on every multiply, and the explicit context lets
+/// callers stay in the Montgomery domain across whole computations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MontgomeryCtx {
     modulus: BigUint,
@@ -729,8 +730,8 @@ impl BigUint {
     /// `O(bits * limbs)` for the bit-serial long division it replaced: one
     /// pass over the divisor now yields 64 quotient bits instead of one.
     ///
-    /// Like the rest of the `vt::` lattice this is variable-time: the
-    /// quotient-digit corrections below are data-dependent.
+    /// Like the rest of the crate this is variable-time: the quotient-digit
+    /// corrections below are data-dependent.
     fn div_rem_knuth(dividend: &[u64], divisor: &[u64]) -> (Self, Self) {
         /// Knuth's `b`, the digit base.
         const BASE: u128 = 1u128 << 64;
@@ -1199,9 +1200,8 @@ impl MontgomeryCtx {
             // percent more at the cost of variable-length window parsing;
             // the fixed window keeps the scan trivially auditable.
             //
-            // Like the rest of the public-key stack this is variable-time:
-            // zero windows skip their multiply, which is why the
-            // variable-time lattice of callers lives under `vt::`.
+            // Like the rest of the crate this is variable-time: zero
+            // windows skip their multiply.
             const WINDOW: usize = 4;
             const TABLE_LEN: usize = 1 << WINDOW;
 
@@ -1443,9 +1443,9 @@ impl MontgomeryCtx {
 
 impl Drop for BigUint {
     fn drop(&mut self) {
-        // BigUint backs private exponents, prime factors, and nonces in the
-        // public-key layer. Clear the limb buffer on drop so those values do
-        // not linger in freed heap memory.
+        // BigUint values may hold secrets — private exponents, prime
+        // factors, nonces. Clear the limb buffer on drop so they do not
+        // linger in freed heap memory.
         crate::scrub::zeroize_slice(self.limbs.as_mut_slice());
     }
 }
