@@ -43,11 +43,13 @@
 #![deny(unsafe_code)]
 
 mod bigint;
+mod gf2m;
 mod number_theory;
 mod random;
 mod scrub;
 
 pub use bigint::{BigInt, BigUint, MontgomeryCtx, Sign};
+pub use gf2m::Gf2m;
 pub use number_theory::{
     crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_with_bases, jacobi,
     kronecker, lcm, legendre, miller_rabin_witness, mod_inverse, mod_pow, sqrt_mod,

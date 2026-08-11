@@ -8,7 +8,7 @@ use rump::{
     crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_with_bases, jacobi,
     kronecker, lcm, legendre, miller_rabin_witness, mod_inverse, mod_pow, random_below,
     random_coprime_below, random_nonzero_below, random_probable_prime, sqrt_mod, BigInt, BigUint,
-    MontgomeryCtx, Rng, Sign,
+    Gf2m, MontgomeryCtx, Rng, Sign,
 };
 
 #[test]
@@ -157,6 +157,34 @@ fn manual_montgomery_domain() {
         ctx.pow_encoded(&a_mont, &BigUint::from_u64(3)),
         BigUint::from_u64(28)
     );
+}
+
+#[test]
+fn manual_galois_fields() {
+    // GF(2³) with x³ + x + 1.
+    let field = Gf2m::new(BigUint::from_u64(0b1011)).expect("degree 3");
+    assert_eq!(field.degree(), 3);
+    assert_eq!(*field.modulus(), BigUint::from_u64(0b1011));
+    assert!(Gf2m::new(BigUint::one()).is_none()); // a constant defines no field
+
+    // (x + 1)(x² + 1) = x³ + x² + x + 1 ≡ x².
+    let x_plus_1 = BigUint::from_u64(0b011);
+    let x2_plus_1 = BigUint::from_u64(0b101);
+    assert_eq!(field.mul(&x_plus_1, &x2_plus_1), BigUint::from_u64(0b100));
+    assert_eq!(field.square(&x_plus_1), field.mul(&x_plus_1, &x_plus_1));
+
+    // Addition is XOR; x · (x² + 1) = x³ + x ≡ 1, so they are inverses.
+    assert_eq!(
+        Gf2m::add(&BigUint::from_u64(0b110), &BigUint::from_u64(0b011)),
+        BigUint::from_u64(0b101)
+    );
+    let x = BigUint::from_u64(0b010);
+    assert_eq!(field.inverse(&x), Some(x2_plus_1));
+    assert_eq!(field.inverse(&BigUint::zero()), None);
+
+    // Tr(x) = 0 in GF(2³), so the half-trace solves z² + z = x.
+    let z = field.half_trace(&x);
+    assert_eq!(Gf2m::add(&field.square(&z), &z), x);
 }
 
 #[test]
