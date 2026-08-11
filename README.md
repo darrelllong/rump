@@ -54,6 +54,12 @@ mutation-hardened: seeded defects in the quotient estimate, the REDC carry
 chain, and the reciprocity logic are caught, and the survivors are proven
 behavior-equivalent and documented in place.
 
+## Naming
+
+The repository and library are `rump`; the crates.io package is `rust-mp`
+(the bare name is taken by an unrelated tool). Depend on `rust-mp` and write
+`use rump::...`.
+
 ## License
 
 BSD-2-Clause.

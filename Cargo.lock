@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "rump"
+name = "rust-mp"
 version = "0.1.0"

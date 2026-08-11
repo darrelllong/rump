@@ -1,9 +1,9 @@
 [package]
-# NOTE: the name "rump" is taken on crates.io (an unrelated CLI tool). To
-# publish there, rename the package (e.g. "rump-mp") and keep `[lib] name =
-# "rump"` so downstream code still says `use rump::...` — the same pattern the
-# cryptography-rs package uses for its `cryptography` lib.
-name = "rump"
+# Package "rust-mp", lib "rump": the bare name "rump" is taken on crates.io
+# by an unrelated CLI tool, so the package publishes as rust-mp while code
+# keeps saying `use rump::...` — the same pattern the cryptography-rs package
+# uses for its `cryptography` lib.
+name = "rust-mp"
 version = "0.1.0"
 edition = "2021"
 license = "BSD-2-Clause"
