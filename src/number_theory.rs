@@ -227,19 +227,35 @@ pub fn mod_pow(base: &BigUint, exponent: &BigUint, modulus: &BigUint) -> BigUint
 
 /// Multiplicative inverse `a^{-1} mod n`, if it exists.
 ///
-/// The gcd must be one; the Bézout coefficient of `a` from [`gcd_extended`]
-/// is then the inverse, mapped into `[0, n)`.
+/// Extended Euclid tracking only the coefficient of `a` — half the signed
+/// bookkeeping of [`gcd_extended`], which measurably matters to callers
+/// doing single-shot inversion chains (Lagrange interpolation is one
+/// inversion per share). Use [`gcd_extended`] when the full Bézout triple
+/// is wanted.
 #[must_use]
 pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
     if n.is_zero() {
         return None;
     }
 
-    let (g, s, _) = gcd_extended(&a.modulo(n), n);
-    if !g.is_one() {
+    let mut t = BigInt::zero();
+    let mut next_t = BigInt::from_biguint(BigUint::one());
+    let mut r = n.clone();
+    let mut next_r = a.modulo(n);
+
+    while !next_r.is_zero() {
+        let (quotient, remainder) = r.div_rem(&next_r);
+        let coefficient = t.sub_ref(&next_t.mul_biguint_ref(&quotient));
+        t = next_t;
+        next_t = coefficient;
+        r = next_r;
+        next_r = remainder;
+    }
+
+    if !r.is_one() {
         return None;
     }
-    Some(s.modulo_positive(n))
+    Some(t.modulo_positive(n))
 }
 
 /// Write `n - 1 = d * 2^s` with `d` odd: the 2-adic split shared by the
