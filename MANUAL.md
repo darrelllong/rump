@@ -230,8 +230,11 @@ encoded as a `BigUint` bit pattern (bit `i` = coefficient of `xⁱ`). The
 degree is derived from the polynomial — `new` returns `None` for constants,
 and irreducibility is the caller's contract. `add` is an associated function
 (XOR needs no modulus); `mul`, `square`, `inverse`, and `half_trace` are
-methods. The half-trace solves `z² + z = c` when `Tr(c) = 0` — the quadratic
-behind compressed-point decompression on binary curves.
+methods, along with `pow`, `div`, `sqrt` (unique — squaring is a bijection),
+`trace`, and `half_trace`, which solves `z² + z = c` when `Tr(c) = 0` — the
+quadratic behind compressed-point decompression on binary curves. Squaring
+is linear (bit spreading), not a general multiply. `Gf2m::is_irreducible`
+(Rabin's test) guards the constructor's contract for untrusted polynomials.
 
 ```rust
 // GF(2³) with x³ + x + 1.
@@ -258,6 +261,28 @@ assert_eq!(field.inverse(&BigUint::zero()), None);
 // Tr(x) = 0 in GF(2³), so the half-trace solves z² + z = x.
 let z = field.half_trace(&x);
 assert_eq!(Gf2m::add(&field.square(&z), &z), x);
+
+// The quadratic z² + z = c has a solution exactly when Tr(c) = 0; the
+// half-trace produces it. Tr(x) = 0 and Tr(1) = 1 in GF(2³).
+assert_eq!(field.trace(&x), 0);
+assert_eq!(field.trace(&BigUint::one()), 1);
+
+// Squaring is a bijection; sqrt inverts it. x is the unique root of x².
+assert_eq!(field.sqrt(&BigUint::from_u64(0b100)), x);
+
+// x generates the order-7 multiplicative group.
+assert_eq!(field.pow(&x, &BigUint::from_u64(7)), BigUint::one());
+
+// Division: x² / x = x; dividing by zero is refused.
+assert_eq!(field.div(&BigUint::from_u64(0b100), &x), Some(x.clone()));
+assert_eq!(field.div(&x, &BigUint::zero()), None);
+
+// Rabin's test guards the constructor's irreducibility contract:
+// x³ + x + 1 passes, x³ + 1 = (x + 1)(x² + x + 1) fails, and the AES
+// polynomial x⁸ + x⁴ + x³ + x + 1 passes.
+assert!(Gf2m::is_irreducible(&BigUint::from_u64(0b1011)));
+assert!(!Gf2m::is_irreducible(&BigUint::from_u64(0b1001)));
+assert!(Gf2m::is_irreducible(&BigUint::from_u64(0x11B)));
 ```
 
 ## Number theory

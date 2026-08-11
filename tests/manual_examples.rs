@@ -185,6 +185,28 @@ fn manual_galois_fields() {
     // Tr(x) = 0 in GF(2³), so the half-trace solves z² + z = x.
     let z = field.half_trace(&x);
     assert_eq!(Gf2m::add(&field.square(&z), &z), x);
+
+    // The quadratic z² + z = c has a solution exactly when Tr(c) = 0; the
+    // half-trace produces it. Tr(x) = 0 and Tr(1) = 1 in GF(2³).
+    assert_eq!(field.trace(&x), 0);
+    assert_eq!(field.trace(&BigUint::one()), 1);
+
+    // Squaring is a bijection; sqrt inverts it. x is the unique root of x².
+    assert_eq!(field.sqrt(&BigUint::from_u64(0b100)), x);
+
+    // x generates the order-7 multiplicative group.
+    assert_eq!(field.pow(&x, &BigUint::from_u64(7)), BigUint::one());
+
+    // Division: x² / x = x; dividing by zero is refused.
+    assert_eq!(field.div(&BigUint::from_u64(0b100), &x), Some(x.clone()));
+    assert_eq!(field.div(&x, &BigUint::zero()), None);
+
+    // Rabin's test guards the constructor's irreducibility contract:
+    // x³ + x + 1 passes, x³ + 1 = (x + 1)(x² + x + 1) fails, and the AES
+    // polynomial x⁸ + x⁴ + x³ + x + 1 passes.
+    assert!(Gf2m::is_irreducible(&BigUint::from_u64(0b1011)));
+    assert!(!Gf2m::is_irreducible(&BigUint::from_u64(0b1001)));
+    assert!(Gf2m::is_irreducible(&BigUint::from_u64(0x11B)));
 }
 
 #[test]

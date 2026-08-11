@@ -102,10 +102,131 @@ impl Gf2m {
     }
 
     /// Square a field element.
-    #[inline]
+    ///
+    /// Squaring is linear over GF(2): `(Σ aᵢxⁱ)² = Σ aᵢx²ⁱ`, because every
+    /// cross term appears twice and cancels. Spreading each bit to twice its
+    /// position and reducing costs O(m), against O(m²) for a general
+    /// multiply — and squaring chains are the backbone of [`Self::trace`],
+    /// [`Self::sqrt`], [`Self::half_trace`], and binary-curve doubling.
     #[must_use]
     pub fn square(&self, a: &BigUint) -> BigUint {
-        self.mul(a, a)
+        let mut spread = BigUint::zero();
+        for i in 0..a.bits() {
+            if a.bit(i) {
+                spread.set_bit(2 * i);
+            }
+        }
+        self.reduce(spread)
+    }
+
+    /// Raise a field element to an integer power by square-and-multiply.
+    ///
+    /// `pow(a, 0)` is one for every `a`, matching [`crate::mod_pow`].
+    #[must_use]
+    pub fn pow(&self, base: &BigUint, exponent: &BigUint) -> BigUint {
+        let bits = exponent.bits();
+        if bits == 0 {
+            return BigUint::one();
+        }
+
+        let base = self.reduce(base.clone());
+        let mut acc = base.clone();
+        for i in (0..bits - 1).rev() {
+            acc = self.square(&acc);
+            if exponent.bit(i) {
+                acc = self.mul(&acc, &base);
+            }
+        }
+        acc
+    }
+
+    /// Divide one field element by another: `a · b⁻¹`, or `None` for a zero
+    /// divisor.
+    #[must_use]
+    pub fn div(&self, a: &BigUint, b: &BigUint) -> Option<BigUint> {
+        Some(self.mul(a, &self.inverse(b)?))
+    }
+
+    /// The unique square root: squaring is a bijection (the Frobenius map)
+    /// in GF(2^m), and its inverse is `a ↦ a^{2^{m−1}}` — square `m − 1`
+    /// times.
+    #[must_use]
+    pub fn sqrt(&self, a: &BigUint) -> BigUint {
+        let mut root = self.reduce(a.clone());
+        for _ in 1..self.degree {
+            root = self.square(&root);
+        }
+        root
+    }
+
+    /// The absolute trace `Tr(c) = Σ_{i=0}^{m−1} c^{2^i}`, always 0 or 1.
+    ///
+    /// The trace decides solvability of `z² + z = c`: a solution exists
+    /// exactly when `Tr(c) = 0` — the precondition of [`Self::half_trace`],
+    /// now checkable through the public API.
+    #[must_use]
+    pub fn trace(&self, c: &BigUint) -> u8 {
+        let mut power = self.reduce(c.clone());
+        let mut acc = power.clone();
+        for _ in 1..self.degree {
+            power = self.square(&power);
+            acc.bitxor_assign(&power);
+        }
+        debug_assert!(
+            acc.is_zero() || acc.is_one(),
+            "the trace lands in the prime subfield"
+        );
+        u8::from(acc.is_one())
+    }
+
+    /// Test whether a GF(2) polynomial is irreducible (Rabin's test).
+    ///
+    /// [`Gf2m::new`] trusts its polynomial, the cheap default for the fixed,
+    /// published moduli of the FIPS curves; run this when the polynomial
+    /// arrives from an untrusted source — the same posture the parent
+    /// cryptography crate takes for primality. Rabin's criterion
+    /// (*Probabilistic algorithms in finite fields*, 1980, here in its
+    /// deterministic GF(2) form): `f` of degree `m` is irreducible iff
+    /// `x^{2^m} ≡ x (mod f)` and, for every prime `q` dividing `m`,
+    /// `gcd(x^{2^{m/q}} − x, f) = 1`.
+    #[must_use]
+    pub fn is_irreducible(poly: &BigUint) -> bool {
+        let bits = poly.bits();
+        if bits < 2 {
+            return false; // constants are units or zero, not irreducible
+        }
+        let degree = bits - 1;
+        if degree == 1 {
+            return true; // x and x + 1
+        }
+
+        // Arithmetic modulo f needs no irreducibility, so the context's own
+        // reduction machinery drives the test.
+        let ring = Self::new(poly.clone()).expect("degree checked above");
+        let x = BigUint::from_u64(2);
+
+        // Frobenius orbit: squaring i times gives x^(2^i) mod f. Walk the
+        // checkpoints m/q in ascending order — one forward pass visits each.
+        let mut checkpoints: Vec<usize> =
+            prime_divisors(degree).iter().map(|&q| degree / q).collect();
+        checkpoints.sort_unstable();
+
+        let mut frobenius = x.clone();
+        let mut steps = 0usize;
+        for target in checkpoints {
+            while steps < target {
+                frobenius = ring.square(&frobenius);
+                steps += 1;
+            }
+            if !gf2_poly_gcd(Self::add(&frobenius, &x), poly.clone()).is_one() {
+                return false;
+            }
+        }
+        while steps < degree {
+            frobenius = ring.square(&frobenius);
+            steps += 1;
+        }
+        frobenius == x
     }
 
     /// Invert a field element via the binary extended GCD algorithm, or
@@ -186,19 +307,64 @@ impl Gf2m {
     /// each set bit at position `i ≥ degree`, XORs in `poly << (i − degree)`.
     /// The leading bit of the shifted polynomial is `i`, which clears bit
     /// `i`; its remaining bits all sit below `i`, so the downward scan stays
-    /// valid.
+    /// valid. One scratch copy of the polynomial is shifted down in place as
+    /// the scan descends — the loop allocates nothing.
     fn reduce(&self, mut a: BigUint) -> BigUint {
         let mut current_bits = a.bits();
-        while current_bits > self.degree {
-            let i = current_bits - 1; // position of the highest set bit
-            let shift = i - self.degree;
-            let mut shifted = self.poly.clone();
-            shifted.shl_bits(shift);
+        if current_bits <= self.degree {
+            return a;
+        }
+
+        let mut shift = current_bits - 1 - self.degree;
+        let mut shifted = self.poly.clone();
+        shifted.shl_bits(shift);
+
+        loop {
+            // Invariant: shifted = poly << shift, with its leading bit at
+            // a's current highest set bit.
             a.bitxor_assign(&shifted);
             current_bits = a.bits();
+            if current_bits <= self.degree {
+                return a;
+            }
+            let next_shift = current_bits - 1 - self.degree;
+            shifted.shr_bits(shift - next_shift);
+            shift = next_shift;
         }
-        a
     }
+}
+
+/// Polynomial gcd over GF(2): Euclid with XOR-shift reduction steps.
+fn gf2_poly_gcd(mut a: BigUint, mut b: BigUint) -> BigUint {
+    while !b.is_zero() {
+        while !a.is_zero() && a.bits() >= b.bits() {
+            let mut shifted = b.clone();
+            shifted.shl_bits(a.bits() - b.bits());
+            a.bitxor_assign(&shifted);
+        }
+        core::mem::swap(&mut a, &mut b);
+    }
+    a
+}
+
+/// Distinct prime divisors of `n`, ascending, by trial division — field
+/// degrees are small enough that nothing cleverer earns its keep.
+fn prime_divisors(mut n: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut d = 2usize;
+    while d * d <= n {
+        if n.is_multiple_of(d) {
+            out.push(d);
+            while n.is_multiple_of(d) {
+                n /= d;
+            }
+        }
+        d += 1;
+    }
+    if n > 1 {
+        out.push(n);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -289,6 +455,146 @@ mod tests {
         let z = field.half_trace(&c);
         let check = Gf2m::add(&field.square(&z), &z);
         assert_eq!(check, c, "HT(c)² + HT(c) must equal c");
+    }
+
+    fn splitmix(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn random_element(field: &Gf2m, state: &mut u64) -> BigUint {
+        let mut bytes = Vec::new();
+        for _ in 0..field.degree().div_ceil(64) {
+            bytes.extend_from_slice(&splitmix(state).to_be_bytes());
+        }
+        // Reduce into the field via a multiplication by one.
+        field.mul(&BigUint::from_be_bytes(&bytes), &BigUint::one())
+    }
+
+    #[test]
+    fn sqrt_inverts_the_frobenius_map() {
+        // Squaring is a bijection in GF(2^m); sqrt must invert it exactly,
+        // in both compositions, for every element.
+        let field = gf163();
+        let mut state = 0x5157_0163;
+        for _ in 0..16 {
+            let a = random_element(&field, &mut state);
+            assert_eq!(field.sqrt(&field.square(&a)), a);
+            assert_eq!(field.square(&field.sqrt(&a)), a);
+        }
+        assert!(field.sqrt(&BigUint::zero()).is_zero());
+        assert!(field.sqrt(&BigUint::one()).is_one());
+    }
+
+    #[test]
+    fn pow_group_facts() {
+        // GF(8)*: x generates the order-7 group.
+        let field = Gf2m::new(BigUint::from_u64(0b1011)).expect("degree 3");
+        let x = BigUint::from_u64(0b010);
+        assert_eq!(field.pow(&x, &BigUint::from_u64(7)), BigUint::one());
+        assert_eq!(field.pow(&x, &BigUint::zero()), BigUint::one());
+        assert!(field.pow(&BigUint::zero(), &BigUint::from_u64(5)).is_zero());
+
+        // Fermat in GF(2^163): a^(2^m) = a for every a.
+        let field = gf163();
+        let mut exponent = BigUint::zero();
+        exponent.set_bit(163);
+        let mut state = 0x0fe2_2163;
+        for _ in 0..4 {
+            let a = random_element(&field, &mut state);
+            assert_eq!(field.pow(&a, &exponent), a);
+        }
+    }
+
+    #[test]
+    fn div_inverts_mul() {
+        let field = gf163();
+        let mut state = 0xd1_4143;
+        for _ in 0..8 {
+            let a = random_element(&field, &mut state);
+            let mut b = random_element(&field, &mut state);
+            if b.is_zero() {
+                b = BigUint::one();
+            }
+            assert_eq!(field.div(&field.mul(&a, &b), &b), Some(a));
+        }
+        assert_eq!(field.div(&BigUint::one(), &BigUint::zero()), None);
+    }
+
+    #[test]
+    fn trace_is_linear_and_decides_the_quadratic() {
+        let field = gf163();
+        // Known values: Tr(x) = 0 in GF(2^163); Tr(1) = m mod 2 = 1.
+        assert_eq!(field.trace(&BigUint::from_u64(2)), 0);
+        assert_eq!(field.trace(&BigUint::one()), 1);
+        assert_eq!(field.trace(&BigUint::zero()), 0);
+
+        let mut state = 0x7ace_0163;
+        for _ in 0..12 {
+            let a = random_element(&field, &mut state);
+            let b = random_element(&field, &mut state);
+            // Linearity over GF(2).
+            assert_eq!(
+                field.trace(&Gf2m::add(&a, &b)),
+                field.trace(&a) ^ field.trace(&b)
+            );
+            // For odd m: HT(c)² + HT(c) = c + Tr(c) — the half-trace solves
+            // the quadratic exactly when the trace vanishes.
+            let z = field.half_trace(&a);
+            let residue = Gf2m::add(&field.square(&z), &z);
+            let expected = if field.trace(&a) == 0 {
+                a.clone()
+            } else {
+                Gf2m::add(&a, &BigUint::one())
+            };
+            assert_eq!(residue, expected);
+        }
+    }
+
+    #[test]
+    fn irreducibility_known_answers() {
+        // Irreducible: x, x+1, x²+x+1, x³+x+1, x⁴+x+1, the AES polynomial
+        // x⁸+x⁴+x³+x+1, and every FIPS binary-curve modulus.
+        for poly in [0b10u64, 0b11, 0b111, 0b1011, 0b10011, 0x11B] {
+            assert!(
+                Gf2m::is_irreducible(&BigUint::from_u64(poly)),
+                "0b{poly:b} is irreducible"
+            );
+        }
+        let fips = [
+            (163usize, &[7usize, 6, 3, 0][..]),
+            (233, &[74, 0]),
+            (283, &[12, 7, 5, 0]),
+            (409, &[87, 0]),
+            (571, &[10, 5, 2, 0]),
+        ];
+        for (degree, taps) in fips {
+            let mut poly = BigUint::zero();
+            poly.set_bit(degree);
+            for &t in taps {
+                poly.set_bit(t);
+            }
+            assert!(Gf2m::is_irreducible(&poly), "FIPS degree {degree}");
+        }
+
+        // Reducible: x², (x+1)² = x²+1, x³+1 = (x+1)(x²+x+1),
+        // (x²+x+1)² = x⁴+x²+1 — the last two have composite structure that a
+        // wrong Frobenius checkpoint order would miss. Constants are not
+        // irreducible.
+        for poly in [0b100u64, 0b101, 0b1001, 0b10101, 0b0, 0b1] {
+            assert!(
+                !Gf2m::is_irreducible(&BigUint::from_u64(poly)),
+                "0b{poly:b} is reducible or degenerate"
+            );
+        }
+
+        // Composite degree with both checkpoints live: x⁶+x+1 is
+        // irreducible; x⁶+x²+x+1 is not.
+        assert!(Gf2m::is_irreducible(&BigUint::from_u64(0b1000011)));
+        assert!(!Gf2m::is_irreducible(&BigUint::from_u64(0b1000111)));
     }
 
     #[test]
