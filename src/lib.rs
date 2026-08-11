@@ -30,6 +30,6 @@ mod scrub;
 
 pub use bigint::{BigInt, BigUint, MontgomeryCtx, Sign};
 pub use number_theory::{
-    gcd, is_probable_prime, is_probable_prime_with_bases, jacobi, lcm, miller_rabin_witness,
-    mod_inverse, mod_pow,
+    crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_with_bases, jacobi,
+    kronecker, lcm, legendre, miller_rabin_witness, mod_inverse, mod_pow, sqrt_mod,
 };

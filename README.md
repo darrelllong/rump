@@ -17,11 +17,15 @@ enforcing a clean API.
   encode once, multiply and exponentiate in-domain (`mul_mont`,
   `square_mont`, `pow`, `pow_encoded`), convert at the boundary. Fixed 4-bit
   window exponentiation.
-- **Number theory** — `gcd`, `lcm`, `jacobi` (binary reciprocity, HAC
-  Algorithm 2.149), `mod_pow`, `mod_inverse` (extended Euclid), fixed-base
-  Miller-Rabin (`is_probable_prime`, `is_probable_prime_with_bases`), and the
-  reusable per-round primitive `miller_rabin_witness` for callers that bring
-  their own witness schedule.
+- **Number theory** — `gcd`, `lcm`, and `gcd_extended` (Bézout
+  coefficients); the quadratic-residue symbols `jacobi` (binary reciprocity,
+  HAC Algorithm 2.149), `legendre`, and `kronecker` (Cohen Algorithm
+  1.4.10); `sqrt_mod` (Tonelli–Shanks with the `p ≡ 3 (mod 4)` shortcut,
+  result verified by squaring); `mod_pow`, `mod_inverse`, and `crt_combine`
+  (Garner, HAC Algorithm 14.71); fixed-base Miller-Rabin
+  (`is_probable_prime`, `is_probable_prime_with_bases`) and the reusable
+  per-round primitive `miller_rabin_witness` for callers that bring their
+  own witness schedule.
 
 Everything here is a deterministic function of its inputs. Randomized prime
 generation and adversarially hardened primality testing live with their

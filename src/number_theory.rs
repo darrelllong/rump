@@ -280,33 +280,232 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
 }
 
 /// Multiplicative inverse `a^{-1} mod n`, if it exists.
+///
+/// The gcd must be one; the Bézout coefficient of `a` from [`gcd_extended`]
+/// is then the inverse, mapped into `[0, n)`.
 #[must_use]
 pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
     if n.is_zero() {
         return None;
     }
 
-    let mut t = BigInt::zero();
-    let mut new_t = BigInt::from_biguint(BigUint::one());
-    let mut r = n.clone();
-    let mut new_r = a.modulo(n);
+    let (g, s, _) = gcd_extended(&a.modulo(n), n);
+    if !g.is_one() {
+        return None;
+    }
+    Some(s.modulo_positive(n))
+}
+/// Legendre symbol `(a/p)` for an odd prime `p`, or `None` when `p` is even
+/// or zero.
+///
+/// For prime `p` the Jacobi and Legendre symbols coincide, so this delegates
+/// to [`jacobi`]; it exists so call sites can say what they mean. Primality
+/// of `p` is the caller's contract — for an odd composite the value returned
+/// is the Jacobi symbol, which no longer decides quadratic residuosity.
+#[must_use]
+pub fn legendre(a: &BigUint, p: &BigUint) -> Option<i8> {
+    jacobi(a, p)
+}
 
-    // Extended Euclid. If the gcd ends at 1, the tracked coefficient `t`
-    // satisfies `t * a ≡ 1 (mod n)` and is therefore the modular inverse.
-    while !new_r.is_zero() {
-        let (quotient, remainder) = r.div_rem(&new_r);
-        let next_t = t.sub_ref(&new_t.mul_biguint_ref(&quotient));
-        t = new_t;
-        new_t = next_t;
-        r = new_r;
-        new_r = remainder;
+/// Kronecker symbol `(a/n)`, the total extension of [`jacobi`] to every
+/// modulus (Cohen, *A Course in Computational Algebraic Number Theory*,
+/// Algorithm 1.4.10, restricted to non-negative arguments).
+///
+/// Factor `n = 2^v · m` with `m` odd; then `(a/n) = (a/2)^v · (a/m)` where
+/// the supplement `(a/2)` is `0` for even `a` and `(-1)^((a^2 - 1)/8)`
+/// otherwise, and `(a/m)` is the Jacobi symbol. By convention `(a/0)` is `1`
+/// when `a = 1` and `0` otherwise. Agrees with [`jacobi`] whenever that is
+/// defined.
+#[must_use]
+pub fn kronecker(a: &BigUint, n: &BigUint) -> i8 {
+    if n.is_zero() {
+        return i8::from(a.is_one());
     }
 
-    if !r.is_one() {
+    // Strip n's factors of two, paying the (a/2) supplement per factor: zero
+    // if a is even, and a sign that depends on a mod 8 — but only the parity
+    // of v can matter.
+    let mut twos = 0usize;
+    while !n.bit(twos) {
+        twos += 1;
+    }
+    let mut sign = 1i8;
+    if twos > 0 {
+        if !a.is_odd() {
+            return 0;
+        }
+        if twos % 2 == 1 && matches!(a.rem_u64(8), 3 | 5) {
+            sign = -sign;
+        }
+    }
+
+    let mut m = n.clone();
+    m.shr_bits(twos);
+    let j = jacobi(a, &m).expect("m is odd by construction");
+    sign * j
+}
+
+/// Modular square root by Tonelli–Shanks: some `r` with `r^2 ≡ a (mod p)`
+/// for an odd prime `p`, or `None` when `a` is a non-residue.
+///
+/// References: Cohen, Algorithm 1.5.1 (the general 2-adic descent);
+/// *Handbook of Applied Cryptography*, §3.5.1 for the `p ≡ 3 (mod 4)`
+/// shortcut `a^((p+1)/4)`. The quadratic non-residue the descent needs is
+/// found by scanning `2, 3, 4, …` — deterministic, and expected to end
+/// within a couple of draws since half of all residues qualify.
+///
+/// The other root is `p - r`. `p = 2` and `a ≡ 0` return `a mod p` and zero
+/// respectively. Primality of `p` is the caller's contract, but the result
+/// is verified by squaring before it is returned, so a composite `p` yields
+/// `None` rather than garbage.
+#[must_use]
+pub fn sqrt_mod(a: &BigUint, p: &BigUint) -> Option<BigUint> {
+    if p.is_zero() {
+        return None;
+    }
+    let a = a.modulo(p);
+    if !p.is_odd() {
+        // The only even prime: 0 and 1 are their own square roots mod 2.
+        return if p == &BigUint::from_u64(2) {
+            Some(a)
+        } else {
+            None
+        };
+    }
+    if a.is_zero() {
+        return Some(BigUint::zero());
+    }
+    if jacobi(&a, p) != Some(1) {
         return None;
     }
 
-    Some(t.modulo_positive(n))
+    let one = BigUint::one();
+    let ctx = MontgomeryCtx::new(p).expect("p is odd and non-zero");
+
+    let candidate = if p.rem_u64(4) == 3 {
+        // a^((p+1)/4): squaring it gives a^((p+1)/2) = a · a^((p-1)/2) = a
+        // by Euler's criterion.
+        let mut exponent = p.add_ref(&one);
+        exponent.shr_bits(2);
+        ctx.pow(&a, &exponent)
+    } else {
+        // General descent on p - 1 = q · 2^s with q odd.
+        let (q, s) = decompose_n_minus_one(p);
+
+        // Any quadratic non-residue drives the descent.
+        let mut z = BigUint::from_u64(2);
+        while jacobi(&z, p) != Some(-1) {
+            z = z.add_ref(&one);
+        }
+
+        let mut m = s;
+        let mut c = ctx.pow(&z, &q);
+        let mut t = ctx.pow(&a, &q);
+        let mut r = {
+            let mut half = q.add_ref(&one);
+            half.shr1();
+            ctx.pow(&a, &half)
+        };
+
+        while t != one {
+            // Least i with t^(2^i) = 1; it exists below m while p is prime.
+            let mut i = 0usize;
+            let mut probe = t.clone();
+            while probe != one && i < m {
+                probe = ctx.square(&probe);
+                i += 1;
+            }
+            if i == m {
+                // Reachable only for composite p; the final check below
+                // would also catch it, but there is nothing left to descend.
+                return None;
+            }
+
+            let mut b = c;
+            for _ in 0..(m - i - 1) {
+                b = ctx.square(&b);
+            }
+            m = i;
+            c = ctx.square(&b);
+            t = ctx.mul(&t, &c);
+            r = ctx.mul(&r, &b);
+        }
+        r
+    };
+
+    // The square is the contract; verifying it makes composite p yield None
+    // instead of a value that merely looks plausible.
+    if ctx.square(&candidate) == a {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// Extended Euclid: `(g, s, t)` with `g = gcd(a, b) = a·s + b·t`.
+///
+/// The classic iterative form tracking both Bézout coefficient pairs;
+/// [`mod_inverse`] is the thin wrapper that keeps only `s`.
+#[must_use]
+pub fn gcd_extended(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
+    let mut old_r = a.clone();
+    let mut r = b.clone();
+    let mut old_s = BigInt::from_biguint(BigUint::one());
+    let mut s = BigInt::zero();
+    let mut old_t = BigInt::zero();
+    let mut t = BigInt::from_biguint(BigUint::one());
+
+    while !r.is_zero() {
+        let (quotient, remainder) = old_r.div_rem(&r);
+        old_r = r;
+        r = remainder;
+
+        let next_s = old_s.sub_ref(&s.mul_biguint_ref(&quotient));
+        old_s = s;
+        s = next_s;
+
+        let next_t = old_t.sub_ref(&t.mul_biguint_ref(&quotient));
+        old_t = t;
+        t = next_t;
+    }
+
+    (old_r, old_s, old_t)
+}
+
+/// Chinese remaindering: the unique `x` below the product of the moduli with
+/// `x ≡ rᵢ (mod mᵢ)` for every pair, or `None` when the moduli are not
+/// pairwise coprime (or the input is empty or contains a zero modulus).
+///
+/// Incremental Garner recombination (*Handbook of Applied Cryptography*,
+/// Algorithm 14.71): fold each congruence into the solution-so-far by
+/// solving `x + M·k ≡ rᵢ (mod mᵢ)` for `k`. Residues may be unreduced.
+#[must_use]
+pub fn crt_combine(congruences: &[(BigUint, BigUint)]) -> Option<BigUint> {
+    let (first_residue, first_modulus) = congruences.first()?;
+    if first_modulus.is_zero() {
+        return None;
+    }
+
+    let mut solution = first_residue.modulo(first_modulus);
+    let mut product = first_modulus.clone();
+
+    for (residue, modulus) in &congruences[1..] {
+        if modulus.is_zero() {
+            return None;
+        }
+        // k = (residue - solution) · product⁻¹ (mod modulus); a missing
+        // inverse is exactly the non-coprime case.
+        let inverse = mod_inverse(&product.modulo(modulus), modulus)?;
+        let residue = residue.modulo(modulus);
+        // The bias by `modulus` keeps the subtraction in range; mod_mul
+        // reduces the product, so no further reduction is needed here.
+        let difference = residue.add_ref(modulus).sub_ref(&solution.modulo(modulus));
+        let k = BigUint::mod_mul(&difference, &inverse, modulus);
+        solution = solution.add_ref(&product.mul_ref(&k));
+        product = product.mul_ref(modulus);
+    }
+
+    Some(solution)
 }
 
 #[cfg(test)]
@@ -614,6 +813,320 @@ mod tests {
         assert_eq!(
             jacobi(&BigUint::from_u64(21), &BigUint::from_u64(7)),
             Some(0)
+        );
+    }
+
+    /// Reference vectors computed by GMP 6.3.0's mpz_kronecker: even moduli,
+    /// powers of two, n = 0, shared factors, and odd moduli where the symbol
+    /// must agree with jacobi. Triples are (a, n, (a/n)) in hex.
+    const GMP_KRONECKER_VECTORS: &[(&str, &str, i8)] = &[
+        ("6", "17", 1),
+        ("cf3", "17", 1),
+        ("45", "17", 0),
+        ("1e", "3e", 0),
+        ("ada", "3e", 0),
+        ("ba", "3e", 0),
+        ("34", "1c", 0),
+        ("fb9", "1c", 0),
+        ("54", "1c", 0),
+        ("2c", "10", 0),
+        ("c51", "10", 1),
+        ("30", "10", 0),
+        ("8", "3", -1),
+        ("70a", "3", -1),
+        ("9", "3", 0),
+        ("39", "b", -1),
+        ("1c0", "b", -1),
+        ("21", "b", 0),
+        ("6d90", "c736", 0),
+        ("bae978da", "c736", 0),
+        ("255a2", "c736", 0),
+        ("db27", "6fd", 1),
+        ("9e967592", "6fd", -1),
+        ("14f7", "6fd", 0),
+        ("5d42", "6e22", 0),
+        ("a5ae927c", "6e22", 0),
+        ("14a66", "6e22", 0),
+        ("b40d", "555e", 1),
+        ("ce98547c", "555e", 0),
+        ("1001a", "555e", 0),
+        ("9332", "a1fe", 0),
+        ("1ca2ec71", "a1fe", 1),
+        ("1e5fa", "a1fe", 0),
+        ("130f", "31cd", 1),
+        ("985d392b", "31cd", -1),
+        ("9567", "31cd", 0),
+        ("3f685d69a27c4277", "87f2e0f5425bb044", -1),
+        ("efeeda2034df7293910e9262ad1e6324", "87f2e0f5425bb044", 0),
+        ("197d8a2dfc71310cc", "87f2e0f5425bb044", 0),
+        ("7e5b2efcb3eb358a", "94da51efee649565", -1),
+        ("8f1206ac54d871b88990a259dc7e637b", "94da51efee649565", 1),
+        ("1be8ef5cfcb2dc02f", "94da51efee649565", 0),
+        ("e061171c0efb20ce", "63d994a4e44ccc9e", 0),
+        ("7f697669a3f64ad1cbb2f5b96b80554f", "63d994a4e44ccc9e", -1),
+        ("12b8cbdeeace665da", "63d994a4e44ccc9e", 0),
+        ("64a4822aa6413040", "b13284b0dc864c5b", 1),
+        ("c61af9eb0a0078a9883c565cf691b38e", "b13284b0dc864c5b", -1),
+        ("213978e129592e511", "b13284b0dc864c5b", 0),
+        ("b4dac7c239161d25", "dc194c6c3dc9cd56", -1),
+        ("1699a669fb123d0a0ab7e8695ff6a80f", "dc194c6c3dc9cd56", -1),
+        ("2944be544b95d6802", "dc194c6c3dc9cd56", 0),
+        ("49df346299ec61f7", "d77a518a4be94a5b", 0),
+        ("47d58925813818a4c762c44a1aab5bf6", "d77a518a4be94a5b", 0),
+        ("2866ef49ee3bbdf11", "d77a518a4be94a5b", 0),
+        ("101f1993bf2963630", "165cc57e58623a33c", 0),
+        ("350d583eb038998ff5fb24ff5ea90b280", "165cc57e58623a33c", 0),
+        ("4316507b0926ae9b4", "165cc57e58623a33c", 0),
+        ("144934acc99280bb9", "19e0ca6a295dad77b", 1),
+        ("2b6402e1b144d3aa194b5ef19bd982f1e", "19e0ca6a295dad77b", 1),
+        ("4da25f3e7c1908671", "19e0ca6a295dad77b", 0),
+        ("2c3adb65ee0b57a2", "1e9be65f0d28deab", 1),
+        ("efdadec2a7c95cdb0678454cabec4511", "1e9be65f0d28deab", -1),
+        ("5bd3b31d277a9c01", "1e9be65f0d28deab", 0),
+        ("144821bfa9f47fef6", "77ba84608e7afeb7", 1),
+        ("391039ac9b2bebeeca24791827afbc976", "77ba84608e7afeb7", 1),
+        ("1672f8d21ab70fc25", "77ba84608e7afeb7", 0),
+        ("c999c6b3bbe5cbfd", "14f36c9ff5702c155", -1),
+        ("18bede79858f97116f826c3cf1334009b", "14f36c9ff5702c155", -1),
+        ("3eda45dfe050843ff", "14f36c9ff5702c155", 0),
+        ("106e15e9eea842980", "7ef417fe62a04c6b", -1),
+        ("37334c3d20667cf8ded312b94bfe17bfd", "7ef417fe62a04c6b", 1),
+        ("17cdc47fb27e0e541", "7ef417fe62a04c6b", 0),
+        ("3c40763dbac10a14ab013fc08fe74607", "4b308a1718a394139be94394b6afcf1f", 0),
+        ("a728a8d5e99ccea6e36ddd4a377aba7db4b71920ee282206d79eca83fe125d2f", "4b308a1718a394139be94394b6afcf1f", 1),
+        ("e1919e4549eabc3ad3bbcabe240f6d5d", "4b308a1718a394139be94394b6afcf1f", 0),
+        ("58d7c70762808b0384eafc0fd8b1df37", "6c86107922a00457b6ecf1675849a8da", -1),
+        ("6e6f35ade10acc0a7bfe5e12c825edff9133479b9463967a540ea9c14e46d2c1", "6c86107922a00457b6ecf1675849a8da", 1),
+        ("14592316b67e00d0724c6d43608dcfa8e", "6c86107922a00457b6ecf1675849a8da", 0),
+        ("5f4e35fa792c66c80f6f8b99d6dbd9e7", "4393c8b1591eee3e286c4a17fe4a35d4", 0),
+        ("c13b98ba7e416750d3a7952a89cf7707ebd0da3b131d9a7b0baefc165c819c7c", "4393c8b1591eee3e286c4a17fe4a35d4", 0),
+        ("cabb5a140b5ccaba7944de47fadea17c", "4393c8b1591eee3e286c4a17fe4a35d4", 0),
+        ("264daed76f230a44bde7082dd26fff76", "9de164425c4fec5b1f04abe97289691a", 0),
+        ("33111102bf3ed8a153bca328dc7d3e14ffdf7009e63684c65970aa3699427757", "9de164425c4fec5b1f04abe97289691a", 1),
+        ("1d9a42cc714efc5115d0e03bc579c3b4e", "9de164425c4fec5b1f04abe97289691a", 0),
+        ("1a27d42d7859a1825cb61709f903e61", "d0fae7b3a4e0598d85908cb21ef968d", -1),
+        ("6a7dce5f8029bae4c30cc1667517a9e3cd01477fdfa124ea4ca2a1b249d78860", "d0fae7b3a4e0598d85908cb21ef968d", -1),
+        ("272f0b71aeea10ca890b1a6165cec3a7", "d0fae7b3a4e0598d85908cb21ef968d", 0),
+        ("4a791b32495f188533f4114327dbb88a", "ae6232c33d7a6663f1639966a1a46dfa", 0),
+        ("6f48a8f0c4375c015e6d5abf2f32da5bec4c260ed57035ebcdcd19657f9c4525", "ae6232c33d7a6663f1639966a1a46dfa", -1),
+        ("20b269849b86f332bd42acc33e4ed49ee", "ae6232c33d7a6663f1639966a1a46dfa", 0),
+        ("1322b705d4b590c5abe50af1673dc68249aa0b4f569483847fb31d056d2a778b1", "a651be231d2ef7bba2d3d7c8a619cac33a3ea773f5d61ae81c4ae6e9a2161a35", -1),
+        ("13953ac042ab20a04dde68f239f91c0be3775eb0d9d6f37418aa195eda4d905ba0a776e1954d76f001041adf453a6db4e53705d533bbd7dd116dfb2398f927af4", "a651be231d2ef7bba2d3d7c8a619cac33a3ea773f5d61ae81c4ae6e9a2161a35", -1),
+        ("1f2f53a69578ce732e87b8759f24d6049aebbf65be18250b854e0b4bce6424e9f", "a651be231d2ef7bba2d3d7c8a619cac33a3ea773f5d61ae81c4ae6e9a2161a35", 0),
+        ("c4f0b682db1f4f3e7c473fa9c26c22b3f76217b3ac0814d7492c025a90c89abf", "a1810d72fb227e5121ac20967f177a3f2078f99106e8270983165a79a1bf537d", 1),
+        ("11fb471b646646d18a8b64ee79ddfb013679759577639668dc62c1cc15faae577a7e61a368982bfe36d743feb457509dfe2ac960240115b98de72a732a46b4a1d", "a1810d72fb227e5121ac20967f177a3f2078f99106e8270983165a79a1bf537d", 0),
+        ("1e4832858f1677af3650461c37d466ebd616aecb314b8751c89430f6ce53dfa77", "a1810d72fb227e5121ac20967f177a3f2078f99106e8270983165a79a1bf537d", 0),
+        ("ea4e175fa484d3ef5e2951323ffa00abf13f182d9ce3dd50663e6e048b5b600a", "242a2f00ff07e9e6531faaa1ccbed29d8bef2b534bd303b51a60d4b6c38e5933", 0),
+        ("2cc0070a42b726bc58f5e7a708ea13541d2186c2b0a5e1c558ce2e70d60b58cdced817a4dd604d04ec37031ab3175c0d095fcd7a92e61100def74087e02fd0746", "242a2f00ff07e9e6531faaa1ccbed29d8bef2b534bd303b51a60d4b6c38e5933", -1),
+        ("6c7e8d02fd17bdb2f95effe5663c77d8a3cd81f9e3790b1f4f227e244aab0b99", "242a2f00ff07e9e6531faaa1ccbed29d8bef2b534bd303b51a60d4b6c38e5933", 0),
+        ("37600b3cb7f36c8a285f86f11fc1457695c9939d6a1d2b2978cf475f94ac17b0", "976fe790406bf1732bd076106305324ddd3fa3c68cb7a65eb39187c3b4c7aaa4", 0),
+        ("3f7a758c9fba12946d8acd8be114391fb5158e80581b553b2060317b6239128576bc9af01c581ad7506f8c3442258517d3abd706512d97582cefe8473ddae9001", "976fe790406bf1732bd076106305324ddd3fa3c68cb7a65eb39187c3b4c7aaa4", 0),
+        ("1c64fb6b0c143d45983716231290f96e997beeb53a626f31c1ab4974b1e56ffec", "976fe790406bf1732bd076106305324ddd3fa3c68cb7a65eb39187c3b4c7aaa4", 0),
+        ("102362676e6d6bbb24471d49d0f0fe6ae1b85205ccc0421d1933bd3681480b7a0", "14896511af7f6e65ed3704944abd021a603e5528a854c03afa1916db807dfb429", 1),
+        ("3509d7c2c54d4680802031fc2faa3d2b8efd2a4ae2072008efc40ac42a939f2518437a694e02bc259687a34cef9b4d422adecaed75990da915aaca0b90e8426de", "14896511af7f6e65ed3704944abd021a603e5528a854c03afa1916db807dfb429", -1),
+        ("3d9c2f350e7e4b31c7a50dbce037064f20baff79f8fe40b0ee4b44928179f1c7b", "14896511af7f6e65ed3704944abd021a603e5528a854c03afa1916db807dfb429", 0),
+        ("1db8619cf5278e2145603c04f850f3bead657387a78fb8626bd5cdf8e29fc2235", "1bfcabd5e4d1fa9d814d4d4caba3c507311721e7846845beacd65c7091e865ca8", 1),
+        ("34c382a8c828fb3680f54c91a856f0763fbf8653464873010a0295b9d86f300deb4de9d734e476b9a8c2e713bca5a00d1281ca73187948bd67bae77eeda556cc", "1bfcabd5e4d1fa9d814d4d4caba3c507311721e7846845beacd65c7091e865ca8", 0),
+        ("53f60381ae75efd883e7e7e602eb4f15934565b68d38d13c06831551b5b9315f8", "1bfcabd5e4d1fa9d814d4d4caba3c507311721e7846845beacd65c7091e865ca8", 0),
+        ("0", "0", 0),
+        ("1", "0", 1),
+        ("2", "0", 0),
+        ("1", "1", 1),
+        ("5", "8", -1),
+        ("3", "8", -1),
+        ("7", "8", 1),
+        ("2", "4", 0),
+        ("6", "4", 0),
+        ("1", "10", 1),
+        ("9", "10", 1),
+        ("ff", "100", 1),
+        ("3", "c", 0),
+        ("5", "c", -1),
+    ];
+
+    #[test]
+    fn kronecker_matches_gmp_vectors() {
+        for &(a_hex, n_hex, expected) in GMP_KRONECKER_VECTORS {
+            let a = biguint_from_hex(a_hex);
+            let n = biguint_from_hex(n_hex);
+            assert_eq!(
+                super::kronecker(&a, &n),
+                expected,
+                "kronecker({a_hex}, {n_hex}) != {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn kronecker_extends_jacobi_and_is_multiplicative() {
+        let mut rng = SplitMix64 { state: 0x2718_2818 };
+        let bound = BigUint::from_u128(1 << 72);
+        for _ in 0..40 {
+            let a = draw_below(&mut rng, &bound);
+            let mut n_odd = draw_below(&mut rng, &bound);
+            if !n_odd.is_odd() {
+                n_odd = n_odd.add_ref(&BigUint::one());
+            }
+            // On odd moduli the Kronecker symbol IS the Jacobi symbol.
+            assert_eq!(super::kronecker(&a, &n_odd), jacobi(&a, &n_odd).unwrap());
+
+            // Multiplicative in the bottom argument.
+            let n2 = draw_below(&mut rng, &bound);
+            if n2.is_zero() {
+                continue;
+            }
+            assert_eq!(
+                super::kronecker(&a, &n_odd.mul_ref(&n2)),
+                super::kronecker(&a, &n_odd) * super::kronecker(&a, &n2)
+            );
+        }
+    }
+
+    #[test]
+    fn legendre_is_jacobi_on_primes() {
+        let p = BigUint::from_u64(1_000_000_007);
+        for a in [0u64, 1, 2, 3, 5, 999_999_999] {
+            let a = BigUint::from_u64(a);
+            assert_eq!(super::legendre(&a, &p), jacobi(&a, &p));
+        }
+        assert_eq!(
+            super::legendre(&BigUint::one(), &BigUint::from_u64(4)),
+            None
+        );
+    }
+
+    #[test]
+    fn sqrt_mod_roundtrips_on_squares() {
+        // Primes covering every residue class the algorithm branches on:
+        // 3 mod 4 (shortcut), 5 mod 8 (s = 2), and deep 2-adic descents —
+        // 41 and 97 (s = 3, 5) and the NTT primes 15·2^27 + 1 and
+        // 17·2^27 + 1 (s = 27). M127 exercises the shortcut at width.
+        let mut primes: Vec<BigUint> = [
+            3u64,
+            5,
+            7,
+            11,
+            13,
+            17,
+            41,
+            73,
+            97,
+            65_537,
+            2_147_483_647,
+            2_013_265_921,
+            2_281_701_377,
+        ]
+        .iter()
+        .map(|&p| BigUint::from_u64(p))
+        .collect();
+        primes.push(mersenne(89));
+        primes.push(mersenne(127));
+
+        let mut rng = SplitMix64 { state: 0x1414_2135 };
+        for p in &primes {
+            for _ in 0..8 {
+                let x = draw_below(&mut rng, p);
+                let square = BigUint::mod_mul(&x, &x, p);
+                let root = super::sqrt_mod(&square, p).expect("squares have roots");
+                assert_eq!(
+                    BigUint::mod_mul(&root, &root, p),
+                    square,
+                    "root fails its own contract for p={p:?}"
+                );
+                // The root is x or p - x.
+                assert!(
+                    root == x || root == p.sub_ref(&x).modulo(p),
+                    "root is neither ±x for p={p:?}"
+                );
+            }
+
+            // Non-residues have no root; zero is its own.
+            if p > &BigUint::from_u64(2) {
+                let mut z = BigUint::from_u64(2);
+                while jacobi(&z, p) != Some(-1) {
+                    z = z.add_ref(&BigUint::one());
+                }
+                assert_eq!(super::sqrt_mod(&z, p), None);
+            }
+            assert_eq!(super::sqrt_mod(&BigUint::zero(), p), Some(BigUint::zero()));
+        }
+
+        // p = 2 and invalid moduli.
+        let two = BigUint::from_u64(2);
+        assert_eq!(
+            super::sqrt_mod(&BigUint::from_u64(5), &two),
+            Some(BigUint::one())
+        );
+        assert_eq!(super::sqrt_mod(&BigUint::one(), &BigUint::zero()), None);
+        // Composite p: the final verification refuses to lie.
+        assert_eq!(
+            super::sqrt_mod(&BigUint::from_u64(2), &BigUint::from_u64(15)),
+            None
+        );
+    }
+
+    #[test]
+    fn gcd_extended_satisfies_bezout() {
+        use crate::bigint::BigInt;
+        let mut rng = SplitMix64 { state: 0x0577_2156 };
+        let bound = BigUint::from_u128(1 << 96);
+        for _ in 0..60 {
+            let a = draw_below(&mut rng, &bound);
+            let b = draw_below(&mut rng, &bound);
+            let (g, s, t) = super::gcd_extended(&a, &b);
+            assert_eq!(g, gcd(&a, &b), "g disagrees with plain gcd");
+            // a·s + b·t = g, in signed arithmetic.
+            let lhs = s.mul_biguint_ref(&a).add_ref(&t.mul_biguint_ref(&b));
+            assert_eq!(lhs, BigInt::from_biguint(g), "Bezout identity fails");
+        }
+
+        // Degenerate corners.
+        let (g, s, _) = super::gcd_extended(&BigUint::zero(), &BigUint::from_u64(7));
+        assert_eq!(g, BigUint::from_u64(7));
+        assert!(matches!(s.sign(), crate::bigint::Sign::Zero));
+    }
+
+    #[test]
+    fn crt_combine_reconstructs_and_rejects() {
+        let mut rng = SplitMix64 { state: 0x6931_4718 };
+        // Pairwise coprime moduli, including big primes.
+        let moduli = [
+            BigUint::from_u64(97),
+            BigUint::from_u64(1_000_000_007),
+            mersenne(89),
+            mersenne(107),
+        ];
+        let product = moduli.iter().fold(BigUint::one(), |acc, m| acc.mul_ref(m));
+
+        for _ in 0..12 {
+            let x = draw_below(&mut rng, &product);
+            let congruences: Vec<(BigUint, BigUint)> =
+                moduli.iter().map(|m| (x.modulo(m), m.clone())).collect();
+            assert_eq!(super::crt_combine(&congruences), Some(x.clone()));
+
+            // Order must not matter.
+            let mut reversed = congruences.clone();
+            reversed.reverse();
+            assert_eq!(super::crt_combine(&reversed), Some(x));
+        }
+
+        // A single congruence reduces its residue.
+        assert_eq!(
+            super::crt_combine(&[(BigUint::from_u64(23), BigUint::from_u64(7))]),
+            Some(BigUint::from_u64(2))
+        );
+        // Non-coprime moduli and degenerate inputs.
+        assert_eq!(
+            super::crt_combine(&[
+                (BigUint::one(), BigUint::from_u64(6)),
+                (BigUint::from_u64(2), BigUint::from_u64(9)),
+            ]),
+            None
+        );
+        assert_eq!(super::crt_combine(&[]), None);
+        assert_eq!(
+            super::crt_combine(&[(BigUint::one(), BigUint::zero())]),
+            None
         );
     }
 
