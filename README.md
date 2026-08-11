@@ -27,12 +27,13 @@ enforcing a clean API.
   per-round primitive `miller_rabin_witness` for callers that bring their
   own witness schedule.
 
-- **`Gf2m`** — binary extension fields GF(2^m): XOR addition, shift-and-XOR
-  multiplication, linear-time squaring, `pow`, `div`, binary extended-GCD
-  inversion (Hankerson–Menezes–Vanstone, *Guide to ECC*, Algorithm 2.22),
-  the unique `sqrt`, `trace`, the half-trace that solves `z² + z = c` for
-  binary-curve point decompression, and Rabin irreducibility testing. The
-  degree is derived from the field polynomial, never supplied alongside it.
+- **`Gf2m`** — binary extension fields GF(2^m): XOR addition, word-level
+  comb multiplication (*Guide to ECC*, Algorithm 2.36) with tap-wise
+  reduction, linear squaring, `pow`, `div`, binary extended-GCD inversion
+  (Algorithm 2.22), the unique `sqrt`, `trace`, quadratic solving at every
+  degree (`solve_quadratic`, with `half_trace` as the odd-degree
+  primitive), and Rabin irreducibility testing. The degree is derived from
+  the field polynomial, never supplied alongside it.
 - **Sampling** — `random_below`, `random_nonzero_below`,
   `random_coprime_below`, and `random_probable_prime`, driven entirely by a
   caller-supplied `Rng` (one method: `fill_bytes`). rump chooses no entropy

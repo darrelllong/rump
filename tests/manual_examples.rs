@@ -201,6 +201,16 @@ fn manual_galois_fields() {
     assert_eq!(field.div(&BigUint::from_u64(0b100), &x), Some(x.clone()));
     assert_eq!(field.div(&x, &BigUint::zero()), None);
 
+    // solve_quadratic is total across degrees — here in the AES byte field
+    // GF(2⁸), where the degree is even and the half-trace does not apply.
+    // c = a² + a guarantees solvability; the two roots are a and a + 1.
+    let aes = Gf2m::new(BigUint::from_u64(0x11B)).expect("the AES byte field");
+    let a = BigUint::from_u64(0x53);
+    let c = Gf2m::add(&aes.square(&a), &a);
+    let z = aes.solve_quadratic(&c).expect("solvable by construction");
+    assert_eq!(Gf2m::add(&aes.square(&z), &z), c);
+    assert!(z == a || z == Gf2m::add(&a, &BigUint::one()));
+
     // Rabin's test guards the constructor's irreducibility contract:
     // x³ + x + 1 passes, x³ + 1 = (x + 1)(x² + x + 1) fails, and the AES
     // polynomial x⁸ + x⁴ + x³ + x + 1 passes.

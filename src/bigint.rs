@@ -207,6 +207,20 @@ impl BigUint {
         out
     }
 
+    /// View the little-endian limbs (crate-internal: the GF(2^m) kernels
+    /// work word-level).
+    pub(crate) fn limbs(&self) -> &[u64] {
+        &self.limbs
+    }
+
+    /// Build from little-endian limbs, normalizing leading zeros
+    /// (crate-internal counterpart of [`Self::limbs`]).
+    pub(crate) fn from_limbs(limbs: Vec<u64>) -> Self {
+        let mut out = Self { limbs };
+        out.normalize();
+        out
+    }
+
     /// Return whether the value is zero.
     #[must_use]
     pub fn is_zero(&self) -> bool {

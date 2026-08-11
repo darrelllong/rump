@@ -32,6 +32,11 @@ use crate::bigint::BigUint;
 pub struct Gf2m {
     poly: BigUint,
     degree: usize,
+    // Bit positions of the polynomial below the leading term, ascending —
+    // the reduction taps. Sparse for every standard modulus (FIPS binary
+    // curves are trinomials and pentanomials), and reduction cost scales
+    // with this weight.
+    taps: Vec<usize>,
 }
 
 impl Gf2m {
@@ -46,10 +51,9 @@ impl Gf2m {
         if bits < 2 {
             return None;
         }
-        Some(Self {
-            poly,
-            degree: bits - 1,
-        })
+        let degree = bits - 1;
+        let taps = (0..degree).filter(|&i| poly.bit(i)).collect();
+        Some(Self { poly, degree, taps })
     }
 
     /// The field's modulus polynomial.
@@ -79,26 +83,67 @@ impl Gf2m {
 
     /// Multiply two field elements modulo the field polynomial.
     ///
-    /// Uses a shift-and-XOR loop: for each set bit `i` of `b`, XOR `a << i`
-    /// into an accumulator, then reduce the accumulator.
+    /// Left-to-right comb multiplication with 4-bit windows (Hankerson,
+    /// Menezes, Vanstone — *Guide to ECC*, Algorithm 2.36): precompute the
+    /// sixteen products `u(x)·b(x)` for 4-bit `u`, then sweep `a` one window
+    /// at a time, shifting the accumulator four bits between sweeps. Word
+    /// arithmetic throughout; the double-width product is then reduced
+    /// tap-wise.
     #[must_use]
     pub fn mul(&self, a: &BigUint, b: &BigUint) -> BigUint {
         if a.is_zero() || b.is_zero() {
             return BigUint::zero();
         }
 
-        let mut acc = BigUint::zero();
-        let mut temp = a.clone();
-        let b_bits = b.bits();
+        let a_limbs = a.limbs();
+        let b_limbs = b.limbs();
+        let stride = b_limbs.len() + 1;
 
-        for i in 0..b_bits {
-            if b.bit(i) {
-                acc.bitxor_assign(&temp);
+        // table[u] = u(x) · b(x), built incrementally: even entries shift a
+        // smaller one, odd entries add b.
+        let mut table = vec![0u64; 16 * stride];
+        table[stride..stride + b_limbs.len()].copy_from_slice(b_limbs);
+        for u in 2..16 {
+            let (lo, hi) = table.split_at_mut(u * stride);
+            let dst = &mut hi[..stride];
+            if u % 2 == 0 {
+                let src = &lo[(u / 2) * stride..(u / 2) * stride + stride];
+                let mut carry = 0u64;
+                for (d, &s) in dst.iter_mut().zip(src.iter()) {
+                    *d = (s << 1) | carry;
+                    carry = s >> 63;
+                }
+            } else {
+                let src = &lo[(u - 1) * stride..u * stride];
+                for (i, d) in dst.iter_mut().enumerate() {
+                    *d = src[i] ^ b_limbs.get(i).copied().unwrap_or(0);
+                }
             }
-            temp.shl1();
         }
 
-        self.reduce(acc)
+        let mut product = vec![0u64; a_limbs.len() + stride];
+        for window in (0..16).rev() {
+            for (j, &limb) in a_limbs.iter().enumerate() {
+                let u = ((limb >> (4 * window)) & 0xF) as usize;
+                if u != 0 {
+                    let entry = &table[u * stride..(u + 1) * stride];
+                    for (i, &w) in entry.iter().enumerate() {
+                        product[j + i] ^= w;
+                    }
+                }
+            }
+            if window > 0 {
+                let mut carry = 0u64;
+                for limb in product.iter_mut() {
+                    let next = *limb >> 60;
+                    *limb = (*limb << 4) | carry;
+                    carry = next;
+                }
+            }
+        }
+
+        self.reduce_limbs(&mut product);
+        BigUint::from_limbs(product)
     }
 
     /// Square a field element.
@@ -110,13 +155,14 @@ impl Gf2m {
     /// [`Self::sqrt`], [`Self::half_trace`], and binary-curve doubling.
     #[must_use]
     pub fn square(&self, a: &BigUint) -> BigUint {
-        let mut spread = BigUint::zero();
-        for i in 0..a.bits() {
-            if a.bit(i) {
-                spread.set_bit(2 * i);
-            }
+        let limbs = a.limbs();
+        let mut spread = Vec::with_capacity(limbs.len() * 2);
+        for &limb in limbs {
+            spread.push(spread_half(limb as u32));
+            spread.push(spread_half((limb >> 32) as u32));
         }
-        self.reduce(spread)
+        self.reduce_limbs(&mut spread);
+        BigUint::from_limbs(spread)
     }
 
     /// Raise a field element to an integer power by square-and-multiply.
@@ -157,6 +203,49 @@ impl Gf2m {
             root = self.square(&root);
         }
         root
+    }
+
+    /// Solve `z² + z = c`, at any field degree, or `None` when no solution
+    /// exists (exactly when `Tr(c) = 1`; the other root is always `z + 1`).
+    ///
+    /// Odd degrees use the half-trace. Even degrees use the classic
+    /// construction (IEEE P1363, A.4.7): with any `δ` of trace one,
+    /// `z = Σ_{i=0}^{m−2} sᵢ δ^{2^i}` where `sᵢ = Σ_{j=i+1}^{m−1} c^{2^j}`
+    /// — and `s₀ = c` when `Tr(c) = 0`, so the suffix sums peel off one
+    /// squaring at a time.
+    #[must_use]
+    pub fn solve_quadratic(&self, c: &BigUint) -> Option<BigUint> {
+        let c = self.reduce(c.clone());
+        if self.trace(&c) == 1 {
+            return None;
+        }
+        if self.degree % 2 == 1 {
+            return Some(self.half_trace(&c));
+        }
+
+        // Any trace-one element drives the construction; half of the field
+        // qualifies, so a scan from small constants ends fast.
+        let mut delta = BigUint::one();
+        while self.trace(&delta) == 0 {
+            delta = delta.add_ref(&BigUint::one());
+        }
+
+        let mut suffix = c.clone(); // s_0 = Tr(c) + c = c
+        let mut c_power = c.clone(); // c^{2^i}
+        let mut delta_power = delta; // δ^{2^i}
+        let mut z = BigUint::zero();
+        for _ in 0..self.degree - 1 {
+            z.bitxor_assign(&self.mul(&suffix, &delta_power));
+            c_power = self.square(&c_power);
+            suffix.bitxor_assign(&c_power);
+            delta_power = self.square(&delta_power);
+        }
+
+        debug_assert!(
+            Self::add(&self.square(&z), &z) == c,
+            "the construction must satisfy its own equation"
+        );
+        Some(z)
     }
 
     /// The absolute trace `Tr(c) = Σ_{i=0}^{m−1} c^{2^i}`, always 0 or 1.
@@ -283,7 +372,8 @@ impl Gf2m {
     /// For any `c` with absolute trace Tr(c) = 0, `z = HT(c)` solves
     /// `z² + z = c` — the quadratic behind compressed-point decompression on
     /// binary curves. The field degree must be odd (all FIPS 186-4 binary
-    /// curve degrees are).
+    /// curve degrees are); [`Self::solve_quadratic`] is the total form that
+    /// handles every degree and checks the trace itself.
     #[must_use]
     pub fn half_trace(&self, c: &BigUint) -> BigUint {
         // HT(c) = c^{2^0} + c^{2^2} + c^{2^4} + ... + c^{2^{degree-1}}
@@ -302,34 +392,106 @@ impl Gf2m {
     }
 
     /// Reduce `a` modulo the field polynomial.
-    ///
-    /// Scans from the highest set bit of `a` down to the degree, and for
-    /// each set bit at position `i ≥ degree`, XORs in `poly << (i − degree)`.
-    /// The leading bit of the shifted polynomial is `i`, which clears bit
-    /// `i`; its remaining bits all sit below `i`, so the downward scan stays
-    /// valid. One scratch copy of the polynomial is shifted down in place as
-    /// the scan descends — the loop allocates nothing.
-    fn reduce(&self, mut a: BigUint) -> BigUint {
-        let mut current_bits = a.bits();
-        if current_bits <= self.degree {
+    fn reduce(&self, a: BigUint) -> BigUint {
+        if a.bits() <= self.degree {
             return a;
         }
+        let mut limbs = a.limbs().to_vec();
+        self.reduce_limbs(&mut limbs);
+        BigUint::from_limbs(limbs)
+    }
 
-        let mut shift = current_bits - 1 - self.degree;
-        let mut shifted = self.poly.clone();
-        shifted.shl_bits(shift);
+    /// Reduce a limb buffer modulo the field polynomial, in place.
+    ///
+    /// One whole word of excess coefficients at a time, top down: a word `w`
+    /// whose bits sit at positions `degree + k` folds back as `w << t` at
+    /// each reduction tap `t`, and clearing the source word is what the
+    /// polynomial's leading term would have done. Cost scales with the
+    /// polynomial's weight — constant per word for the trinomial and
+    /// pentanomial moduli every standard uses. Small tap gaps can re-raise
+    /// bits above the degree inside the boundary word; the outer loop
+    /// re-scans until the buffer is clean, and each pass strictly shrinks
+    /// the excess.
+    fn reduce_limbs(&self, buf: &mut Vec<u64>) {
+        let boundary_word = self.degree / 64;
+        let boundary_bit = self.degree % 64;
 
         loop {
-            // Invariant: shifted = poly << shift, with its leading bit at
-            // a's current highest set bit.
-            a.bitxor_assign(&shifted);
-            current_bits = a.bits();
-            if current_bits <= self.degree {
-                return a;
+            let bits = limbs_bits(buf);
+            if bits <= self.degree {
+                break;
             }
-            let next_shift = current_bits - 1 - self.degree;
-            shifted.shr_bits(shift - next_shift);
-            shift = next_shift;
+            let top_word = (bits - 1) / 64;
+
+            let (excess, base_shift) = if top_word > boundary_word {
+                let w = buf[top_word];
+                buf[top_word] = 0;
+                (w, top_word * 64 - self.degree)
+            } else {
+                let w = buf[top_word] >> boundary_bit;
+                buf[top_word] &= (1u64 << boundary_bit) - 1;
+                (w, 0)
+            };
+
+            for &t in &self.taps {
+                xor_shifted_word(buf, excess, base_shift + t);
+            }
+        }
+
+        while buf.last() == Some(&0) {
+            buf.pop();
+        }
+    }
+}
+
+/// Interleave a zero bit after every bit of `half` — the squaring map on
+/// one 32-bit word, via an 8-bit spread table.
+#[inline]
+fn spread_half(half: u32) -> u64 {
+    const SPREAD: [u16; 256] = {
+        let mut table = [0u16; 256];
+        let mut byte = 0usize;
+        while byte < 256 {
+            let mut spread = 0u16;
+            let mut bit = 0;
+            while bit < 8 {
+                if byte & (1 << bit) != 0 {
+                    spread |= 1 << (2 * bit);
+                }
+                bit += 1;
+            }
+            table[byte] = spread;
+            byte += 1;
+        }
+        table
+    };
+
+    u64::from(SPREAD[(half & 0xFF) as usize])
+        | u64::from(SPREAD[((half >> 8) & 0xFF) as usize]) << 16
+        | u64::from(SPREAD[((half >> 16) & 0xFF) as usize]) << 32
+        | u64::from(SPREAD[(half >> 24) as usize]) << 48
+}
+
+/// Significant bits of a little-endian limb buffer (trailing zero words
+/// permitted).
+fn limbs_bits(buf: &[u64]) -> usize {
+    for (i, &limb) in buf.iter().enumerate().rev() {
+        if limb != 0 {
+            return i * 64 + (64 - limb.leading_zeros() as usize);
+        }
+    }
+    0
+}
+
+/// XOR `word` into the buffer at the given bit offset.
+fn xor_shifted_word(buf: &mut [u64], word: u64, bit_offset: usize) {
+    let index = bit_offset / 64;
+    let shift = bit_offset % 64;
+    buf[index] ^= word << shift;
+    if shift > 0 {
+        let high = word >> (64 - shift);
+        if high != 0 {
+            buf[index + 1] ^= high;
         }
     }
 }
@@ -595,6 +757,110 @@ mod tests {
         // irreducible; x⁶+x²+x+1 is not.
         assert!(Gf2m::is_irreducible(&BigUint::from_u64(0b1000011)));
         assert!(!Gf2m::is_irreducible(&BigUint::from_u64(0b1000111)));
+    }
+
+    /// The pre-comb algorithm, kept as an independent oracle: shift-and-XOR
+    /// per set bit, reduced bit-serially with no shared kernel code.
+    fn mul_reference(field: &Gf2m, a: &BigUint, b: &BigUint) -> BigUint {
+        let mut acc = BigUint::zero();
+        let mut temp = a.clone();
+        for i in 0..b.bits() {
+            if b.bit(i) {
+                acc.bitxor_assign(&temp);
+            }
+            temp.shl1();
+        }
+        // Bit-serial reduction, structurally unlike the tap-wise word walk.
+        while acc.bits() > field.degree() {
+            let shift = acc.bits() - 1 - field.degree();
+            let mut shifted = field.modulus().clone();
+            shifted.shl_bits(shift);
+            acc.bitxor_assign(&shifted);
+        }
+        acc
+    }
+
+    #[test]
+    fn comb_mul_matches_the_reference() {
+        // Sparse FIPS-style moduli, the AES byte field, and a deliberately
+        // dense degree-8 modulus whose top tap gap is 1 — the case that
+        // forces the word-level reduction through repeated boundary passes.
+        let mut dense = None;
+        for candidate in 0x100u64..0x200 {
+            let poly = BigUint::from_u64(candidate | 0x180); // x^8 + x^7 + ...
+            if candidate.count_ones() >= 6 && Gf2m::is_irreducible(&poly) {
+                dense = Some(poly);
+                break;
+            }
+        }
+        let dense =
+            Gf2m::new(dense.expect("a dense degree-8 irreducible exists")).expect("degree 8");
+
+        let mut b571 = BigUint::zero();
+        for bit in [571usize, 10, 5, 2, 0] {
+            b571.set_bit(bit);
+        }
+
+        let fields = [
+            gf163(),
+            gf4(),
+            Gf2m::new(BigUint::from_u64(0x11B)).expect("AES field"),
+            Gf2m::new(b571).expect("B-571 field"),
+            dense,
+        ];
+
+        let mut state = 0xc0b_0236;
+        for field in &fields {
+            for _ in 0..24 {
+                let a = random_element(field, &mut state);
+                let b = random_element(field, &mut state);
+                assert_eq!(
+                    field.mul(&a, &b),
+                    mul_reference(field, &a, &b),
+                    "comb disagrees with reference in degree {}",
+                    field.degree()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn solve_quadratic_all_degrees() {
+        // Odd degree: must agree with the half-trace on trace-zero input.
+        let odd = gf163();
+        let mut state = 0x50_1363;
+        for _ in 0..8 {
+            let a = random_element(&odd, &mut state);
+            let c = Gf2m::add(&odd.square(&a), &a); // Tr(c) = 0 by construction
+            let z = odd.solve_quadratic(&c).expect("constructed solvable");
+            assert_eq!(Gf2m::add(&odd.square(&z), &z), c);
+            assert_eq!(z, odd.half_trace(&c));
+        }
+
+        // Even degrees: GF(2^4) and the AES byte field GF(2^8).
+        for field in [
+            gf4(),
+            Gf2m::new(BigUint::from_u64(0x11B)).expect("AES field"),
+        ] {
+            for _ in 0..16 {
+                let a = random_element(&field, &mut state);
+                let c = Gf2m::add(&field.square(&a), &a);
+                let z = field
+                    .solve_quadratic(&c)
+                    .expect("z^2 + z = a^2 + a is solvable");
+                assert_eq!(Gf2m::add(&field.square(&z), &z), c);
+                // The two roots are a and a + 1.
+                let other = Gf2m::add(&z, &BigUint::one());
+                assert!(z == a || other == a, "root must be a or a + 1");
+            }
+
+            // A trace-one element has no root.
+            let mut witness = BigUint::one();
+            while field.trace(&witness) == 0 {
+                witness = witness.add_ref(&BigUint::one());
+            }
+            assert_eq!(field.solve_quadratic(&witness), None);
+        }
     }
 
     #[test]

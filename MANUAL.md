@@ -231,10 +231,12 @@ degree is derived from the polynomial — `new` returns `None` for constants,
 and irreducibility is the caller's contract. `add` is an associated function
 (XOR needs no modulus); `mul`, `square`, `inverse`, and `half_trace` are
 methods, along with `pow`, `div`, `sqrt` (unique — squaring is a bijection),
-`trace`, and `half_trace`, which solves `z² + z = c` when `Tr(c) = 0` — the
-quadratic behind compressed-point decompression on binary curves. Squaring
-is linear (bit spreading), not a general multiply. `Gf2m::is_irreducible`
-(Rabin's test) guards the constructor's contract for untrusted polynomials.
+`trace`, `half_trace` (the odd-degree primitive), and `solve_quadratic`,
+which solves `z² + z = c` at every degree and returns `None` exactly when
+`Tr(c) = 1`. Multiplication is comb-based over words (*Guide to ECC*,
+Algorithm 2.36) with tap-wise reduction, and squaring is linear via a
+spread table. `Gf2m::is_irreducible` (Rabin's test) guards the
+constructor's contract for untrusted polynomials.
 
 ```rust
 // GF(2³) with x³ + x + 1.
@@ -276,6 +278,16 @@ assert_eq!(field.pow(&x, &BigUint::from_u64(7)), BigUint::one());
 // Division: x² / x = x; dividing by zero is refused.
 assert_eq!(field.div(&BigUint::from_u64(0b100), &x), Some(x.clone()));
 assert_eq!(field.div(&x, &BigUint::zero()), None);
+
+// solve_quadratic is total across degrees — here in the AES byte field
+// GF(2⁸), where the degree is even and the half-trace does not apply.
+// c = a² + a guarantees solvability; the two roots are a and a + 1.
+let aes = Gf2m::new(BigUint::from_u64(0x11B)).expect("the AES byte field");
+let a = BigUint::from_u64(0x53);
+let c = Gf2m::add(&aes.square(&a), &a);
+let z = aes.solve_quadratic(&c).expect("solvable by construction");
+assert_eq!(Gf2m::add(&aes.square(&z), &z), c);
+assert!(z == a || z == Gf2m::add(&a, &BigUint::one()));
 
 // Rabin's test guards the constructor's irreducibility contract:
 // x³ + x + 1 passes, x³ + 1 = (x + 1)(x² + x + 1) fails, and the AES
