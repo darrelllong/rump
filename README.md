@@ -54,6 +54,12 @@ apples-to-apples comparison (requires libgmp). Measured against GMP 6.3.0,
 modular exponentiation at RSA sizes runs within 1.6–2× of GMP's
 assembly-backed kernels on both x86-64 and Apple Silicon.
 
+## Manual
+
+[MANUAL.md](MANUAL.md) documents every public API with a worked example.
+Every code block in it is replicated in `tests/manual_examples.rs` and
+asserted on `cargo test`, so the manual cannot drift from the code.
+
 ## Testing
 
 Differential suites check division against a bit-serial oracle, Montgomery
