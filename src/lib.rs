@@ -23,7 +23,9 @@
 //!
 //! Safety policy: `#![deny(unsafe_code)]` crate-wide; the sole audited
 //! exception is the volatile-write scrub helper in `scrub`, which cannot be
-//! expressed in safe Rust.
+//! expressed in safe Rust. `#![deny(missing_docs)]` holds every public item
+//! to a doc comment, and `MANUAL.md` carries a worked, test-pinned example
+//! for each.
 //!
 //! ```
 //! use rump::{is_probable_prime, jacobi, mod_pow, BigUint};
@@ -41,6 +43,7 @@
 //! ```
 
 #![deny(unsafe_code)]
+#![deny(missing_docs)]
 
 mod bigint;
 mod gf2m;
