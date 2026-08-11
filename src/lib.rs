@@ -9,6 +9,10 @@
 //! multiplication, and the binary Jacobi symbol (*Handbook of Applied
 //! Cryptography*, Algorithm 2.149).
 //!
+//! The arithmetic and number theory are deterministic functions of their
+//! inputs; the sampling routines (`random_below` and friends) are driven by a
+//! caller-supplied generator and choose no entropy source of their own.
+//!
 //! Two properties carried over from the parent crate:
 //!
 //! - **Variable-time.** Operations take data-dependent paths; do not use them
@@ -26,10 +30,14 @@
 
 mod bigint;
 mod number_theory;
+mod random;
 mod scrub;
 
 pub use bigint::{BigInt, BigUint, MontgomeryCtx, Sign};
 pub use number_theory::{
     crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_with_bases, jacobi,
     kronecker, lcm, legendre, miller_rabin_witness, mod_inverse, mod_pow, sqrt_mod,
+};
+pub use random::{
+    random_below, random_coprime_below, random_nonzero_below, random_probable_prime, Rng,
 };
