@@ -41,21 +41,28 @@ done
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# Print one Markdown row `| op | mean_ms | min | p50 | p99 | max | ratio |`
-# by driving pilot-bench and reducing its readings.csv.
+# Print one Markdown row
+#   `| op | mean_ms | ±95% CI | min | p50 | p99 | max | ratio |`
+# by driving pilot-bench and reducing its output. The CI column is
+# pilot-bench's own converged 95% confidence interval on the mean (its
+# subsession CI, which accounts for autocorrelation between readings), read
+# straight from pi_results.csv rather than recomputed.
 measure() {
-    local op=$1 out="$WORK/$op"
+    local op=$1
+    local out="$WORK/$op"
     rm -rf "$out"
     # Exit 13 = hit the session limit; that is a clean stop with readings
     # written, so it is not an error here.
     "$BENCH" run_program --preset "$PILOT_PRESET" -s "$SESSION" -o "$out" \
         --pi "${op},ms/op,0,1,1" -- "$MP" "$op" >/dev/null 2>&1 || true
-    python3 - "$op" "$out/readings.csv" <<'PY'
+    python3 - "$op" "$out/readings.csv" "$out/pi_results.csv" <<'PY'
 import sys, statistics
-op, path = sys.argv[1], sys.argv[2]
+op, readings_path, pi_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+# Order statistics come from the raw readings sample.
 xs = []
 try:
-    with open(path) as f:
+    with open(readings_path) as f:
         next(f)  # header: piid,round,readings
         for line in f:
             parts = line.split(",")
@@ -63,39 +70,83 @@ try:
                 xs.append(float(parts[2]))  # ms/op
 except FileNotFoundError:
     pass
-if not xs:
-    print(f"| {op} | ? | ? | ? | ? | ? | ? |")
+
+# pilot-bench's own mean and 95% subsession CI (accounts for autocorrelation
+# between consecutive readings — the interval it converges against).
+pilot_mean = pilot_ci = None
+try:
+    with open(pi_path) as f:
+        header = next(f).rstrip("\n").split(",")
+        rec = dict(zip(header, next(f).rstrip("\n").split(",")))
+        pilot_mean = float(rec["readings_mean"])
+        pilot_ci = float(rec["readings_subsession_ci"])
+except (FileNotFoundError, StopIteration, KeyError, ValueError):
+    pass
+
+if not xs and pilot_mean is None:
+    print(f"| {op} | ? | ? | ? | ? | ? | ? | ? |")
     sys.exit()
+
 xs.sort()
 ns = [x * 1e6 for x in xs]  # ms -> ns
-q = lambda p: ns[min(len(ns) - 1, int((len(ns) - 1) * p))]
-mean_ms = statistics.fmean(xs)
-lo, hi = ns[0], ns[-1]
-ratio = hi / lo if lo > 0 else float("inf")
-# Mark the mean approximate ("~") when the sample's own 95% CI half-width
-# exceeds 10% of the mean — i.e. pilot hit the session cap without the mean
-# converging, which happens for the heavy-tailed primitives.
+q = lambda p: ns[min(len(ns) - 1, int((len(ns) - 1) * p))] if ns else float("nan")
+# Prefer pilot's mean, but fall back to the sample mean if it is missing or
+# absurd — with a single reading pilot can emit a denormal here, and the sample
+# mean (that one reading) is the correct value.
+if pilot_mean is not None and pilot_mean > 1e-12:
+    mean_ms = pilot_mean
+elif xs:
+    mean_ms = statistics.fmean(xs)
+else:
+    mean_ms = float("nan")
+lo = ns[0] if ns else float("nan")
+hi = ns[-1] if ns else float("nan")
+ratio = hi / lo if ns and lo > 0 else float("inf")
+
+# 95% CI half-width as a percent of the mean: pilot's converged value when
+# present, else a naive IID estimate from the sample.
+if pilot_ci is not None and mean_ms > 0:
+    ci_pct = 100.0 * pilot_ci / mean_ms
+elif len(xs) > 2:
+    ci_pct = 100.0 * (1.96 * statistics.stdev(xs) / len(xs) ** 0.5) / mean_ms
+else:
+    ci_pct = float("nan")
+
+# Flag a mean whose CI never tightened below 10% (a heavy-tailed op that hit
+# the session cap) so downstream tables can treat it as approximate.
 mean_str = f"{mean_ms:.6g}"
-if len(xs) > 2:
-    ci = 1.96 * statistics.stdev(xs) / len(xs) ** 0.5
-    if ci > 0.10 * mean_ms:
-        mean_str = "~" + mean_str
-print(f"| {op} | {mean_str} | {lo:.1f} | {q(0.50):.1f} | {q(0.99):.1f} | {hi:.1f} | {ratio:.2f} |")
+if ci_pct == ci_pct and ci_pct > 10.0:  # first clause: not NaN
+    mean_str = "~" + mean_str
+ci_str = f"{ci_pct:.2f}%" if ci_pct == ci_pct else "?"
+print(
+    f"| {op} | {mean_str} | {ci_str} | {lo:.1f} | "
+    f"{q(0.50):.1f} | {q(0.99):.1f} | {hi:.1f} | {ratio:.2f} |"
+)
 PY
 }
+
+# Single-op mode: `bench_primitives.sh <op>` re-measures one operation and
+# prints just its Markdown row (no header) — handy for patching a stray reading.
+if [[ $# -ge 1 ]]; then
+    measure "$1"
+    exit 0
+fi
 
 echo "# rump primitive microbenchmarks"
 echo
 echo "Fresh random operands per pilot-bench trial; preset \`${PILOT_PRESET}\`,"
-echo "session cap ${SESSION}s per op. Mean is the average over random inputs;"
-echo "the ns/op order statistics are the extrema of each variable-time"
-echo "primitive, from the readings pilot-bench gathered (\`max/min\` = 1.0 means"
-echo "data-independent). A \`~\` on the mean flags a heavy-tailed op that hit"
-echo "the session cap without the mean CI converging (its extrema are the"
-echo "meaningful result); tail resolution tracks the sample size."
+echo "session cap ${SESSION}s per op. Mean is the average over random inputs,"
+echo "with pilot-bench's own 95% confidence interval on it (\`±95% CI\`, as a"
+echo "percent of the mean — its subsession CI, which accounts for"
+echo "autocorrelation). The ns/op order statistics are the extrema of each"
+echo "variable-time primitive, from the readings pilot-bench gathered"
+echo "(\`max/min\` = 1.0 means data-independent). A \`~\` on the mean flags a"
+echo "heavy-tailed op that hit the session cap with its CI still above 10%"
+echo "(its extrema are the meaningful result); tail resolution tracks the"
+echo "sample size."
 echo
-echo "| Operation | mean ms/op | min ns | p50 ns | p99 ns | max ns | max/min |"
-echo "|---|---:|---:|---:|---:|---:|---:|"
+echo "| Operation | mean ms/op | ±95% CI | min ns | p50 ns | p99 ns | max ns | max/min |"
+echo "|---|---:|---:|---:|---:|---:|---:|---:|"
 while read -r op; do
     [[ -z "$op" ]] && continue
     measure "$op"

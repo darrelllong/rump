@@ -6,9 +6,11 @@ Usage:
   perf_analysis.py fit   host=path [host=path ...]        -> markdown fit table
   perf_analysis.py plot  family out.svg host=path [...]    -> log-log scaling SVG
 
-Each table row is `| <op>_<size> | mean | min | p50 | p99 | max | max/min |`,
-mean in ms/op (a leading '~' marks a heavy-tailed op whose mean did not
-converge). Sizes are bit widths (integers) or field degrees (gf2m).
+Each table row is
+`| <op>_<size> | mean | ±95% CI | min | p50 | p99 | max | max/min |`, mean in
+ms/op (a leading '~' marks a heavy-tailed op whose mean did not converge). The
+±95% CI cell is pilot-bench's confidence interval on the mean; it is skipped
+here. Sizes are bit widths (integers) or field degrees (gf2m).
 """
 import math
 import re
@@ -17,7 +19,9 @@ import sys
 # ─── Parsing ────────────────────────────────────────────────────────────────
 
 ROW = re.compile(
-    r"\|\s*([a-z0-9_]+)_(\d+)\s*\|\s*~?([0-9.eE+-]+)\s*\|"
+    r"\|\s*([a-z0-9_]+)_(\d+)\s*\|"  # op_size
+    r"\s*~?([0-9.eE+-]+)\s*\|"       # mean (ms)
+    r"\s*[^|]*\|"                    # ±95% CI (skipped, keeps group numbers)
     r"\s*([0-9.]+)\s*\|\s*([0-9.]+)\s*\|\s*([0-9.]+)\s*\|\s*([0-9.]+)\s*\|\s*([0-9.]+)"
 )
 
@@ -64,7 +68,12 @@ def fit_power(sizes, means):
     sxx = sum((x - mx) ** 2 for x in xs)
     sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
     alpha = sxy / sxx
-    c = math.exp(my - alpha * mx)
+    try:
+        c = math.exp(my - alpha * mx)
+    except OverflowError:
+        # A degenerate fit (isprime's heavy-tailed mean) can blow the intercept
+        # past the float range; the exponent is what the table reports anyway.
+        c = float("inf")
     return alpha, c
 
 
@@ -80,8 +89,8 @@ INT_FAMILIES = {
 THEORY = {
     "add": "O(n)",
     "sub": "O(n)",
-    "mul": "O(n^1.585) Karatsuba / O(n²) schoolbook",
-    "sqr": "O(n^1.585) / O(n²)",
+    "mul": "schoolbook → Karatsuba → Toom-3/4",
+    "sqr": "schoolbook → Karatsuba → Toom-3/4",
     "divrem": "O(n²) Algorithm D",
     "modulo": "O(n²)",
     "modmul": "O(n²) mul + reduce",
@@ -91,10 +100,10 @@ THEORY = {
     "montpow_rand": "O(e·n²), e = 256",
     "montsetup": "O(n²) (one division)",
     "modpow": "O(e·n²), e = 256",
-    "gcd": "O(n²)",
-    "gcdext": "O(n²)",
-    "modinv": "O(n²) extended Euclid",
-    "jacobi": "O(n²)",
+    "gcd": "O(n²) Lehmer",
+    "gcdext": "O(n²) Lehmer",
+    "modinv": "O(n²) Lehmer",
+    "jacobi": "O(n²) binary",
     "sqrtmod": "O(n³) Tonelli–Shanks (input-dependent)",
     "isprime": "O(k·n²) Miller–Rabin (input-dependent)",
 }
@@ -239,22 +248,20 @@ FAMILY_TITLES = {
 SIZES = [256, 1024, 2048, 4096]
 
 
-def means_table(arm, x86):
-    """Per-family mean ns/op, ARM and x86 side by side."""
+def means_table(hosts):
+    """Per-family mean ns/op, one four-size column block per host."""
+
+    def cell(d, s):
+        v = d.get(s)
+        return f"{v['mean_ns']:.0f}" + ("~" if v and v["approx"] else "") if v else "–"
+
     for fam, ops in INT_FAMILIES.items():
         print(f"\n**{FAMILY_TITLES[fam]}** — mean ns/op\n")
-        print("| Method | " + " | ".join(f"{s}b (M1)" for s in SIZES)
-              + " | " + " | ".join(f"{s}b (EPYC)" for s in SIZES) + " |")
-        print("|---|" + "---:|" * (2 * len(SIZES)))
+        head = " | ".join(f"{s}b ({label})" for label in hosts for s in SIZES)
+        print(f"| Method | {head} |")
+        print("|---|" + "---:|" * (len(hosts) * len(SIZES)))
         for op in ops:
-            a = arm.get(op, {})
-            x = x86.get(op, {})
-
-            def cell(d, s):
-                v = d.get(s)
-                return f"{v['mean_ns']:.0f}" + ("~" if v and v["approx"] else "") if v else "–"
-
-            row = [cell(a, s) for s in SIZES] + [cell(x, s) for s in SIZES]
+            row = [cell(data.get(op, {}), s) for data in hosts.values() for s in SIZES]
             print(f"| `{op}` | " + " | ".join(row) + " |")
 
 
@@ -274,28 +281,17 @@ def extrema_table(arm):
 
 def main():
     mode = sys.argv[1]
-    if mode == "report":
-        # report armrump=.. x86rump=.. armgmp=.. x86gmp=..
-        f = dict(a.split("=", 1) for a in sys.argv[2:])
-        arm, x86 = parse(f["armrump"]), parse(f["x86rump"])
-        print("## Fitted complexity\n")
-        fit_table({"M1": arm, "EPYC": x86})
-        print("\n## Cost by method")
-        means_table(arm, x86)
-        print("\n## vs GMP — M1\n")
-        compare_table(f["armrump"], f["armgmp"])
-        print("\n## vs GMP — EPYC\n")
-        compare_table(f["x86rump"], f["x86gmp"])
-        print("\n## Extrema (M1)\n")
-        extrema_table(arm)
-        return
-    if mode == "fit":
+    if mode == "fit":  # fit  <label>=path ...
         fit_table(load(sys.argv[2:]))
-    elif mode == "plot":
+    elif mode == "means":  # means  <label>=path ...
+        means_table(load(sys.argv[2:]))
+    elif mode == "extrema":  # extrema  <label>=path  (single host)
+        extrema_table(next(iter(load(sys.argv[2:]).values())))
+    elif mode == "compare":  # compare  rump.md  gmp.md
+        compare_table(sys.argv[2], sys.argv[3])
+    elif mode == "plot":  # plot  <family>  out.svg  <label>=path ...
         family, out = sys.argv[2], sys.argv[3]
         scaling_svg(family, out, load(sys.argv[4:]))
-    elif mode == "compare":
-        compare_table(sys.argv[2], sys.argv[3])
     else:
         sys.exit(f"unknown mode: {mode}")
 

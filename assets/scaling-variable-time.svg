@@ -10,44 +10,54 @@
 <line x1="570.0" y1="40" x2="570.0" y2="405" stroke="#E4DED4"/>
 <text x="570.0" y="423" font-size="11" fill="#6F675C" text-anchor="middle">4096</text>
 <text x="320" y="446" font-size="12" fill="#6F675C" text-anchor="middle">bit width</text>
-<line x1="70" y1="361.5" x2="570" y2="361.5" stroke="#E4DED4"/>
-<text x="62" y="365.5" font-size="11" fill="#6F675C" text-anchor="end">1 µs</text>
-<line x1="70" y1="298.1" x2="570" y2="298.1" stroke="#E4DED4"/>
-<text x="62" y="302.1" font-size="11" fill="#6F675C" text-anchor="end">10 µs</text>
-<line x1="70" y1="234.6" x2="570" y2="234.6" stroke="#E4DED4"/>
-<text x="62" y="238.6" font-size="11" fill="#6F675C" text-anchor="end">100 µs</text>
-<line x1="70" y1="171.2" x2="570" y2="171.2" stroke="#E4DED4"/>
-<text x="62" y="175.2" font-size="11" fill="#6F675C" text-anchor="end">1 ms</text>
-<line x1="70" y1="107.8" x2="570" y2="107.8" stroke="#E4DED4"/>
-<text x="62" y="111.8" font-size="11" fill="#6F675C" text-anchor="end">10 ms</text>
-<line x1="70" y1="44.4" x2="570" y2="44.4" stroke="#E4DED4"/>
-<text x="62" y="48.4" font-size="11" fill="#6F675C" text-anchor="end">100 ms</text>
-<path d="M70.0,268.2 L320.0,185.5 L445.0,134.5 L570.0,70.9" fill="none" stroke="#A64E28" stroke-width="2" />
-<circle cx="70.0" cy="268.2" r="2.5" fill="#A64E28"/>
-<circle cx="320.0" cy="185.5" r="2.5" fill="#A64E28"/>
-<circle cx="445.0" cy="134.5" r="2.5" fill="#A64E28"/>
-<circle cx="570.0" cy="70.9" r="2.5" fill="#A64E28"/>
-<path d="M70.0,260.6 L320.0,173.1 L445.0,126.5 L570.0,56.6" fill="none" stroke="#A64E28" stroke-width="2" stroke-dasharray="5,3"/>
-<circle cx="70.0" cy="260.6" r="2.5" fill="#A64E28"/>
-<circle cx="320.0" cy="173.1" r="2.5" fill="#A64E28"/>
-<circle cx="445.0" cy="126.5" r="2.5" fill="#A64E28"/>
+<line x1="70" y1="361.9" x2="570" y2="361.9" stroke="#E4DED4"/>
+<text x="62" y="365.9" font-size="11" fill="#6F675C" text-anchor="end">1 µs</text>
+<line x1="70" y1="297.0" x2="570" y2="297.0" stroke="#E4DED4"/>
+<text x="62" y="301.0" font-size="11" fill="#6F675C" text-anchor="end">10 µs</text>
+<line x1="70" y1="232.1" x2="570" y2="232.1" stroke="#E4DED4"/>
+<text x="62" y="236.1" font-size="11" fill="#6F675C" text-anchor="end">100 µs</text>
+<line x1="70" y1="167.1" x2="570" y2="167.1" stroke="#E4DED4"/>
+<text x="62" y="171.1" font-size="11" fill="#6F675C" text-anchor="end">1 ms</text>
+<line x1="70" y1="102.2" x2="570" y2="102.2" stroke="#E4DED4"/>
+<text x="62" y="106.2" font-size="11" fill="#6F675C" text-anchor="end">10 ms</text>
+<path d="M70.0,284.2 L320.0,190.2 L445.0,138.1 L570.0,108.7" fill="none" stroke="#A64E28" stroke-width="2" />
+<circle cx="70.0" cy="284.2" r="2.5" fill="#A64E28"/>
+<circle cx="320.0" cy="190.2" r="2.5" fill="#A64E28"/>
+<circle cx="445.0" cy="138.1" r="2.5" fill="#A64E28"/>
+<circle cx="570.0" cy="108.7" r="2.5" fill="#A64E28"/>
+<path d="M70.0,262.8 L320.0,170.9 L445.0,117.3 L570.0,75.0" fill="none" stroke="#A64E28" stroke-width="2" stroke-dasharray="5,3"/>
+<circle cx="70.0" cy="262.8" r="2.5" fill="#A64E28"/>
+<circle cx="320.0" cy="170.9" r="2.5" fill="#A64E28"/>
+<circle cx="445.0" cy="117.3" r="2.5" fill="#A64E28"/>
+<circle cx="570.0" cy="75.0" r="2.5" fill="#A64E28"/>
+<path d="M70.0,247.6 L320.0,151.9 L445.0,82.8 L570.0,56.6" fill="none" stroke="#A64E28" stroke-width="2" stroke-dasharray="1,3"/>
+<circle cx="70.0" cy="247.6" r="2.5" fill="#A64E28"/>
+<circle cx="320.0" cy="151.9" r="2.5" fill="#A64E28"/>
+<circle cx="445.0" cy="82.8" r="2.5" fill="#A64E28"/>
 <circle cx="570.0" cy="56.6" r="2.5" fill="#A64E28"/>
-<path d="M70.0,332.5 L320.0,250.7 L445.0,165.2 L570.0,388.4" fill="none" stroke="#3D648A" stroke-width="2" />
-<circle cx="70.0" cy="332.5" r="2.5" fill="#3D648A"/>
-<circle cx="320.0" cy="250.7" r="2.5" fill="#3D648A"/>
-<circle cx="445.0" cy="165.2" r="2.5" fill="#3D648A"/>
+<path d="M70.0,367.0 L320.0,269.9 L445.0,341.0 L570.0,388.4" fill="none" stroke="#3D648A" stroke-width="2" />
+<circle cx="70.0" cy="367.0" r="2.5" fill="#3D648A"/>
+<circle cx="320.0" cy="269.9" r="2.5" fill="#3D648A"/>
+<circle cx="445.0" cy="341.0" r="2.5" fill="#3D648A"/>
 <circle cx="570.0" cy="388.4" r="2.5" fill="#3D648A"/>
-<path d="M70.0,316.5 L320.0,248.1 L445.0,180.3 L570.0,332.1" fill="none" stroke="#3D648A" stroke-width="2" stroke-dasharray="5,3"/>
-<circle cx="70.0" cy="316.5" r="2.5" fill="#3D648A"/>
-<circle cx="320.0" cy="248.1" r="2.5" fill="#3D648A"/>
-<circle cx="445.0" cy="180.3" r="2.5" fill="#3D648A"/>
-<circle cx="570.0" cy="332.1" r="2.5" fill="#3D648A"/>
+<path d="M70.0,351.9 L320.0,231.0 L445.0,182.2 L570.0,357.0" fill="none" stroke="#3D648A" stroke-width="2" stroke-dasharray="5,3"/>
+<circle cx="70.0" cy="351.9" r="2.5" fill="#3D648A"/>
+<circle cx="320.0" cy="231.0" r="2.5" fill="#3D648A"/>
+<circle cx="445.0" cy="182.2" r="2.5" fill="#3D648A"/>
+<circle cx="570.0" cy="357.0" r="2.5" fill="#3D648A"/>
+<path d="M70.0,304.8 L320.0,210.1 L445.0,138.6 L570.0,286.1" fill="none" stroke="#3D648A" stroke-width="2" stroke-dasharray="1,3"/>
+<circle cx="70.0" cy="304.8" r="2.5" fill="#3D648A"/>
+<circle cx="320.0" cy="210.1" r="2.5" fill="#3D648A"/>
+<circle cx="445.0" cy="138.6" r="2.5" fill="#3D648A"/>
+<circle cx="570.0" cy="286.1" r="2.5" fill="#3D648A"/>
 <line x1="578" y1="46" x2="596" y2="46" stroke="#A64E28" stroke-width="2"/>
 <text x="600" y="50" font-size="10" fill="#211E19">sqrtmod</text>
 <line x1="578" y1="62" x2="596" y2="62" stroke="#3D648A" stroke-width="2"/>
 <text x="600" y="66" font-size="10" fill="#211E19">isprime</text>
 <line x1="578" y1="84" x2="596" y2="84" stroke="#211E19" stroke-width="2" />
-<text x="600" y="88" font-size="10" fill="#6F675C">tolkien</text>
+<text x="600" y="88" font-size="10" fill="#6F675C">M4</text>
 <line x1="578" y1="99" x2="596" y2="99" stroke="#211E19" stroke-width="2" stroke-dasharray="5,3"/>
-<text x="600" y="103" font-size="10" fill="#6F675C">moore</text>
+<text x="600" y="103" font-size="10" fill="#6F675C">EPYC</text>
+<line x1="578" y1="114" x2="596" y2="114" stroke="#211E19" stroke-width="2" stroke-dasharray="1,3"/>
+<text x="600" y="118" font-size="10" fill="#6F675C">Pi</text>
 </svg>
