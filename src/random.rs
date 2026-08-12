@@ -20,7 +20,9 @@ pub trait Rng {
     fn fill_bytes(&mut self, dest: &mut [u8]);
 }
 
-/// Draw a random integer in `[0, upper_exclusive)`.
+/// Draw a random integer in `[0, upper_exclusive)`, uniformly, by rejection
+/// sampling from the enclosing power-of-two range (Knuth, *TAOCP* vol. 2,
+/// §3.4.1, the unbiased range-reduction discussed there).
 #[must_use]
 pub fn random_below<R: Rng + ?Sized>(rng: &mut R, upper_exclusive: &BigUint) -> Option<BigUint> {
     if upper_exclusive.is_zero() {
@@ -86,7 +88,10 @@ pub fn random_coprime_below<R: Rng + ?Sized>(
     }
 }
 
-/// Draw a probable prime with the requested bit length.
+/// Draw a probable prime with the requested bit length, by random search:
+/// sample an odd candidate of the right width and retry until it passes the
+/// probable-prime test (*Handbook of Applied Cryptography*, Algorithm 4.44,
+/// "Random search for a prime using the Miller-Rabin test").
 #[must_use]
 pub fn random_probable_prime<R: Rng + ?Sized>(rng: &mut R, bits: usize) -> Option<BigUint> {
     if bits < 2 {

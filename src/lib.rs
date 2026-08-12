@@ -5,9 +5,10 @@
 //! boundary keeps the API honest. The kernels are auditable against their
 //! sources: Knuth's Algorithm D for division (*TAOCP* vol. 2, §4.3.1),
 //! Montgomery multiplication with an explicit public Montgomery domain
-//! (Montgomery 1985; Koç, Acar & Kaliski 1996), schoolbook and Karatsuba
-//! multiplication, and the binary Jacobi symbol (*Handbook of Applied
-//! Cryptography*, Algorithm 2.149).
+//! (Montgomery 1985; Koç, Acar & Kaliski 1996), schoolbook, Karatsuba, and
+//! Toom–Cook multiplication, Lehmer's gcd (Knuth §4.5.2, Algorithm L), and the
+//! Jacobi symbol by quadratic reciprocity (*Handbook of Applied Cryptography*,
+//! Algorithm 2.149). Every algorithm carries its citation at its definition.
 //!
 //! The arithmetic and number theory are deterministic functions of their
 //! inputs; the sampling routines (`random_below` and friends) are driven by a

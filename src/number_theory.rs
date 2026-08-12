@@ -6,27 +6,274 @@
 //! adversarially hardened primality testing live with their consumers (the
 //! parent cryptography crate), where the entropy source and hash live.
 
-use crate::bigint::{BigInt, BigUint, MontgomeryCtx};
+use crate::bigint::{BigInt, BigUint, MontgomeryCtx, Sign};
 
 // ─── Divisibility ──────────────────────────────────────────────────────────────
 
-/// Greatest common divisor by Euclid's algorithm.
-#[must_use]
-pub fn gcd(lhs: &BigUint, rhs: &BigUint) -> BigUint {
-    let mut current = lhs.clone();
-    let mut next = rhs.clone();
-    while !next.is_zero() {
-        let remainder = current.modulo(&next);
-        current = next;
-        next = remainder;
+// Lehmer's gcd machinery (Knuth, TAOCP vol. 2, §4.5.2, Algorithm L).
+//
+// Classical Euclid does a full multiprecision division per step, and there are
+// O(bits) of them. Lehmer's refinement runs Euclid on just the aligned leading
+// 64-bit digits, accumulating the 2×2 transform of every step whose quotient
+// the leading digits pin down *exactly*, then applies that one transform to the
+// full operands with a handful of multiplications. The quotient test — accept
+// `q` only when the low and high leading-digit estimates agree — certifies each
+// batched quotient equals the true one, so the outcome is bit-for-bit classical
+// Euclid, with an order of magnitude fewer big-integer divisions. `gcd`,
+// `gcd_extended`, and `mod_inverse` all share this engine.
+
+/// Single-word Euclid, the base case once both operands fit in one limb.
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let remainder = a % b;
+        a = b;
+        b = remainder;
     }
-    current
+    a
 }
 
-/// Extended Euclid: `(g, s, t)` with `g = gcd(a, b) = a·s + b·t`.
+/// The top ≤124 bits of `limbs` starting at bit `shift`, as a non-negative
+/// `i128`. Callers pick `shift` so `value >> shift < 2^124`, keeping the result
+/// positive and leaving headroom for the transform's corrections. Clone-free:
+/// it reads the (up to) three limbs the window spans directly.
+fn leading_i128(limbs: &[u64], shift: usize) -> i128 {
+    let word = shift / 64;
+    let bit = shift % 64;
+    let lo = u128::from(limbs.get(word).copied().unwrap_or(0));
+    let mid = u128::from(limbs.get(word + 1).copied().unwrap_or(0));
+    let window = if bit == 0 {
+        lo | (mid << 64)
+    } else {
+        let hi = u128::from(limbs.get(word + 2).copied().unwrap_or(0));
+        (lo >> bit) | (mid << (64 - bit)) | (hi << (128 - bit))
+    };
+    // The caller's `shift` guarantees `window < 2^124`, so this cast is exact.
+    window as i128
+}
+
+/// Knuth Algorithm L on the aligned leading digits `u_hat >= v_hat` (each below
+/// 2^124): the 2×2 transform `(m00, m01, m10, m11)` collecting every Euclidean
+/// step whose quotient the leading digits determine exactly. `m01 == 0` signals
+/// that the digits pinned no step, so the caller must take one full division
+/// step. Wider leading digits (124 bits, not one 64-bit limb) batch far more
+/// steps per call — the difference between a shallow and a useful transform.
 ///
-/// The classic iterative form tracking both Bézout coefficient pairs;
-/// [`mod_inverse`] is the thin wrapper that keeps only `s`.
+/// Signs live in the entries, so `m00·u + m01·v` and `m10·u + m11·v` reproduce
+/// the post-step operands directly, both provably non-negative.
+fn lehmer_transform(u_hat: i128, v_hat: i128) -> (i128, i128, i128, i128) {
+    let (mut m00, mut m01, mut m10, mut m11) = (1i128, 0i128, 0i128, 1i128);
+    let (mut u, mut v) = (u_hat, v_hat);
+    loop {
+        // The corrected denominators bracket the true quotient; both must stay
+        // positive for the bracket to hold.
+        let (denom_low, denom_high) = (v + m10, v + m11);
+        if denom_low <= 0 || denom_high <= 0 {
+            break;
+        }
+        let q = (u + m00) / denom_low;
+        // A genuine Euclid step has quotient >= 1; accepting only when the low
+        // and high estimates agree certifies q is the true quotient.
+        if q < 1 || q != (u + m01) / denom_high {
+            break;
+        }
+        // With 124-bit leading digits the accumulated entries can approach the
+        // digit size, so these products can genuinely overflow i128 near the
+        // end of a long batch. A checked break there is exact: it just ends the
+        // batch one step early, and the caller applies what was collected.
+        let (Some(q_m10), Some(q_m11), Some(q_v)) =
+            (q.checked_mul(m10), q.checked_mul(m11), q.checked_mul(v))
+        else {
+            break;
+        };
+        let (Some(new_m10), Some(new_m11)) = (m00.checked_sub(q_m10), m01.checked_sub(q_m11))
+        else {
+            break;
+        };
+        (m00, m10) = (m10, new_m10);
+        (m01, m11) = (m11, new_m11);
+        (u, v) = (v, u - q_v);
+    }
+    (m00, m01, m10, m11)
+}
+
+/// Aligned 124-bit leading digits of `a >= b`, both non-zero: the same window
+/// (top of the larger) taken from each, ready for [`lehmer_transform`].
+fn leading_pair(a: &BigUint, b: &BigUint) -> (i128, i128) {
+    let shift = a.bits().saturating_sub(124);
+    (leading_i128(a.limbs(), shift), leading_i128(b.limbs(), shift))
+}
+
+// The Lehmer transform is applied to the operands (and, for the extended
+// variants, to the Bézout cofactors) as `c0·x0 + c1·x1` with two-word signed
+// coefficients. Going through `mul_ref`/`add_ref` would allocate several
+// temporaries per application; the transform runs tens of times per gcd, so
+// these fused limb-level routines — accumulate `|c|·x` straight into a positive
+// or negative bucket by sign, then take the difference once — are what make the
+// batching actually pay off.
+
+/// `out += (clo, chi)·x` in place, where `(clo, chi)` is a two-word magnitude
+/// and `out` is little-endian with room for the carries (`x.len() + 2` limbs
+/// past the write origin).
+fn mul_add_2word(out: &mut [u64], x: &[u64], clo: u64, chi: u64) {
+    if clo != 0 {
+        let mut carry = 0u128;
+        for (i, &xi) in x.iter().enumerate() {
+            let acc = u128::from(out[i]) + u128::from(xi) * u128::from(clo) + carry;
+            out[i] = acc as u64;
+            carry = acc >> 64;
+        }
+        let mut idx = x.len();
+        while carry != 0 {
+            let acc = u128::from(out[idx]) + carry;
+            out[idx] = acc as u64;
+            carry = acc >> 64;
+            idx += 1;
+        }
+    }
+    if chi != 0 {
+        // The high word contributes one limb further up.
+        let mut carry = 0u128;
+        for (i, &xi) in x.iter().enumerate() {
+            let acc = u128::from(out[i + 1]) + u128::from(xi) * u128::from(chi) + carry;
+            out[i + 1] = acc as u64;
+            carry = acc >> 64;
+        }
+        let mut idx = x.len() + 1;
+        while carry != 0 {
+            let acc = u128::from(out[idx]) + carry;
+            out[idx] = acc as u64;
+            carry = acc >> 64;
+            idx += 1;
+        }
+    }
+}
+
+/// Route `|coefficient|·x` into the positive or negative accumulator by the
+/// term's overall sign (`sign(coefficient) · sign(x)`).
+fn route_term(pos: &mut [u64], neg: &mut [u64], coefficient: i128, x_negative: bool, x: &[u64]) {
+    if coefficient == 0 || x.is_empty() {
+        return;
+    }
+    let magnitude = coefficient.unsigned_abs();
+    let (clo, chi) = (magnitude as u64, (magnitude >> 64) as u64);
+    let term_negative = (coefficient < 0) ^ x_negative;
+    let target = if term_negative { neg } else { pos };
+    mul_add_2word(target, x, clo, chi);
+}
+
+/// Compare equal-length little-endian limb slices.
+fn cmp_slices(a: &[u64], b: &[u64]) -> core::cmp::Ordering {
+    for i in (0..a.len()).rev() {
+        match a[i].cmp(&b[i]) {
+            core::cmp::Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    core::cmp::Ordering::Equal
+}
+
+/// `a - b` for equal-length little-endian slices with `a >= b`.
+fn sub_slices(a: &[u64], b: &[u64]) -> Vec<u64> {
+    let mut out = vec![0u64; a.len()];
+    let mut borrow = 0i128;
+    for i in 0..a.len() {
+        let diff = i128::from(a[i]) - i128::from(b[i]) - borrow;
+        if diff < 0 {
+            out[i] = (diff + (1i128 << 64)) as u64;
+            borrow = 1;
+        } else {
+            out[i] = diff as u64;
+            borrow = 0;
+        }
+    }
+    debug_assert!(borrow == 0, "sub_slices requires a >= b");
+    out
+}
+
+/// `c0·x0 + c1·x1` as a `BigUint`, for a result the Lehmer transform guarantees
+/// is non-negative (the remainder sequence).
+fn combine_unsigned(c0: i128, x0: &BigUint, c1: i128, x1: &BigUint) -> BigUint {
+    let width = x0.limbs().len().max(x1.limbs().len()) + 3;
+    let mut pos = vec![0u64; width];
+    let mut neg = vec![0u64; width];
+    route_term(&mut pos, &mut neg, c0, false, x0.limbs());
+    route_term(&mut pos, &mut neg, c1, false, x1.limbs());
+    debug_assert!(
+        cmp_slices(&pos, &neg) != core::cmp::Ordering::Less,
+        "Lehmer transform keeps the remainder sequence non-negative"
+    );
+    BigUint::from_limbs(sub_slices(&pos, &neg))
+}
+
+/// `c0·x0 + c1·x1` as a signed `BigInt`, for the Bézout cofactor sequences.
+fn combine_signed(c0: i128, x0: &BigInt, c1: i128, x1: &BigInt) -> BigInt {
+    let width = x0.magnitude().limbs().len().max(x1.magnitude().limbs().len()) + 3;
+    let mut pos = vec![0u64; width];
+    let mut neg = vec![0u64; width];
+    route_term(&mut pos, &mut neg, c0, x0.sign() == Sign::Negative, x0.magnitude().limbs());
+    route_term(&mut pos, &mut neg, c1, x1.sign() == Sign::Negative, x1.magnitude().limbs());
+    match cmp_slices(&pos, &neg) {
+        core::cmp::Ordering::Less => {
+            BigInt::from_parts(Sign::Negative, BigUint::from_limbs(sub_slices(&neg, &pos)))
+        }
+        _ => BigInt::from_parts(Sign::Positive, BigUint::from_limbs(sub_slices(&pos, &neg))),
+    }
+}
+
+/// Greatest common divisor by Lehmer's algorithm: classical Euclid with each
+/// run of steps whose quotient the leading 64-bit digits fix batched into one
+/// 2×2 transform of the full operands. Same result as plain Euclid, an order of
+/// magnitude fewer multiprecision divisions.
+#[must_use]
+pub fn gcd(lhs: &BigUint, rhs: &BigUint) -> BigUint {
+    let (mut a, mut b) = if lhs >= rhs {
+        (lhs.clone(), rhs.clone())
+    } else {
+        (rhs.clone(), lhs.clone())
+    };
+    loop {
+        if b.is_zero() {
+            return a;
+        }
+        // Both operands in a single limb: finish in single-word Euclid.
+        if b.limbs().len() == 1 {
+            let small = a.rem_u64(b.limbs()[0]);
+            return BigUint::from_u64(gcd_u64(b.limbs()[0], small));
+        }
+        // Leading digits are only comparable at equal length; otherwise one
+        // ordinary step brings the operands level.
+        let n = b.limbs().len();
+        if a.limbs().len() != n {
+            let remainder = a.modulo(&b);
+            a = b;
+            b = remainder;
+            continue;
+        }
+        let (u_hat, v_hat) = leading_pair(&a, &b);
+        let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat);
+        if m01 == 0 {
+            // The leading digits pinned no step; take one full division step.
+            let remainder = a.modulo(&b);
+            a = b;
+            b = remainder;
+        } else {
+            let next_a = combine_unsigned(m00, &a, m01, &b);
+            let next_b = combine_unsigned(m10, &a, m11, &b);
+            a = next_a;
+            b = next_b;
+            debug_assert!(a >= b, "Lehmer transform preserves a >= b");
+        }
+    }
+}
+
+/// Extended Euclid: `(g, s, t)` with `g = gcd(a, b) = a·s + b·t` (*Handbook of
+/// Applied Cryptography*, Algorithm 2.107; Knuth, *TAOCP* vol. 2, §4.5.2,
+/// Algorithm X).
+///
+/// Tracks both Bézout coefficient pairs, carrying them through the same
+/// leading-digit Lehmer transform [`gcd`] uses, so the result is identical to
+/// the classical step-by-step recurrence but with the reductions batched.
+/// [`mod_inverse`] is the lean variant that keeps only one coefficient.
 ///
 /// ```
 /// use rump::{gcd_extended, BigInt, BigUint};
@@ -39,28 +286,45 @@ pub fn gcd(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 /// ```
 #[must_use]
 pub fn gcd_extended(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
-    let mut old_r = a.clone();
-    let mut r = b.clone();
-    let mut old_s = BigInt::from_biguint(BigUint::one());
-    let mut s = BigInt::zero();
-    let mut old_t = BigInt::zero();
-    let mut t = BigInt::from_biguint(BigUint::one());
+    // Invariant: r0 = s0·a + t0·b and r1 = s1·a + t1·b throughout. The loop
+    // reproduces classical extended Euclid step for step (a leading `a < b`
+    // enters as one quotient-zero swap), only with runs of steps batched.
+    let (mut r0, mut r1) = (a.clone(), b.clone());
+    let (mut s0, mut s1) = (BigInt::from_biguint(BigUint::one()), BigInt::zero());
+    let (mut t0, mut t1) = (BigInt::zero(), BigInt::from_biguint(BigUint::one()));
 
-    while !r.is_zero() {
-        let (quotient, remainder) = old_r.div_rem(&r);
-        old_r = r;
-        r = remainder;
-
-        let next_s = old_s.sub_ref(&s.mul_biguint_ref(&quotient));
-        old_s = s;
-        s = next_s;
-
-        let next_t = old_t.sub_ref(&t.mul_biguint_ref(&quotient));
-        old_t = t;
-        t = next_t;
+    while !r1.is_zero() {
+        let n = r1.limbs().len();
+        // A Lehmer step only when the operands share a multi-limb length and
+        // r0 >= r1, so the 124-bit leading digits are aligned and in range.
+        if n >= 2 && r0.limbs().len() == n && r0 >= r1 {
+            let (u_hat, v_hat) = leading_pair(&r0, &r1);
+            let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat);
+            if m01 != 0 {
+                let next_r0 = combine_unsigned(m00, &r0, m01, &r1);
+                let next_r1 = combine_unsigned(m10, &r0, m11, &r1);
+                let next_s0 = combine_signed(m00, &s0, m01, &s1);
+                let next_s1 = combine_signed(m10, &s0, m11, &s1);
+                let next_t0 = combine_signed(m00, &t0, m01, &t1);
+                let next_t1 = combine_signed(m10, &t0, m11, &t1);
+                (r0, r1) = (next_r0, next_r1);
+                (s0, s1) = (next_s0, next_s1);
+                (t0, t1) = (next_t0, next_t1);
+                debug_assert!(r0 >= r1, "Lehmer transform preserves r0 >= r1");
+                continue;
+            }
+        }
+        // One ordinary Euclid step: (r0, r1) → (r1, r0 mod r1), each cofactor
+        // pair following the same quotient.
+        let (quotient, remainder) = r0.div_rem(&r1);
+        let next_s1 = s0.sub_ref(&s1.mul_biguint_ref(&quotient));
+        let next_t1 = t0.sub_ref(&t1.mul_biguint_ref(&quotient));
+        r0 = core::mem::replace(&mut r1, remainder);
+        s0 = core::mem::replace(&mut s1, next_s1);
+        t0 = core::mem::replace(&mut t1, next_t1);
     }
 
-    (old_r, old_s, old_t)
+    (r0, s0, t0)
 }
 
 /// Least common multiple.
@@ -85,12 +349,14 @@ pub fn lcm(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 
 /// Jacobi symbol `(a/n)` for odd `n`, or `None` when `n` is even or zero.
 ///
-/// Binary algorithm via quadratic reciprocity (Menezes, van Oorschot &
-/// Vanstone, *Handbook of Applied Cryptography*, Algorithm 2.149): strip
-/// factors of two using the supplement `(2/n) = (-1)^((n^2 - 1)/8)` — a sign
-/// flip exactly when `n ≡ 3, 5 (mod 8)` — then swap the arguments, paying the
-/// reciprocity sign flip when both are `≡ 3 (mod 4)`, and reduce. Runs in
-/// `O(log a · log n)` bit operations like the gcd it shadows.
+/// Quadratic reciprocity, in the shape of *Handbook of Applied Cryptography*,
+/// Algorithm 2.149: strip factors of two using the supplement
+/// `(2/n) = (-1)^((n^2 - 1)/8)` — a sign flip exactly when `n ≡ 3, 5 (mod 8)`
+/// — then swap the arguments, paying the reciprocity sign flip when both are
+/// `≡ 3 (mod 4)`. The reduction, though, is division-free: rather than
+/// `a mod n`, subtract-and-halve using the symbol's periodicity in its top
+/// argument, `(a/n) = ((a - n)/n)` — the binary gcd this shadows, which is
+/// markedly faster here than a full division per step.
 ///
 /// For prime `n` this is the Legendre symbol: `1` for quadratic residues,
 /// `-1` for non-residues, `0` when `n` divides `a`. `(a/1) = 1` by the
@@ -115,26 +381,31 @@ pub fn jacobi(a: &BigUint, n: &BigUint) -> Option<i8> {
     let mut sign = 1i8;
 
     while !a.is_zero() {
-        // Strip a's factors of two; each one contributes the (2/n) supplement.
+        // Strip a's factors of two; each one contributes the (2/n) supplement,
+        // a sign flip exactly when n ≡ 3 or 5 (mod 8).
         let mut twos = 0usize;
         while !a.bit(twos) {
             twos += 1;
         }
-        if twos % 2 == 1 {
-            let n_mod_8 = n.rem_u64(8);
-            if n_mod_8 == 3 || n_mod_8 == 5 {
-                sign = -sign;
-            }
+        if twos % 2 == 1 && matches!(n.rem_u64(8), 3 | 5) {
+            sign = -sign;
         }
         a.shr_bits(twos);
 
-        // Reciprocity: with both arguments now odd, (a/n) and (n/a) agree
-        // unless both are ≡ 3 (mod 4).
-        if a.rem_u64(4) == 3 && n.rem_u64(4) == 3 {
-            sign = -sign;
+        // Order the (now both odd) arguments so a >= n. The swap is the
+        // reciprocity step, paying its sign flip when both are ≡ 3 (mod 4).
+        if a < n {
+            if a.rem_u64(4) == 3 && n.rem_u64(4) == 3 {
+                sign = -sign;
+            }
+            core::mem::swap(&mut a, &mut n);
         }
-        core::mem::swap(&mut a, &mut n);
-        a = a.modulo(&n);
+
+        // a >= n and both odd, so a - n is even and non-negative — stripped on
+        // the next pass. This is the reduction, division-free: the symbol is
+        // periodic in its top argument, so (a/n) = ((a - n)/n). Repeated
+        // subtract-and-halve is the binary gcd this loop already shadows.
+        a.sub_assign_ref(&n);
     }
 
     // The loop preserves (a/n) up to the accumulated sign; it ends with the
@@ -225,37 +496,53 @@ pub fn mod_pow(base: &BigUint, exponent: &BigUint, modulus: &BigUint) -> BigUint
     result
 }
 
-/// Multiplicative inverse `a^{-1} mod n`, if it exists.
+/// Multiplicative inverse `a^{-1} mod n`, if it exists (*Handbook of Applied
+/// Cryptography*, Algorithm 2.142).
 ///
-/// Extended Euclid tracking only the coefficient of `a` — half the signed
-/// bookkeeping of [`gcd_extended`], which measurably matters to callers
-/// doing single-shot inversion chains (Lagrange interpolation is one
-/// inversion per share). Use [`gcd_extended`] when the full Bézout triple
-/// is wanted.
+/// Extended Euclid — over the shared leading-digit Lehmer engine — tracking
+/// only the coefficient of `a`, half the signed bookkeeping of
+/// [`gcd_extended`], which measurably matters to callers doing single-shot
+/// inversion chains (Lagrange interpolation is one inversion per share). Use
+/// [`gcd_extended`] when the full Bézout triple is wanted.
 #[must_use]
 pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
     if n.is_zero() {
         return None;
     }
 
-    let mut t = BigInt::zero();
-    let mut next_t = BigInt::from_biguint(BigUint::one());
-    let mut r = n.clone();
-    let mut next_r = a.modulo(n);
+    // Extended Euclid on (n, a mod n) over the shared Lehmer engine, tracking
+    // only the coefficient of `a mod n`: modulo n the modulus contributes
+    // nothing, so r0 ≡ u0·(a mod n) (mod n), and when r0 reaches gcd = 1 the
+    // coefficient u0 is the inverse.
+    let (mut r0, mut r1) = (n.clone(), a.modulo(n));
+    let (mut u0, mut u1) = (BigInt::zero(), BigInt::from_biguint(BigUint::one()));
 
-    while !next_r.is_zero() {
-        let (quotient, remainder) = r.div_rem(&next_r);
-        let coefficient = t.sub_ref(&next_t.mul_biguint_ref(&quotient));
-        t = next_t;
-        next_t = coefficient;
-        r = next_r;
-        next_r = remainder;
+    while !r1.is_zero() {
+        let m = r1.limbs().len();
+        if m >= 2 && r0.limbs().len() == m && r0 >= r1 {
+            let (u_hat, v_hat) = leading_pair(&r0, &r1);
+            let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat);
+            if m01 != 0 {
+                let next_r0 = combine_unsigned(m00, &r0, m01, &r1);
+                let next_r1 = combine_unsigned(m10, &r0, m11, &r1);
+                let next_u0 = combine_signed(m00, &u0, m01, &u1);
+                let next_u1 = combine_signed(m10, &u0, m11, &u1);
+                (r0, r1) = (next_r0, next_r1);
+                (u0, u1) = (next_u0, next_u1);
+                debug_assert!(r0 >= r1, "Lehmer transform preserves r0 >= r1");
+                continue;
+            }
+        }
+        let (quotient, remainder) = r0.div_rem(&r1);
+        let next_u1 = u0.sub_ref(&u1.mul_biguint_ref(&quotient));
+        r0 = core::mem::replace(&mut r1, remainder);
+        u0 = core::mem::replace(&mut u1, next_u1);
     }
 
-    if !r.is_one() {
+    if !r0.is_one() {
         return None;
     }
-    Some(t.modulo_positive(n))
+    Some(u0.modulo_positive(n))
 }
 
 /// Write `n - 1 = d * 2^s` with `d` odd: the 2-adic split shared by the
@@ -432,11 +719,13 @@ pub fn crt_combine(congruences: &[(BigUint, BigUint)]) -> Option<BigUint> {
 /// Fixed Miller-Rabin witness set used by the bigint probable-prime test.
 ///
 /// These twelve small prime bases give a deterministic, repeatable witness
-/// schedule. They are the classic "small prime" bases through `37`.
+/// schedule. They are the first twelve primes, `2` through `37`.
 ///
 /// Notes on determinism:
-/// - For all odd `n < 2^64`, published smaller witness sets are already
-///   deterministic; this superset is therefore deterministic in that range.
+/// - The first twelve prime bases make Miller-Rabin deterministic for every
+///   `n < 3.317 × 10^24` (Sorenson & Webster, *Strong Pseudoprimes to Twelve
+///   Prime Bases*, Math. Comp. 86 (2017), 985–1003; arXiv:1509.00864), which
+///   covers the whole `n < 2^64 ≈ 1.8 × 10^19` range.
 /// - For larger `BigUint` candidates this remains a strong fixed-basis
 ///   probable-prime test, but not a proof of primality.
 const MR_BASES: [u64; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
@@ -467,8 +756,9 @@ fn is_witness(
     let n_minus_one = ctx.modulus().sub_ref(&one);
     let mut value = ctx.pow(base, odd_factor);
 
-    // Miller-Rabin witness test: a non-trivial square root of 1 proves
-    // compositeness, and failing to end at 1 is the usual Fermat backstop.
+    // Miller-Rabin witness test (HAC Algorithm 4.24): a non-trivial square
+    // root of 1 proves compositeness, and failing to end at 1 is the usual
+    // Fermat backstop.
     for _ in 0..two_adic_exponent {
         let next = ctx.square(&value);
         if next == one && value != one && value != n_minus_one {

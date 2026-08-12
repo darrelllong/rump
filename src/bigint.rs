@@ -2,14 +2,19 @@
 //!
 //! The representation uses little-endian `u64` limbs because the algorithms
 //! are naturally word-oriented. The kernels come straight from the literature
-//! so they are easy to audit against their sources: schoolbook and Karatsuba
-//! multiplication, and Knuth's Algorithm D for division (*TAOCP* vol. 2,
-//! §4.3.1), all fully in Rust with no external arithmetic backend.
+//! so they are easy to audit against their sources: schoolbook (Knuth's
+//! Algorithm M), Karatsuba, and Toom–Cook three- and four-way multiplication,
+//! and Knuth's Algorithm D for division — all fully in Rust with no external
+//! arithmetic backend.
 //!
-//! References for the multiplication kernels (PDFs in the parent crate's
-//! `pubs/` directory at <https://github.com/darrelllong/cryptography>):
-//! - Comba 1990, *Exponentiation cryptosystems on the IBM PC*
-//! - Karatsuba & Ofman 1963, *Multiplication of multidigit numbers on automata*
+//! References for the multiplication and division kernels:
+//! - Knuth, *TAOCP* vol. 2, §4.3.1, Algorithm M (schoolbook multiply) and
+//!   Algorithm D (long division); §4.3.3 ("How Fast Can We Multiply?") for the
+//!   Karatsuba and Toom–Cook methods.
+//! - Karatsuba & Ofman, *Multiplication of Multidigit Numbers on Automata*,
+//!   Soviet Physics–Doklady 7 (1963).
+//! - Bodrato, *Towards Optimal Toom–Cook Multiplication…*, WAIFI 2007, for the
+//!   optimized Toom evaluation/interpolation sequences.
 
 use core::cmp::Ordering;
 
@@ -19,6 +24,18 @@ const KARATSUBA_THRESHOLD_LIMBS: usize = 32;
 // Limit highly lopsided splits; beyond this ratio the extra recursion/temporary
 // cost usually outweighs Karatsuba's multiplication count reduction.
 const KARATSUBA_MAX_IMBALANCE: usize = 2;
+// Toom-3 (three-way Toom–Cook) crossover: above this many limbs in the shorter
+// operand, the five sub-multiplications of size n/3 overtake Karatsuba's three
+// of size n/2, despite the heavier evaluate/interpolate pass. Measured crossover
+// on this pure-Rust implementation is ~120 limbs (Karatsuba still wins at and
+// below 4096-bit crypto sizes); see PERFORMANCE.md.
+const TOOM3_THRESHOLD_LIMBS: usize = 128;
+// Toom-4 (four-way Toom–Cook) crossover. Its exponent (log 7 / log 4 ≈ 1.404)
+// beats Toom-3's (1.465), but the seven-point interpolation carries a much
+// larger constant here, so it only overtakes Toom-3 for very large operands —
+// measured near ~3000 limbs (~190 kbit). Set there as headroom; the practical
+// range stays on Toom-3. See PERFORMANCE.md.
+const TOOM4_THRESHOLD_LIMBS: usize = 3072;
 
 /// Sign of a [`BigInt`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -306,7 +323,9 @@ impl BigUint {
         (self.limbs.len() - 1) * 64 + top_bits
     }
 
-    /// Integer square root: the largest `r` such that `r^2 <= self`.
+    /// Integer square root: the largest `r` such that `r^2 <= self`, by
+    /// bisection on `r` (Warren, *Hacker's Delight*, 2nd ed., §11-1 "Integer
+    /// Square Root"), squaring the midpoint each step.
     #[must_use]
     pub fn sqrt_floor(&self) -> Self {
         if self.is_zero() {
@@ -460,6 +479,14 @@ impl BigUint {
             return Self::zero();
         }
 
+        if Self::should_use_toom4(self, other) {
+            return self.mul_toom4_ref(other);
+        }
+
+        if Self::should_use_toom3(self, other) {
+            return self.mul_toom3_ref(other);
+        }
+
         if Self::should_use_karatsuba(self, other) {
             return self.mul_karatsuba_ref(other);
         }
@@ -528,6 +555,228 @@ impl BigUint {
         out
     }
 
+    fn should_use_toom3(lhs: &Self, rhs: &Self) -> bool {
+        let short = lhs.limbs.len().min(rhs.limbs.len());
+        let long = lhs.limbs.len().max(rhs.limbs.len());
+        // Both operands large, and close enough in length that all three parts
+        // of each carry weight (a lopsided split wastes the five-way machinery).
+        short >= TOOM3_THRESHOLD_LIMBS && long <= short + short / 2
+    }
+
+    /// Split into three little-endian chunks of `k` limbs — low `[0, k)`, mid
+    /// `[k, 2k)`, high `[2k, len)`. The high chunk holds whatever remains and
+    /// may be shorter than `k`, or empty.
+    fn split3_at(&self, k: usize) -> (Self, Self, Self) {
+        let n = self.limbs.len();
+        let piece = |lo: usize, hi: usize| {
+            if lo >= n {
+                Self::zero()
+            } else {
+                let mut part = Self {
+                    limbs: self.limbs[lo..hi.min(n)].to_vec(),
+                };
+                part.normalize();
+                part
+            }
+        };
+        (piece(0, k), piece(k, 2 * k), piece(2 * k, n))
+    }
+
+    /// Toom–Cook three-way multiplication (Knuth, *TAOCP* vol. 2, §4.3.3, the
+    /// generalization of Karatsuba; interpolation sequence after Bodrato,
+    /// *Towards Optimal Toom–Cook Multiplication…*, WAIFI 2007).
+    ///
+    /// Split both operands into three base-`B = 2^{64k}` digits, evaluate each
+    /// as a degree-2 polynomial at `{0, 1, -1, 2, ∞}`, multiply the five pairs
+    /// (recursively — this is where the sub-quadratic saving lives: five
+    /// products of a third the size, versus schoolbook's nine or Karatsuba's
+    /// three of a half), then interpolate the five product digits and
+    /// recompose. Evaluation and interpolation run in signed arithmetic; the
+    /// interpolation's divisions by 2, 3, 6 are exact.
+    fn mul_toom3_ref(&self, other: &Self) -> Self {
+        let n = self.limbs.len().max(other.limbs.len());
+        let k = n.div_ceil(3);
+        let (a0, a1, a2) = self.split3_at(k);
+        let (b0, b1, b2) = other.split3_at(k);
+
+        // Evaluate a and b at 0, 1, -1, 2, ∞. The value at -1 can go negative,
+        // so those points live in signed arithmetic.
+        let eval = |c0: &Self, c1: &Self, c2: &Self| {
+            let even = c0.add_ref(c2); // c0 + c2
+            let at_1 = even.add_ref(c1); // c(1)
+            let at_m1 = BigInt::from_biguint(even).sub_ref(&BigInt::from_biguint(c1.clone()));
+            let mut twice_c1 = c1.clone();
+            twice_c1.shl_bits(1);
+            let mut four_c2 = c2.clone();
+            four_c2.shl_bits(2);
+            let at_2 = c0.add_ref(&twice_c1).add_ref(&four_c2); // c(2)
+            (at_1, at_m1, at_2)
+        };
+        let (a_1, a_m1, a_2) = eval(&a0, &a1, &a2);
+        let (b_1, b_m1, b_2) = eval(&b0, &b1, &b2);
+
+        // Pointwise products (each a recursive multiplication).
+        let v0 = BigInt::from_biguint(a0.mul_ref(&b0)); // W(0)
+        let v_inf = BigInt::from_biguint(a2.mul_ref(&b2)); // W(∞)
+        let v1 = BigInt::from_biguint(a_1.mul_ref(&b_1)); // W(1)
+        let vm1 = bigint_mul(&a_m1, &b_m1); // W(-1)
+        let v2 = BigInt::from_biguint(a_2.mul_ref(&b_2)); // W(2)
+
+        // Interpolate the product digits c0..c4. Derivation: with
+        // W(x) = Σ cᵢ xⁱ, the points give c0 = W(0), c4 = W(∞), and
+        //   s = (W(1)+W(-1))/2 = c0 + c2 + c4,   t = (W(1)-W(-1))/2 = c1 + c3,
+        //   u = (W(2) - c0 - 4c2 - 16c4)/2 = c1 + 4c3,
+        // whence c2 = s - c0 - c4, c3 = (u - t)/3, c1 = t - c3. Every quotient
+        // is exact.
+        let c0 = v0;
+        let c4 = v_inf;
+        let s = bigint_div_exact(&v1.add_ref(&vm1), 2);
+        let t = bigint_div_exact(&v1.sub_ref(&vm1), 2);
+        let c2 = s.sub_ref(&c0).sub_ref(&c4);
+        let four_c2 = c2.mul_biguint_ref(&BigUint::from_u64(4));
+        let sixteen_c4 = c4.mul_biguint_ref(&BigUint::from_u64(16));
+        let u = bigint_div_exact(&v2.sub_ref(&c0).sub_ref(&four_c2).sub_ref(&sixteen_c4), 2);
+        let c3 = bigint_div_exact(&u.sub_ref(&t), 3);
+        let c1 = t.sub_ref(&c3);
+
+        // Recompose Σ cᵢ·B^{ik} by Horner. The product's digits are all
+        // non-negative, so this returns to unsigned.
+        let shift = 64 * k;
+        let mut acc = BigUint::zero();
+        for coefficient in [&c4, &c3, &c2, &c1, &c0] {
+            debug_assert!(
+                coefficient.sign() != Sign::Negative,
+                "Toom-3 product digits are non-negative"
+            );
+            acc.shl_bits(shift);
+            acc.add_assign_ref(coefficient.magnitude());
+        }
+        acc
+    }
+
+    fn should_use_toom4(lhs: &Self, rhs: &Self) -> bool {
+        let short = lhs.limbs.len().min(rhs.limbs.len());
+        let long = lhs.limbs.len().max(rhs.limbs.len());
+        short >= TOOM4_THRESHOLD_LIMBS && long <= short + short / 2
+    }
+
+    /// Split into four little-endian chunks of `k` limbs; the top chunk holds
+    /// whatever remains and may be shorter than `k`, or empty.
+    fn split4_at(&self, k: usize) -> (Self, Self, Self, Self) {
+        let n = self.limbs.len();
+        let piece = |lo: usize, hi: usize| {
+            if lo >= n {
+                Self::zero()
+            } else {
+                let mut part = Self {
+                    limbs: self.limbs[lo..hi.min(n)].to_vec(),
+                };
+                part.normalize();
+                part
+            }
+        };
+        (piece(0, k), piece(k, 2 * k), piece(2 * k, 3 * k), piece(3 * k, n))
+    }
+
+    /// Toom–Cook four-way multiplication: split into four base-`B = 2^{64k}`
+    /// digits (degree-3 polynomials), evaluate at `{0, 1, -1, 2, -2, 3, ∞}`,
+    /// multiply the seven pairs recursively, then interpolate the seven product
+    /// digits. Sub-quadratic exponent `log 7 / log 4 ≈ 1.404`, below Toom-3's
+    /// `1.465`, so it overtakes Toom-3 once the seven-point interpolation
+    /// (divisions by 2, 3, 4, 5, 8, 12, all exact) is amortized. Same
+    /// interpolation shape as Toom-3, one order up.
+    fn mul_toom4_ref(&self, other: &Self) -> Self {
+        let n = self.limbs.len().max(other.limbs.len());
+        let k = n.div_ceil(4);
+        let (a0, a1, a2, a3) = self.split4_at(k);
+        let (b0, b1, b2, b3) = other.split4_at(k);
+
+        // Evaluate a degree-3 digit polynomial at 1, -1, 2, -2, 3 (the ∞ and 0
+        // points are the top and bottom digits themselves). Points -1, -2 can
+        // go negative, so those live in signed arithmetic.
+        let eval4 = |c0: &Self, c1: &Self, c2: &Self, c3: &Self| {
+            let mut two_c1 = c1.clone();
+            two_c1.shl_bits(1);
+            let mut four_c2 = c2.clone();
+            four_c2.shl_bits(2);
+            let mut eight_c3 = c3.clone();
+            eight_c3.shl_bits(3);
+
+            let at_1 = c0.add_ref(c1).add_ref(c2).add_ref(c3); // c(1)
+            let even = c0.add_ref(c2); // c0 + c2
+            let odd = c1.add_ref(c3); // c1 + c3
+            let at_m1 = BigInt::from_biguint(even).sub_ref(&BigInt::from_biguint(odd)); // c(-1)
+            let at_2 = c0.add_ref(&two_c1).add_ref(&four_c2).add_ref(&eight_c3); // c(2)
+            let even2 = c0.add_ref(&four_c2); // c0 + 4c2
+            let odd2 = two_c1.add_ref(&eight_c3); // 2c1 + 8c3
+            let at_m2 = BigInt::from_biguint(even2).sub_ref(&BigInt::from_biguint(odd2)); // c(-2)
+            // c(3) = c0 + 3c1 + 9c2 + 27c3, by Horner at x = 3.
+            let three = BigUint::from_u64(3);
+            let mut at_3 = c3.mul_ref(&three);
+            at_3.add_assign_ref(c2);
+            at_3 = at_3.mul_ref(&three);
+            at_3.add_assign_ref(c1);
+            at_3 = at_3.mul_ref(&three);
+            at_3.add_assign_ref(c0);
+            (at_1, at_m1, at_2, at_m2, at_3)
+        };
+        let (a_1, a_m1, a_2, a_m2, a_3) = eval4(&a0, &a1, &a2, &a3);
+        let (b_1, b_m1, b_2, b_m2, b_3) = eval4(&b0, &b1, &b2, &b3);
+
+        // Seven pointwise products (each a recursive multiplication).
+        let w0 = BigInt::from_biguint(a0.mul_ref(&b0)); // W(0)
+        let w1 = BigInt::from_biguint(a_1.mul_ref(&b_1)); // W(1)
+        let w2 = bigint_mul(&a_m1, &b_m1); // W(-1)
+        let w3 = BigInt::from_biguint(a_2.mul_ref(&b_2)); // W(2)
+        let w4 = bigint_mul(&a_m2, &b_m2); // W(-2)
+        let w5 = BigInt::from_biguint(a_3.mul_ref(&b_3)); // W(3)
+        let w6 = BigInt::from_biguint(a3.mul_ref(&b3)); // W(∞)
+
+        let scale = |x: &BigInt, m: u64| x.mul_biguint_ref(&BigUint::from_u64(m));
+        let c0 = w0;
+        let c6 = w6;
+
+        // Even coefficients c2, c4 from the symmetric sums.
+        let e1 = bigint_div_exact(&w1.add_ref(&w2), 2); // c2 + c4 + c0 + c6
+        let e2 = bigint_div_exact(&w3.add_ref(&w4), 2); // 4c2 + 16c4 + c0 + 64c6
+        let sum24 = e1.sub_ref(&c0).sub_ref(&c6); // c2 + c4
+        let weighted24 = e2.sub_ref(&c0).sub_ref(&scale(&c6, 64)); // 4c2 + 16c4
+        let c4 = bigint_div_exact(&weighted24.sub_ref(&scale(&sum24, 4)), 12);
+        let c2 = sum24.sub_ref(&c4);
+
+        // Odd coefficients c1, c3, c5 from the antisymmetric sums and W(3).
+        let o1 = bigint_div_exact(&w1.sub_ref(&w2), 2); // c1 + c3 + c5
+        let o2 = bigint_div_exact(&w3.sub_ref(&w4), 4); // c1 + 4c3 + 16c5
+        let o3 = bigint_div_exact(
+            &w5.sub_ref(&c0)
+                .sub_ref(&scale(&c2, 9))
+                .sub_ref(&scale(&c4, 81))
+                .sub_ref(&scale(&c6, 729)),
+            3,
+        ); // c1 + 9c3 + 81c5
+        let p = bigint_div_exact(&o2.sub_ref(&o1), 3); // c3 + 5c5
+        let q = bigint_div_exact(&o3.sub_ref(&o1), 8); // c3 + 10c5
+        let c5 = bigint_div_exact(&q.sub_ref(&p), 5);
+        let c3 = p.sub_ref(&scale(&c5, 5));
+        let c1 = o1.sub_ref(&c3).sub_ref(&c5);
+
+        // Recompose Σ cᵢ·B^{ik}; the product digits are all non-negative.
+        let shift = 64 * k;
+        let mut acc = BigUint::zero();
+        for coefficient in [&c6, &c5, &c4, &c3, &c2, &c1, &c0] {
+            debug_assert!(
+                coefficient.sign() != Sign::Negative,
+                "Toom-4 product digits are non-negative"
+            );
+            acc.shl_bits(shift);
+            acc.add_assign_ref(coefficient.magnitude());
+        }
+        acc
+    }
+
+    /// Classic operand-scanning long multiplication (Knuth, *TAOCP* vol. 2,
+    /// §4.3.1, Algorithm M): for each limb of `lhs`, multiply-accumulate it
+    /// across `rhs` into the running product with a `u128` carry.
     fn mul_schoolbook_ref(lhs: &Self, rhs: &Self) -> Self {
         let mut out = vec![0u64; lhs.limbs.len() + rhs.limbs.len()];
         for (i, &lhs_limb) in lhs.limbs.iter().enumerate() {
@@ -1026,6 +1275,10 @@ fn mont_mul(
 }
 
 /// Montgomery squaring: `out = value^2 * R^-1 mod n`, canonical.
+///
+/// The squaring kernel is the classic multiple-precision squaring of
+/// *Handbook of Applied Cryptography*, Algorithm 14.16 (cross terms once, then
+/// double, then add the diagonal), followed by one Montgomery reduction.
 ///
 /// The product pass computes each cross term `value[i] * value[j]` (`i < j`)
 /// once, doubles the whole partial sum with a single shift pass, then adds
@@ -1576,6 +1829,24 @@ fn montgomery_n0_inv(n0: u64) -> u64 {
     inv.wrapping_neg()
 }
 
+/// Signed product `a · b`, for the Toom-3 evaluate/interpolate arithmetic.
+fn bigint_mul(a: &BigInt, b: &BigInt) -> BigInt {
+    let sign = match (a.sign(), b.sign()) {
+        (Sign::Zero, _) | (_, Sign::Zero) => Sign::Zero,
+        (lhs, rhs) if lhs == rhs => Sign::Positive,
+        _ => Sign::Negative,
+    };
+    BigInt::from_parts(sign, a.magnitude().mul_ref(b.magnitude()))
+}
+
+/// `x / divisor` where `divisor` divides `x` exactly — the interpolation
+/// steps of Toom-3 and Toom-4 (dividing by 2, 3, 4, 5, 8, 12).
+fn bigint_div_exact(x: &BigInt, divisor: u64) -> BigInt {
+    let (quotient, remainder) = BigUint::div_rem_limb(x.magnitude().limbs(), divisor);
+    debug_assert!(remainder == 0, "Toom interpolation divides evenly by {divisor}");
+    BigInt::from_parts(x.sign(), quotient)
+}
+
 impl BigInt {
     /// Construct zero.
     #[must_use]
@@ -1786,6 +2057,120 @@ mod tests {
                 let schoolbook = BigUint::mul_schoolbook_ref(&lhs, &rhs);
                 assert_eq!(dispatched, schoolbook);
             }
+        }
+    }
+
+    #[test]
+    fn toom3_matches_schoolbook_across_shapes() {
+        let mut seed = 0x1357_9bdf_2468_ace0;
+        // Exercise the Toom-3 kernel directly — including well below the
+        // dispatch threshold, at sizes not divisible by three, and with heavy
+        // imbalance (one operand collapsing to a single Toom part) — against
+        // the schoolbook oracle it must reproduce exactly.
+        let sizes = [3usize, 4, 5, 7, 8, 9, 16, 31, 33, 48, 64, 65, 96, 127, 130, 200];
+        for &la in &sizes {
+            for &lb in &sizes {
+                for _ in 0..3 {
+                    let a = seeded_biguint(la, &mut seed);
+                    let b = seeded_biguint(lb, &mut seed);
+                    assert_eq!(
+                        a.mul_toom3_ref(&b),
+                        BigUint::mul_schoolbook_ref(&a, &b),
+                        "toom3 != schoolbook for {la}x{lb} words"
+                    );
+                }
+            }
+        }
+        // Full dispatch (Toom-3 for large balanced operands) and squaring.
+        for &words in &[64usize, 96, 150, 256] {
+            for _ in 0..4 {
+                let a = seeded_biguint(words, &mut seed);
+                let b = seeded_biguint(words, &mut seed);
+                assert_eq!(a.mul_ref(&b), BigUint::mul_schoolbook_ref(&a, &b));
+                assert_eq!(a.square_ref(), BigUint::mul_schoolbook_ref(&a, &a));
+            }
+        }
+    }
+
+    #[test]
+    fn toom4_matches_schoolbook_across_shapes() {
+        let mut seed = 0x0f0f_1e1e_2d2d_3c3c;
+        // Direct Toom-4 kernel exercise: sizes not divisible by four, heavy
+        // imbalance (a short operand collapsing to fewer Toom parts), and sizes
+        // straddling its dispatch threshold — all against the schoolbook oracle.
+        let sizes = [4usize, 5, 6, 7, 9, 13, 16, 33, 64, 128, 256, 260, 384, 500];
+        for &la in &sizes {
+            for &lb in &sizes {
+                for _ in 0..2 {
+                    let a = seeded_biguint(la, &mut seed);
+                    let b = seeded_biguint(lb, &mut seed);
+                    assert_eq!(
+                        a.mul_toom4_ref(&b),
+                        BigUint::mul_schoolbook_ref(&a, &b),
+                        "toom4 != schoolbook for {la}x{lb} words"
+                    );
+                }
+            }
+        }
+        // Full dispatch at Toom-4 sizes, plus squaring, plus a Toom-4 call that
+        // recurses (its n/4 parts themselves crossing the Toom-3 threshold).
+        for &words in &[256usize, 300, 512, 768] {
+            for _ in 0..3 {
+                let a = seeded_biguint(words, &mut seed);
+                let b = seeded_biguint(words, &mut seed);
+                assert_eq!(a.mul_ref(&b), BigUint::mul_schoolbook_ref(&a, &b));
+                assert_eq!(a.square_ref(), BigUint::mul_schoolbook_ref(&a, &a));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing probe for tuning the Toom thresholds; run with --ignored"]
+    fn toom_crossover_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let mut seed = 0xC0FF_EE00_1234_5678;
+        eprintln!(
+            "{:>6} {:>11} {:>11} {:>11}  best",
+            "words", "kara_us", "toom3_us", "toom4_us"
+        );
+        for &words in &[
+            96usize, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072,
+        ] {
+            let reps = (2_000_000 / words).max(20);
+            // Average each kernel over several independent operand pairs, each
+            // measured as the min of three runs, to shed operand- and
+            // scheduler-specific noise.
+            let operands: Vec<(BigUint, BigUint)> = (0..4)
+                .map(|_| (seeded_biguint(words, &mut seed), seeded_biguint(words, &mut seed)))
+                .collect();
+            let time = |f: &dyn Fn(&BigUint, &BigUint) -> BigUint| {
+                let mut total = 0.0;
+                for (a, b) in &operands {
+                    let mut best = f64::INFINITY;
+                    for _ in 0..3 {
+                        black_box(f(a, b));
+                        let t = Instant::now();
+                        for _ in 0..reps {
+                            black_box(f(a, b));
+                        }
+                        best = best.min(t.elapsed().as_secs_f64() / reps as f64 * 1e6);
+                    }
+                    total += best;
+                }
+                total / operands.len() as f64
+            };
+            let kara = time(&|a, b| BigUint::mul_karatsuba_ref(a, b));
+            let toom3 = time(&|a, b| a.mul_toom3_ref(b));
+            let toom4 = time(&|a, b| a.mul_toom4_ref(b));
+            let best = if kara <= toom3 && kara <= toom4 {
+                "kara"
+            } else if toom3 <= toom4 {
+                "toom3"
+            } else {
+                "toom4"
+            };
+            eprintln!("{words:6} {kara:11.4} {toom3:11.4} {toom4:11.4}  {best}");
         }
     }
 

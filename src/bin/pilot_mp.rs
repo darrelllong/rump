@@ -1,8 +1,8 @@
 //! Microbenchmark harness for rump's multiprecision primitives.
 //!
-//!   pilot_mp <op>      draw ONE fresh random operand, run the primitive
+//!   `pilot_mp <op>`    draw ONE fresh random operand, run the primitive
 //!                      enough times to beat the clock, print `ms/op`
-//!   pilot_mp --list    every operation name
+//!   `pilot_mp --list`  every operation name
 //!
 //! Each invocation seeds its operands from the OS clock + pid, so it is a
 //! *fresh* random trial. pilot-bench runs the program until the mean's

@@ -16,10 +16,11 @@
 //!
 //! - **Addition** is XOR (no reduction needed: XOR of two polynomials of
 //!   degree < m has degree < m).
-//! - **Multiplication** uses a schoolbook shift-and-XOR loop followed by
-//!   polynomial reduction modulo the field polynomial.
-//! - **Inversion** uses the binary extended GCD for polynomials over GF(2)
-//!   (Algorithm 2.22 of Hankerson, Menezes, Vanstone — *Guide to ECC*).
+//! - **Multiplication** uses the left-to-right comb method with 4-bit windows
+//!   (Algorithm 2.36 of Hankerson, Menezes, Vanstone — *Guide to ECC*),
+//!   followed by polynomial reduction modulo the field polynomial.
+//! - **Inversion** uses the extended Euclidean algorithm for polynomials over
+//!   GF(2) (Algorithm 2.48 of Hankerson, Menezes, Vanstone — *Guide to ECC*).
 //! - **Half-trace** computes HT(c) = Σ c^{2^{2i}} (i = 0...(m−1)/2), which
 //!   is a root of z² + z = c for any c in GF(2^m) with Tr(c) = 0. This
 //!   solves the quadratic needed for compressed-point decompression on
@@ -146,13 +147,15 @@ impl Gf2m {
         BigUint::from_limbs(product)
     }
 
-    /// Square a field element.
+    /// Square a field element (Hankerson, Menezes, Vanstone — *Guide to ECC*,
+    /// Algorithm 2.39, "Polynomial squaring").
     ///
     /// Squaring is linear over GF(2): `(Σ aᵢxⁱ)² = Σ aᵢx²ⁱ`, because every
     /// cross term appears twice and cancels. Spreading each bit to twice its
-    /// position and reducing costs O(m), against O(m²) for a general
-    /// multiply — and squaring chains are the backbone of [`Self::trace`],
-    /// [`Self::sqrt`], [`Self::half_trace`], and binary-curve doubling.
+    /// position (via a precomputed byte table) and reducing costs O(m), against
+    /// O(m²) for a general multiply — and squaring chains are the backbone of
+    /// [`Self::trace`], [`Self::sqrt`], [`Self::half_trace`], and binary-curve
+    /// doubling.
     #[must_use]
     pub fn square(&self, a: &BigUint) -> BigUint {
         let limbs = a.limbs();
@@ -248,7 +251,8 @@ impl Gf2m {
         Some(z)
     }
 
-    /// The absolute trace `Tr(c) = Σ_{i=0}^{m−1} c^{2^i}`, always 0 or 1.
+    /// The absolute trace `Tr(c) = Σ_{i=0}^{m−1} c^{2^i}`, always 0 or 1
+    /// (IEEE Std 1363-2000, Annex A.4.5, "Trace").
     ///
     /// The trace decides solvability of `z² + z = c`: a solution exists
     /// exactly when `Tr(c) = 0` — the precondition of [`Self::half_trace`],
@@ -318,10 +322,13 @@ impl Gf2m {
         frobenius == x
     }
 
-    /// Invert a field element via the binary extended GCD algorithm, or
-    /// `None` for zero (which has no inverse).
+    /// Invert a field element via the extended Euclidean algorithm over
+    /// `GF(2)[x]`, or `None` for zero (which has no inverse).
     ///
-    /// Algorithm 2.22 from Hankerson, Menezes, Vanstone — *Guide to ECC*.
+    /// Algorithm 2.48 from Hankerson, Menezes, Vanstone — *Guide to ECC*: each
+    /// step cancels the leading term of the higher-degree remainder by adding a
+    /// shifted copy of the other (`u ^= v · x^{deg u − deg v}`), carrying the
+    /// single cofactor of `a` alongside.
     /// Invariant during the loop: `b ≡ u · a (mod poly)` in the sense that
     /// `b` and `u` are updated in lockstep so that `b = u · a XOR s · poly`
     /// for some polynomial `s` we do not track.
@@ -402,6 +409,11 @@ impl Gf2m {
     }
 
     /// Reduce a limb buffer modulo the field polynomial, in place.
+    ///
+    /// The word-at-a-time tap folding of *Guide to ECC* §2.3.5 (fast reduction,
+    /// e.g. Algorithms 2.41–2.45 for the specific NIST polynomials), here
+    /// generalized to fold at the taps of any reduction polynomial rather than
+    /// a hard-coded one.
     ///
     /// One whole word of excess coefficients at a time, top down: a word `w`
     /// whose bits sit at positions `degree + k` folds back as `w << t` at
