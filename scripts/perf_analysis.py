@@ -110,20 +110,24 @@ THEORY = {
 
 
 def fit_table(hosts):
+    # Only the exponent alpha is reported. The fit's intercept c is deliberately
+    # omitted: it carries units of ns/bit^alpha (not ns) and so is meaningless to
+    # read as a time or to compare across rows with different alpha. Actual times
+    # are in the cost tables.
     order = [op for fam in INT_FAMILIES.values() for op in fam]
-    ncols = " | ".join(f"{h} α | {h} c(ns)" for h in hosts)
+    ncols = " | ".join(f"{h} α" for h in hosts)
     print(f"| Method | Complexity | {ncols} |")
-    print("|---|---|" + "---|---|" * len(hosts))
+    print("|---|---|" + "---|" * len(hosts))
     for op in order:
         cells = []
         for data in hosts.values():
             d = data.get(op, {})
             sizes = sorted(s for s in d if s in (256, 1024, 2048, 4096))
             if len(sizes) >= 2:
-                alpha, c = fit_power(sizes, [d[s]["mean_ns"] for s in sizes])
-                cells.append(f"{alpha:.2f} | {c:.2g}")
+                alpha, _c = fit_power(sizes, [d[s]["mean_ns"] for s in sizes])
+                cells.append(f"{alpha:.2f}")
             else:
-                cells.append("– | –")
+                cells.append("–")
         print(f"| `{op}` | {THEORY.get(op, '?')} | " + " | ".join(cells) + " |")
 
 

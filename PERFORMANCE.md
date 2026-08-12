@@ -19,13 +19,37 @@ then a random sample of the primitive's cost, from which we report both:
   which for a variable-time primitive is the data-dependent behaviour that a
   mean hides.
 
-A few primitives are **heavy-tailed**: `sqrt_mod`'s Tonelli–Shanks cost scales
-with the 2-adic valuation of `p−1` (rare large-valuation primes cost far more),
-and `is_probable_prime` ranges from an instant small-factor rejection to a full
-Miller–Rabin pass on a prime. Their sample variance never stabilises, so the
-mean CI cannot converge; pilot-bench is given a session cap that stops it
-cleanly with a large sample (means marked `~`), and their **extrema**, not
-their means, are the meaningful result.
+Two primitives are **heavy-tailed**, and for them the mean is not a meaningful
+number at all. `is_probable_prime` costs either an instant trial-division
+rejection (a random odd number almost always has a small factor, a few hundred
+ns) or a full Miller–Rabin pass (tens of µs) when the sample happens to contain
+an actual prime — so its mean is set by *how many primes the random draw hit*,
+not by operand size, and it is **non-monotonic in size**: a size whose sample
+hit no hard primes reads faster than a smaller one that did. `sqrt_mod`'s
+Tonelli–Shanks cost swings with the prime's 2-adic structure (a non-residue
+input rejects in µs; a Blum prime `p ≡ 3 (mod 4)` takes one exponentiation; a
+`p ≡ 1 (mod 4)` of high 2-adic valuation takes the full descent). Their sample
+variance never stabilises, so the mean CI cannot converge; means are marked
+`~`, and **only their extrema are the meaningful result** — do not read their
+means or fitted exponents as physics.
+
+Operation glossary (integer sizes are the operand bit width; field sizes are the
+degree of GF(2^m)):
+
+| op | what it measures |
+|---|---|
+| `add` `sub` `mul` `sqr` | schoolbook/Karatsuba/Toom arithmetic on two random operands |
+| `divrem` `modulo` | Knuth Algorithm D division, full width by half width |
+| `modmul` | one `mul` then a reduction, general (non-Montgomery) modulus |
+| `montmul` `montsqr` | one Montgomery multiply / square, operands already in the domain |
+| `montsetup` | building a `MontgomeryCtx` (the one division and R² setup) |
+| `montpow_e65537` | Montgomery exponentiation to the **fixed exponent 65537** (2¹⁶+1, the RSA public exponent F4) — an RSA verify/encrypt |
+| `montpow_rand` | Montgomery exponentiation to a fresh **256-bit random** exponent — a private-key / Diffie–Hellman shape |
+| `modpow` | `mod_pow` to a 256-bit random exponent (dispatches to the Montgomery ladder for odd moduli) |
+| `gcd` `gcdext` `modinv` `jacobi` | the number-theory family |
+| `sqrtmod` | `sqrt_mod` — a modular square root by Tonelli–Shanks (several exponentiations) |
+| `isprime` | `is_probable_prime` — trial-division sieve then Miller–Rabin |
+| `gf2m_*` | binary-field multiply / square / sqrt / pow / inverse |
 
 Hosts: **M4** (Apple M4, macOS), **EPYC** (AMD EPYC 7452, Linux), and **Pi**
 (Raspberry Pi 5, Cortex-A76, Debian) — two ARM cores at opposite ends (a wide
@@ -35,37 +59,41 @@ so the comparison is apples-to-apples down to the measurement method.
 
 ## Fitted complexity
 
-Least-squares log–log fit of mean vs bit width, `mean ≈ c·n^α`, against the
-theoretical complexity. At 256–4096 bits (4–64 limbs) the fitted exponents are
-**sub-asymptotic**: fixed per-call overhead flattens the cheap ops (`add` reads
-α≈0.3 though it is O(n)). The Euclid family now reads α≈1.0–1.1 — **Lehmer
-batching** cuts both the constant and the observed growth against classical
-Euclid's ≈1.4. `mul`/`sqr` read α≈1.8 because at these sizes they are mostly
-schoolbook with a single Karatsuba split, still below the Toom crossover
-(~8192 bits). `isprime`'s fit is meaningless (its heavy-tailed mean is dominated
-by how many primes the sample happened to hit) — see Extrema.
+Least-squares log–log fit of mean vs bit width, `mean ≈ c·n^α`; the table gives
+the **exponent α** only. (The fit's intercept `c` is deliberately not shown: it
+carries units of ns/bit^α — *not* nanoseconds — so it is neither a time nor
+comparable across rows with different α. Read actual times from the cost tables
+below, never α or `c` as a speed.) At 256–4096 bits (4–64 limbs) the exponents
+are **sub-asymptotic**: fixed per-call overhead flattens the cheap ops (`add`
+reads α≈0.3 though it is O(n)); a higher α means a steeper curve, so `mul`
+(α≈1.8) overtakes `add` well before these sizes even though it starts cheaper.
+The Euclid family now reads α≈1.0–1.1 — **Lehmer batching** cuts both the
+constant and the observed growth against classical Euclid's ≈1.4. `mul`/`sqr`
+read α≈1.8 because at these sizes they are mostly schoolbook with a single
+Karatsuba split, still below the Toom crossover (~8192 bits). `sqrtmod` and
+`isprime` are heavy-tailed; their fits are meaningless (see above).
 
-| Method | Complexity | M4 α | M4 c(ns) | EPYC α | EPYC c(ns) | Pi α | Pi c(ns) |
-|---|---|---|---|---|---|---|---|
-| `add` | O(n) | 0.35 | 5.7 | 0.28 | 16 | 0.44 | 7.9 |
-| `sub` | O(n) | 0.49 | 1.2 | 0.50 | 2 | 0.56 | 1.8 |
-| `mul` | schoolbook → Karatsuba → Toom-3/4 | 1.88 | 0.00066 | 1.80 | 0.0022 | 1.81 | 0.0033 |
-| `sqr` | schoolbook → Karatsuba → Toom-3/4 | 1.85 | 0.0008 | 1.72 | 0.004 | 1.83 | 0.003 |
-| `divrem` | O(n²) Algorithm D | 1.08 | 0.21 | 1.05 | 0.39 | 1.14 | 0.39 |
-| `modulo` | O(n²) | 1.09 | 0.2 | 1.06 | 0.38 | 1.14 | 0.39 |
-| `modmul` | O(n²) mul + reduce | 1.51 | 0.035 | 1.48 | 0.067 | 1.52 | 0.095 |
-| `montmul` | O(n²) | 1.59 | 0.0083 | 1.58 | 0.017 | 1.73 | 0.012 |
-| `montsqr` | O(n²) | 1.59 | 0.0084 | 1.54 | 0.023 | 1.73 | 0.012 |
-| `montpow_e65537` | O(n²) (17-bit exponent) | 1.64 | 0.081 | 1.62 | 0.19 | 1.78 | 0.12 |
-| `montpow_rand` | O(e·n²), e = 256 | 1.74 | 0.65 | 1.60 | 4 | 1.84 | 1.4 |
-| `montsetup` | O(n²) (one division) | 1.25 | 0.24 | 1.26 | 0.36 | 1.40 | 0.23 |
-| `gcd` | O(n²) Lehmer | 1.14 | 3.7 | 1.14 | 11 | 1.12 | 19 |
-| `gcdext` | O(n²) Lehmer | 1.01 | 21 | 1.09 | 31 | 1.09 | 40 |
-| `modinv` | O(n²) Lehmer | 1.00 | 17 | 1.07 | 26 | 1.07 | 37 |
-| `jacobi` | O(n²) binary | 1.60 | 0.15 | 1.66 | 0.24 | 1.62 | 0.45 |
-| `modpow` | O(e·n²), e = 256 | 1.74 | 0.69 | 1.60 | 4.1 | 1.83 | 1.5 |
-| `sqrtmod` | O(n³) Tonelli–Shanks (input-dependent) | 2.30 | 0.051 | 2.43 | 0.048 | 2.54 | 0.047 |
-| `isprime` | O(k·n²) Miller–Rabin (input-dependent) | -0.25 | 1.2e+04 | 0.51 | 4.6e+02 | 0.78 | 3.5e+02 |
+| Method | Complexity | M4 α | EPYC α | Pi α |
+|---|---|---|---|---|
+| `add` | O(n) | 0.35 | 0.28 | 0.44 |
+| `sub` | O(n) | 0.49 | 0.50 | 0.56 |
+| `mul` | schoolbook → Karatsuba → Toom-3/4 | 1.88 | 1.80 | 1.81 |
+| `sqr` | schoolbook → Karatsuba → Toom-3/4 | 1.85 | 1.72 | 1.83 |
+| `divrem` | O(n²) Algorithm D | 1.08 | 1.05 | 1.14 |
+| `modulo` | O(n²) | 1.09 | 1.06 | 1.14 |
+| `modmul` | O(n²) mul + reduce | 1.51 | 1.48 | 1.52 |
+| `montmul` | O(n²) | 1.59 | 1.58 | 1.73 |
+| `montsqr` | O(n²) | 1.59 | 1.54 | 1.73 |
+| `montpow_e65537` | O(n²) (17-bit exponent) | 1.64 | 1.62 | 1.78 |
+| `montpow_rand` | O(e·n²), e = 256 | 1.74 | 1.60 | 1.84 |
+| `montsetup` | O(n²) (one division) | 1.25 | 1.26 | 1.40 |
+| `gcd` | O(n²) Lehmer | 1.14 | 1.14 | 1.12 |
+| `gcdext` | O(n²) Lehmer | 1.01 | 1.09 | 1.09 |
+| `modinv` | O(n²) Lehmer | 1.00 | 1.07 | 1.07 |
+| `jacobi` | O(n²) binary | 1.60 | 1.66 | 1.62 |
+| `modpow` | O(e·n²), e = 256 | 1.74 | 1.60 | 1.83 |
+| `sqrtmod` | O(n³) Tonelli–Shanks (input-dependent) | 2.30 | 2.43 | 2.54 |
+| `isprime` | O(k·n²) Miller–Rabin (input-dependent) | -0.25 | 0.51 | 0.78 |
 
 ## Cost by method
 
