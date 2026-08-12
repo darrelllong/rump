@@ -310,7 +310,8 @@ assert!(Gf2m::is_irreducible(&BigUint::from_u64(0x11B)));
 
 ### Divisibility
 
-`gcd` and `lcm` by Euclid; `gcd_extended` returns the Bézout triple
+`gcd` and `lcm` by Euclid — `gcd`, `gcd_extended`, and `mod_inverse` share a
+Lehmer-accelerated engine; `gcd_extended` returns the Bézout triple
 `(g, s, t)` with `g = a·s + b·t`.
 
 ```rust
