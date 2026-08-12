@@ -205,13 +205,97 @@ def scaling_svg(family, out, hosts):
     print(f"wrote {out}")
 
 
+GMP_SIZES = [256, 1024, 2048, 4096]
+# Ops with a genuine GMP mpz counterpart (mirrors pilot_gmp.c).
+GMP_OPS = ["add", "sub", "mul", "sqr", "divrem", "modulo", "modmul", "modpow",
+           "gcd", "gcdext", "modinv", "jacobi", "isprime"]
+
+
+def compare_table(rump_path, gmp_path):
+    """rump vs GMP: mean ns/op and rump/gmp ratio at each size."""
+    rump, gmp = parse(rump_path), parse(gmp_path)
+    hdr = " | ".join(f"{s}b" for s in GMP_SIZES)
+    print(f"| Method | {hdr} (rump ns / gmp ns / ×) |")
+    print("|---|" + "---|" * len(GMP_SIZES))
+    for op in GMP_OPS:
+        cells = []
+        for s in GMP_SIZES:
+            r = rump.get(op, {}).get(s)
+            g = gmp.get(op, {}).get(s)
+            if r and g and g["mean_ns"] > 0:
+                cells.append(f"{r['mean_ns']:.0f} / {g['mean_ns']:.0f} / {r['mean_ns']/g['mean_ns']:.1f}×")
+            else:
+                cells.append("–")
+        print(f"| `{op}` | " + " | ".join(cells) + " |")
+
+
+FAMILY_TITLES = {
+    "arithmetic": "Arithmetic",
+    "division": "Division & reduction",
+    "montgomery": "Montgomery domain",
+    "number-theory": "Number theory",
+    "variable-time": "Variable-time (input-dependent)",
+}
+SIZES = [256, 1024, 2048, 4096]
+
+
+def means_table(arm, x86):
+    """Per-family mean ns/op, ARM and x86 side by side."""
+    for fam, ops in INT_FAMILIES.items():
+        print(f"\n**{FAMILY_TITLES[fam]}** — mean ns/op\n")
+        print("| Method | " + " | ".join(f"{s}b (M1)" for s in SIZES)
+              + " | " + " | ".join(f"{s}b (EPYC)" for s in SIZES) + " |")
+        print("|---|" + "---:|" * (2 * len(SIZES)))
+        for op in ops:
+            a = arm.get(op, {})
+            x = x86.get(op, {})
+
+            def cell(d, s):
+                v = d.get(s)
+                return f"{v['mean_ns']:.0f}" + ("~" if v and v["approx"] else "") if v else "–"
+
+            row = [cell(a, s) for s in SIZES] + [cell(x, s) for s in SIZES]
+            print(f"| `{op}` | " + " | ".join(row) + " |")
+
+
+def extrema_table(arm):
+    """Every op with its ARM extrema, ranked by spread — the variable-time view."""
+    rows = []
+    for op, sizes in arm.items():
+        for s, d in sizes.items():
+            rows.append((d["ratio"], f"{op}_{s}", d))
+    rows.sort(reverse=True)
+    print("| Operation | min ns | p50 ns | p99 ns | max ns | max/min |")
+    print("|---|---:|---:|---:|---:|---:|")
+    for _, name, d in rows:
+        print(f"| `{name}` | {d['min']:.0f} | {d['p50']:.0f} | {d['p99']:.0f} "
+              f"| {d['max']:.0f} | {d['ratio']:.1f} |")
+
+
 def main():
     mode = sys.argv[1]
+    if mode == "report":
+        # report armrump=.. x86rump=.. armgmp=.. x86gmp=..
+        f = dict(a.split("=", 1) for a in sys.argv[2:])
+        arm, x86 = parse(f["armrump"]), parse(f["x86rump"])
+        print("## Fitted complexity\n")
+        fit_table({"M1": arm, "EPYC": x86})
+        print("\n## Cost by method")
+        means_table(arm, x86)
+        print("\n## vs GMP — M1\n")
+        compare_table(f["armrump"], f["armgmp"])
+        print("\n## vs GMP — EPYC\n")
+        compare_table(f["x86rump"], f["x86gmp"])
+        print("\n## Extrema (M1)\n")
+        extrema_table(arm)
+        return
     if mode == "fit":
         fit_table(load(sys.argv[2:]))
     elif mode == "plot":
         family, out = sys.argv[2], sys.argv[3]
         scaling_svg(family, out, load(sys.argv[4:]))
+    elif mode == "compare":
+        compare_table(sys.argv[2], sys.argv[3])
     else:
         sys.exit(f"unknown mode: {mode}")
 

@@ -55,11 +55,18 @@ inputs. Adversarially hardened primality testing lives with its consumer
 
 ## Benchmarks
 
+[PERFORMANCE.md](PERFORMANCE.md) is the full per-primitive report: pilot-bench
+means and variable-time extrema over random operands, log–log scaling graphs,
+fitted complexity exponents, and a per-primitive comparison against GMP on ARM
+(Apple M1) and x86 (AMD EPYC). Regenerate it with `scripts/bench_primitives.sh`
+(rump and, via `pilot_gmp`, GMP through the same harness) and
+`scripts/perf_analysis.py`.
+
 `cargo run --release --bin bench_bigint` reports ns/op for the core kernels.
-`bash scripts/bench_gmp.sh` runs the same table against GMP for an
-apples-to-apples comparison (requires libgmp). Measured against GMP 6.3.0,
-modular exponentiation at RSA sizes runs within 1.6–2× of GMP's
-assembly-backed kernels on both x86-64 and Apple Silicon.
+Headline: `modpow` runs within ~2× of GMP (matched windowed-Montgomery
+algorithm), while the Euclid family (`gcd`, `gcdext`, `modinv`, `jacobi`) is
+17–89× behind — GMP's Half-GCD against rump's classical O(n²) Euclid, the top
+item on PERFORMANCE.md's improvement roadmap.
 
 ## Manual
 
