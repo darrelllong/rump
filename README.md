@@ -1,6 +1,6 @@
 # rump
 
-**R**ust **MU**lti**P**recision: multiprecision integer arithmetic in pure,
+**RU**st **Mu**lti**P**recision: multiprecision integer arithmetic in pure,
 safe Rust, implemented directly from the literature. Extracted from
 [darrelllong/cryptography](https://github.com/darrelllong/cryptography) so the
 arithmetic can serve consumers beyond cryptography, with the crate boundary
