@@ -55,6 +55,13 @@ static void pool_init(Pool *p, unsigned long bits) {
     gmp_randclear(st);
 }
 
+/* Sink for scalar-returning ops (jacobi, isprime): without it, -O2 sees the
+ * result unused and no memory written, and dead-code-eliminates the whole
+ * call. `volatile` forces the store, keeping the call — the C analogue of
+ * rump's black_box(). The value-writing ops (mpz_add/mul/…) are kept anyway
+ * because they store into heap-allocated mpz_t limbs. */
+static volatile long g_sink;
+
 /* ── one operation on the pool ── */
 static void run(const char *op, Pool *p) {
     if (!strcmp(op, "add"))          mpz_add(p->r, p->a, p->b);
@@ -71,8 +78,8 @@ static void run(const char *op, Pool *p) {
     else if (!strcmp(op, "gcd"))     mpz_gcd(p->r, p->a, p->b);
     else if (!strcmp(op, "gcdext"))  mpz_gcdext(p->g, p->s, p->t, p->a, p->b);
     else if (!strcmp(op, "modinv"))  mpz_invert(p->r, p->a, p->modulus);
-    else if (!strcmp(op, "jacobi"))  (void)mpz_jacobi(p->a, p->modulus);
-    else if (!strcmp(op, "isprime")) (void)mpz_probab_prime_p(p->a, p->prime_reps);
+    else if (!strcmp(op, "jacobi"))  g_sink += mpz_jacobi(p->a, p->modulus);
+    else if (!strcmp(op, "isprime")) g_sink += mpz_probab_prime_p(p->a, p->prime_reps);
     else { fprintf(stderr, "unknown op: %s\n", op); exit(2); }
 }
 
