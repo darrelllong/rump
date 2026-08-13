@@ -77,6 +77,24 @@ def fit_power(sizes, means):
     return alpha, c
 
 
+def fmt_time(ns):
+    """Three significant figures in the natural unit: ns, µs, ms, or s."""
+    for bound, divisor, unit in (
+        (1e3, 1.0, "ns"),
+        (1e6, 1e3, "µs"),
+        (1e9, 1e6, "ms"),
+        (float("inf"), 1e9, "s"),
+    ):
+        if ns < bound:
+            return f"{ns / divisor:.3g} {unit}"
+    return f"{ns:.3g} ns"
+
+
+def size_label(s):
+    """Bit widths in kilobit form once they reach 8 kbit."""
+    return f"{s // 1024}kb" if s % 1024 == 0 and s >= 8192 else f"{s}b"
+
+
 INT_FAMILIES = {
     "arithmetic": ["add", "sub", "mul", "sqr"],
     "division": ["divrem", "modulo", "modmul"],
@@ -240,9 +258,8 @@ def compare_table(rump_path, gmp_path):
         {s for op in ops for s in rump.get(op, {})}
         | {s for op in ops for s in gmp.get(op, {})}
     )
-    label = lambda s: f"{s // 1024}kb" if s % 1024 == 0 and s >= 8192 else f"{s}b"
-    hdr = " | ".join(label(s) for s in sizes)
-    print(f"| Method | {hdr} (rump ns / gmp ns / ×) |")
+    hdr = " | ".join(size_label(s) for s in sizes)
+    print(f"| Method | {hdr} |")
     print("|---|" + "---|" * len(sizes))
     for op in ops:
         cells = []
@@ -250,10 +267,38 @@ def compare_table(rump_path, gmp_path):
             r = rump.get(op, {}).get(s)
             g = gmp.get(op, {}).get(s)
             if r and g and g["mean_ns"] > 0:
-                cells.append(f"{r['mean_ns']:.0f} / {g['mean_ns']:.0f} / {r['mean_ns']/g['mean_ns']:.1f}×")
+                cells.append(
+                    f"{fmt_time(r['mean_ns'])} / {fmt_time(g['mean_ns'])} / "
+                    f"{r['mean_ns'] / g['mean_ns']:.1f}×"
+                )
             else:
                 cells.append("–")
         print(f"| `{op}` | " + " | ".join(cells) + " |")
+
+
+def compare_by_size(rump_path, gmp_path):
+    """The same comparison transposed: one row per size, one column per op."""
+    rump, gmp = parse(rump_path), parse(gmp_path)
+    ops = [op for op in GMP_OPS if op in rump or op in gmp]
+    sizes = sorted(
+        {s for op in ops for s in rump.get(op, {})}
+        | {s for op in ops for s in gmp.get(op, {})}
+    )
+    print("| bits | " + " | ".join(f"`{op}`" for op in ops) + " |")
+    print("|---|" + "---|" * len(ops))
+    for s_ in sizes:
+        cells = []
+        for op in ops:
+            r = rump.get(op, {}).get(s_)
+            g = gmp.get(op, {}).get(s_)
+            if r and g and g["mean_ns"] > 0:
+                cells.append(
+                    f"{fmt_time(r['mean_ns'])} / {fmt_time(g['mean_ns'])} / "
+                    f"{r['mean_ns'] / g['mean_ns']:.1f}×"
+                )
+            else:
+                cells.append("–")
+        print(f"| {size_label(s_)} | " + " | ".join(cells) + " |")
 
 
 FAMILY_TITLES = {
@@ -267,20 +312,31 @@ SIZES = [256, 1024, 2048, 4096]
 
 
 def means_table(hosts):
-    """Per-family mean ns/op, one four-size column block per host."""
+    """Per-family mean cost: one row per method and host, one column per size."""
 
     def cell(d, s):
         v = d.get(s)
-        return f"{v['mean_ns']:.0f}" + ("~" if v and v["approx"] else "") if v else "–"
+        if not v:
+            return "–"
+        return fmt_time(v["mean_ns"]) + ("~" if v["approx"] else "")
 
     for fam, ops in INT_FAMILIES.items():
-        print(f"\n**{FAMILY_TITLES[fam]}** — mean ns/op\n")
-        head = " | ".join(f"{s}b ({label})" for label in hosts for s in SIZES)
-        print(f"| Method | {head} |")
-        print("|---|" + "---:|" * (len(hosts) * len(SIZES)))
+        fam_sizes = sorted(
+            {s for data in hosts.values() for op in ops for s in data.get(op, {})}
+        )
+        print(f"\n**{FAMILY_TITLES[fam]}** — mean per operation\n")
+        print("| Method | host | " + " | ".join(size_label(s) for s in fam_sizes) + " |")
+        print("|---|---|" + "---:|" * len(fam_sizes))
         for op in ops:
-            row = [cell(data.get(op, {}), s) for data in hosts.values() for s in SIZES]
-            print(f"| `{op}` | " + " | ".join(row) + " |")
+            first = True
+            for host, data in hosts.items():
+                d = data.get(op, {})
+                if not d:
+                    continue
+                name = f"`{op}`" if first else ""
+                first = False
+                row = [cell(d, s) for s in fam_sizes]
+                print(f"| {name} | {host} | " + " | ".join(row) + " |")
 
 
 def extrema_table(arm):
@@ -290,11 +346,15 @@ def extrema_table(arm):
         for s, d in sizes.items():
             rows.append((d["ratio"], f"{op}_{s}", d))
     rows.sort(reverse=True)
-    print("| Operation | min ns | p50 ns | p99 ns | max ns | max/min |")
+    print("| Operation | min | p50 | p99 | max | max/min |")
     print("|---|---:|---:|---:|---:|---:|")
     for _, name, d in rows:
-        print(f"| `{name}` | {d['min']:.0f} | {d['p50']:.0f} | {d['p99']:.0f} "
-              f"| {d['max']:.0f} | {d['ratio']:.1f} |")
+        r = d["ratio"]
+        spread = f"{r:,.0f}" if r >= 1000 else f"{r:.1f}"
+        print(
+            f"| `{name}` | {fmt_time(d['min'])} | {fmt_time(d['p50'])} "
+            f"| {fmt_time(d['p99'])} | {fmt_time(d['max'])} | {spread} |"
+        )
 
 
 def main():
@@ -305,8 +365,11 @@ def main():
         means_table(load(sys.argv[2:]))
     elif mode == "extrema":  # extrema  <label>=path  (single host)
         extrema_table(next(iter(load(sys.argv[2:]).values())))
-    elif mode == "compare":  # compare  rump.md  gmp.md
-        compare_table(sys.argv[2], sys.argv[3])
+    elif mode == "compare":  # compare [--by-size]  rump.md  gmp.md
+        if sys.argv[2] == "--by-size":
+            compare_by_size(sys.argv[3], sys.argv[4])
+        else:
+            compare_table(sys.argv[2], sys.argv[3])
     elif mode == "plot":  # plot  <family>  out.svg  <label>=path ...
         family, out = sys.argv[2], sys.argv[3]
         scaling_svg(family, out, load(sys.argv[4:]))

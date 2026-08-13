@@ -19,7 +19,7 @@ random sample of the primitive's cost over random inputs, from which we
 report both:
 
 - the **mean** — the average cost over random inputs, and
-- the **extrema** — `min / p50 / p99 / max` ns/op and the `max/min` spread,
+- the **extrema** — min / p50 / p99 / max and the `max/min` spread,
   which for a variable-time primitive is the data-dependent behaviour that a
   mean hides.
 
@@ -32,7 +32,14 @@ bits, 24 ms at 4096 — and a prime, at probability 1/ln 2ⁿ, pays all twelve
 rounds. The mean is real and increases monotonically with size, but the tail
 sets it, so a faithful estimate requires a sample of several hundred trials;
 these two operations therefore receive a 120 s collection session where the
-others receive 30 s. `sqrt_mod` has the same structure — a non-residue
+others receive 30 s. (An earlier revision of this table showed `isprime`
+means *decreasing* past 2048 bits. That was a harness defect, not arithmetic:
+the operand pool then generated a random prime at the operand size for every
+operation, so each 4096-bit trial cost seconds of setup and the session
+starved — too few trials to contain the 8 % tail. With the corrected pool the
+means are monotone through 6144 bits — 217 µs, 1.41 ms, 5.06 ms, 11.5 ms at
+2048, 4096, 5120, 6144 — with the tail present at every width;
+`bench/isprime_extended_hardy.md` holds the verification rows.) `sqrt_mod` has the same structure — a non-residue
 rejects after one Euler-criterion exponentiation, a modulus with
 `p ≡ 3 (mod 4)` takes a single exponentiation, and a high 2-adic valuation
 takes the full Tonelli–Shanks descent — plus one cost the harness cannot
@@ -127,49 +134,87 @@ extrema (see above).
 ## Cost by method
 
 
-**Arithmetic** — mean ns/op
+**Arithmetic** — mean per operation
 
-| Method | 256b (M4) | 1024b (M4) | 2048b (M4) | 4096b (M4) | 256b (EPYC) | 1024b (EPYC) | 2048b (EPYC) | 4096b (EPYC) | 256b (Pi) | 1024b (Pi) | 2048b (Pi) | 4096b (Pi) |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `add` | 45 | 54 | 75 | 125 | 80 | 108 | 131 | 179~ | 91 | 163 | 217 | 313 |
-| `sub` | 22 | 28 | 44 | 94 | 37 | 53 | 85 | 152 | 44 | 78 | 122 | 210 |
-| `mul` | 27 | 192 | 1217 | 4595 | 55 | 389 | 2041 | 7814~ | 82 | 815 | 3605 | 12175 |
-| `sqr` | 28 | 192 | 1192 | 4549~ | 69 | 397 | 2037 | 8115~ | 82 | 820 | 3583 | 12843 |
+| Method | host | 256b | 1024b | 2048b | 4096b |
+|---|---|---:|---:|---:|---:|
+| `add` | M4 | 45 ns | 54 ns | 75.4 ns | 125 ns |
+|  | EPYC | 79.6 ns | 108 ns | 131 ns | 179 ns~ |
+|  | Pi | 91.4 ns | 163 ns | 217 ns | 313 ns |
+| `sub` | M4 | 22.2 ns | 28.4 ns | 44 ns | 93.9 ns |
+|  | EPYC | 36.6 ns | 53.1 ns | 84.5 ns | 152 ns |
+|  | Pi | 43.6 ns | 77.7 ns | 122 ns | 210 ns |
+| `mul` | M4 | 26.7 ns | 192 ns | 1.22 µs | 4.6 µs |
+|  | EPYC | 54.8 ns | 389 ns | 2.04 µs | 7.81 µs~ |
+|  | Pi | 82.3 ns | 815 ns | 3.61 µs | 12.2 µs |
+| `sqr` | M4 | 28.1 ns | 192 ns | 1.19 µs | 4.55 µs~ |
+|  | EPYC | 69.3 ns | 397 ns | 2.04 µs | 8.11 µs~ |
+|  | Pi | 82 ns | 820 ns | 3.58 µs | 12.8 µs |
 
-**Division & reduction** — mean ns/op
+**Division & reduction** — mean per operation
 
-| Method | 256b (M4) | 1024b (M4) | 2048b (M4) | 4096b (M4) | 256b (EPYC) | 1024b (EPYC) | 2048b (EPYC) | 4096b (EPYC) | 256b (Pi) | 1024b (Pi) | 2048b (Pi) | 4096b (Pi) |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `divrem` | 95 | 317 | 720 | 2020 | 155 | 441 | 1073 | 3010~ | 248 | 820 | 2050 | 6170 |
-| `modulo` | 94 | 312 | 710 | 2050 | 155 | 438 | 1086 | 3053 | 248 | 818 | 2056 | 6113 |
-| `modmul` | 171 | 924 | 3296 | 11355 | 288 | 1444 | 5085 | 17947 | 484 | 2846 | 9708 | 33194 |
+| Method | host | 256b | 1024b | 2048b | 4096b |
+|---|---|---:|---:|---:|---:|
+| `divrem` | M4 | 95.4 ns | 317 ns | 720 ns | 2.02 µs |
+|  | EPYC | 155 ns | 441 ns | 1.07 µs | 3.01 µs~ |
+|  | Pi | 248 ns | 820 ns | 2.05 µs | 6.17 µs |
+| `modulo` | M4 | 94.2 ns | 312 ns | 710 ns | 2.05 µs |
+|  | EPYC | 155 ns | 438 ns | 1.09 µs | 3.05 µs |
+|  | Pi | 248 ns | 818 ns | 2.06 µs | 6.11 µs |
+| `modmul` | M4 | 171 ns | 924 ns | 3.3 µs | 11.4 µs |
+|  | EPYC | 288 ns | 1.44 µs | 5.08 µs | 17.9 µs |
+|  | Pi | 484 ns | 2.85 µs | 9.71 µs | 33.2 µs |
 
-**Montgomery domain** — mean ns/op
+**Montgomery domain** — mean per operation
 
-| Method | 256b (M4) | 1024b (M4) | 2048b (M4) | 4096b (M4) | 256b (EPYC) | 1024b (EPYC) | 2048b (EPYC) | 4096b (EPYC) | 256b (Pi) | 1024b (Pi) | 2048b (Pi) | 4096b (Pi) |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `montmul` | 66 | 388 | 1328 | 5863 | 125 | 738 | 2652 | 10344 | 198 | 1652 | 6228 | 24357 |
-| `montsqr` | 66 | 386 | 1331 | 5702 | 140 | 727 | 2672 | 10372 | 198 | 1661 | 6227 | 24366 |
-| `montpow_e65537` | 833 | 5582 | 19695 | 82882 | 1677 | 11527 | 39701 | 155124 | 2488 | 24702 | 91672 | 356677 |
-| `montpow_rand` | 11454 | 96765 | 348000 | 1510640 | 32149 | 206641 | 729135 | 2792820 | 39429 | 438295 | 1657350 | 6479990 |
-| `montsetup` | 289 | 1027 | 2874 | 9832 | 454 | 1653 | 4631 | 15758 | 653 | 3133 | 9631 | 33574 |
+| Method | host | 256b | 1024b | 2048b | 4096b |
+|---|---|---:|---:|---:|---:|
+| `montmul` | M4 | 66.4 ns | 388 ns | 1.33 µs | 5.86 µs |
+|  | EPYC | 125 ns | 738 ns | 2.65 µs | 10.3 µs |
+|  | Pi | 198 ns | 1.65 µs | 6.23 µs | 24.4 µs |
+| `montsqr` | M4 | 65.6 ns | 386 ns | 1.33 µs | 5.7 µs |
+|  | EPYC | 140 ns | 727 ns | 2.67 µs | 10.4 µs |
+|  | Pi | 198 ns | 1.66 µs | 6.23 µs | 24.4 µs |
+| `montpow_e65537` | M4 | 833 ns | 5.58 µs | 19.7 µs | 82.9 µs |
+|  | EPYC | 1.68 µs | 11.5 µs | 39.7 µs | 155 µs |
+|  | Pi | 2.49 µs | 24.7 µs | 91.7 µs | 357 µs |
+| `montpow_rand` | M4 | 11.5 µs | 96.8 µs | 348 µs | 1.51 ms |
+|  | EPYC | 32.1 µs | 207 µs | 729 µs | 2.79 ms |
+|  | Pi | 39.4 µs | 438 µs | 1.66 ms | 6.48 ms |
+| `montsetup` | M4 | 289 ns | 1.03 µs | 2.87 µs | 9.83 µs |
+|  | EPYC | 454 ns | 1.65 µs | 4.63 µs | 15.8 µs |
+|  | Pi | 653 ns | 3.13 µs | 9.63 µs | 33.6 µs |
 
-**Number theory** — mean ns/op
+**Number theory** — mean per operation
 
-| Method | 256b (M4) | 1024b (M4) | 2048b (M4) | 4096b (M4) | 256b (EPYC) | 1024b (EPYC) | 2048b (EPYC) | 4096b (EPYC) | 256b (Pi) | 1024b (Pi) | 2048b (Pi) | 4096b (Pi) |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `gcd` | 2067 | 9697 | 20884 | 49100 | 6106 | 30590 | 66298 | 145746 | 9765 | 45875 | 98749 | 220639 |
-| `gcdext` | 6195 | 20858 | 42291 | 106556 | 13666 | 52729 | 122734 | 278595~ | 17970 | 70330 | 155857 | 381107 |
-| `modinv` | 4696 | 16035 | 32409 | 78992 | 10594 | 42808 | 93381 | 210990 | 14711 | 58458 | 126354 | 293610 |
-| `jacobi` | 1216 | 7484 | 24402 | 111168~ | 2639 | 20270 | 75771 | 264337 | 3813 | 30136 | 100647 | 345614 |
-| `modpow` | 11804 | 97872 | 350304 | 1532420 | 32510 | 208994 | 735993 | 2821970 | 40094 | 444024 | 1670360 | 6475310 |
+| Method | host | 256b | 1024b | 2048b | 4096b |
+|---|---|---:|---:|---:|---:|
+| `gcd` | M4 | 2.07 µs | 9.7 µs | 20.9 µs | 49.1 µs |
+|  | EPYC | 6.11 µs | 30.6 µs | 66.3 µs | 146 µs |
+|  | Pi | 9.77 µs | 45.9 µs | 98.7 µs | 221 µs |
+| `gcdext` | M4 | 6.2 µs | 20.9 µs | 42.3 µs | 107 µs |
+|  | EPYC | 13.7 µs | 52.7 µs | 123 µs | 279 µs~ |
+|  | Pi | 18 µs | 70.3 µs | 156 µs | 381 µs |
+| `modinv` | M4 | 4.7 µs | 16 µs | 32.4 µs | 79 µs |
+|  | EPYC | 10.6 µs | 42.8 µs | 93.4 µs | 211 µs |
+|  | Pi | 14.7 µs | 58.5 µs | 126 µs | 294 µs |
+| `jacobi` | M4 | 1.22 µs | 7.48 µs | 24.4 µs | 111 µs~ |
+|  | EPYC | 2.64 µs | 20.3 µs | 75.8 µs | 264 µs |
+|  | Pi | 3.81 µs | 30.1 µs | 101 µs | 346 µs |
+| `modpow` | M4 | 11.8 µs | 97.9 µs | 350 µs | 1.53 ms |
+|  | EPYC | 32.5 µs | 209 µs | 736 µs | 2.82 ms |
+|  | Pi | 40.1 µs | 444 µs | 1.67 ms | 6.48 ms |
 
-**Variable-time (input-dependent)** — mean ns/op
+**Variable-time (input-dependent)** — mean per operation
 
-| Method | 256b (M4) | 1024b (M4) | 2048b (M4) | 4096b (M4) | 256b (EPYC) | 1024b (EPYC) | 2048b (EPYC) | 4096b (EPYC) | 256b (Pi) | 1024b (Pi) | 2048b (Pi) | 4096b (Pi) |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `sqrtmod` | 18274~ | 479630~ | 3277310~ | 25678800~ | 33625~ | 952210~ | 7606910~ | 66893400~ | 58655~ | 1428960~ | 14685600~ | 350064 |
-| `isprime` | 4913~ | 29941~ | 216704~ | 1414600~ | 3250~ | 276345~ | 203179~ | 969312~ | 4290~ | 177384~ | 233056~ | 9454600~ |
+| Method | host | 256b | 1024b | 2048b | 4096b |
+|---|---|---:|---:|---:|---:|
+| `sqrtmod` | M4 | 18.3 µs~ | 480 µs~ | 3.28 ms~ | 25.7 ms~ |
+|  | EPYC | 33.6 µs~ | 952 µs~ | 7.61 ms~ | 66.9 ms~ |
+|  | Pi | 58.7 µs~ | 1.43 ms~ | 14.7 ms~ | 350 µs |
+| `isprime` | M4 | 4.91 µs~ | 29.9 µs~ | 217 µs~ | 1.41 ms~ |
+|  | EPYC | 3.25 µs~ | 276 µs~ | 203 µs~ | 969 µs~ |
+|  | Pi | 4.29 µs~ | 177 µs~ | 233 µs~ | 9.45 ms~ |
 
 EPYC runs ~1.3–1.8× behind the M4 across the board (lower single-thread clock),
 and the Pi ~2–5× behind it (a small board core) — the same shapes, shifted up.
@@ -185,7 +230,7 @@ The scaling graphs plot all three.
 
 ## Versus GMP
 
-Each cell is `rump ns / gmp ns / ratio`. Lower ratio is better; **1.0×** would
+Each cell is rump time / GMP time / ratio. Lower ratio is better; **1.0×** would
 mean parity. `isprime` is omitted here — its heavy-tailed mean makes the ratio
 meaningless (see Extrema). rump's Montgomery domain, `sqrt_mod`, and GF(2^m)
 have no `mpz` counterpart and so cannot appear in the comparison; their costs
@@ -193,54 +238,54 @@ are in the tables above.
 
 ### M4
 
-| Method | 256b | 1024b | 2048b | 4096b (rump ns / gmp ns / ×) |
+| Method | 256b | 1024b | 2048b | 4096b |
 |---|---|---|---|---|
-| `add` | 45 / 3 / 14.9× | 54 / 5 / 12.0× | 75 / 7 / 10.8× | 125 / 13 / 9.4× |
-| `sub` | 22 / 4 / 5.2× | 28 / 6 / 4.9× | 44 / 8 / 5.2× | 94 / 14 / 6.6× |
-| `mul` | 27 / 11 / 2.3× | 192 / 79 / 2.4× | 1217 / 265 / 4.6× | 4595 / 764 / 6.0× |
-| `sqr` | 28 / 10 / 2.8× | 192 / 61 / 3.1× | 1192 / 192 / 6.2× | 4549 / 606 / 7.5× |
-| `divrem` | 95 / 14 / 6.6× | 317 / 84 / 3.8× | 720 / 213 / 3.4× | 2020 / 613 / 3.3× |
-| `modulo` | 94 / 16 / 6.0× | 312 / 89 / 3.5× | 710 / 213 / 3.3× | 2050 / 619 / 3.3× |
-| `modmul` | 171 / 53 / 3.2× | 924 / 296 / 3.1× | 3296 / 891 / 3.7× | 11355 / 2604 / 4.4× |
-| `modpow` | 11804 / 8016 / 1.5× | 97872 / 46803 / 2.1× | 350304 / 163795 / 2.1× | 1532420 / 569545 / 2.7× |
-| `gcd` | 2067 / 486 / 4.3× | 9697 / 2368 / 4.1× | 20884 / 5251 / 4.0× | 49100 / 11833 / 4.1× |
-| `gcdext` | 6195 / 662 / 9.4× | 20858 / 2785 / 7.5× | 42291 / 6316 / 6.7× | 106556 / 15522 / 6.9× |
-| `modinv` | 4696 / 616 / 7.6× | 16035 / 2632 / 6.1× | 32409 / 5839 / 5.6× | 78992 / 14023 / 5.6× |
-| `jacobi` | 1216 / 512 / 2.4× | 7484 / 2429 / 3.1× | 24402 / 5266 / 4.6× | 111168 / 11961 / 9.3× |
+| `add` | 45 ns / 3.02 ns / 14.9× | 54 ns / 4.5 ns / 12.0× | 75.4 ns / 7 ns / 10.8× | 125 ns / 13.3 ns / 9.4× |
+| `sub` | 22.2 ns / 4.29 ns / 5.2× | 28.4 ns / 5.8 ns / 4.9× | 44 ns / 8.41 ns / 5.2× | 93.9 ns / 14.2 ns / 6.6× |
+| `mul` | 26.7 ns / 11.4 ns / 2.3× | 192 ns / 78.6 ns / 2.4× | 1.22 µs / 265 ns / 4.6× | 4.6 µs / 764 ns / 6.0× |
+| `sqr` | 28.1 ns / 10 ns / 2.8× | 192 ns / 61.2 ns / 3.1× | 1.19 µs / 192 ns / 6.2× | 4.55 µs / 606 ns / 7.5× |
+| `divrem` | 95.4 ns / 14.4 ns / 6.6× | 317 ns / 84.3 ns / 3.8× | 720 ns / 213 ns / 3.4× | 2.02 µs / 613 ns / 3.3× |
+| `modulo` | 94.2 ns / 15.7 ns / 6.0× | 312 ns / 89.3 ns / 3.5× | 710 ns / 213 ns / 3.3× | 2.05 µs / 619 ns / 3.3× |
+| `modmul` | 171 ns / 53.1 ns / 3.2× | 924 ns / 296 ns / 3.1× | 3.3 µs / 891 ns / 3.7× | 11.4 µs / 2.6 µs / 4.4× |
+| `modpow` | 11.8 µs / 8.02 µs / 1.5× | 97.9 µs / 46.8 µs / 2.1× | 350 µs / 164 µs / 2.1× | 1.53 ms / 570 µs / 2.7× |
+| `gcd` | 2.07 µs / 486 ns / 4.3× | 9.7 µs / 2.37 µs / 4.1× | 20.9 µs / 5.25 µs / 4.0× | 49.1 µs / 11.8 µs / 4.1× |
+| `gcdext` | 6.2 µs / 662 ns / 9.4× | 20.9 µs / 2.78 µs / 7.5× | 42.3 µs / 6.32 µs / 6.7× | 107 µs / 15.5 µs / 6.9× |
+| `modinv` | 4.7 µs / 616 ns / 7.6× | 16 µs / 2.63 µs / 6.1× | 32.4 µs / 5.84 µs / 5.6× | 79 µs / 14 µs / 5.6× |
+| `jacobi` | 1.22 µs / 512 ns / 2.4× | 7.48 µs / 2.43 µs / 3.1× | 24.4 µs / 5.27 µs / 4.6× | 111 µs / 12 µs / 9.3× |
 
 ### EPYC
 
-| Method | 256b | 1024b | 2048b | 4096b (rump ns / gmp ns / ×) |
+| Method | 256b | 1024b | 2048b | 4096b |
 |---|---|---|---|---|
-| `add` | 80 / 7 / 11.4× | 108 / 11 / 9.8× | 131 / 16 / 7.9× | 179 / 27 / 6.6× |
-| `sub` | 37 / 12 / 3.0× | 53 / 16 / 3.4× | 85 / 20 / 4.1× | 152 / 31 / 4.9× |
-| `mul` | 55 / 20 / 2.7× | 389 / 183 / 2.1× | 2041 / 607 / 3.4× | 7814 / 1899 / 4.1× |
-| `sqr` | 69 / 14 / 4.9× | 397 / 118 / 3.4× | 2037 / 411 / 5.0× | 8115 / 1295 / 6.3× |
-| `divrem` | 155 / 39 / 4.0× | 441 / 146 / 3.0× | 1073 / 361 / 3.0× | 3010 / 1121 / 2.7× |
-| `modulo` | 155 / 42 / 3.7× | 438 / 155 / 2.8× | 1086 / 372 / 2.9× | 3053 / 1129 / 2.7× |
-| `modmul` | 288 / 102 / 2.8× | 1444 / 549 / 2.6× | 5085 / 1744 / 2.9× | 17947 / 5420 / 3.3× |
-| `modpow` | 32510 / 9468 / 3.4× | 208994 / 99250 / 2.1× | 735993 / 380285 / 1.9× | 2821970 / 1384750 / 2.0× |
-| `gcd` | 6106 / 787 / 7.8× | 30590 / 3672 / 8.3× | 66298 / 8343 / 7.9× | 145746 / 20643 / 7.1× |
-| `gcdext` | 13666 / 1048 / 13.0× | 52729 / 4526 / 11.7× | 122734 / 11016 / 11.1× | 278595 / 30490 / 9.1× |
-| `modinv` | 10594 / 969 / 10.9× | 42808 / 4172 / 10.3× | 93381 / 9887 / 9.4× | 210990 / 26467 / 8.0× |
-| `jacobi` | 2639 / 826 / 3.2× | 20270 / 3943 / 5.1× | 75771 / 8921 / 8.5× | 264337 / 21932 / 12.1× |
+| `add` | 79.6 ns / 6.97 ns / 11.4× | 108 ns / 11.1 ns / 9.8× | 131 ns / 16.5 ns / 7.9× | 179 ns / 27.3 ns / 6.6× |
+| `sub` | 36.6 ns / 12.1 ns / 3.0× | 53.1 ns / 15.7 ns / 3.4× | 84.5 ns / 20.4 ns / 4.1× | 152 ns / 30.9 ns / 4.9× |
+| `mul` | 54.8 ns / 20.5 ns / 2.7× | 389 ns / 183 ns / 2.1× | 2.04 µs / 607 ns / 3.4× | 7.81 µs / 1.9 µs / 4.1× |
+| `sqr` | 69.3 ns / 14.2 ns / 4.9× | 397 ns / 118 ns / 3.4× | 2.04 µs / 411 ns / 5.0× | 8.11 µs / 1.3 µs / 6.3× |
+| `divrem` | 155 ns / 38.6 ns / 4.0× | 441 ns / 146 ns / 3.0× | 1.07 µs / 361 ns / 3.0× | 3.01 µs / 1.12 µs / 2.7× |
+| `modulo` | 155 ns / 42.3 ns / 3.7× | 438 ns / 155 ns / 2.8× | 1.09 µs / 372 ns / 2.9× | 3.05 µs / 1.13 µs / 2.7× |
+| `modmul` | 288 ns / 102 ns / 2.8× | 1.44 µs / 549 ns / 2.6× | 5.08 µs / 1.74 µs / 2.9× | 17.9 µs / 5.42 µs / 3.3× |
+| `modpow` | 32.5 µs / 9.47 µs / 3.4× | 209 µs / 99.2 µs / 2.1× | 736 µs / 380 µs / 1.9× | 2.82 ms / 1.38 ms / 2.0× |
+| `gcd` | 6.11 µs / 787 ns / 7.8× | 30.6 µs / 3.67 µs / 8.3× | 66.3 µs / 8.34 µs / 7.9× | 146 µs / 20.6 µs / 7.1× |
+| `gcdext` | 13.7 µs / 1.05 µs / 13.0× | 52.7 µs / 4.53 µs / 11.7× | 123 µs / 11 µs / 11.1× | 279 µs / 30.5 µs / 9.1× |
+| `modinv` | 10.6 µs / 969 ns / 10.9× | 42.8 µs / 4.17 µs / 10.3× | 93.4 µs / 9.89 µs / 9.4× | 211 µs / 26.5 µs / 8.0× |
+| `jacobi` | 2.64 µs / 826 ns / 3.2× | 20.3 µs / 3.94 µs / 5.1× | 75.8 µs / 8.92 µs / 8.5× | 264 µs / 21.9 µs / 12.1× |
 
 ### Pi
 
-| Method | 256b | 1024b | 2048b | 4096b (rump ns / gmp ns / ×) |
+| Method | 256b | 1024b | 2048b | 4096b |
 |---|---|---|---|---|
-| `add` | 91 / 12 / 7.9× | 163 / 17 / 9.5× | 217 / 25 / 8.7× | 313 / 40 / 7.7× |
-| `sub` | 44 / 20 / 2.2× | 78 / 25 / 3.1× | 122 / 31 / 3.9× | 210 / 46 / 4.5× |
-| `mul` | 82 / 63 / 1.3× | 815 / 641 / 1.3× | 3605 / 1971 / 1.8× | 12175 / 6332 / 1.9× |
-| `sqr` | 82 / 44 / 1.9× | 820 / 412 / 2.0× | 3583 / 1276 / 2.8× | 12843 / 3929 / 3.3× |
-| `divrem` | 248 / 71 / 3.5× | 820 / 316 / 2.6× | 2050 / 960 / 2.1× | 6170 / 3358 / 1.8× |
-| `modulo` | 248 / 78 / 3.2× | 818 / 318 / 2.6× | 2056 / 965 / 2.1× | 6113 / 3352 / 1.8× |
-| `modmul` | 484 / 202 / 2.4× | 2846 / 2149 / 1.3× | 9708 / 5314 / 1.8× | 33194 / 17006 / 2.0× |
-| `modpow` | 40094 / 30437 / 1.3× | 444024 / 387412 / 1.1× | 1670360 / 1402020 / 1.2× | 6475310 / 4014930 / 1.6× |
-| `gcd` | 9765 / 959 / 10.2× | 45875 / 5599 / 8.2× | 98749 / 18823 / 5.2× | 220639 / 55639 / 4.0× |
-| `gcdext` | 17970 / 1454 / 12.4× | 70330 / 8423 / 8.4× | 155857 / 24891 / 6.3× | 381107 / 83148 / 4.6× |
-| `modinv` | 14711 / 1298 / 11.3× | 58458 / 7209 / 8.1× | 126354 / 21160 / 6.0× | 293610 / 69988 / 4.2× |
-| `jacobi` | 3813 / 1429 / 2.7× | 30136 / 5852 / 5.1× | 100647 / 15596 / 6.5× | 345614 / 46387 / 7.5× |
+| `add` | 91.4 ns / 11.5 ns / 7.9× | 163 ns / 17.2 ns / 9.5× | 217 ns / 24.9 ns / 8.7× | 313 ns / 40.4 ns / 7.7× |
+| `sub` | 43.6 ns / 19.9 ns / 2.2× | 77.7 ns / 25.3 ns / 3.1× | 122 ns / 31.1 ns / 3.9× | 210 ns / 46.3 ns / 4.5× |
+| `mul` | 82.3 ns / 62.6 ns / 1.3× | 815 ns / 641 ns / 1.3× | 3.61 µs / 1.97 µs / 1.8× | 12.2 µs / 6.33 µs / 1.9× |
+| `sqr` | 82 ns / 43.9 ns / 1.9× | 820 ns / 412 ns / 2.0× | 3.58 µs / 1.28 µs / 2.8× | 12.8 µs / 3.93 µs / 3.3× |
+| `divrem` | 248 ns / 71.4 ns / 3.5× | 820 ns / 316 ns / 2.6× | 2.05 µs / 960 ns / 2.1× | 6.17 µs / 3.36 µs / 1.8× |
+| `modulo` | 248 ns / 77.6 ns / 3.2× | 818 ns / 318 ns / 2.6× | 2.06 µs / 965 ns / 2.1× | 6.11 µs / 3.35 µs / 1.8× |
+| `modmul` | 484 ns / 202 ns / 2.4× | 2.85 µs / 2.15 µs / 1.3× | 9.71 µs / 5.31 µs / 1.8× | 33.2 µs / 17 µs / 2.0× |
+| `modpow` | 40.1 µs / 30.4 µs / 1.3× | 444 µs / 387 µs / 1.1× | 1.67 ms / 1.4 ms / 1.2× | 6.48 ms / 4.01 ms / 1.6× |
+| `gcd` | 9.77 µs / 959 ns / 10.2× | 45.9 µs / 5.6 µs / 8.2× | 98.7 µs / 18.8 µs / 5.2× | 221 µs / 55.6 µs / 4.0× |
+| `gcdext` | 18 µs / 1.45 µs / 12.4× | 70.3 µs / 8.42 µs / 8.4× | 156 µs / 24.9 µs / 6.3× | 381 µs / 83.1 µs / 4.6× |
+| `modinv` | 14.7 µs / 1.3 µs / 11.3× | 58.5 µs / 7.21 µs / 8.1× | 126 µs / 21.2 µs / 6.0× | 294 µs / 70 µs / 4.2× |
+| `jacobi` | 3.81 µs / 1.43 µs / 2.7× | 30.1 µs / 5.85 µs / 5.1× | 101 µs / 15.6 µs / 6.5× | 346 µs / 46.4 µs / 7.5× |
 
 ### Interpretation
 
@@ -332,6 +377,20 @@ one matrix accumulation per round. This section measures the family from
   the multiplication ladder underneath — GMP's HGCD multiplies by FFT at
   these sizes, rump's by Toom — plus Half-GCD's own constants. `jacobi`,
   still quadratic, runs 30× at 32 kbit, 76× at 256 kbit, and 181× at 1 Mbit.
+- **The 181× decomposes into two measured factors.** GMP computes the Jacobi
+  symbol as a symbol-tracking variant of its subquadratic gcd and pays the
+  same price for both: 39.49 ms against 39.02 ms for gcd at 1 Mbit. rump
+  computes it by binary reciprocity — Θ(n) subtract-and-halve iterations,
+  each a full-width pass, 7.15 s at 1 Mbit — and these steps take no Lehmer
+  batching because each iteration's sign contribution depends on the current
+  values' low three bits, which a leading-digits batch does not carry. The
+  ratio therefore factors as (7153 ÷ 470) × (470 ÷ 39.5) = 15.2 × 11.9: the
+  first factor is the quadratic-versus-subquadratic gap between rump's
+  jacobi and rump's own gcd, the second is the Half-GCD constant and
+  Toom-versus-FFT gap itemized above. The Brent–Zimmermann algorithm removes
+  the first factor by carrying the low-bit state through the Half-GCD
+  transform, after which the symbol costs what gcd costs — as GMP's equal
+  timings demonstrate.
 - **The GMP column states the goal:** α ≈ 1.5 across the whole family,
   achieved by running HGCD beneath every one of these operations. The
   remaining item is `jacobi`.
@@ -343,14 +402,18 @@ one matrix accumulation per round. This section measures the family from
 | `modinv` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.73 | 1.53 |
 | `jacobi` | O(n²) binary | 1.99 | 1.50 |
 
-Each cell below is `rump ns / gmp ns / ratio`, as in the main comparison.
+Rows are bit widths; each cell is rump time / GMP time / ratio.
 
-| Method | 8kb | 16kb | 32kb | 64kb | 128kb | 256kb | 512kb | 1024kb (rump ns / gmp ns / ×) |
-|---|---|---|---|---|---|---|---|---|
-| `gcd` | 121094 / 29670 / 4.1× | 343966 / 81561 / 4.2× | 1101010 / 237633 / 4.6× | 3860870 / 716023 / 5.4× | 14069600 / 2179590 / 6.5× | 44281500 / 5923260 / 7.5× | 143126000 / 15837300 / 9.0× | 470116000 / 39020000 / 12.0× |
-| `gcdext` | 293884 / 43378 / 6.8× | 922900 / 136002 / 6.8× | 2801110 / 361100 / 7.8× | 8593390 / 1163250 / 7.4× | 28846000 / 3481200 / 8.3× | 100562000 / 9518620 / 10.6× | 366639000 / 26117200 / 14.0× | 1366310000 / 65674900 / 20.8× |
-| `modinv` | 214932 / 38238 / 5.6× | 649969 / 118467 / 5.5× | 2600870 / 312617 / 8.3× | 7482570 / 1007860 / 7.4× | 23115800 / 3127780 / 7.4× | 77343400 / 8498100 / 9.1× | 273159000 / 23929200 / 11.4× | 988360000 / 60981400 / 16.2× |
-| `jacobi` | 455061 / 29414 / 15.5× | 1811850 / 80741 / 22.4× | 6979290 / 235123 / 29.7× | 27945200 / 706505 / 39.6× | 111377000 / 2188140 / 50.9× | 449375000 / 5908460 / 76.1× | 1799530000 / 15844900 / 113.6× | 7153290000 / 39485800 / 181.2× |
+| bits | `gcd` | `gcdext` | `modinv` | `jacobi` |
+|---|---|---|---|---|
+| 8kb | 121 µs / 29.7 µs / 4.1× | 294 µs / 43.4 µs / 6.8× | 215 µs / 38.2 µs / 5.6× | 455 µs / 29.4 µs / 15.5× |
+| 16kb | 344 µs / 81.6 µs / 4.2× | 923 µs / 136 µs / 6.8× | 650 µs / 118 µs / 5.5× | 1.81 ms / 80.7 µs / 22.4× |
+| 32kb | 1.1 ms / 238 µs / 4.6× | 2.8 ms / 361 µs / 7.8× | 2.6 ms / 313 µs / 8.3× | 6.98 ms / 235 µs / 29.7× |
+| 64kb | 3.86 ms / 716 µs / 5.4× | 8.59 ms / 1.16 ms / 7.4× | 7.48 ms / 1.01 ms / 7.4× | 27.9 ms / 707 µs / 39.6× |
+| 128kb | 14.1 ms / 2.18 ms / 6.5× | 28.8 ms / 3.48 ms / 8.3× | 23.1 ms / 3.13 ms / 7.4× | 111 ms / 2.19 ms / 50.9× |
+| 256kb | 44.3 ms / 5.92 ms / 7.5× | 101 ms / 9.52 ms / 10.6× | 77.3 ms / 8.5 ms / 9.1× | 449 ms / 5.91 ms / 76.1× |
+| 512kb | 143 ms / 15.8 ms / 9.0× | 367 ms / 26.1 ms / 14.0× | 273 ms / 23.9 ms / 11.4× | 1.8 s / 15.8 ms / 113.6× |
+| 1024kb | 470 ms / 39 ms / 12.0× | 1.37 s / 65.7 ms / 20.8× | 988 ms / 61 ms / 16.2× | 7.15 s / 39.5 ms / 181.2× |
 
 ![gcd at scale](assets/scaling-gcd-at-scale.svg)
 
@@ -371,50 +434,30 @@ Two operations produce the large spreads:
   Euclid family, GF(2^m) — sits at **1.0–1.6×**: cost tracks operand width, which
   is public, not the operand values.
 
-| Operation | min ns | p50 ns | p99 ns | max ns | max/min |
+| Operation | min | p50 | p99 | max | max/min |
 |---|---:|---:|---:|---:|---:|
-| `isprime_4096` | 133 | 256 | 23864300 | 284412000 | 2143351.3 |
-| `isprime_2048` | 65 | 144 | 2886540 | 34267100 | 528242.6 |
-| `isprime_1024` | 37 | 81 | 411026 | 4826580 | 129600.4 |
-| `isprime_256` | 17 | 26 | 14720 | 1681580 | 97145.0 |
-| `sqrtmod_4096` | 103512 | 107275 | 71826900 | 71877300 | 694.4 |
-| `sqrtmod_2048` | 23317 | 2814710 | 9857120 | 12666400 | 543.2 |
-| `sqrtmod_1024` | 6974 | 386005 | 1301730 | 1713980 | 245.8 |
-| `sqrtmod_256` | 1067 | 1376 | 48813 | 77066 | 72.2 |
-| `gf2m_mul_571` | 687 | 749 | 1055 | 2206 | 3.2 |
-| `gf2m_inv_571` | 23998 | 27185 | 38838 | 40523 | 1.7 |
-| `modmul_256` | 161 | 172 | 198 | 264 | 1.6 |
-| `gcdext_256` | 4981 | 6165 | 7045 | 7986 | 1.6 |
-| `gf2m_inv_233` | 7888 | 9671 | 11704 | 12115 | 1.5 |
-| `add_256` | 38 | 45 | 51 | 57 | 1.5 |
-| `gcdext_1024` | 17904 | 20547 | 23180 | 25583 | 1.4 |
-| `modinv_256` | 4022 | 4701 | 5382 | 5571 | 1.4 |
-| `sqr_2048` | 1035 | 1228 | 1296 | 1429 | 1.4 |
-| `mul_256` | 24 | 27 | 32 | 34 | 1.4 |
-| `montsetup_256` | 249 | 290 | 324 | 330 | 1.3 |
-| `gcd_256` | 1751 | 2073 | 2319 | 2325 | 1.3 |
-| `sub_1024` | 26 | 28 | 34 | 35 | 1.3 |
-| `mul_2048` | 1036 | 1230 | 1339 | 1366 | 1.3 |
-| `modulo_256` | 86 | 92 | 111 | 113 | 1.3 |
-| `modinv_1024` | 13531 | 16020 | 17487 | 17677 | 1.3 |
-| `divrem_256` | 86 | 95 | 110 | 114 | 1.3 |
-| `add_2048` | 71 | 75 | 84 | 93 | 1.3 |
-| `add_1024` | 50 | 54 | 64 | 65 | 1.3 |
-| `montmul_256` | 60 | 65 | 75 | 76 | 1.3 |
-| `gf2m_pow_233` | 42241 | 47298 | 52061 | 53666 | 1.3 |
-| `sqr_256` | 25 | 28 | 31 | 31 | 1.2 |
-| `gf2m_sqrt_233` | 9762 | 10790 | 11991 | 12085 | 1.2 |
-| `sub_256` | 20 | 22 | 24 | 25 | 1.2 |
-| `jacobi_4096` | 104947 | 106740 | 113286 | 129034 | 1.2 |
-| `gf2m_pow_571` | 258313 | 285911 | 308010 | 316745 | 1.2 |
-| `sub_2048` | 42 | 44 | 49 | 52 | 1.2 |
-| `jacobi_256` | 1081 | 1221 | 1300 | 1314 | 1.2 |
-| `modmul_1024` | 879 | 916 | 982 | 1060 | 1.2 |
-| `gf2m_sqr_233` | 43 | 48 | 51 | 52 | 1.2 |
-| `montsetup_1024` | 977 | 1019 | 1157 | 1170 | 1.2 |
-| `montpow_e65537_256` | 771 | 813 | 920 | 928 | 1.2 |
+| `isprime_4096` | 133 ns | 256 ns | 23.9 ms | 284 ms | 2,143,351 |
+| `isprime_2048` | 64.9 ns | 144 ns | 2.89 ms | 34.3 ms | 528,243 |
+| `isprime_1024` | 37.2 ns | 80.8 ns | 411 µs | 4.83 ms | 129,600 |
+| `isprime_256` | 17.3 ns | 25.5 ns | 14.7 µs | 1.68 ms | 97,145 |
+| `sqrtmod_4096` | 104 µs | 107 µs | 71.8 ms | 71.9 ms | 694.4 |
+| `sqrtmod_2048` | 23.3 µs | 2.81 ms | 9.86 ms | 12.7 ms | 543.2 |
+| `sqrtmod_1024` | 6.97 µs | 386 µs | 1.3 ms | 1.71 ms | 245.8 |
+| `sqrtmod_256` | 1.07 µs | 1.38 µs | 48.8 µs | 77.1 µs | 72.2 |
+| `gf2m_mul_571` | 687 ns | 749 ns | 1.06 µs | 2.21 µs | 3.2 |
+| `gf2m_inv_571` | 24 µs | 27.2 µs | 38.8 µs | 40.5 µs | 1.7 |
+| `modmul_256` | 161 ns | 172 ns | 198 ns | 264 ns | 1.6 |
+| `gcdext_256` | 4.98 µs | 6.16 µs | 7.04 µs | 7.99 µs | 1.6 |
+| `gf2m_inv_233` | 7.89 µs | 9.67 µs | 11.7 µs | 12.1 µs | 1.5 |
+| `add_256` | 38.5 ns | 44.8 ns | 51.4 ns | 57.4 ns | 1.5 |
+| `gcdext_1024` | 17.9 µs | 20.5 µs | 23.2 µs | 25.6 µs | 1.4 |
+| `modinv_256` | 4.02 µs | 4.7 µs | 5.38 µs | 5.57 µs | 1.4 |
+| `sqr_2048` | 1.04 µs | 1.23 µs | 1.3 µs | 1.43 µs | 1.4 |
+| `mul_256` | 24.4 ns | 27.2 ns | 31.7 ns | 33.6 ns | 1.4 |
+| `montsetup_256` | 249 ns | 290 ns | 324 ns | 330 ns | 1.3 |
+| `gcd_256` | 1.75 µs | 2.07 µs | 2.32 µs | 2.32 µs | 1.3 |
 
-The remaining 46 primitives all sit at **1.0–1.2×** — data-independent, their
+The remaining 66 rows all sit at **1.0–1.3×** — data-independent, their
 cost set by operand width alone.
 
 ![variable-time scaling](assets/scaling-variable-time.svg)

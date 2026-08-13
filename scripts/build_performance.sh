@@ -43,7 +43,7 @@ random sample of the primitive's cost over random inputs, from which we
 report both:
 
 - the **mean** — the average cost over random inputs, and
-- the **extrema** — `min / p50 / p99 / max` ns/op and the `max/min` spread,
+- the **extrema** — min / p50 / p99 / max and the `max/min` spread,
   which for a variable-time primitive is the data-dependent behaviour that a
   mean hides.
 
@@ -56,7 +56,14 @@ bits, 24 ms at 4096 — and a prime, at probability 1/ln 2ⁿ, pays all twelve
 rounds. The mean is real and increases monotonically with size, but the tail
 sets it, so a faithful estimate requires a sample of several hundred trials;
 these two operations therefore receive a 120 s collection session where the
-others receive 30 s. `sqrt_mod` has the same structure — a non-residue
+others receive 30 s. (An earlier revision of this table showed `isprime`
+means *decreasing* past 2048 bits. That was a harness defect, not arithmetic:
+the operand pool then generated a random prime at the operand size for every
+operation, so each 4096-bit trial cost seconds of setup and the session
+starved — too few trials to contain the 8 % tail. With the corrected pool the
+means are monotone through 6144 bits — 217 µs, 1.41 ms, 5.06 ms, 11.5 ms at
+2048, 4096, 5120, 6144 — with the tail present at every width;
+`bench/isprime_extended_hardy.md` holds the verification rows.) `sqrt_mod` has the same structure — a non-residue
 rejects after one Euler-criterion exponentiation, a modulus with
 `p ≡ 3 (mod 4)` takes a single exponentiation, and a high 2-adic valuation
 takes the full Tonelli–Shanks descent — plus one cost the harness cannot
@@ -154,7 +161,7 @@ The scaling graphs plot all three.
 
 ## Versus GMP
 
-Each cell is `rump ns / gmp ns / ratio`. Lower ratio is better; **1.0×** would
+Each cell is rump time / GMP time / ratio. Lower ratio is better; **1.0×** would
 mean parity. `isprime` is omitted here — its heavy-tailed mean makes the ratio
 meaningless (see Extrema). rump's Montgomery domain, `sqrt_mod`, and GF(2^m)
 have no `mpz` counterpart and so cannot appear in the comparison; their costs
@@ -274,6 +281,20 @@ one matrix accumulation per round. This section measures the family from
   the multiplication ladder underneath — GMP's HGCD multiplies by FFT at
   these sizes, rump's by Toom — plus Half-GCD's own constants. `jacobi`,
   still quadratic, runs 30× at 32 kbit, 76× at 256 kbit, and 181× at 1 Mbit.
+- **The 181× decomposes into two measured factors.** GMP computes the Jacobi
+  symbol as a symbol-tracking variant of its subquadratic gcd and pays the
+  same price for both: 39.49 ms against 39.02 ms for gcd at 1 Mbit. rump
+  computes it by binary reciprocity — Θ(n) subtract-and-halve iterations,
+  each a full-width pass, 7.15 s at 1 Mbit — and these steps take no Lehmer
+  batching because each iteration's sign contribution depends on the current
+  values' low three bits, which a leading-digits batch does not carry. The
+  ratio therefore factors as (7153 ÷ 470) × (470 ÷ 39.5) = 15.2 × 11.9: the
+  first factor is the quadratic-versus-subquadratic gap between rump's
+  jacobi and rump's own gcd, the second is the Half-GCD constant and
+  Toom-versus-FFT gap itemized above. The Brent–Zimmermann algorithm removes
+  the first factor by carrying the low-bit state through the Half-GCD
+  transform, after which the symbol costs what gcd costs — as GMP's equal
+  timings demonstrate.
 - **The GMP column states the goal:** α ≈ 1.5 across the whole family,
   achieved by running HGCD beneath every one of these operations. The
   remaining item is `jacobi`.
@@ -284,11 +305,11 @@ $PA fit "rump=$GCD_SCALE" "GMP=$GMP_GCD_SCALE"
 
 cat <<'MD'
 
-Each cell below is `rump ns / gmp ns / ratio`, as in the main comparison.
+Rows are bit widths; each cell is rump time / GMP time / ratio.
 
 MD
 
-$PA compare "$GCD_SCALE" "$GMP_GCD_SCALE"
+$PA compare --by-size "$GCD_SCALE" "$GMP_GCD_SCALE"
 
 cat <<'MD'
 
@@ -313,11 +334,11 @@ Two operations produce the large spreads:
 
 MD
 
-$PA extrema "M4=$M4" | head -42
+$PA extrema "M4=$M4" | head -22
 
 cat <<'MD'
 
-The remaining 46 primitives all sit at **1.0–1.2×** — data-independent, their
+The remaining 66 rows all sit at **1.0–1.3×** — data-independent, their
 cost set by operand width alone.
 
 ![variable-time scaling](assets/scaling-variable-time.svg)
