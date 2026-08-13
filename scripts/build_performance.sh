@@ -9,12 +9,16 @@ PA="python3 scripts/perf_analysis.py"
 M4=bench/primitives_hardy.md
 EPYC=bench/primitives_moore.md
 PI=bench/primitives_darby.md
+GCD_SCALE=bench/gcd_scaling_hardy.md
+GMP_GCD_SCALE=bench/gmp_gcd_scaling_hardy.md
 OUT=PERFORMANCE.md
 
 # Regenerate the scaling SVGs too, so they never drift from the tables.
 for fam in arithmetic division montgomery number-theory variable-time; do
     $PA plot "$fam" "assets/scaling-$fam.svg" "M4=$M4" "EPYC=$EPYC" "Pi=$PI" >/dev/null
 done
+$PA plot gcd-at-scale assets/scaling-gcd-at-scale.svg \
+    "rump=$GCD_SCALE" "GMP=$GMP_GCD_SCALE" >/dev/null
 
 {
 cat <<'MD'
@@ -188,20 +192,63 @@ The comparison sorts rump's primitives into groups, and the grouping is by
 
 ### Where to work harder
 
-Landed this round: **double-digit Lehmer** (`gcd`/`gcd_extended`/`mod_inverse`,
-17–89× → 4–13×), **division-free binary Jacobi** (12–29× → 2–12×), and
-**Toom-3/Toom-4** multiplication. What remains, biggest first:
+Landed so far: **double-digit Lehmer** (`gcd`/`gcd_extended`/`mod_inverse`,
+17–89× → 4–13×), **division-free binary Jacobi** (12–29× → 2–12×),
+**Toom-3/Toom-4** multiplication, and **Half-GCD** behind `gcd` (subquadratic
+above ~131 kbit — the section below). What remains, biggest first:
 
-1. **Half-GCD** for the Euclid family. Lehmer (done) cut the constant but the
-   algorithm is still O(n²), so the residual gap grows with size on wide cores.
-   HGCD recurses on the top half of the operands for O(M(n)·log n), with Lehmer
-   as its base case — it is the one remaining algorithmic step for `gcd`,
-   `gcdext`, and `modinv`.
-2. **Jacobi through an HGCD that tracks the symbol.** `jacobi` is a binary O(n²)
-   whose ratio widens to ~12×; batching its reduction the way Lehmer batches
-   gcd, while carrying the reciprocity sign, closes it.
+1. **`jacobi` at scale.** The scale sweep makes it the family's worst curve:
+   pure O(n²) (α≈2.0 — its subtract-and-halve steps get no Lehmer batching)
+   and a ratio that reaches ~76× by 256 kbit. Batching its reduction the way
+   Lehmer batches gcd — carrying the reciprocity sign through the transform —
+   is the same trick that already worked twice.
+2. **Half-GCD through the cofactors.** `gcd_extended` and `mod_inverse` still
+   ride Lehmer's O(n²); the Half-GCD transform *is* the Bézout data (a row of
+   it is the cofactor pair), so extending the dispatch to them is bookkeeping,
+   not new algorithm.
 3. **In-place `add`/`sub`** (the 2–15× on the cheapest ops). A fresh `Vec` per
    call against GMP's in-place `mpn`; the absolute cost is nanoseconds, so last.
+
+## GCD at scale
+
+The tables above stop at 4096 bits, where the whole family runs its Lehmer (or
+binary) engine. `gcd` no longer stops there: past ~131 kbit (2048 limbs) it
+dispatches to **Half-GCD** (Möller, *On Schönhage's algorithm and subquadratic
+integer gcd computation*, Math. Comp. 77 (2008), 589–607 — the algorithm behind
+GMP's `mpn_hgcd`), which computes the reduction matrix from the operands' top
+halves by recursion and replaces Lehmer's O(n²) with O(M(n)·log n). This
+section runs the family from 8 kbit to a megabit — on the M4 — to show what
+that buys and what it does not:
+
+- **`gcd` bends; its siblings do not.** Over this range `gcd` fits α≈1.7
+  against `gcdext`/`modinv`'s ≈1.85 and `jacobi`'s ≈2.0 — and the fit
+  understates the bend, since the range's lower half is still Lehmer: the
+  subquadratic regime only begins at 128 kbit.
+- **The ratio's growth slows but does not stop.** `gcd`'s gap to GMP grows
+  4.1× → 12× across the sweep, driven below 128 kbit by Lehmer-vs-HGCD and
+  above it by the multiplication ladder underneath — GMP's HGCD multiplies by
+  FFT at these sizes, rump's by Toom — plus Half-GCD's own constants. Compare
+  the still-quadratic ops: `gcdext` reaches 18.6× and `jacobi` 76× by 256 kbit,
+  where their rows stop because a single quadratic reading costs ~half a second
+  and the trend is already unambiguous.
+- **The GMP column is the target picture:** α≈1.5 across the whole family —
+  HGCD under every one of these ops is what the roadmap above is for.
+
+MD
+
+$PA fit "rump=$GCD_SCALE" "GMP=$GMP_GCD_SCALE"
+
+cat <<'MD'
+
+Each cell below is `rump ns / gmp ns / ratio`, as in the main comparison.
+
+MD
+
+$PA compare "$GCD_SCALE" "$GMP_GCD_SCALE"
+
+cat <<'MD'
+
+![gcd at scale](assets/scaling-gcd-at-scale.svg)
 
 ## Extrema — the variable-time signal
 
@@ -240,6 +287,11 @@ bash scripts/bench_gmp.sh                      # builds pilot_gmp (needs libgmp)
 PILOT_PRESET=normal bash scripts/bench_primitives.sh > bench/primitives_<host>.md
 PILOT_MP_BIN=target/bench_gmp/pilot_gmp \
   PILOT_PRESET=normal bash scripts/bench_primitives.sh > bench/gmp_<host>.md
+
+# the GCD-at-scale sweep (8 kbit – 1 Mbit):
+bash scripts/bench_gcd_scaling.sh > bench/gcd_scaling_<host>.md
+PILOT_MP_BIN=target/bench_gmp/pilot_gmp \
+  bash scripts/bench_gcd_scaling.sh > bench/gmp_gcd_scaling_<host>.md
 
 # assemble the whole document (tables, graphs, prose):
 bash scripts/build_performance.sh

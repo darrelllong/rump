@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="460" viewBox="0 0 720 460" font-family="system-ui,sans-serif">
+<rect width="720" height="460" fill="#FBF9F5"/>
+<text x="70" y="24" font-size="15" font-weight="600" fill="#211E19">rump — gcd-at-scale scaling (mean ns/op, log–log)</text>
+<line x1="70.0" y1="40" x2="70.0" y2="405" stroke="#E4DED4"/>
+<text x="70.0" y="423" font-size="11" fill="#6F675C" text-anchor="middle">8k</text>
+<line x1="141.4" y1="40" x2="141.4" y2="405" stroke="#E4DED4"/>
+<text x="141.4" y="423" font-size="11" fill="#6F675C" text-anchor="middle">16k</text>
+<line x1="212.9" y1="40" x2="212.9" y2="405" stroke="#E4DED4"/>
+<text x="212.9" y="423" font-size="11" fill="#6F675C" text-anchor="middle">32k</text>
+<line x1="284.3" y1="40" x2="284.3" y2="405" stroke="#E4DED4"/>
+<text x="284.3" y="423" font-size="11" fill="#6F675C" text-anchor="middle">64k</text>
+<line x1="355.7" y1="40" x2="355.7" y2="405" stroke="#E4DED4"/>
+<text x="355.7" y="423" font-size="11" fill="#6F675C" text-anchor="middle">128k</text>
+<line x1="427.1" y1="40" x2="427.1" y2="405" stroke="#E4DED4"/>
+<text x="427.1" y="423" font-size="11" fill="#6F675C" text-anchor="middle">256k</text>
+<line x1="498.6" y1="40" x2="498.6" y2="405" stroke="#E4DED4"/>
+<text x="498.6" y="423" font-size="11" fill="#6F675C" text-anchor="middle">512k</text>
+<line x1="570.0" y1="40" x2="570.0" y2="405" stroke="#E4DED4"/>
+<text x="570.0" y="423" font-size="11" fill="#6F675C" text-anchor="middle">1024k</text>
+<text x="320" y="446" font-size="12" fill="#6F675C" text-anchor="middle">bit width</text>
+<line x1="70" y1="346.5" x2="570" y2="346.5" stroke="#E4DED4"/>
+<text x="62" y="350.5" font-size="11" fill="#6F675C" text-anchor="end">100 µs</text>
+<line x1="70" y1="267.5" x2="570" y2="267.5" stroke="#E4DED4"/>
+<text x="62" y="271.5" font-size="11" fill="#6F675C" text-anchor="end">1 ms</text>
+<line x1="70" y1="188.6" x2="570" y2="188.6" stroke="#E4DED4"/>
+<text x="62" y="192.6" font-size="11" fill="#6F675C" text-anchor="end">10 ms</text>
+<line x1="70" y1="109.7" x2="570" y2="109.7" stroke="#E4DED4"/>
+<text x="62" y="113.7" font-size="11" fill="#6F675C" text-anchor="end">100 ms</text>
+<path d="M70.0,339.9 L141.4,304.1 L212.9,264.2 L284.3,221.2 L355.7,176.9 L427.1,137.6 L498.6,97.4 L570.0,56.6" fill="none" stroke="#A64E28" stroke-width="2" />
+<circle cx="70.0" cy="339.9" r="2.5" fill="#A64E28"/>
+<circle cx="141.4" cy="304.1" r="2.5" fill="#A64E28"/>
+<circle cx="212.9" cy="264.2" r="2.5" fill="#A64E28"/>
+<circle cx="284.3" cy="221.2" r="2.5" fill="#A64E28"/>
+<circle cx="355.7" cy="176.9" r="2.5" fill="#A64E28"/>
+<circle cx="427.1" cy="137.6" r="2.5" fill="#A64E28"/>
+<circle cx="498.6" cy="97.4" r="2.5" fill="#A64E28"/>
+<circle cx="570.0" cy="56.6" r="2.5" fill="#A64E28"/>
+<path d="M70.0,388.1 L141.4,353.4 L212.9,316.8 L284.3,279.0 L355.7,240.8 L427.1,206.5 L498.6,172.8 L570.0,141.9" fill="none" stroke="#A64E28" stroke-width="2" stroke-dasharray="5,3"/>
+<circle cx="70.0" cy="388.1" r="2.5" fill="#A64E28"/>
+<circle cx="141.4" cy="353.4" r="2.5" fill="#A64E28"/>
+<circle cx="212.9" cy="316.8" r="2.5" fill="#A64E28"/>
+<circle cx="284.3" cy="279.0" r="2.5" fill="#A64E28"/>
+<circle cx="355.7" cy="240.8" r="2.5" fill="#A64E28"/>
+<circle cx="427.1" cy="206.5" r="2.5" fill="#A64E28"/>
+<circle cx="498.6" cy="172.8" r="2.5" fill="#A64E28"/>
+<circle cx="570.0" cy="141.9" r="2.5" fill="#A64E28"/>
+<path d="M70.0,309.5 L141.4,270.3 L212.9,227.4 L284.3,183.3 L355.7,136.9 L427.1,90.1" fill="none" stroke="#3D648A" stroke-width="2" />
+<circle cx="70.0" cy="309.5" r="2.5" fill="#3D648A"/>
+<circle cx="141.4" cy="270.3" r="2.5" fill="#3D648A"/>
+<circle cx="212.9" cy="227.4" r="2.5" fill="#3D648A"/>
+<circle cx="284.3" cy="183.3" r="2.5" fill="#3D648A"/>
+<circle cx="355.7" cy="136.9" r="2.5" fill="#3D648A"/>
+<circle cx="427.1" cy="90.1" r="2.5" fill="#3D648A"/>
+<path d="M70.0,375.1 L141.4,335.9 L212.9,302.4 L284.3,262.3 L355.7,224.8 L427.1,190.3" fill="none" stroke="#3D648A" stroke-width="2" stroke-dasharray="5,3"/>
+<circle cx="70.0" cy="375.1" r="2.5" fill="#3D648A"/>
+<circle cx="141.4" cy="335.9" r="2.5" fill="#3D648A"/>
+<circle cx="212.9" cy="302.4" r="2.5" fill="#3D648A"/>
+<circle cx="284.3" cy="262.3" r="2.5" fill="#3D648A"/>
+<circle cx="355.7" cy="224.8" r="2.5" fill="#3D648A"/>
+<circle cx="427.1" cy="190.3" r="2.5" fill="#3D648A"/>
+<path d="M70.0,320.2 L141.4,282.3 L212.9,240.1 L284.3,196.5 L355.7,148.2 L427.1,103.4" fill="none" stroke="#2E7D4F" stroke-width="2" />
+<circle cx="70.0" cy="320.2" r="2.5" fill="#2E7D4F"/>
+<circle cx="141.4" cy="282.3" r="2.5" fill="#2E7D4F"/>
+<circle cx="212.9" cy="240.1" r="2.5" fill="#2E7D4F"/>
+<circle cx="284.3" cy="196.5" r="2.5" fill="#2E7D4F"/>
+<circle cx="355.7" cy="148.2" r="2.5" fill="#2E7D4F"/>
+<circle cx="427.1" cy="103.4" r="2.5" fill="#2E7D4F"/>
+<path d="M70.0,379.4 L141.4,340.6 L212.9,307.4 L284.3,267.3 L355.7,228.4 L427.1,194.2" fill="none" stroke="#2E7D4F" stroke-width="2" stroke-dasharray="5,3"/>
+<circle cx="70.0" cy="379.4" r="2.5" fill="#2E7D4F"/>
+<circle cx="141.4" cy="340.6" r="2.5" fill="#2E7D4F"/>
+<circle cx="212.9" cy="307.4" r="2.5" fill="#2E7D4F"/>
+<circle cx="284.3" cy="267.3" r="2.5" fill="#2E7D4F"/>
+<circle cx="355.7" cy="228.4" r="2.5" fill="#2E7D4F"/>
+<circle cx="427.1" cy="194.2" r="2.5" fill="#2E7D4F"/>
+<path d="M70.0,294.5 L141.4,247.1 L212.9,200.9 L284.3,153.4 L355.7,106.0 L427.1,58.1" fill="none" stroke="#A97416" stroke-width="2" />
+<circle cx="70.0" cy="294.5" r="2.5" fill="#A97416"/>
+<circle cx="141.4" cy="247.1" r="2.5" fill="#A97416"/>
+<circle cx="212.9" cy="200.9" r="2.5" fill="#A97416"/>
+<circle cx="284.3" cy="153.4" r="2.5" fill="#A97416"/>
+<circle cx="355.7" cy="106.0" r="2.5" fill="#A97416"/>
+<circle cx="427.1" cy="58.1" r="2.5" fill="#A97416"/>
+<path d="M70.0,388.4 L141.4,353.8 L212.9,317.2 L284.3,279.4 L355.7,240.7 L427.1,206.6" fill="none" stroke="#A97416" stroke-width="2" stroke-dasharray="5,3"/>
+<circle cx="70.0" cy="388.4" r="2.5" fill="#A97416"/>
+<circle cx="141.4" cy="353.8" r="2.5" fill="#A97416"/>
+<circle cx="212.9" cy="317.2" r="2.5" fill="#A97416"/>
+<circle cx="284.3" cy="279.4" r="2.5" fill="#A97416"/>
+<circle cx="355.7" cy="240.7" r="2.5" fill="#A97416"/>
+<circle cx="427.1" cy="206.6" r="2.5" fill="#A97416"/>
+<line x1="578" y1="46" x2="596" y2="46" stroke="#A64E28" stroke-width="2"/>
+<text x="600" y="50" font-size="10" fill="#211E19">gcd</text>
+<line x1="578" y1="62" x2="596" y2="62" stroke="#3D648A" stroke-width="2"/>
+<text x="600" y="66" font-size="10" fill="#211E19">gcdext</text>
+<line x1="578" y1="78" x2="596" y2="78" stroke="#2E7D4F" stroke-width="2"/>
+<text x="600" y="82" font-size="10" fill="#211E19">modinv</text>
+<line x1="578" y1="94" x2="596" y2="94" stroke="#A97416" stroke-width="2"/>
+<text x="600" y="98" font-size="10" fill="#211E19">jacobi</text>
+<line x1="578" y1="116" x2="596" y2="116" stroke="#211E19" stroke-width="2" />
+<text x="600" y="120" font-size="10" fill="#6F675C">rump</text>
+<line x1="578" y1="131" x2="596" y2="131" stroke="#211E19" stroke-width="2" stroke-dasharray="5,3"/>
+<text x="600" y="135" font-size="10" fill="#6F675C">GMP</text>
+</svg>

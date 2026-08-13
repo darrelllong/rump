@@ -71,8 +71,11 @@ after switching to **Lehmer's gcd** and a **division-free binary Jacobi**.
 `mul`/`sqr` climb schoolbook → Karatsuba → **Toom-3/Toom-4**; the **1.3–7.5×**
 that remains at crypto sizes is GMP's assembly inner loops, not the algorithm
 (on the Raspberry Pi, where that assembly edge shrinks, `mul` is only 1.3–1.9×).
-The one algorithmic gap left is **Half-GCD**, which would take the Euclid family
-subquadratic.
+Above ~131 kbit, `gcd` dispatches to **Half-GCD** (Möller, Math. Comp. 77
+(2008); the algorithm behind GMP's `mpn_hgcd`) and goes subquadratic — see
+PERFORMANCE.md's "GCD at scale". The standing items are carrying that
+transform through the Bézout cofactors (`gcd_extended`, `mod_inverse`) and the
+Jacobi symbol.
 
 ## Manual
 

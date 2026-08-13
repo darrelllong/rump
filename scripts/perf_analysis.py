@@ -100,7 +100,7 @@ THEORY = {
     "montpow_rand": "O(e·n²), e = 256",
     "montsetup": "O(n²) (one division)",
     "modpow": "O(e·n²), e = 256",
-    "gcd": "O(n²) Lehmer",
+    "gcd": "Lehmer O(n²) → Half-GCD O(M(n)·log n)",
     "gcdext": "O(n²) Lehmer",
     "modinv": "O(n²) Lehmer",
     "jacobi": "O(n²) binary",
@@ -122,12 +122,14 @@ def fit_table(hosts):
         cells = []
         for data in hosts.values():
             d = data.get(op, {})
-            sizes = sorted(s for s in d if s in (256, 1024, 2048, 4096))
+            sizes = sorted(d)
             if len(sizes) >= 2:
                 alpha, _c = fit_power(sizes, [d[s]["mean_ns"] for s in sizes])
                 cells.append(f"{alpha:.2f}")
             else:
                 cells.append("–")
+        if all(c == "–" for c in cells):
+            continue
         print(f"| `{op}` | {THEORY.get(op, '?')} | " + " | ".join(cells) + " |")
 
 
@@ -138,15 +140,20 @@ ML, MR, MT, MB = 70, 150, 40, 55
 PALETTE = ["#A64E28", "#3D648A", "#2E7D4F", "#A97416", "#6D4C91", "#8A8378"]
 
 
+# Families that exist only as graphs; fit/means iterate INT_FAMILIES alone,
+# so entries here never duplicate table rows.
+PLOT_FAMILIES = {"gcd-at-scale": ["gcd", "gcdext", "modinv", "jacobi"]}
+
+
 def scaling_svg(family, out, hosts):
-    ops = INT_FAMILIES[family]
+    ops = INT_FAMILIES.get(family) or PLOT_FAMILIES[family]
     # Collect (op, host) series over the integer sizes present.
     series = []
     all_x, all_y = [], []
     for oi, op in enumerate(ops):
         for hi, (host, data) in enumerate(hosts.items()):
             d = data.get(op, {})
-            pts = sorted((s, d[s]["mean_ns"]) for s in d if s in (256, 1024, 2048, 4096))
+            pts = sorted((s, d[s]["mean_ns"]) for s in d)
             if len(pts) < 2:
                 continue
             series.append((op, host, hi, pts))
@@ -168,12 +175,13 @@ def scaling_svg(family, out, hosts):
     s.append(f'<rect width="{W}" height="{H}" fill="#FBF9F5"/>')
     s.append(f'<text x="{ML}" y="24" font-size="15" font-weight="600" fill="#211E19">'
              f'rump — {family} scaling (mean ns/op, log–log)</text>')
-    # x grid: the four sizes.
+    # x grid: one line per size present, k-labeled once sizes reach kilobits.
     for sz in sorted(set(all_x)):
         x = px(sz)
+        lbl = f"{sz // 1024}k" if sz % 1024 == 0 and sz >= 8192 else str(sz)
         s.append(f'<line x1="{x:.1f}" y1="{MT}" x2="{x:.1f}" y2="{H-MB}" stroke="#E4DED4"/>')
         s.append(f'<text x="{x:.1f}" y="{H-MB+18}" font-size="11" fill="#6F675C" '
-                 f'text-anchor="middle">{sz}</text>')
+                 f'text-anchor="middle">{lbl}</text>')
     s.append(f'<text x="{(ML+W-MR)/2:.0f}" y="{H-14}" font-size="12" fill="#6F675C" '
              f'text-anchor="middle">bit width</text>')
     # y decade grid.
@@ -225,14 +233,20 @@ GMP_OPS = ["add", "sub", "mul", "sqr", "divrem", "modulo", "modmul", "modpow",
 
 
 def compare_table(rump_path, gmp_path):
-    """rump vs GMP: mean ns/op and rump/gmp ratio at each size."""
+    """rump vs GMP: mean ns/op and rump/gmp ratio, at every size the data holds."""
     rump, gmp = parse(rump_path), parse(gmp_path)
-    hdr = " | ".join(f"{s}b" for s in GMP_SIZES)
+    ops = [op for op in GMP_OPS if op in rump or op in gmp]
+    sizes = sorted(
+        {s for op in ops for s in rump.get(op, {})}
+        | {s for op in ops for s in gmp.get(op, {})}
+    )
+    label = lambda s: f"{s // 1024}kb" if s % 1024 == 0 and s >= 8192 else f"{s}b"
+    hdr = " | ".join(label(s) for s in sizes)
     print(f"| Method | {hdr} (rump ns / gmp ns / ×) |")
-    print("|---|" + "---|" * len(GMP_SIZES))
-    for op in GMP_OPS:
+    print("|---|" + "---|" * len(sizes))
+    for op in ops:
         cells = []
-        for s in GMP_SIZES:
+        for s in sizes:
             r = rump.get(op, {}).get(s)
             g = gmp.get(op, {}).get(s)
             if r and g and g["mean_ns"] > 0:

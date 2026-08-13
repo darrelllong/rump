@@ -77,37 +77,67 @@ struct IntPool {
     /// its `self < divisor` early return.
     divisor: BigUint,
     modulus: BigUint,
-    ctx: MontgomeryCtx,
-    a_mont: BigUint,
-    b_mont: BigUint,
-    prime: BigUint,
+    /// Montgomery context and in-domain operands, built only for the ops that
+    /// read them: the context setup is a full-width division, which at the
+    /// scaling-sweep sizes (up to a million bits) would swamp a cheap op's
+    /// measurement with pool construction.
+    mont: Option<MontState>,
+    /// A random probable prime, built only for `sqrtmod`: prime density thins
+    /// as sizes grow, and hunting one beyond a few thousand bits costs minutes
+    /// — unpayable per pilot trial, and pointless for every other op.
+    prime: Option<BigUint>,
     e65537: BigUint,
     exp_rand: BigUint,
 }
 
+/// The Montgomery-domain slice of the pool.
+struct MontState {
+    ctx: MontgomeryCtx,
+    a_mont: BigUint,
+    b_mont: BigUint,
+}
+
 impl IntPool {
-    fn new(bits: usize) -> Self {
+    fn mont(&self) -> &MontState {
+        self.mont.as_ref().expect("op reads the Montgomery pool")
+    }
+
+    fn prime(&self) -> &BigUint {
+        self.prime.as_ref().expect("op reads the prime")
+    }
+}
+
+impl IntPool {
+    fn new(bits: usize, op: &str) -> Self {
         let mut rng = SplitMix64::from_os();
         let a = rng.biguint(bits);
         let b = rng.biguint(bits);
         let divisor = rng.odd(bits / 2);
         let modulus = rng.odd(bits);
-        let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus");
-        let a_mont = ctx.encode(&a);
-        let b_mont = ctx.encode(&b);
-        // A prime near a fresh random point, for sqrt_mod / prime-field pow.
-        let mut prime = rng.odd(bits);
-        while !is_probable_prime(&prime) {
-            prime = prime.add_ref(&BigUint::from_u64(2));
-        }
+        let mont = matches!(
+            op,
+            "montmul" | "montsqr" | "montpow_e65537" | "montpow_rand"
+        )
+        .then(|| {
+            let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus");
+            let a_mont = ctx.encode(&a);
+            let b_mont = ctx.encode(&b);
+            MontState { ctx, a_mont, b_mont }
+        });
+        // A prime near a fresh random point, for sqrt_mod.
+        let prime = (op == "sqrtmod").then(|| {
+            let mut candidate = rng.odd(bits);
+            while !is_probable_prime(&candidate) {
+                candidate = candidate.add_ref(&BigUint::from_u64(2));
+            }
+            candidate
+        });
         Self {
             a,
             b,
             divisor,
             modulus,
-            ctx,
-            a_mont,
-            b_mont,
+            mont,
             prime,
             e65537: BigUint::from_u64(65_537),
             exp_rand: rng.biguint(256),
@@ -193,16 +223,18 @@ fn int_op(name: &str) -> Option<fn(&IntPool)> {
             black_box(MontgomeryCtx::new(&p.modulus));
         },
         "montmul" => |p| {
-            black_box(p.ctx.mul_mont(&p.a_mont, &p.b_mont));
+            let m = p.mont();
+            black_box(m.ctx.mul_mont(&m.a_mont, &m.b_mont));
         },
         "montsqr" => |p| {
-            black_box(p.ctx.square_mont(&p.a_mont));
+            let m = p.mont();
+            black_box(m.ctx.square_mont(&m.a_mont));
         },
         "montpow_e65537" => |p| {
-            black_box(p.ctx.pow(&p.a, &p.e65537));
+            black_box(p.mont().ctx.pow(&p.a, &p.e65537));
         },
         "montpow_rand" => |p| {
-            black_box(p.ctx.pow(&p.a, &p.exp_rand));
+            black_box(p.mont().ctx.pow(&p.a, &p.exp_rand));
         },
         "modpow" => |p| {
             black_box(mod_pow(&p.a, &p.exp_rand, &p.modulus));
@@ -220,7 +252,7 @@ fn int_op(name: &str) -> Option<fn(&IntPool)> {
             black_box(jacobi(&p.a, &p.modulus));
         },
         "sqrtmod" => |p| {
-            black_box(sqrt_mod(&p.a, &p.prime));
+            black_box(sqrt_mod(&p.a, p.prime()));
         },
         "isprime" => |p| {
             black_box(is_probable_prime(&p.a));
@@ -281,7 +313,7 @@ fn build(full: &str) -> Option<Bench> {
     let (name, num) = full.rsplit_once('_')?;
     let num: usize = num.parse().ok()?;
     if let Some(f) = int_op(name) {
-        return Some(Bench::Int(IntPool::new(num), f));
+        return Some(Bench::Int(IntPool::new(num, name), f));
     }
     if let Some(f) = field_op(name) {
         let (_, taps) = FIELDS.iter().find(|(d, _)| *d == num)?;
