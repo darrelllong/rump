@@ -30,8 +30,8 @@ Tonelli–Shanks cost swings with the prime's 2-adic structure (a non-residue
 input rejects in µs; a Blum prime `p ≡ 3 (mod 4)` takes one exponentiation; a
 `p ≡ 1 (mod 4)` of high 2-adic valuation takes the full descent). Their sample
 variance never stabilises, so the mean CI cannot converge; means are marked
-`~`, and **only their extrema are the meaningful result** — do not read their
-means or fitted exponents as physics.
+`~`, and **only their extrema are the meaningful result**; their means and
+fitted exponents reflect the sample's composition, not the algorithm.
 
 Operation glossary (integer sizes are the operand bit width; field sizes are the
 degree of GF(2^m)):
@@ -51,10 +51,11 @@ degree of GF(2^m)):
 | `isprime` | `is_probable_prime` — trial-division sieve then Miller–Rabin |
 | `gf2m_*` | binary-field multiply / square / sqrt / pow / inverse |
 
-The two `montpow_*` rows carry classical public-key workload names, and that is
-deliberate familiarity, nothing more — rump is a general-purpose multiprecision
-library, and rows tied to a cryptosystem's conventions are called out as such.
-They earn their place by what they isolate. Exponentiation costs
+The two `montpow_*` rows are named for classical public-key workloads (RSA's
+public exponent; a DH/DSA-sized private exponent). rump is a general-purpose
+multiprecision library, so rows tied to a cryptosystem's conventions are
+identified as such, and the rows are in the table for what they isolate,
+not for the workloads they resemble. Exponentiation costs
 (exponent bits) × (kernel cost), two independent axes: `montpow_e65537` pins
 the exponent at its floor (two set bits — sixteen squarings and one multiply)
 so the row measures the kernel's scaling alone, and `montpow_rand` pins it at a
@@ -171,8 +172,8 @@ The scaling graphs plot all three.
 Each cell is `rump ns / gmp ns / ratio`. Lower ratio is better; **1.0×** would
 mean parity. `isprime` is omitted here — its heavy-tailed mean makes the ratio
 meaningless (see Extrema). rump's Montgomery domain, `sqrt_mod`, and GF(2^m)
-have **no `mpz` counterpart** and so cannot appear: that absence is itself
-rump's surplus over GMP's integer layer.
+have no `mpz` counterpart and so cannot appear in the comparison; their costs
+are in the tables above.
 
 ### M4
 
@@ -237,17 +238,19 @@ The comparison sorts rump's primitives into groups, and the grouping is by
   1.1–1.6×): GMP's hand-tuned assembly edge is a wide-core advantage that shrinks
   on the Pi's simpler pipeline, where the pure-Rust penalty is smallest.
 
-- **Constant factor behind — was a *worse* algorithm, now fixed.** `gcd`,
-  `gcd_extended`, and `mod_inverse` used to run **17–89×** slower on classical
-  Euclid; they now run **4–13×** after the switch to **double-digit Lehmer**.
-  `jacobi`, which did a full division per step, now runs **2–12×** on a
-  **division-free binary reciprocity** (it was 12–29×). At these sizes all four
-  run O(n²) engines, so on the wide M4/EPYC cores the ratio creeps up — GMP's
-  **Half-GCD (HGCD)** is subquadratic everywhere. `gcd` stops conceding that
-  above ~131 kbit, where it dispatches to its own Half-GCD (see *GCD at scale*
-  below); its three siblings still pay the quadratic curve at every size. (On
-  the Pi the ratios *narrow* with size instead, from ~10–12× at 256-bit to ~4×
-  at 4096-bit, as rump's fixed per-call overhead amortizes.)
+- **The Euclid family: Lehmer's algorithm replaced classical Euclid, and
+  binary reciprocity replaced the division-per-step Jacobi.** `gcd`,
+  `gcd_extended`, and `mod_inverse` ran classical Euclid — one full
+  multiprecision division per quotient — and stood 17–89× behind GMP; on
+  Lehmer's algorithm they stand 4–13×. `jacobi` performed a full division per
+  reduction step and stood 12–29× behind; on binary reciprocity it stands
+  2–12×. At 256–4096 bits all four engines are O(n²) while GMP runs
+  subquadratic **Half-GCD (HGCD)** under each, so the ratios rise with size on
+  the wide M4/EPYC cores. Above ~131 kbit `gcd` dispatches to its own
+  Half-GCD (see *GCD at scale* below); `gcd_extended`, `mod_inverse`, and
+  `jacobi` pay the quadratic curve at every size. (On the Pi the ratios narrow
+  with size instead — from ~10–12× at 256 bits to ~4× at 4096 — as rump's
+  fixed per-call overhead amortizes.)
 
 - **`mul`/`sqr` — 1.3–7.5×, widening on the wide cores.** rump climbs
   schoolbook → Karatsuba → **Toom-3 → Toom-4**; Toom-3 crosses in above ~8192
@@ -255,12 +258,14 @@ The comparison sorts rump's primitives into groups, and the grouping is by
   assembly base-case, not the algorithm. GMP escalates to Toom-6.5/8.5 → FFT far
   above rump's range.
 
-- **`add`/`sub` — 2–15×, but nanoseconds.** Almost all of this is rump allocating
-  a fresh `Vec` per call against GMP's in-place `mpn`; the absolute cost is tens
-  of nanoseconds.
+- **`add`/`sub` — 2–15×.** Nearly all of this is allocation: rump returns a
+  fresh `Vec` per call where GMP's `mpn` layer writes into an existing buffer.
+  The absolute difference is tens of nanoseconds per call.
 
-- **No contest — rump has it, `mpz` doesn't.** A public Montgomery domain
-  (`mul_mont`/`pow`), modular square roots (`sqrt_mod`), and GF(2^m) fields.
+- **Operations with no `mpz` counterpart.** The public Montgomery domain
+  (`mul_mont`, `square_mont`, `pow`), `sqrt_mod`, and the GF(2^m) field
+  operations cannot appear in this comparison because GMP's integer layer does
+  not provide them; their costs are in the tables above.
 
 ### Where to work harder
 
@@ -271,13 +276,14 @@ above ~131 kbit — the section below). What remains, biggest first:
 
 1. **`jacobi` at scale.** The scale sweep makes it the family's worst curve:
    pure O(n²) (α≈2.0 — its subtract-and-halve steps get no Lehmer batching)
-   and a ratio that reaches ~76× by 256 kbit. Batching its reduction the way
-   Lehmer batches gcd — carrying the reciprocity sign through the transform —
-   is the same trick that already worked twice.
+   and a ratio that reaches ~76× by 256 kbit. The fix is the batching that
+   took gcd from classical Euclid to Lehmer, with the reciprocity sign
+   carried through the transform.
 2. **Half-GCD through the cofactors.** `gcd_extended` and `mod_inverse` still
-   ride Lehmer's O(n²); the Half-GCD transform *is* the Bézout data (a row of
-   it is the cofactor pair), so extending the dispatch to them is bookkeeping,
-   not new algorithm.
+   run Lehmer's O(n²). The Half-GCD transform already contains the Bézout
+   data — at full reduction a row of it is the cofactor pair — so extending
+   the dispatch to them means carrying the transform through the driver, not
+   implementing a new algorithm.
 3. **In-place `add`/`sub`** (the 2–15× on the cheapest ops). A fresh `Vec` per
    call against GMP's in-place `mpn`; the absolute cost is nanoseconds, so last.
 
@@ -292,10 +298,10 @@ halves by recursion and replaces Lehmer's O(n²) with O(M(n)·log n). This
 section runs the family from 8 kbit to a megabit — on the M4 — to show what
 that buys and what it does not:
 
-- **`gcd` bends; its siblings do not.** Over this range `gcd` fits α≈1.7
-  against `gcdext`/`modinv`'s ≈1.85 and `jacobi`'s ≈2.0 — and the fit
-  understates the bend, since the range's lower half is still Lehmer: the
-  subquadratic regime only begins at 128 kbit.
+- **`gcd`'s exponent drops below its siblings'.** Over this range `gcd` fits
+  α≈1.7 against `gcdext`/`modinv`'s ≈1.85 and `jacobi`'s ≈2.0 — and the fit
+  understates the difference, since the range's lower half still runs Lehmer:
+  the subquadratic regime begins at 128 kbit.
 - **The ratio's growth slows but does not stop.** `gcd`'s gap to GMP grows
   4.1× → 12× across the sweep, driven below 128 kbit by Lehmer-vs-HGCD and
   above it by the multiplication ladder underneath — GMP's HGCD multiplies by
@@ -303,8 +309,9 @@ that buys and what it does not:
   the still-quadratic ops: `gcdext` reaches 18.6× and `jacobi` 76× by 256 kbit,
   where their rows stop because a single quadratic reading costs ~half a second
   and the trend is already unambiguous.
-- **The GMP column is the target picture:** α≈1.5 across the whole family —
-  HGCD under every one of these ops is what the roadmap above is for.
+- **The GMP column shows the goal:** α≈1.5 across the whole family, achieved
+  by running HGCD beneath every one of these operations — the remaining
+  roadmap items above.
 
 | Method | Complexity | rump α | GMP α |
 |---|---|---|---|
@@ -330,7 +337,7 @@ Ranked by `max/min` spread (M4). A spread near 1.0 is data-independent; a large
 spread means the primitive's cost depends on its input, which is why rump is
 explicitly variable-time and must not be used where timing may not leak secrets.
 
-The two extremes tell the story:
+Two operations produce the large spreads:
 - **`isprime`** ranges from an ~20 ns small-factor rejection to a full
   Miller–Rabin pass on a prime — a spread past **40,000×** at 2048-bit (the exact
   figure is data-dependent: it tracks how many hard primes the random sample hit).
