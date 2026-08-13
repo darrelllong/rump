@@ -340,20 +340,39 @@ def means_table(hosts):
 
 
 def extrema_table(arm):
-    """Every op with its ARM extrema, ranked by spread — the variable-time view."""
-    rows = []
+    """The variable-time view. Operations whose spread exceeds an order of
+    magnitude get a full per-size table, operation-major, sizes ascending;
+    every other row is summarized in one generated sentence, so the summary
+    cannot drift from the data."""
+    by_op = {}
     for op, sizes in arm.items():
-        for s, d in sizes.items():
-            rows.append((d["ratio"], f"{op}_{s}", d))
-    rows.sort(reverse=True)
-    print("| Operation | min | p50 | p99 | max | max/min |")
-    print("|---|---:|---:|---:|---:|---:|")
-    for _, name, d in rows:
-        r = d["ratio"]
-        spread = f"{r:,.0f}" if r >= 1000 else f"{r:.1f}"
+        for sz, d in sizes.items():
+            by_op.setdefault(op, []).append((sz, d))
+    heavy = sorted(
+        (op for op in by_op if max(d["ratio"] for _, d in by_op[op]) >= 10),
+        key=lambda op: -max(d["ratio"] for _, d in by_op[op]),
+    )
+    print("| Operation | size | min | p50 | p99 | max | max/min |")
+    print("|---|---|---:|---:|---:|---:|---:|")
+    for op in heavy:
+        first = True
+        for sz, d in sorted(by_op[op]):
+            name = f"`{op}`" if first else ""
+            first = False
+            r = d["ratio"]
+            spread = f"{r:,.0f}" if r >= 1000 else f"{r:.1f}"
+            print(
+                f"| {name} | {sz} | {fmt_time(d['min'])} | {fmt_time(d['p50'])} "
+                f"| {fmt_time(d['p99'])} | {fmt_time(d['max'])} | {spread} |"
+            )
+    rest = [
+        d["ratio"] for op in by_op if op not in heavy for _, d in by_op[op]
+    ]
+    if rest:
         print(
-            f"| `{name}` | {fmt_time(d['min'])} | {fmt_time(d['p50'])} "
-            f"| {fmt_time(d['p99'])} | {fmt_time(d['max'])} | {spread} |"
+            f"\nThe remaining {len(rest)} rows — every other operation and size —"
+            f" span **{min(rest):.1f}–{max(rest):.1f}×**: their cost is set by"
+            f" operand width, not operand value."
         )
 
 

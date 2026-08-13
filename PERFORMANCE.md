@@ -434,31 +434,18 @@ Two operations produce the large spreads:
   Euclid family, GF(2^m) — sits at **1.0–1.6×**: cost tracks operand width, which
   is public, not the operand values.
 
-| Operation | min | p50 | p99 | max | max/min |
-|---|---:|---:|---:|---:|---:|
-| `isprime_4096` | 133 ns | 256 ns | 23.9 ms | 284 ms | 2,143,351 |
-| `isprime_2048` | 64.9 ns | 144 ns | 2.89 ms | 34.3 ms | 528,243 |
-| `isprime_1024` | 37.2 ns | 80.8 ns | 411 µs | 4.83 ms | 129,600 |
-| `isprime_256` | 17.3 ns | 25.5 ns | 14.7 µs | 1.68 ms | 97,145 |
-| `sqrtmod_4096` | 104 µs | 107 µs | 71.8 ms | 71.9 ms | 694.4 |
-| `sqrtmod_2048` | 23.3 µs | 2.81 ms | 9.86 ms | 12.7 ms | 543.2 |
-| `sqrtmod_1024` | 6.97 µs | 386 µs | 1.3 ms | 1.71 ms | 245.8 |
-| `sqrtmod_256` | 1.07 µs | 1.38 µs | 48.8 µs | 77.1 µs | 72.2 |
-| `gf2m_mul_571` | 687 ns | 749 ns | 1.06 µs | 2.21 µs | 3.2 |
-| `gf2m_inv_571` | 24 µs | 27.2 µs | 38.8 µs | 40.5 µs | 1.7 |
-| `modmul_256` | 161 ns | 172 ns | 198 ns | 264 ns | 1.6 |
-| `gcdext_256` | 4.98 µs | 6.16 µs | 7.04 µs | 7.99 µs | 1.6 |
-| `gf2m_inv_233` | 7.89 µs | 9.67 µs | 11.7 µs | 12.1 µs | 1.5 |
-| `add_256` | 38.5 ns | 44.8 ns | 51.4 ns | 57.4 ns | 1.5 |
-| `gcdext_1024` | 17.9 µs | 20.5 µs | 23.2 µs | 25.6 µs | 1.4 |
-| `modinv_256` | 4.02 µs | 4.7 µs | 5.38 µs | 5.57 µs | 1.4 |
-| `sqr_2048` | 1.04 µs | 1.23 µs | 1.3 µs | 1.43 µs | 1.4 |
-| `mul_256` | 24.4 ns | 27.2 ns | 31.7 ns | 33.6 ns | 1.4 |
-| `montsetup_256` | 249 ns | 290 ns | 324 ns | 330 ns | 1.3 |
-| `gcd_256` | 1.75 µs | 2.07 µs | 2.32 µs | 2.32 µs | 1.3 |
+| Operation | size | min | p50 | p99 | max | max/min |
+|---|---|---:|---:|---:|---:|---:|
+| `isprime` | 256 | 17.3 ns | 25.5 ns | 14.7 µs | 1.68 ms | 97,145 |
+|  | 1024 | 37.2 ns | 80.8 ns | 411 µs | 4.83 ms | 129,600 |
+|  | 2048 | 64.9 ns | 144 ns | 2.89 ms | 34.3 ms | 528,243 |
+|  | 4096 | 133 ns | 256 ns | 23.9 ms | 284 ms | 2,143,351 |
+| `sqrtmod` | 256 | 1.07 µs | 1.38 µs | 48.8 µs | 77.1 µs | 72.2 |
+|  | 1024 | 6.97 µs | 386 µs | 1.3 ms | 1.71 ms | 245.8 |
+|  | 2048 | 23.3 µs | 2.81 ms | 9.86 ms | 12.7 ms | 543.2 |
+|  | 4096 | 104 µs | 107 µs | 71.8 ms | 71.9 ms | 694.4 |
 
-The remaining 66 rows all sit at **1.0–1.3×** — data-independent, their
-cost set by operand width alone.
+The remaining 78 rows — every other operation and size — span **1.0–3.2×**: their cost is set by operand width, not operand value.
 
 ![variable-time scaling](assets/scaling-variable-time.svg)
 

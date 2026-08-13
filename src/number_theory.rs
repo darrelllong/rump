@@ -220,6 +220,144 @@ fn combine_signed(c0: i128, x0: &BigInt, c1: i128, x1: &BigInt) -> BigInt {
     }
 }
 
+// ─── Jacobi state machine ───────────────────────────────────────────────────
+//
+// The Jacobi symbol can ride the same left-to-right quotient sequence as gcd:
+// Schönhage's identities give the symbol's change across one Euclidean step
+// r0 = q·r1 + r2 as a sign that depends only on r0 and r1 modulo 4 and on
+// q modulo 4 — never on the operands' high bits. Two rules cover everything:
+// for odd r0, r1, reciprocity charges a sign exactly when both are ≡ 3
+// (mod 4); for even r1 (the remainders of a quotient sequence are not kept
+// odd), the accumulated sign across the step is (−1)^((q(r0−1)/2 + r0(q−1)/2))
+// when r1 ≡ 2 (mod 4), and nothing otherwise. Möller's formulation carries
+// the whole computation as a five-bit state — the sign bit plus thirteen
+// reachable classes of (a mod 4, b mod 4, which side is the denominator) —
+// advanced by one table lookup per quotient. Even intermediates need no
+// two-stripping: the state tracks their low bits symbolically, and a
+// remainder sequence beside an odd operand cannot end on an even value.
+//
+// The design and the table generator are Niels Möller's, as shipped in GMP
+// (`mpn_jacobi_n`, `gen-jacobitab.c`); the identities are Schönhage's. The
+// published subquadratic-Jacobi reference is Brent and Zimmermann, *An
+// O(M(n) log n) algorithm for the Jacobi symbol*, ANTS-IX, 2010 — their
+// algorithm takes the binary (2-adic) route; this implementation takes the
+// left-to-right route their §1 attributes to Möller, which composes with the
+// Half-GCD machinery below.
+
+/// The thirteen reachable `(a mod 4, b mod 4)` classes. At least one side of
+/// the pair is always odd; the denominator flag `d` is ambiguous only for
+/// `(3, 3)`, which therefore appears twice — index 7 with `d = 1`, index 12
+/// with `d = 0`. For indices 0–7 the parity of `b` implies `d = 1`; for
+/// 8–11, `d = 0`.
+const JACOBI_DECODE: [(u8, u8); 13] = [
+    (0, 1),
+    (0, 3),
+    (1, 1),
+    (1, 3),
+    (2, 1),
+    (2, 3),
+    (3, 1),
+    (3, 3), // d = 1
+    (1, 0),
+    (1, 2),
+    (3, 0),
+    (3, 2),
+    (3, 3), // d = 0
+];
+
+/// Index of `(a, b)` with denominator flag `d` in [`JACOBI_DECODE`].
+const fn jacobi_encode(a: u8, b: u8, d: u8) -> u8 {
+    if a == 3 && b == 3 {
+        return if d == 1 { 7 } else { 12 };
+    }
+    let mut i = 0;
+    while i < 12 {
+        let (da, db) = JACOBI_DECODE[i];
+        if da == a && db == b {
+            return i as u8;
+        }
+        i += 1;
+    }
+    panic!("unreachable (a, b) class: one side must be odd");
+}
+
+/// Build the 208-entry transition table from Schönhage's rules, at compile
+/// time. Entry `(state << 3) | (d << 2) | (q mod 4)` holds the successor of
+/// `state` after one Euclidean step with quotient `q` reducing side `d`
+/// (`d = 1`: `a ← a − q·b`; `d = 0`: `b ← b − q·a`). A state is
+/// `(class << 1) | e`, the result being `(−1)^e`.
+const fn build_jacobi_table() -> [u8; 208] {
+    let mut table = [0u8; 208];
+    let mut idx = 0;
+    while idx < 208 {
+        let q = (idx & 3) as u8;
+        let d = ((idx >> 2) & 1) as u8;
+        let state = (idx >> 3) as u8;
+        let mut e = state & 1;
+        let class = (state >> 1) as usize;
+        let (mut a, mut b) = JACOBI_DECODE[class];
+        // d is determinate only for the two (3, 3) classes; elsewhere the
+        // reciprocity charge below cannot fire, so any value serves.
+        let d_old = if class == 7 { 1 } else { 0 };
+
+        // Reciprocity: exchanging the denominator costs a sign exactly when
+        // both sides are ≡ 3 (mod 4).
+        if d != d_old && a == 3 && b == 3 {
+            e ^= 1;
+        }
+        // The even-denominator rule, and the symbolic low-bit recurrence for
+        // the reduced side.
+        if d == 1 {
+            if b == 2 {
+                e ^= (q & (a >> 1)) ^ (q >> 1);
+            }
+            a = a.wrapping_sub(q.wrapping_mul(b)) & 3;
+        } else {
+            if a == 2 {
+                e ^= (q & (b >> 1)) ^ (q >> 1);
+            }
+            b = b.wrapping_sub(q.wrapping_mul(a)) & 3;
+        }
+        table[idx] = (jacobi_encode(a, b, d) << 1) | e;
+        idx += 1;
+    }
+    table
+}
+
+/// The transition table, derived from the rules above by the compiler.
+static JACOBI_TABLE: [u8; 208] = build_jacobi_table();
+
+/// The five-bit Jacobi state threaded through a quotient sequence.
+#[derive(Clone, Copy)]
+struct JacobiState(u8);
+
+impl JacobiState {
+    /// Initial state from the operands' low two bits; `b` must be odd. The
+    /// large operands' low bits are never consulted again after this.
+    fn new(a_low: u8, b_low: u8) -> Self {
+        debug_assert!(b_low & 1 == 1, "the initial denominator must be odd");
+        Self(((a_low & 3) << 2) + (b_low & 2))
+    }
+
+    /// Advance across one applied Euclidean step: side `d` was reduced by
+    /// `q` times the other (`d = 1`: `a ← a − q·b`). `q` is the quotient as
+    /// applied — after any size-guard back-off — reduced mod 4.
+    fn update(&mut self, d: u8, q_mod_4: u8) {
+        debug_assert!(self.0 < 26 && d < 2 && q_mod_4 < 4);
+        self.0 = JACOBI_TABLE[((self.0 as usize) << 3) | ((d as usize) << 2) | q_mod_4 as usize];
+    }
+
+    /// Whether the `a` slot currently holds the odd (denominator) side.
+    fn a_is_denominator(&self) -> bool {
+        (self.0 >> 1) >= 8
+    }
+
+    /// Read out the symbol once the pair has reached `(1, 0)` or `(0, 1)`.
+    fn finish(&self) -> i8 {
+        1 - 2 * (self.0 & 1) as i8
+    }
+}
+
 // ─── Half-GCD machinery ─────────────────────────────────────────────────────
 //
 // Euclid's quotient sequence is the continued-fraction expansion of a/b, and a
@@ -1499,6 +1637,97 @@ mod tests {
         let mut v = BigUint::zero();
         v.set_bit(bits);
         v
+    }
+
+    /// The Jacobi state machine driven by a plain Euclidean quotient
+    /// sequence — the validation harness for the state machine in isolation,
+    /// before it is threaded through the Half-GCD reduction.
+    fn jacobi_by_quotient_state(a: &BigUint, n: &BigUint) -> Option<i8> {
+        use super::JacobiState;
+        if n.is_zero() || !n.is_odd() {
+            return None;
+        }
+        let mut x = a.modulo(n); // the state's `a` slot
+        let mut y = n.clone(); // the state's `b` slot; odd at initialization
+        if x.is_zero() {
+            return Some(i8::from(y.is_one()));
+        }
+        let mut state = JacobiState::new(
+            (x.limbs()[0] & 3) as u8,
+            (y.limbs()[0] & 3) as u8,
+        );
+        loop {
+            let d = u8::from(x >= y);
+            let (q, r) = if d == 1 { x.div_rem(&y) } else { y.div_rem(&x) };
+            state.update(d, (q.limbs().first().copied().unwrap_or(0) & 3) as u8);
+            if d == 1 {
+                x = r;
+            } else {
+                y = r;
+            }
+            let (reduced, other) = if d == 1 { (&x, &y) } else { (&y, &x) };
+            if reduced.is_zero() {
+                return Some(if other.is_one() { state.finish() } else { 0 });
+            }
+        }
+    }
+
+    #[test]
+    fn jacobi_table_matches_gmp() {
+        // GMP's shipped jacobitab.h, as produced by Möller's gen-jacobitab.c —
+        // an independently generated cross-check of the compile-time
+        // derivation from Schönhage's rules.
+        #[rustfmt::skip]
+        const GMP_TABLE: [u8; 208] = [
+             0,  0,  0,  0,  0, 12,  8,  4,  1,  1,  1,  1,  1, 13,  9,  5,
+             2,  2,  2,  2,  2,  6, 10, 14,  3,  3,  3,  3,  3,  7, 11, 15,
+             4, 16,  6, 18,  4,  0, 12,  8,  5, 17,  7, 19,  5,  1, 13,  9,
+             6, 18,  4, 16,  6, 10, 14,  2,  7, 19,  5, 17,  7, 11, 15,  3,
+             8, 10,  9, 11,  8,  4,  0, 12,  9, 11,  8, 10,  9,  5,  1, 13,
+            10,  9, 11,  8, 10, 14,  2,  6, 11,  8, 10,  9, 11, 15,  3,  7,
+            12, 22, 24, 20, 12,  8,  4,  0, 13, 23, 25, 21, 13,  9,  5,  1,
+            25, 21, 13, 23, 14,  2,  6, 10, 24, 20, 12, 22, 15,  3,  7, 11,
+            16,  6, 18,  4, 16, 16, 16, 16, 17,  7, 19,  5, 17, 17, 17, 17,
+            18,  4, 16,  6, 18, 22, 19, 23, 19,  5, 17,  7, 19, 23, 18, 22,
+            20, 12, 22, 24, 20, 20, 20, 20, 21, 13, 23, 25, 21, 21, 21, 21,
+            22, 24, 20, 12, 22, 19, 23, 18, 23, 25, 21, 13, 23, 18, 22, 19,
+            24, 20, 12, 22, 15,  3,  7, 11, 25, 21, 13, 23, 14,  2,  6, 10,
+        ];
+        assert_eq!(super::JACOBI_TABLE, GMP_TABLE);
+    }
+
+    #[test]
+    fn jacobi_state_machine_matches_jacobi() {
+        use super::jacobi;
+        // Exhaustive small cases: every (a, odd n) with n < 200.
+        for n_small in (1u64..200).step_by(2) {
+            let n = BigUint::from_u64(n_small);
+            for a_small in 0..n_small.min(60) {
+                let a = BigUint::from_u64(a_small);
+                assert_eq!(
+                    jacobi_by_quotient_state(&a, &n),
+                    jacobi(&a, &n),
+                    "state machine diverged at ({a_small}/{n_small})"
+                );
+            }
+        }
+        // Random sweep across sizes, including the GMP-vector-backed public
+        // implementation as the oracle.
+        let mut rng = SplitMix64 { state: 0x0dd5_ba11_5eed_c0de };
+        for &bits in &[16usize, 64, 128, 256, 777, 1024, 2048] {
+            for _ in 0..30 {
+                let mut n = draw_below(&mut rng, &pow2(bits));
+                if !n.is_odd() {
+                    n = n.add_ref(&BigUint::one());
+                }
+                let a = draw_below(&mut rng, &pow2(bits));
+                assert_eq!(
+                    jacobi_by_quotient_state(&a, &n),
+                    jacobi(&a, &n),
+                    "state machine diverged at {bits} bits"
+                );
+            }
+        }
     }
 
     #[test]

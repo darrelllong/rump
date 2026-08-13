@@ -334,12 +334,9 @@ Two operations produce the large spreads:
 
 MD
 
-$PA extrema "M4=$M4" | head -22
+$PA extrema "M4=$M4"
 
 cat <<'MD'
-
-The remaining 66 rows all sit at **1.0–1.3×** — data-independent, their
-cost set by operand width alone.
 
 ![variable-time scaling](assets/scaling-variable-time.svg)
 
