@@ -7,6 +7,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 PA="python3 scripts/perf_analysis.py"
 M4=bench/primitives_hardy.md
+M4_HEAVY_EXT=bench/heavy_extended_hardy.md
 EPYC=bench/primitives_moore.md
 PI=bench/primitives_darby.md
 GCD_SCALE=bench/gcd_scaling_hardy.md
@@ -71,7 +72,21 @@ avoid: each trial must generate a fresh random prime modulus, which at 4096
 bits on the Pi dominates the session and leaves that cell's sample thin (its
 confidence-interval column discloses this). For both operations the interval
 converges slowly (means carry the `~` mark) and the extrema columns are the
-primary result.
+primary result. The prime-conditioned rows (`isprime_true`, and `sqrt_mod`
+throughout) carry one structural limit: every trial must first generate a
+random prime of the row's width, which beyond ~4 kbit costs tens of seconds
+per trial and bounds the session's trial count. On the M4, long trials also
+showed scheduling-dependent timing variance under background execution that
+short trials do not; conditioned cells whose samples did not meet the
+standard are omitted there, and the EPYC and Pi rows — spreads of 1.01–1.27
+across every width — carry the conditioned-cost result. The outcome-conditioned `isprime_true` row is the complement:
+on a prime, the cost is the sieve plus exactly twelve Miller–Rabin rounds, a
+tight distribution whose mean converges in a handful of trials — the mixture
+row characterizes the distribution a random operand induces, the conditioned
+row the cost a caller plans around. The extrema table extends both
+heavy-tailed operations to 8192 bits in 1024-bit steps on the M4
+(`bench/heavy_extended_hardy.md`): the isprime record that once reversed past
+2048 bits now rises monotonically through every width.
 
 Operation glossary (integer sizes are the operand bit width; field sizes are the
 degree of GF(2^m)):
@@ -85,7 +100,8 @@ degree of GF(2^m)):
 | `montsetup` | building a `MontgomeryCtx` (the one division and R² setup) |
 | `gcd` `gcdext` `modinv` `jacobi` | the number-theory family |
 | `sqrtmod` | `sqrt_mod` — a modular square root by Tonelli–Shanks (several exponentiations) |
-| `isprime` | `is_probable_prime` — trial-division sieve then Miller–Rabin |
+| `isprime` | `is_probable_prime` on a fully random operand — the outcome mixture; its extrema carry the variable-time signal, its p99 the one-round composite cost |
+| `isprime_true` | `is_probable_prime` on a random prime of the row's width — the outcome-conditioned accept cost: the sieve plus all twelve Miller–Rabin rounds, the cost a caller plans around |
 | `gf2m_*` | binary-field multiply / square / sqrt / pow / inverse |
 
 Three further rows measure exponentiation under fixed workloads taken from
@@ -237,19 +253,21 @@ The comparison sorts rump's primitives into groups, and the grouping is by
 Completed to date: double-digit Lehmer for the Euclid family (17–89× behind
 GMP reduced to 4–13× at 256–4096 bits), the division-free binary Jacobi
 (12–29× reduced to 2–12×), Toom-3 and Toom-4 multiplication, Half-GCD behind
-`gcd` (subquadratic above ~131 kbit), and Half-GCD behind `gcd_extended` and
-`mod_inverse` (above ~32 kbit). The section below measures the results at
-scale.
+`gcd` (subquadratic above ~131 kbit), Half-GCD behind `gcd_extended` and
+`mod_inverse` (above ~32 kbit), and the Lehmer-batched Jacobi carrying
+Möller's symbol state (above ~4 kbit; 181× reduced to 41× at 1 Mbit). The
+section below measures the results at scale.
 
 Remaining, in priority order:
 
-1. **Subquadratic `jacobi`.** The scale sweep shows it as the family's only
-   remaining quadratic curve: α ≈ 2.0, because its subtract-and-halve steps
-   admit no Lehmer batching, with a ratio to GMP of 76× at 256 kbit and 181×
-   at 1 Mbit. The algorithm is published: carry the symbol's low-bit state
-   through the Half-GCD transform (Brent and Zimmermann, *An O(M(n) log n)
-   algorithm for the Jacobi symbol*, ANTS-IX, 2010; GMP's `mpn_jacobi`
-   implements the same idea).
+1. **Half-GCD-threaded `jacobi`.** The symbol state and the quotient logging
+   are in place; what remains is threading them through the Half-GCD
+   recursion itself, whose every applied quotient is already materialized in
+   a Lehmer batch or a guarded division. That takes the symbol subquadratic
+   and closes the remaining 3.5× between `jacobi` and rump's own `gcd`
+   (published treatment: Brent and Zimmermann, *An O(M(n) log n) algorithm
+   for the Jacobi symbol*, ANTS-IX, 2010; GMP's `mpn_jacobi` implements the
+   left-to-right variant this codebase follows).
 2. **In-place `add`/`sub`.** The 2–15× ratios on the cheapest operations are
    allocation: a fresh `Vec` per call against GMP's in-place `mpn` writes.
    The absolute difference is tens of nanoseconds per call, which bounds the
@@ -267,7 +285,11 @@ Lehmer's O(n²) with O(M(n)·log n). `gcd_extended` and `mod_inverse` ride the
 same driver with the transform accumulated, and their crossover is lower,
 ~32 kbit (512 limbs), because Lehmer's extended form carries full-width
 signed cofactors through every batch while the driver folds that work into
-one matrix accumulation per round. This section measures the family from
+one matrix accumulation per round. `jacobi` dispatches at ~4 kbit (64 limbs)
+from the binary algorithm to a Lehmer-batched quotient sequence, with
+Möller's five-bit symbol state replaying each batch's applied quotients —
+still O(n²), but advancing ~35 certified quotients per full-width pass where
+the binary loop advances a few bits. This section measures the family from
 8 kbit to 1 Mbit on the M4:
 
 - **Three curves bend; one does not.** `gcd`, `gcd_extended`, and
@@ -275,26 +297,30 @@ one matrix accumulation per round. This section measures the family from
   fit table below), and the fits understate the change: each curve's lower
   range still runs Lehmer, with the subquadratic regime beginning only at
   its dispatch size.
-- **The ratios to GMP grow slowly for the Half-GCD functions and quadratically
-  for `jacobi`.** Across the sweep, `gcd` runs 4.1× → 12×, `mod_inverse`
-  8.3× → 16×, and `gcd_extended` 7.8× → 21×; the residual growth comes from
-  the multiplication ladder underneath — GMP's HGCD multiplies by FFT at
-  these sizes, rump's by Toom — plus Half-GCD's own constants. `jacobi`,
-  still quadratic, runs 30× at 32 kbit, 76× at 256 kbit, and 181× at 1 Mbit.
-- **The 181× decomposes into two measured factors.** GMP computes the Jacobi
-  symbol as a symbol-tracking variant of its subquadratic gcd and pays the
-  same price for both: 39.49 ms against 39.02 ms for gcd at 1 Mbit. rump
-  computes it by binary reciprocity — Θ(n) subtract-and-halve iterations,
-  each a full-width pass, 7.15 s at 1 Mbit — and these steps take no Lehmer
-  batching because each iteration's sign contribution depends on the current
-  values' low three bits, which a leading-digits batch does not carry. The
-  ratio therefore factors as (7153 ÷ 470) × (470 ÷ 39.5) = 15.2 × 11.9: the
-  first factor is the quadratic-versus-subquadratic gap between rump's
-  jacobi and rump's own gcd, the second is the Half-GCD constant and
-  Toom-versus-FFT gap itemized above. The Brent–Zimmermann algorithm removes
-  the first factor by carrying the low-bit state through the Half-GCD
-  transform, after which the symbol costs what gcd costs — as GMP's equal
-  timings demonstrate.
+- **The ratios to GMP grow slowly for the Half-GCD functions and
+  quadratically for `jacobi`.** Across the sweep, `gcd` runs 4.1× → 12×,
+  `mod_inverse` 8.3× → 16×, and `gcd_extended` 7.8× → 21×; the residual
+  growth comes from the multiplication ladder underneath — GMP's HGCD
+  multiplies by FFT at these sizes, rump's by Toom — plus Half-GCD's own
+  constants. `jacobi` on the batched engine runs 4.6× at 8 kbit, 15.6× at
+  256 kbit, and 41× at 1 Mbit — before the batching it reached 181×, and the
+  remaining growth is the quadratic-versus-subquadratic gap that Half-GCD
+  threading closes.
+- **The jacobi ratio decomposes into two measured factors.** GMP computes
+  the symbol as a symbol-tracking variant of its subquadratic gcd and pays
+  the same price for both: 39.49 ms against 39.02 ms for gcd at 1 Mbit.
+  rump's original binary engine — whose per-step sign contributions read the
+  current operands' low bits, information a leading-digits batch does not
+  carry — reached 7.15 s at 1 Mbit, a ratio of 181× factoring as
+  (7153 ÷ 470) × (470 ÷ 39.5) = 15.2 × 11.9: jacobi against rump's own gcd,
+  times the documented Half-GCD and Toom-versus-FFT gap. Möller's five-bit
+  symbol state removes the low-bits obstruction — Schönhage's identities
+  need only the quotient mod 4 — and the Lehmer-batched engine built on it
+  brings 1 Mbit to 1.62 s and the ratio to 41×, leaving a factor of 3.5
+  against rump's own gcd. That remainder is quadratic versus subquadratic:
+  threading the same state through the Half-GCD recursion, whose every
+  applied quotient is already materialized, closes it — after which the
+  symbol costs what gcd costs, as GMP's equal timings demonstrate.
 - **The GMP column states the goal:** α ≈ 1.5 across the whole family,
   achieved by running HGCD beneath every one of these operations. The
   remaining item is `jacobi`.
@@ -334,7 +360,10 @@ Two operations produce the large spreads:
 
 MD
 
-$PA extrema "M4=$M4"
+EXTREMA_MERGED="$(mktemp)"
+cat "$M4" "$M4_HEAVY_EXT" > "$EXTREMA_MERGED"
+$PA extrema "M4=$EXTREMA_MERGED"
+rm -f "$EXTREMA_MERGED"
 
 cat <<'MD'
 

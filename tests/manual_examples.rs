@@ -369,3 +369,33 @@ fn manual_panics_unsigned_underflow() {
 fn manual_panics_division_by_zero() {
     let _ = BigUint::from_u64(3).div_rem(&BigUint::zero());
 }
+
+#[test]
+fn manual_ordinary_code_sorting() {
+    /// Sort in place by repeated adjacent exchange — pedagogical, not fast.
+    fn bubble_sort(values: &mut [BigInt]) {
+        for pass in 1..values.len() {
+            for i in 0..values.len() - pass {
+                if values[i] > values[i + 1] {
+                    values.swap(i, i + 1);
+                }
+            }
+        }
+    }
+
+    // A signed value is built from an unsigned magnitude; negation is a method.
+    let big = |v: u64| BigInt::from_biguint(BigUint::from_u64(v));
+    let neg = |v: u64| big(v).negated();
+
+    // One operand wider than any machine word: 2^100 + 7.
+    let mut wide = BigUint::one();
+    wide.shl_bits(100);
+    let wide = BigInt::from_biguint(wide.add_ref(&BigUint::from_u64(7)));
+
+    let mut values = vec![big(251), neg(40), big(0), wide.clone(), neg(3), big(17)];
+    bubble_sort(&mut values);
+    assert_eq!(
+        values,
+        vec![neg(40), neg(3), big(0), big(17), big(251), wide]
+    );
+}

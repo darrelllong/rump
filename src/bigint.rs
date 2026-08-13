@@ -1755,6 +1755,30 @@ impl MontgomeryCtx {
     }
 }
 
+/// Sign-aware total order: every negative value is below zero, zero below
+/// every positive. Two positives compare by magnitude; two negatives compare
+/// by magnitude reversed. Consistent with `Eq` because representations are
+/// canonical — zero is exactly `(Sign::Zero, empty magnitude)`.
+impl Ord for BigInt {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self.sign, other.sign) {
+            (Sign::Negative, Sign::Negative) => other.magnitude.cmp(&self.magnitude),
+            (Sign::Negative, _) => Ordering::Less,
+            (_, Sign::Negative) => Ordering::Greater,
+            (Sign::Zero, Sign::Zero) => Ordering::Equal,
+            (Sign::Zero, Sign::Positive) => Ordering::Less,
+            (Sign::Positive, Sign::Zero) => Ordering::Greater,
+            (Sign::Positive, Sign::Positive) => self.magnitude.cmp(&other.magnitude),
+        }
+    }
+}
+
+impl PartialOrd for BigInt {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl Drop for BigUint {
     fn drop(&mut self) {
         // BigUint values may hold secrets — private exponents, prime

@@ -47,7 +47,21 @@ avoid: each trial must generate a fresh random prime modulus, which at 4096
 bits on the Pi dominates the session and leaves that cell's sample thin (its
 confidence-interval column discloses this). For both operations the interval
 converges slowly (means carry the `~` mark) and the extrema columns are the
-primary result.
+primary result. The prime-conditioned rows (`isprime_true`, and `sqrt_mod`
+throughout) carry one structural limit: every trial must first generate a
+random prime of the row's width, which beyond ~4 kbit costs tens of seconds
+per trial and bounds the session's trial count. On the M4, long trials also
+showed scheduling-dependent timing variance under background execution that
+short trials do not; conditioned cells whose samples did not meet the
+standard are omitted there, and the EPYC and Pi rows — spreads of 1.01–1.27
+across every width — carry the conditioned-cost result. The outcome-conditioned `isprime_true` row is the complement:
+on a prime, the cost is the sieve plus exactly twelve Miller–Rabin rounds, a
+tight distribution whose mean converges in a handful of trials — the mixture
+row characterizes the distribution a random operand induces, the conditioned
+row the cost a caller plans around. The extrema table extends both
+heavy-tailed operations to 8192 bits in 1024-bit steps on the M4
+(`bench/heavy_extended_hardy.md`): the isprime record that once reversed past
+2048 bits now rises monotonically through every width.
 
 Operation glossary (integer sizes are the operand bit width; field sizes are the
 degree of GF(2^m)):
@@ -61,7 +75,8 @@ degree of GF(2^m)):
 | `montsetup` | building a `MontgomeryCtx` (the one division and R² setup) |
 | `gcd` `gcdext` `modinv` `jacobi` | the number-theory family |
 | `sqrtmod` | `sqrt_mod` — a modular square root by Tonelli–Shanks (several exponentiations) |
-| `isprime` | `is_probable_prime` — trial-division sieve then Miller–Rabin |
+| `isprime` | `is_probable_prime` on a fully random operand — the outcome mixture; its extrema carry the variable-time signal, its p99 the one-round composite cost |
+| `isprime_true` | `is_probable_prime` on a random prime of the row's width — the outcome-conditioned accept cost: the sieve plus all twelve Miller–Rabin rounds, the cost a caller plans around |
 | `gf2m_*` | binary-field multiply / square / sqrt / pow / inverse |
 
 Three further rows measure exponentiation under fixed workloads taken from
@@ -126,10 +141,11 @@ extrema (see above).
 | `gcd` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.14 | 1.14 | 1.12 |
 | `gcdext` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.01 | 1.09 | 1.09 |
 | `modinv` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.00 | 1.07 | 1.07 |
-| `jacobi` | O(n²) binary | 1.60 | 1.66 | 1.62 |
+| `jacobi` | binary → Lehmer-batched quotients, O(n²) | 1.41 | 1.52 | 1.51 |
 | `modpow` | O(e·n²), e = 256 | 1.74 | 1.60 | 1.83 |
 | `sqrtmod` | O(n³) Tonelli–Shanks (input-dependent) | 2.60 | 2.72 | 1.07 |
-| `isprime` | O(k·n²) Miller–Rabin (input-dependent) | 2.03 | 1.97 | 2.56 |
+| `isprime` | mixture on random operands (input-dependent) | 2.03 | 1.97 | 2.56 |
+| `isprime_true` | twelve Miller–Rabin rounds: O(n·M(n)) | 2.29 | 2.64 | 2.80 |
 
 ## Cost by method
 
@@ -198,9 +214,9 @@ extrema (see above).
 | `modinv` | M4 | 4.7 µs | 16 µs | 32.4 µs | 79 µs |
 |  | EPYC | 10.6 µs | 42.8 µs | 93.4 µs | 211 µs |
 |  | Pi | 14.7 µs | 58.5 µs | 126 µs | 294 µs |
-| `jacobi` | M4 | 1.22 µs | 7.48 µs | 24.4 µs | 111 µs~ |
-|  | EPYC | 2.64 µs | 20.3 µs | 75.8 µs | 264 µs |
-|  | Pi | 3.81 µs | 30.1 µs | 101 µs | 346 µs |
+| `jacobi` | M4 | 1.22 µs | 7.48 µs | 24.4 µs | 57.9 µs |
+|  | EPYC | 2.64 µs | 20.3 µs | 75.8 µs | 165 µs |
+|  | Pi | 3.81 µs | 30.1 µs | 101 µs | 235 µs |
 | `modpow` | M4 | 11.8 µs | 97.9 µs | 350 µs | 1.53 ms |
 |  | EPYC | 32.5 µs | 209 µs | 736 µs | 2.82 ms |
 |  | Pi | 40.1 µs | 444 µs | 1.67 ms | 6.48 ms |
@@ -215,6 +231,9 @@ extrema (see above).
 | `isprime` | M4 | 4.91 µs~ | 29.9 µs~ | 217 µs~ | 1.41 ms~ |
 |  | EPYC | 3.25 µs~ | 276 µs~ | 203 µs~ | 969 µs~ |
 |  | Pi | 4.29 µs~ | 177 µs~ | 233 µs~ | 9.45 ms~ |
+| `isprime_true` | M4 | 444 µs | 9.31 ms | 54.1 ms~ | – |
+|  | EPYC | 327 µs | 9.54 ms | 66.5 ms | 511 ms |
+|  | Pi | 508 µs | 20.9 ms | 155 ms | 1.2 s |
 
 EPYC runs ~1.3–1.8× behind the M4 across the board (lower single-thread clock),
 and the Pi ~2–5× behind it (a small board core) — the same shapes, shifted up.
@@ -251,7 +270,7 @@ are in the tables above.
 | `gcd` | 2.07 µs / 486 ns / 4.3× | 9.7 µs / 2.37 µs / 4.1× | 20.9 µs / 5.25 µs / 4.0× | 49.1 µs / 11.8 µs / 4.1× |
 | `gcdext` | 6.2 µs / 662 ns / 9.4× | 20.9 µs / 2.78 µs / 7.5× | 42.3 µs / 6.32 µs / 6.7× | 107 µs / 15.5 µs / 6.9× |
 | `modinv` | 4.7 µs / 616 ns / 7.6× | 16 µs / 2.63 µs / 6.1× | 32.4 µs / 5.84 µs / 5.6× | 79 µs / 14 µs / 5.6× |
-| `jacobi` | 1.22 µs / 512 ns / 2.4× | 7.48 µs / 2.43 µs / 3.1× | 24.4 µs / 5.27 µs / 4.6× | 111 µs / 12 µs / 9.3× |
+| `jacobi` | 1.22 µs / 512 ns / 2.4× | 7.48 µs / 2.43 µs / 3.1× | 24.4 µs / 5.27 µs / 4.6× | 57.9 µs / 12 µs / 4.8× |
 
 ### EPYC
 
@@ -268,7 +287,7 @@ are in the tables above.
 | `gcd` | 6.11 µs / 787 ns / 7.8× | 30.6 µs / 3.67 µs / 8.3× | 66.3 µs / 8.34 µs / 7.9× | 146 µs / 20.6 µs / 7.1× |
 | `gcdext` | 13.7 µs / 1.05 µs / 13.0× | 52.7 µs / 4.53 µs / 11.7× | 123 µs / 11 µs / 11.1× | 279 µs / 30.5 µs / 9.1× |
 | `modinv` | 10.6 µs / 969 ns / 10.9× | 42.8 µs / 4.17 µs / 10.3× | 93.4 µs / 9.89 µs / 9.4× | 211 µs / 26.5 µs / 8.0× |
-| `jacobi` | 2.64 µs / 826 ns / 3.2× | 20.3 µs / 3.94 µs / 5.1× | 75.8 µs / 8.92 µs / 8.5× | 264 µs / 21.9 µs / 12.1× |
+| `jacobi` | 2.64 µs / 826 ns / 3.2× | 20.3 µs / 3.94 µs / 5.1× | 75.8 µs / 8.92 µs / 8.5× | 165 µs / 21.9 µs / 7.5× |
 
 ### Pi
 
@@ -285,7 +304,7 @@ are in the tables above.
 | `gcd` | 9.77 µs / 959 ns / 10.2× | 45.9 µs / 5.6 µs / 8.2× | 98.7 µs / 18.8 µs / 5.2× | 221 µs / 55.6 µs / 4.0× |
 | `gcdext` | 18 µs / 1.45 µs / 12.4× | 70.3 µs / 8.42 µs / 8.4× | 156 µs / 24.9 µs / 6.3× | 381 µs / 83.1 µs / 4.6× |
 | `modinv` | 14.7 µs / 1.3 µs / 11.3× | 58.5 µs / 7.21 µs / 8.1× | 126 µs / 21.2 µs / 6.0× | 294 µs / 70 µs / 4.2× |
-| `jacobi` | 3.81 µs / 1.43 µs / 2.7× | 30.1 µs / 5.85 µs / 5.1× | 101 µs / 15.6 µs / 6.5× | 346 µs / 46.4 µs / 7.5× |
+| `jacobi` | 3.81 µs / 1.43 µs / 2.7× | 30.1 µs / 5.85 µs / 5.1× | 101 µs / 15.6 µs / 6.5× | 235 µs / 46.4 µs / 5.1× |
 
 ### Interpretation
 
@@ -333,19 +352,21 @@ The comparison sorts rump's primitives into groups, and the grouping is by
 Completed to date: double-digit Lehmer for the Euclid family (17–89× behind
 GMP reduced to 4–13× at 256–4096 bits), the division-free binary Jacobi
 (12–29× reduced to 2–12×), Toom-3 and Toom-4 multiplication, Half-GCD behind
-`gcd` (subquadratic above ~131 kbit), and Half-GCD behind `gcd_extended` and
-`mod_inverse` (above ~32 kbit). The section below measures the results at
-scale.
+`gcd` (subquadratic above ~131 kbit), Half-GCD behind `gcd_extended` and
+`mod_inverse` (above ~32 kbit), and the Lehmer-batched Jacobi carrying
+Möller's symbol state (above ~4 kbit; 181× reduced to 41× at 1 Mbit). The
+section below measures the results at scale.
 
 Remaining, in priority order:
 
-1. **Subquadratic `jacobi`.** The scale sweep shows it as the family's only
-   remaining quadratic curve: α ≈ 2.0, because its subtract-and-halve steps
-   admit no Lehmer batching, with a ratio to GMP of 76× at 256 kbit and 181×
-   at 1 Mbit. The algorithm is published: carry the symbol's low-bit state
-   through the Half-GCD transform (Brent and Zimmermann, *An O(M(n) log n)
-   algorithm for the Jacobi symbol*, ANTS-IX, 2010; GMP's `mpn_jacobi`
-   implements the same idea).
+1. **Half-GCD-threaded `jacobi`.** The symbol state and the quotient logging
+   are in place; what remains is threading them through the Half-GCD
+   recursion itself, whose every applied quotient is already materialized in
+   a Lehmer batch or a guarded division. That takes the symbol subquadratic
+   and closes the remaining 3.5× between `jacobi` and rump's own `gcd`
+   (published treatment: Brent and Zimmermann, *An O(M(n) log n) algorithm
+   for the Jacobi symbol*, ANTS-IX, 2010; GMP's `mpn_jacobi` implements the
+   left-to-right variant this codebase follows).
 2. **In-place `add`/`sub`.** The 2–15× ratios on the cheapest operations are
    allocation: a fresh `Vec` per call against GMP's in-place `mpn` writes.
    The absolute difference is tens of nanoseconds per call, which bounds the
@@ -363,7 +384,11 @@ Lehmer's O(n²) with O(M(n)·log n). `gcd_extended` and `mod_inverse` ride the
 same driver with the transform accumulated, and their crossover is lower,
 ~32 kbit (512 limbs), because Lehmer's extended form carries full-width
 signed cofactors through every batch while the driver folds that work into
-one matrix accumulation per round. This section measures the family from
+one matrix accumulation per round. `jacobi` dispatches at ~4 kbit (64 limbs)
+from the binary algorithm to a Lehmer-batched quotient sequence, with
+Möller's five-bit symbol state replaying each batch's applied quotients —
+still O(n²), but advancing ~35 certified quotients per full-width pass where
+the binary loop advances a few bits. This section measures the family from
 8 kbit to 1 Mbit on the M4:
 
 - **Three curves bend; one does not.** `gcd`, `gcd_extended`, and
@@ -371,26 +396,30 @@ one matrix accumulation per round. This section measures the family from
   fit table below), and the fits understate the change: each curve's lower
   range still runs Lehmer, with the subquadratic regime beginning only at
   its dispatch size.
-- **The ratios to GMP grow slowly for the Half-GCD functions and quadratically
-  for `jacobi`.** Across the sweep, `gcd` runs 4.1× → 12×, `mod_inverse`
-  8.3× → 16×, and `gcd_extended` 7.8× → 21×; the residual growth comes from
-  the multiplication ladder underneath — GMP's HGCD multiplies by FFT at
-  these sizes, rump's by Toom — plus Half-GCD's own constants. `jacobi`,
-  still quadratic, runs 30× at 32 kbit, 76× at 256 kbit, and 181× at 1 Mbit.
-- **The 181× decomposes into two measured factors.** GMP computes the Jacobi
-  symbol as a symbol-tracking variant of its subquadratic gcd and pays the
-  same price for both: 39.49 ms against 39.02 ms for gcd at 1 Mbit. rump
-  computes it by binary reciprocity — Θ(n) subtract-and-halve iterations,
-  each a full-width pass, 7.15 s at 1 Mbit — and these steps take no Lehmer
-  batching because each iteration's sign contribution depends on the current
-  values' low three bits, which a leading-digits batch does not carry. The
-  ratio therefore factors as (7153 ÷ 470) × (470 ÷ 39.5) = 15.2 × 11.9: the
-  first factor is the quadratic-versus-subquadratic gap between rump's
-  jacobi and rump's own gcd, the second is the Half-GCD constant and
-  Toom-versus-FFT gap itemized above. The Brent–Zimmermann algorithm removes
-  the first factor by carrying the low-bit state through the Half-GCD
-  transform, after which the symbol costs what gcd costs — as GMP's equal
-  timings demonstrate.
+- **The ratios to GMP grow slowly for the Half-GCD functions and
+  quadratically for `jacobi`.** Across the sweep, `gcd` runs 4.1× → 12×,
+  `mod_inverse` 8.3× → 16×, and `gcd_extended` 7.8× → 21×; the residual
+  growth comes from the multiplication ladder underneath — GMP's HGCD
+  multiplies by FFT at these sizes, rump's by Toom — plus Half-GCD's own
+  constants. `jacobi` on the batched engine runs 4.6× at 8 kbit, 15.6× at
+  256 kbit, and 41× at 1 Mbit — before the batching it reached 181×, and the
+  remaining growth is the quadratic-versus-subquadratic gap that Half-GCD
+  threading closes.
+- **The jacobi ratio decomposes into two measured factors.** GMP computes
+  the symbol as a symbol-tracking variant of its subquadratic gcd and pays
+  the same price for both: 39.49 ms against 39.02 ms for gcd at 1 Mbit.
+  rump's original binary engine — whose per-step sign contributions read the
+  current operands' low bits, information a leading-digits batch does not
+  carry — reached 7.15 s at 1 Mbit, a ratio of 181× factoring as
+  (7153 ÷ 470) × (470 ÷ 39.5) = 15.2 × 11.9: jacobi against rump's own gcd,
+  times the documented Half-GCD and Toom-versus-FFT gap. Möller's five-bit
+  symbol state removes the low-bits obstruction — Schönhage's identities
+  need only the quotient mod 4 — and the Lehmer-batched engine built on it
+  brings 1 Mbit to 1.62 s and the ratio to 41×, leaving a factor of 3.5
+  against rump's own gcd. That remainder is quadratic versus subquadratic:
+  threading the same state through the Half-GCD recursion, whose every
+  applied quotient is already materialized, closes it — after which the
+  symbol costs what gcd costs, as GMP's equal timings demonstrate.
 - **The GMP column states the goal:** α ≈ 1.5 across the whole family,
   achieved by running HGCD beneath every one of these operations. The
   remaining item is `jacobi`.
@@ -400,20 +429,20 @@ one matrix accumulation per round. This section measures the family from
 | `gcd` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.72 | 1.50 |
 | `gcdext` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.73 | 1.52 |
 | `modinv` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.73 | 1.53 |
-| `jacobi` | O(n²) binary | 1.99 | 1.50 |
+| `jacobi` | binary → Lehmer-batched quotients, O(n²) | 1.74 | 1.50 |
 
 Rows are bit widths; each cell is rump time / GMP time / ratio.
 
 | bits | `gcd` | `gcdext` | `modinv` | `jacobi` |
 |---|---|---|---|---|
-| 8kb | 121 µs / 29.7 µs / 4.1× | 294 µs / 43.4 µs / 6.8× | 215 µs / 38.2 µs / 5.6× | 455 µs / 29.4 µs / 15.5× |
-| 16kb | 344 µs / 81.6 µs / 4.2× | 923 µs / 136 µs / 6.8× | 650 µs / 118 µs / 5.5× | 1.81 ms / 80.7 µs / 22.4× |
-| 32kb | 1.1 ms / 238 µs / 4.6× | 2.8 ms / 361 µs / 7.8× | 2.6 ms / 313 µs / 8.3× | 6.98 ms / 235 µs / 29.7× |
-| 64kb | 3.86 ms / 716 µs / 5.4× | 8.59 ms / 1.16 ms / 7.4× | 7.48 ms / 1.01 ms / 7.4× | 27.9 ms / 707 µs / 39.6× |
-| 128kb | 14.1 ms / 2.18 ms / 6.5× | 28.8 ms / 3.48 ms / 8.3× | 23.1 ms / 3.13 ms / 7.4× | 111 ms / 2.19 ms / 50.9× |
-| 256kb | 44.3 ms / 5.92 ms / 7.5× | 101 ms / 9.52 ms / 10.6× | 77.3 ms / 8.5 ms / 9.1× | 449 ms / 5.91 ms / 76.1× |
-| 512kb | 143 ms / 15.8 ms / 9.0× | 367 ms / 26.1 ms / 14.0× | 273 ms / 23.9 ms / 11.4× | 1.8 s / 15.8 ms / 113.6× |
-| 1024kb | 470 ms / 39 ms / 12.0× | 1.37 s / 65.7 ms / 20.8× | 988 ms / 61 ms / 16.2× | 7.15 s / 39.5 ms / 181.2× |
+| 8kb | 121 µs / 29.7 µs / 4.1× | 294 µs / 43.4 µs / 6.8× | 215 µs / 38.2 µs / 5.6× | 396 µs / 29.4 µs / 13.4× |
+| 16kb | 344 µs / 81.6 µs / 4.2× | 923 µs / 136 µs / 6.8× | 650 µs / 118 µs / 5.5× | 987 µs / 80.7 µs / 12.2× |
+| 32kb | 1.1 ms / 238 µs / 4.6× | 2.8 ms / 361 µs / 7.8× | 2.6 ms / 313 µs / 8.3× | 2.46 ms / 235 µs / 10.4× |
+| 64kb | 3.86 ms / 716 µs / 5.4× | 8.59 ms / 1.16 ms / 7.4× | 7.48 ms / 1.01 ms / 7.4× | 6.72 ms / 707 µs / 9.5× |
+| 128kb | 14.1 ms / 2.18 ms / 6.5× | 28.8 ms / 3.48 ms / 8.3× | 23.1 ms / 3.13 ms / 7.4× | 33.6 ms / 2.19 ms / 15.4× |
+| 256kb | 44.3 ms / 5.92 ms / 7.5× | 101 ms / 9.52 ms / 10.6× | 77.3 ms / 8.5 ms / 9.1× | 92.2 ms / 5.91 ms / 15.6× |
+| 512kb | 143 ms / 15.8 ms / 9.0× | 367 ms / 26.1 ms / 14.0× | 273 ms / 23.9 ms / 11.4× | 440 ms / 15.8 ms / 27.8× |
+| 1024kb | 470 ms / 39 ms / 12.0× | 1.37 s / 65.7 ms / 20.8× | 988 ms / 61 ms / 16.2× | 1.62 s / 39.5 ms / 41.1× |
 
 ![gcd at scale](assets/scaling-gcd-at-scale.svg)
 
@@ -440,12 +469,18 @@ Two operations produce the large spreads:
 |  | 1024 | 37.2 ns | 80.8 ns | 411 µs | 4.83 ms | 129,600 |
 |  | 2048 | 64.9 ns | 144 ns | 2.89 ms | 34.3 ms | 528,243 |
 |  | 4096 | 133 ns | 256 ns | 23.9 ms | 284 ms | 2,143,351 |
+|  | 5120 | 159 ns | 412 ns | 47 ms | 52.3 ms | 328,767 |
+|  | 6144 | 198 ns | 509 ns | 82.6 ms | 984 ms | 4,963,074 |
+|  | 7168 | 219 ns | 590 ns | 131 ms | 1.56 s | 7,140,082 |
+|  | 8192 | 280 ns | 438 ns | 203 ms | 210 ms | 750,826 |
 | `sqrtmod` | 256 | 1.07 µs | 1.38 µs | 48.8 µs | 77.1 µs | 72.2 |
 |  | 1024 | 6.97 µs | 386 µs | 1.3 ms | 1.71 ms | 245.8 |
 |  | 2048 | 23.3 µs | 2.81 ms | 9.86 ms | 12.7 ms | 543.2 |
 |  | 4096 | 104 µs | 107 µs | 71.8 ms | 71.9 ms | 694.4 |
+|  | 5120 | 168 µs | 176 µs | 142 ms | 142 ms | 847.6 |
+|  | 6144 | 247 µs | 81.6 ms | 246 ms | 249 ms | 1,008 |
 
-The remaining 78 rows — every other operation and size — span **1.0–3.2×**: their cost is set by operand width, not operand value.
+The remaining 81 rows — every other operation and size — span **1.0–3.4×**: their cost is set by operand width, not operand value.
 
 ![variable-time scaling](assets/scaling-variable-time.svg)
 

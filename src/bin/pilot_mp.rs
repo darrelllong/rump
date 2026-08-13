@@ -83,9 +83,10 @@ struct IntPool {
     /// scaling-sweep sizes (up to a million bits) would swamp a cheap op's
     /// measurement with pool construction.
     mont: Option<MontState>,
-    /// A random probable prime, built only for `sqrtmod`: prime density thins
-    /// as sizes grow, and hunting one beyond a few thousand bits costs minutes
-    /// — unpayable per pilot trial, and pointless for every other op.
+    /// A random probable prime, built only for the ops that read one
+    /// (`sqrtmod`, `isprime_true`): prime density thins as sizes grow, and
+    /// hunting one beyond a few thousand bits costs seconds per trial —
+    /// unpayable for every other op.
     prime: Option<BigUint>,
     /// Exponent pinned at 2^16 + 1 — two set bits, so the ladder is sixteen
     /// squarings and one multiply. This is the exponent floor: the row
@@ -134,8 +135,8 @@ impl IntPool {
             let b_mont = ctx.encode(&b);
             MontState { ctx, a_mont, b_mont }
         });
-        // A prime near a fresh random point, for sqrt_mod.
-        let prime = (op == "sqrtmod").then(|| {
+        // A prime near a fresh random point, for the prime-conditioned ops.
+        let prime = matches!(op, "sqrtmod" | "isprime_true").then(|| {
             let mut candidate = rng.odd(bits);
             while !is_probable_prime(&candidate) {
                 candidate = candidate.add_ref(&BigUint::from_u64(2));
@@ -267,6 +268,13 @@ fn int_op(name: &str) -> Option<fn(&IntPool)> {
         "isprime" => |p| {
             black_box(is_probable_prime(&p.a));
         },
+        "isprime_true" => |p| {
+            // The outcome-conditioned cost: a prime pays the sieve plus all
+            // twelve Miller-Rabin rounds. On a fully random operand the mean
+            // is dominated by trivial rejections; this row measures the cost
+            // a caller plans around.
+            black_box(is_probable_prime(p.prime()));
+        },
         _ => return None,
     })
 }
@@ -313,6 +321,7 @@ const INT_OPS: &[&str] = &[
     "jacobi",
     "sqrtmod",
     "isprime",
+    "isprime_true",
 ];
 
 /// (degree, taps) for two representative FIPS binary fields.

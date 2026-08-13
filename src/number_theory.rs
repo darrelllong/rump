@@ -60,10 +60,21 @@ fn leading_i128(limbs: &[u64], shift: usize) -> i128 {
 ///
 /// Signs live in the entries, so `m00·u + m01·v` and `m10·u + m11·v` reproduce
 /// the post-step operands directly, both provably non-negative.
-fn lehmer_transform(u_hat: i128, v_hat: i128) -> (i128, i128, i128, i128) {
+fn lehmer_transform(
+    u_hat: i128,
+    v_hat: i128,
+    mut quotients: Option<&mut QuotientLog>,
+) -> (i128, i128, i128, i128) {
     let (mut m00, mut m01, mut m10, mut m11) = (1i128, 0i128, 0i128, 1i128);
     let (mut u, mut v) = (u_hat, v_hat);
     loop {
+        // A full log ends the batch: every logged quotient must correspond to
+        // a committed matrix step, so an unloggable step is not taken.
+        if let Some(log) = quotients.as_deref_mut() {
+            if log.len == log.q_mod_4.len() {
+                break;
+            }
+        }
         // The corrected denominators bracket the true quotient; both must stay
         // positive for the bracket to hold.
         let (denom_low, denom_high) = (v + m10, v + m11);
@@ -92,8 +103,28 @@ fn lehmer_transform(u_hat: i128, v_hat: i128) -> (i128, i128, i128, i128) {
         (m00, m10) = (m10, new_m10);
         (m01, m11) = (m11, new_m11);
         (u, v) = (v, u - q_v);
+        if let Some(log) = quotients.as_deref_mut() {
+            log.q_mod_4[log.len] = (q & 3) as u8;
+            log.len += 1;
+        }
     }
     (m00, m01, m10, m11)
+}
+
+/// The applied-quotient log of one Lehmer batch: each entry a quotient's low
+/// two bits, in application order — what the Jacobi state replays when the
+/// batch commits. Sized for the longest possible batch: all-ones quotients
+/// advance the leading digits along the Fibonacci sequence, and F₁₈₀ already
+/// exceeds 2¹²⁴, so 184 entries cannot be filled by a 124-bit window.
+struct QuotientLog {
+    q_mod_4: [u8; 184],
+    len: usize,
+}
+
+impl QuotientLog {
+    fn new() -> Self {
+        Self { q_mod_4: [0; 184], len: 0 }
+    }
 }
 
 /// Aligned 124-bit leading digits of `a >= b`, both non-zero: the same window
@@ -345,11 +376,6 @@ impl JacobiState {
     fn update(&mut self, d: u8, q_mod_4: u8) {
         debug_assert!(self.0 < 26 && d < 2 && q_mod_4 < 4);
         self.0 = JACOBI_TABLE[((self.0 as usize) << 3) | ((d as usize) << 2) | q_mod_4 as usize];
-    }
-
-    /// Whether the `a` slot currently holds the odd (denominator) side.
-    fn a_is_denominator(&self) -> bool {
-        (self.0 >> 1) >= 8
     }
 
     /// Read out the symbol once the pair has reached `(1, 0)` or `(0, 1)`.
@@ -608,7 +634,7 @@ fn hgcd_base(a: &BigUint, b: &BigUint, s: usize) -> (Mat2, BigUint, BigUint) {
             let a_is_larger = aa >= bb;
             let (hi, lo) = if a_is_larger { (&aa, &bb) } else { (&bb, &aa) };
             let (u_hat, v_hat) = leading_pair(hi, lo);
-            let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat);
+            let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, None);
             // m01 == 0 means the digits pinned no quotient — the pair is too
             // lopsided for its leading windows to overlap — and division is
             // the only way forward.
@@ -926,7 +952,7 @@ fn gcd_lehmer(lhs: &BigUint, rhs: &BigUint) -> BigUint {
             continue;
         }
         let (u_hat, v_hat) = leading_pair(&a, &b);
-        let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat);
+        let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, None);
         if m01 == 0 {
             // The leading digits pinned no step; take one full division step.
             let remainder = a.modulo(&b);
@@ -1007,7 +1033,7 @@ fn gcd_extended_lehmer(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
         // r0 >= r1, so the 124-bit leading digits are aligned and in range.
         if n >= 2 && r0.limbs().len() == n && r0 >= r1 {
             let (u_hat, v_hat) = leading_pair(&r0, &r1);
-            let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat);
+            let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, None);
             if m01 != 0 {
                 let next_r0 = combine_unsigned(m00, &r0, m01, &r1);
                 let next_r1 = combine_unsigned(m10, &r0, m11, &r1);
@@ -1083,9 +1109,28 @@ pub fn jacobi(a: &BigUint, n: &BigUint) -> Option<i8> {
     if n.is_zero() || !n.is_odd() {
         return None;
     }
+    let reduced = a.modulo(n);
+    if n.limbs().len().min(reduced.limbs().len()) >= JACOBI_LEHMER_THRESHOLD_LIMBS {
+        return Some(jacobi_lehmer(reduced, n.clone()));
+    }
+    jacobi_binary(reduced, n.clone())
+}
 
-    let mut a = a.modulo(n);
-    let mut n = n.clone();
+/// Below this many limbs in the smaller operand, [`jacobi`] runs the binary
+/// algorithm, whose shift-and-subtract steps are cheapest at small sizes; at
+/// or above it, the Lehmer-batched quotient sequence, which advances by ~35
+/// certified quotients per full-width pass where the binary loop advances by
+/// a few bits. Measured on M4: a tie near 32 limbs, the batched engine 1.8×
+/// ahead at 64 and 5.5× at 512, the gap compounding with size
+/// (PERFORMANCE.md). Correctness does not depend on the value — the suite
+/// validates with this set to 2, forcing every size through the new engine.
+const JACOBI_LEHMER_THRESHOLD_LIMBS: usize = 64;
+
+/// [`jacobi`]'s below-crossover engine: binary quadratic reciprocity, taking
+/// `a` already reduced modulo the odd `n`.
+fn jacobi_binary(reduced: BigUint, n: BigUint) -> Option<i8> {
+    let mut a = reduced;
+    let mut n = n;
     let mut sign = 1i8;
 
     while !a.is_zero() {
@@ -1123,6 +1168,79 @@ pub fn jacobi(a: &BigUint, n: &BigUint) -> Option<i8> {
         Some(sign)
     } else {
         Some(0)
+    }
+}
+
+/// [`jacobi`]'s above-crossover engine: the Euclidean quotient sequence with
+/// Lehmer batching, the [`JacobiState`] replaying each batch's applied
+/// quotients. Takes `x` already reduced modulo the odd `y`.
+///
+/// The state's two slots are fixed to `x` and `y`; nothing is ever swapped.
+/// A batch of `k` swapping remainder steps ends with the remainder pair
+/// distributed by parity — the slot that held `r₀` (the larger input) holds
+/// the even-indexed member of `(r_k, r_{k+1})` — and the replayed direction
+/// flags alternate from whichever slot was reduced first. Every quotient the
+/// state sees is a quotient actually applied, which is what Schönhage's
+/// identities require.
+fn jacobi_lehmer(x: BigUint, y: BigUint) -> i8 {
+    debug_assert!(y.is_odd() && x < y);
+    if x.is_zero() {
+        return i8::from(y.is_one());
+    }
+    let mut x = x;
+    let mut y = y;
+    let mut state = JacobiState::new((x.limbs()[0] & 3) as u8, (y.limbs()[0] & 3) as u8);
+    loop {
+        if x.is_zero() {
+            return if y.is_one() { state.finish() } else { 0 };
+        }
+        if y.is_zero() {
+            return if x.is_one() { state.finish() } else { 0 };
+        }
+        let x_is_hi = x >= y;
+        let (hi, lo) = if x_is_hi { (&x, &y) } else { (&y, &x) };
+        // Batch only when the aligned leading digits can certify quotients:
+        // both multi-limb and of equal length.
+        let n_limbs = hi.limbs().len();
+        if n_limbs >= 2 && lo.limbs().len() == n_limbs {
+            let (u_hat, v_hat) = leading_pair(hi, lo);
+            let mut log = QuotientLog::new();
+            let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, Some(&mut log));
+            if m01 != 0 {
+                let next_hi = combine_unsigned(m00, hi, m01, lo);
+                let next_lo = combine_unsigned(m10, hi, m11, lo);
+                // Replay the batch: the first step reduced the slot holding
+                // the larger value, and swapping steps alternate thereafter.
+                let d0 = u8::from(x_is_hi);
+                for i in 0..log.len {
+                    let d = if i % 2 == 0 { d0 } else { 1 - d0 };
+                    state.update(d, log.q_mod_4[i]);
+                }
+                // Parity places the results: the slot that held r₀ now holds
+                // the even-indexed remainder of the final pair.
+                let even_steps = log.len.is_multiple_of(2);
+                let hi_slot_gets = if even_steps { &next_hi } else { &next_lo };
+                let lo_slot_gets = if even_steps { &next_lo } else { &next_hi };
+                if x_is_hi {
+                    x = hi_slot_gets.clone();
+                    y = lo_slot_gets.clone();
+                } else {
+                    y = hi_slot_gets.clone();
+                    x = lo_slot_gets.clone();
+                }
+                continue;
+            }
+        }
+        // The digits certified nothing (unequal lengths, or a boundary case):
+        // one exact division step, reducing the larger slot in place.
+        let d = u8::from(x_is_hi);
+        let (q, r) = if x_is_hi { x.div_rem(&y) } else { y.div_rem(&x) };
+        state.update(d, (q.limbs().first().copied().unwrap_or(0) & 3) as u8);
+        if x_is_hi {
+            x = r;
+        } else {
+            y = r;
+        }
     }
 }
 
@@ -1243,7 +1361,7 @@ pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
         let m = r1.limbs().len();
         if m >= 2 && r0.limbs().len() == m && r0 >= r1 {
             let (u_hat, v_hat) = leading_pair(&r0, &r1);
-            let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat);
+            let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, None);
             if m01 != 0 {
                 let next_r0 = combine_unsigned(m00, &r0, m01, &r1);
                 let next_r1 = combine_unsigned(m10, &r0, m11, &r1);
@@ -1673,6 +1791,44 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "timing probe for the binary/Lehmer jacobi crossover; run with --ignored"]
+    fn jacobi_crossover_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let mut rng = SplitMix64 { state: 0x7ac0_b1de_ba7c_4ed5 };
+        eprintln!("{:>7} {:>12} {:>12}  winner", "limbs", "binary_ms", "lehmer_ms");
+        for &limbs in &[2usize, 4, 8, 16, 32, 64, 128, 256, 512] {
+            let bits = limbs * 64;
+            let mut n = draw_below(&mut rng, &pow2(bits));
+            n.set_bit(bits - 1);
+            if !n.is_odd() {
+                n = n.add_ref(&BigUint::one());
+            }
+            let a = draw_below(&mut rng, &pow2(bits)).modulo(&n);
+            let reps = (512 / limbs).max(2);
+            let time = |f: &dyn Fn()| {
+                let mut best = f64::INFINITY;
+                for _ in 0..3 {
+                    let t0 = Instant::now();
+                    for _ in 0..reps {
+                        f();
+                    }
+                    best = best.min(t0.elapsed().as_secs_f64() / reps as f64 * 1e3);
+                }
+                best
+            };
+            let bin = time(&|| {
+                black_box(super::jacobi_binary(a.clone(), n.clone()));
+            });
+            let leh = time(&|| {
+                black_box(super::jacobi_lehmer(a.clone(), n.clone()));
+            });
+            let winner = if bin <= leh { "binary" } else { "lehmer" };
+            eprintln!("{limbs:7} {bin:12.4} {leh:12.4}  {winner}");
+        }
+    }
+
+    #[test]
     fn jacobi_table_matches_gmp() {
         // GMP's shipped jacobitab.h, as produced by Möller's gen-jacobitab.c —
         // an independently generated cross-check of the compile-time
@@ -1696,35 +1852,56 @@ mod tests {
         assert_eq!(super::JACOBI_TABLE, GMP_TABLE);
     }
 
+    /// The GMP-vector-grounded binary implementation as an oracle, on the
+    /// same contract as the public function.
+    fn jacobi_binary_oracle(a: &BigUint, n: &BigUint) -> Option<i8> {
+        if n.is_zero() || !n.is_odd() {
+            return None;
+        }
+        super::jacobi_binary(a.modulo(n), n.clone())
+    }
+
     #[test]
-    fn jacobi_state_machine_matches_jacobi() {
-        use super::jacobi;
-        // Exhaustive small cases: every (a, odd n) with n < 200.
+    fn jacobi_state_machine_matches_binary() {
+        // Exhaustive small cases: every (a, odd n) with n < 200, for both the
+        // plain quotient driver and the Lehmer-batched engine.
         for n_small in (1u64..200).step_by(2) {
             let n = BigUint::from_u64(n_small);
             for a_small in 0..n_small.min(60) {
                 let a = BigUint::from_u64(a_small);
+                let oracle = jacobi_binary_oracle(&a, &n);
                 assert_eq!(
                     jacobi_by_quotient_state(&a, &n),
-                    jacobi(&a, &n),
-                    "state machine diverged at ({a_small}/{n_small})"
+                    oracle,
+                    "quotient driver diverged at ({a_small}/{n_small})"
+                );
+                assert_eq!(
+                    super::jacobi(&a, &n),
+                    oracle,
+                    "dispatched jacobi diverged at ({a_small}/{n_small})"
                 );
             }
         }
-        // Random sweep across sizes, including the GMP-vector-backed public
-        // implementation as the oracle.
+        // Random sweep across sizes; the development threshold routes the
+        // public function through the Lehmer-batched engine everywhere.
         let mut rng = SplitMix64 { state: 0x0dd5_ba11_5eed_c0de };
-        for &bits in &[16usize, 64, 128, 256, 777, 1024, 2048] {
+        for &bits in &[16usize, 64, 128, 256, 777, 1024, 2048, 4096] {
             for _ in 0..30 {
                 let mut n = draw_below(&mut rng, &pow2(bits));
                 if !n.is_odd() {
                     n = n.add_ref(&BigUint::one());
                 }
                 let a = draw_below(&mut rng, &pow2(bits));
+                let oracle = jacobi_binary_oracle(&a, &n);
                 assert_eq!(
                     jacobi_by_quotient_state(&a, &n),
-                    jacobi(&a, &n),
-                    "state machine diverged at {bits} bits"
+                    oracle,
+                    "quotient driver diverged at {bits} bits"
+                );
+                assert_eq!(
+                    super::jacobi(&a, &n),
+                    oracle,
+                    "dispatched jacobi diverged at {bits} bits"
                 );
             }
         }
