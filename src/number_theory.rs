@@ -220,12 +220,439 @@ fn combine_signed(c0: i128, x0: &BigInt, c1: i128, x1: &BigInt) -> BigInt {
     }
 }
 
+// ─── Half-GCD machinery ─────────────────────────────────────────────────────
+//
+// Euclid's quotient sequence is the continued-fraction expansion of a/b, and a
+// ratio is pinned by its leading bits: the top halves of a and b already
+// determine the first half of the quotient sequence. Half-GCD lives on that
+// fact. It computes, from the top halves alone, the 2×2 matrix a half-run of
+// Euclid would apply, applies it to the full operands in a few multiplications,
+// and finds that matrix by recursing on the halves themselves — so reduction
+// costs O(M(n)·log n), where Lehmer, re-reading the leading digits after every
+// 124-bit batch, stays O(n²).
+//
+// The treachery is at the boundary. "These quotients are what full-width
+// Euclid would do" holds for a half-run's beginning but can fail for its last
+// step or two — the discarded low bits can tip a quotient — so every reduction
+// here is size-guarded: it stops strictly above the certification boundary,
+// and short runs of guarded full-width steps repair each splice. Möller
+// exhibits a concrete pair computed wrong without that repair (§6.3); his
+// Figure 4 is the algorithm implemented here, and GMP's mpn_hgcd is the same
+// design.
+
+/// The 2×2 integer matrix of a partial Euclidean reduction, acting on columns:
+/// each row combines `(a, b)` into a later remainder of the sequence. Later
+/// remainders are alternating-sign combinations of earlier ones, so the
+/// entries are signed even though every remainder they produce is not.
+struct Mat2 {
+    m00: BigInt,
+    m01: BigInt,
+    m10: BigInt,
+    m11: BigInt,
+}
+
+impl Mat2 {
+    fn identity() -> Self {
+        let one = || BigInt::from_biguint(BigUint::one());
+        Self { m00: one(), m01: BigInt::zero(), m10: BigInt::zero(), m11: one() }
+    }
+
+    /// The matrix product `self · other`.
+    fn compose(&self, other: &Self) -> Self {
+        Self {
+            m00: self.m00.mul_ref(&other.m00).add_ref(&self.m01.mul_ref(&other.m10)),
+            m01: self.m00.mul_ref(&other.m01).add_ref(&self.m01.mul_ref(&other.m11)),
+            m10: self.m10.mul_ref(&other.m00).add_ref(&self.m11.mul_ref(&other.m10)),
+            m11: self.m10.mul_ref(&other.m01).add_ref(&self.m11.mul_ref(&other.m11)),
+        }
+    }
+
+    /// Apply to a non-negative column `(a, b)`, returning `(m00·a + m01·b,
+    /// m10·a + m11·b)` — both non-negative when the transform is valid for the
+    /// pair (used by the invariant tests; the hot path is [`hgcd_adjust`]).
+    #[cfg(test)]
+    fn apply(&self, a: &BigUint, b: &BigUint) -> (BigUint, BigUint) {
+        let combine = |r: &BigInt, s: &BigInt| {
+            let sum = r.mul_biguint_ref(a).add_ref(&s.mul_biguint_ref(b));
+            debug_assert!(
+                sum.sign() != Sign::Negative,
+                "Half-GCD transform keeps the pair non-negative"
+            );
+            sum.magnitude().clone()
+        };
+        (combine(&self.m00, &self.m01), combine(&self.m10, &self.m11))
+    }
+
+    /// Fold in the non-swapping Euclid step `a ← a − q·b` (used when `a > b`):
+    /// left-multiply the transform by `[[1, −q], [0, 1]]`, i.e. `row0 −= q·row1`.
+    fn reduce_top(&self, q: &BigUint) -> Self {
+        Self {
+            m00: self.m00.sub_ref(&self.m10.mul_biguint_ref(q)),
+            m01: self.m01.sub_ref(&self.m11.mul_biguint_ref(q)),
+            m10: self.m10.clone(),
+            m11: self.m11.clone(),
+        }
+    }
+
+    /// Fold in the non-swapping Euclid step `b ← b − q·a` (used when `b > a`):
+    /// left-multiply by `[[1, 0], [−q, 1]]`, i.e. `row1 −= q·row0`.
+    fn reduce_bottom(&self, q: &BigUint) -> Self {
+        Self {
+            m00: self.m00.clone(),
+            m01: self.m01.clone(),
+            m10: self.m10.sub_ref(&self.m00.mul_biguint_ref(q)),
+            m11: self.m11.sub_ref(&self.m01.mul_biguint_ref(q)),
+        }
+    }
+}
+
+/// `x >> bits`, out of place.
+fn shr(x: &BigUint, bits: usize) -> BigUint {
+    let mut y = x.clone();
+    y.shr_bits(bits);
+    y
+}
+
+/// `#(a, b)` — bit-size of the larger element.
+fn pair_size(a: &BigUint, b: &BigUint) -> usize {
+    a.bits().max(b.bits())
+}
+
+/// Möller's underlined `#(a, b)` — bit-size of the *smaller* element. The
+/// distinction matters: hgcd's precondition and both of its recursion guards
+/// are conditions on the smaller element, and reading them as the larger is
+/// exactly the mistake that produces transforms invalid for the full operands.
+fn pair_min_size(a: &BigUint, b: &BigUint) -> usize {
+    a.bits().min(b.bits())
+}
+
+/// Splice the low bits back after a recursion on the top halves. `T` is
+/// linear, so applying it to `a = 2^p·(a≫p) + (a mod 2^p)` splits into the
+/// part the sub-call already computed and the part it never saw:
+/// `T·(a, b) = 2^p·(α, β) + T·(a mod 2^p, b mod 2^p)` — Möller's Equation 4.
+/// Using the right-hand side costs a matrix–vector product on `p`-bit pieces
+/// instead of full-width ones, which is most of the reason the recursion is
+/// cheap.
+///
+/// Each spliced total is positive even though the matrix term alone need not
+/// be: the sub-call left `α, β` above its boundary, so the shifted term
+/// exceeds `2^{p+s}`, while the correction is capped below it by the entry
+/// bounds of `T` (his Lemma 6, the size analysis behind this function). Hence
+/// signed arithmetic inside, unsigned out.
+fn hgcd_adjust(
+    t: &Mat2,
+    alpha: &BigUint,
+    beta: &BigUint,
+    a: &BigUint,
+    b: &BigUint,
+    p: usize,
+) -> (BigUint, BigUint) {
+    let a_low = a.low_bits(p);
+    let b_low = b.low_bits(p);
+    let attach = |high: &BigUint, r: &BigInt, s: &BigInt| {
+        let mut shifted = high.clone();
+        shifted.shl_bits(p);
+        let sum = BigInt::from_biguint(shifted)
+            .add_ref(&r.mul_biguint_ref(&a_low))
+            .add_ref(&s.mul_biguint_ref(&b_low));
+        debug_assert!(
+            sum.sign() == Sign::Positive,
+            "adjusted pair stays positive (Möller Lemma 6)"
+        );
+        sum.magnitude().clone()
+    };
+    (
+        attach(alpha, &t.m00, &t.m01),
+        attach(beta, &t.m10, &t.m11),
+    )
+}
+
+/// `#(a − b)` — bit-size of the absolute difference.
+fn abs_diff_bits(a: &BigUint, b: &BigUint) -> usize {
+    if a >= b {
+        a.sub_ref(b).bits()
+    } else {
+        b.sub_ref(a).bits()
+    }
+}
+
+/// One size-guarded division step — Möller's `sdiv`: reduce the larger element
+/// by the largest multiple of the smaller that leaves the remainder strictly
+/// above `s` bits, folding the step into `t`. Returns `false` if no quotient
+/// can respect the guard (only reachable when the caller's invariants are
+/// already violated; the loops treat it as "stop here" rather than corrupt
+/// the transform).
+///
+/// The guard is what earns the right to work on high bits alone. Above the
+/// boundary these quotients are exactly what full-width Euclid would produce;
+/// a remainder allowed to dip to `s` bits or below would depend on low bits
+/// the recursion never saw, and every conclusion drawn after it would be
+/// unsound. So the step refuses — reduction stalls at the boundary by design,
+/// and the caller decides what happens next.
+fn sdiv_step(a: &mut BigUint, b: &mut BigUint, t: &mut Mat2, s: usize) -> bool {
+    let a_is_larger = *a >= *b;
+    let (hi, lo) = if a_is_larger { (a.clone(), b.clone()) } else { (b.clone(), a.clone()) };
+    if lo.is_zero() {
+        return false;
+    }
+    // The largest q with `hi − q·lo ≥ 2^s`, i.e. `q = ⌊(hi − 2^s)/lo⌋`. This is
+    // the ordinary Euclidean quotient whenever `hi mod lo` already clears the
+    // boundary, and backs off by exactly as much as needed otherwise — Möller's
+    // sdiv, which never lets the remainder fall to or below `s` bits.
+    let threshold = {
+        let mut t = BigUint::zero();
+        t.set_bit(s);
+        t
+    };
+    if hi < threshold {
+        return false; // hi already sits at or below the boundary
+    }
+    let q = hi.sub_ref(&threshold).div_rem(&lo).0;
+    if q.is_zero() {
+        return false; // reducing even once would cross the boundary
+    }
+    let r = hi.sub_ref(&q.mul_ref(&lo));
+    if a_is_larger {
+        *a = r;
+        *t = t.reduce_top(&q);
+    } else {
+        *b = r;
+        *t = t.reduce_bottom(&q);
+    }
+    true
+}
+
+/// Below this many limbs [`hgcd`] stops recursing and runs [`hgcd_base`]
+/// directly — the analogue of GMP's `HGCD_THRESHOLD`. Tuned empirically.
+const HGCD_BASE_LIMBS: usize = 96;
+
+/// [`hgcd`]'s workhorse below the recursion threshold — the role GMP's
+/// `hgcd2` loop plays. Reduction runs in two regimes: far from the boundary,
+/// whole Lehmer batches (the leading 124 bits certify a run of ~35 quotients,
+/// replayed against the full operands as one matrix application); near it,
+/// single guarded divisions, because a batch commits to its whole run and
+/// cannot stop at the boundary mid-way.
+///
+/// What licenses running a batch *unguarded*: one batch advances the remainder
+/// sequence by at most its digit window, so started with both elements above
+/// `s + LEHMER_MARGIN` it physically cannot drop either to `s` bits — and
+/// everywhere above the boundary, certified quotients are Euclid's, so the
+/// batch is the same reduction the guarded steps would have taken.
+fn hgcd_base(a: &BigUint, b: &BigUint, s: usize) -> (Mat2, BigUint, BigUint) {
+    /// A batch moves each element by at most the 124-bit digit window; the
+    /// slack above that covers the window's own imprecision at its last step.
+    const LEHMER_MARGIN: usize = 130;
+
+    let mut aa = a.clone();
+    let mut bb = b.clone();
+    let mut t = Mat2::identity();
+
+    while abs_diff_bits(&aa, &bb) > s {
+        if pair_min_size(&aa, &bb) > s + LEHMER_MARGIN {
+            let a_is_larger = aa >= bb;
+            let (hi, lo) = if a_is_larger { (&aa, &bb) } else { (&bb, &aa) };
+            let (u_hat, v_hat) = leading_pair(hi, lo);
+            let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat);
+            // m01 == 0 means the digits pinned no quotient — the pair is too
+            // lopsided for its leading windows to overlap — and division is
+            // the only way forward.
+            if m01 != 0 {
+                let next_hi = combine_unsigned(m00, hi, m01, lo);
+                let next_lo = combine_unsigned(m10, hi, m11, lo);
+                // The batch is linear, so it composes with `t` by acting on
+                // t's rows exactly as it acts on the values — with the same
+                // care for which row currently plays hi and which lo.
+                let (row_hi, row_lo) = if a_is_larger {
+                    ((&t.m00, &t.m01), (&t.m10, &t.m11))
+                } else {
+                    ((&t.m10, &t.m11), (&t.m00, &t.m01))
+                };
+                let new_hi_row = (
+                    combine_signed(m00, row_hi.0, m01, row_lo.0),
+                    combine_signed(m00, row_hi.1, m01, row_lo.1),
+                );
+                let new_lo_row = (
+                    combine_signed(m10, row_hi.0, m11, row_lo.0),
+                    combine_signed(m10, row_hi.1, m11, row_lo.1),
+                );
+                if a_is_larger {
+                    (t.m00, t.m01) = new_hi_row;
+                    (t.m10, t.m11) = new_lo_row;
+                    aa = next_hi;
+                    bb = next_lo;
+                } else {
+                    (t.m10, t.m11) = new_hi_row;
+                    (t.m00, t.m01) = new_lo_row;
+                    bb = next_hi;
+                    aa = next_lo;
+                }
+                continue;
+            }
+        }
+        // Within a batch-width of the boundary a batch could sail past it, so
+        // the last stretch goes one guarded division at a time.
+        if !sdiv_step(&mut aa, &mut bb, &mut t, s) {
+            break;
+        }
+    }
+
+    (t, aa, bb)
+}
+
+/// Half-GCD: run Euclid's reduction of `(a, b)` halfway — to the boundary
+/// `s = ⌊N/2⌋ + 1`, `N` the larger element's bit-size — returning the reduced
+/// pair `(α, β) = T·(a, b)` and the transform `T` that got there.
+///
+/// The contract, from Möller's Lemma 5: the caller supplies both elements
+/// above `s` bits, and gets back both elements still above `s` bits with the
+/// *difference* at or below — the last moment reduction is still certifiable
+/// from the bits above `s`. Asking for one more step is asking for an answer
+/// the high bits do not contain; that boundary discipline, not the recursion,
+/// is what makes the function composable, because a caller holding `2p + n`
+/// bits can run it on the top `n` and trust the result for the whole number.
+///
+/// The recursion is that composition applied to itself: one sub-call on the
+/// top halves takes the pair to ~3N/4 bits, a second on the top halves of the
+/// remainder reaches ~N/2. Each splice is followed by a short run of guarded
+/// full-width division steps (at most four, Lemma 7) because a sub-call's
+/// final quotient can be wrong for the full operands — the low bits it never
+/// saw can tip it — and §6.3 constructs a pair computed wrongly when this
+/// repair is skipped. Both recursion guards test the *smaller* element: the
+/// sub-call's contract needs both of its inputs above its own boundary, and
+/// the guard is the parent-level condition that delivers exactly that
+/// (Lemma 7). Read the guards against the larger element and the recursion
+/// runs on pairs it has no contract for.
+///
+/// `T` is `M⁻¹` in Möller's notation: unimodular with rows of alternating
+/// sign. det is ±1 rather than his +1 — the base case batches swapping Euclid
+/// steps, det −1 apiece — which nothing downstream depends on. At full
+/// reduction (`s = 0`) a row of `T` is a Bézout cofactor pair.
+///
+/// Reference: Niels Möller, *On Schönhage's algorithm and subquadratic
+/// integer gcd computation*, Math. Comp. 77 (2008), 589–607, Figure 4 — the
+/// algorithm behind GMP's `mpn_hgcd`. O(M(n)·log n) with fast multiplication
+/// carrying the matrix work.
+fn hgcd(a: &BigUint, b: &BigUint) -> (Mat2, BigUint, BigUint) {
+    let n = pair_size(a, b);
+    let s = n / 2 + 1; // Möller's S = ⌊N/2⌋ + 1
+    debug_assert!(
+        pair_min_size(a, b) > s,
+        "hgcd precondition: both elements above the boundary"
+    );
+    let mut aa = a.clone();
+    let mut bb = b.clone();
+    let mut t = Mat2::identity();
+
+    // Already straddling the boundary: nothing to do. (Möller's sgcd threads
+    // this escape through its Step 5 → Step 8 goto; without it a close pair
+    // that is still large recurses on nearly its own size, and the recursion's
+    // cost estimate collapses.)
+    if abs_diff_bits(&aa, &bb) <= s {
+        return (t, aa, bb);
+    }
+
+    // Below this size the recursion's matrix multiplications cost more than
+    // simply reducing the pair with batched Lehmer steps, so the recursion
+    // bottoms out here rather than at trivial sizes.
+    if n <= HGCD_BASE_LIMBS * 64 {
+        return hgcd_base(&aa, &bb, s);
+    }
+
+    // First recursive call (Step 2): only when the smaller element clears
+    // ⌊3N/4⌋ + 2, which puts both top halves above the sub-call's boundary.
+    if pair_min_size(&aa, &bb) > 3 * n / 4 + 2 {
+        let p1 = n / 2;
+        let (t1, alpha, beta) = hgcd(&shr(&aa, p1), &shr(&bb, p1));
+        let (na, nb) = hgcd_adjust(&t1, &alpha, &beta, &aa, &bb, p1);
+        aa = na;
+        bb = nb;
+        t = t1;
+    }
+
+    // Repair the splice (Step 9): the sub-call certified its quotients only
+    // against the bits it saw, so its last step or two may be wrong for the
+    // full operands. At most four full-width guarded steps make it right.
+    while pair_size(&aa, &bb) > 3 * n / 4 + 1 && abs_diff_bits(&aa, &bb) > s {
+        if !sdiv_step(&mut aa, &mut bb, &mut t, s) {
+            break;
+        }
+    }
+
+    // Second recursive call (Step 12), again guarded on the smaller element —
+    // and skipped when the backup steps already met the target (the sgcd
+    // Step 5 → Step 8 escape).
+    if pair_min_size(&aa, &bb) > s + 2 && abs_diff_bits(&aa, &bb) > s {
+        let n2 = pair_size(&aa, &bb);
+        let p2 = 2 * s + 1 - n2; // 2S − N2 + 1, positive since N2 ≤ 2S − 1
+        let (t2, alpha, beta) = hgcd(&shr(&aa, p2), &shr(&bb, p2));
+        let (na, nb) = hgcd_adjust(&t2, &alpha, &beta, &aa, &bb, p2);
+        aa = na;
+        bb = nb;
+        t = t2.compose(&t); // T ← T′·T: the second reduction acts after the first
+    }
+
+    // Repair the second splice and land on the target (Step 20).
+    while abs_diff_bits(&aa, &bb) > s {
+        if !sdiv_step(&mut aa, &mut bb, &mut t, s) {
+            break;
+        }
+    }
+
+    debug_assert!(
+        pair_min_size(&aa, &bb) > s && abs_diff_bits(&aa, &bb) <= s,
+        "hgcd postcondition: pair straddles the boundary"
+    );
+    (t, aa, bb)
+}
+
+/// Below this many limbs in the smaller operand, gcd runs on Lehmer; at or
+/// above it, on the Half-GCD driver — and the driver hands its own tail back
+/// to Lehmer at the same line, since below the crossover every round is
+/// better spent there. Measured on M4: a tie at 2048 limbs, Half-GCD ahead
+/// 1.3× at 4096 and 1.7× at 8192, the gap widening as the subquadratic curve
+/// pulls away (PERFORMANCE.md, "GCD at scale"). Correctness does not depend
+/// on the value — the suite validates with this set to 2, forcing every size
+/// through the recursion.
+const HGCD_THRESHOLD_LIMBS: usize = 2048;
+
+/// Greatest common divisor through [`hgcd`]. Each round halves the pair, so
+/// the rounds' costs form a geometric series and the whole gcd runs in
+/// O(M(n)·log n) — about twice the cost of the first hgcd call.
+///
+/// hgcd's contract wants both elements past the halfway boundary and a gap
+/// wider than it; a pair can leave a round (or arrive) violating either. One
+/// ordinary division step is the repair for both, and a sharp one: an
+/// unbalanced pair collapses to the smaller element's size, and a close pair
+/// drops to its difference — which the previous round just certified small.
+/// Below the crossover the tail goes to Lehmer, whose constant wins there.
+fn gcd_via_hgcd(a: &BigUint, b: &BigUint) -> BigUint {
+    let (mut aa, mut bb) = if a >= b { (a.clone(), b.clone()) } else { (b.clone(), a.clone()) };
+    loop {
+        if bb.is_zero() {
+            return aa;
+        }
+        if bb.limbs().len() < HGCD_THRESHOLD_LIMBS {
+            return gcd_lehmer(&aa, &bb);
+        }
+        let s = aa.bits() / 2 + 1;
+        // hgcd needs the smaller element above the boundary and a gap wide
+        // enough to close; otherwise one division step makes sharp progress
+        // (an unbalanced pair collapses, a close pair drops to its difference).
+        if bb.bits() <= s || abs_diff_bits(&aa, &bb) <= s {
+            let r = aa.modulo(&bb);
+            aa = core::mem::replace(&mut bb, r);
+            continue;
+        }
+        let (_t, ra, rb) = hgcd(&aa, &bb);
+        (aa, bb) = if ra >= rb { (ra, rb) } else { (rb, ra) };
+    }
+}
+
 /// Greatest common divisor by Lehmer's algorithm: classical Euclid with each
 /// run of steps whose quotient the leading 64-bit digits fix batched into one
 /// 2×2 transform of the full operands. Same result as plain Euclid, an order of
 /// magnitude fewer multiprecision divisions.
-#[must_use]
-pub fn gcd(lhs: &BigUint, rhs: &BigUint) -> BigUint {
+fn gcd_lehmer(lhs: &BigUint, rhs: &BigUint) -> BigUint {
     let (mut a, mut b) = if lhs >= rhs {
         (lhs.clone(), rhs.clone())
     } else {
@@ -263,6 +690,24 @@ pub fn gcd(lhs: &BigUint, rhs: &BigUint) -> BigUint {
             b = next_b;
             debug_assert!(a >= b, "Lehmer transform preserves a >= b");
         }
+    }
+}
+
+/// Greatest common divisor.
+///
+/// Lehmer's algorithm (Knuth, *TAOCP* vol. 2, §4.5.2, Algorithm L) below the
+/// crossover; above it, subquadratic Half-GCD (Möller, *On Schönhage's
+/// algorithm and subquadratic integer gcd computation*, Math. Comp. 77
+/// (2008), 589–607 — the algorithm behind GMP's `mpn_hgcd`), whose
+/// O(M(n)·log n) beats Lehmer's O(n²). The dispatch tests the smaller
+/// operand: one ordinary division collapses any pair to its smaller
+/// element's size, so that size is what the work scales with.
+#[must_use]
+pub fn gcd(lhs: &BigUint, rhs: &BigUint) -> BigUint {
+    if lhs.limbs().len().min(rhs.limbs().len()) >= HGCD_THRESHOLD_LIMBS {
+        gcd_via_hgcd(lhs, rhs)
+    } else {
+        gcd_lehmer(lhs, rhs)
     }
 }
 
@@ -909,6 +1354,156 @@ mod tests {
         let mut value = BigUint::zero();
         value.set_bit(exponent);
         value.sub_ref(&BigUint::one())
+    }
+
+    fn pow2(bits: usize) -> BigUint {
+        let mut v = BigUint::zero();
+        v.set_bit(bits);
+        v
+    }
+
+    #[test]
+    fn hgcd_matrix_step_algebra() {
+        use super::Mat2;
+        let (a, b) = (BigUint::from_u64(240), BigUint::from_u64(46));
+        let id = Mat2::identity();
+        assert_eq!(id.apply(&a, &b), (a.clone(), b.clone()));
+        // reduce_top by 5: a ← a − 5·b = 10, b unchanged.
+        let m = id.reduce_top(&BigUint::from_u64(5));
+        assert_eq!(m.apply(&a, &b), (BigUint::from_u64(10), BigUint::from_u64(46)));
+        // reduce_bottom by 4: b ← b − 4·a' = 46 − 40 = 6.
+        let m2 = m.reduce_bottom(&BigUint::from_u64(4));
+        assert_eq!(m2.apply(&a, &b), (BigUint::from_u64(10), BigUint::from_u64(6)));
+    }
+
+    #[test]
+    #[ignore = "timing probe for the Lehmer/HGCD crossover; run with --ignored"]
+    fn hgcd_crossover_timing() {
+        use super::{gcd_lehmer, gcd_via_hgcd};
+        use std::hint::black_box;
+        use std::time::Instant;
+        let mut rng = SplitMix64 { state: 0x7a11_5eed_0dd5_ba11 };
+        eprintln!("{:>7} {:>12} {:>12}  winner", "limbs", "lehmer_ms", "hgcd_ms");
+        for &limbs in &[64usize, 128, 256, 512, 1024, 2048, 4096, 8192] {
+            let bits = limbs * 64;
+            let mut a = draw_below(&mut rng, &pow2(bits));
+            let mut b = draw_below(&mut rng, &pow2(bits));
+            a.set_bit(bits - 1);
+            b.set_bit(bits - 1);
+            let reps = (2048 / limbs).max(1);
+            let time = |f: &dyn Fn() -> BigUint| {
+                let mut best = f64::INFINITY;
+                for _ in 0..2 {
+                    let t0 = Instant::now();
+                    for _ in 0..reps {
+                        black_box(f());
+                    }
+                    best = best.min(t0.elapsed().as_secs_f64() / reps as f64 * 1e3);
+                }
+                best
+            };
+            let lehmer = time(&|| gcd_lehmer(&a, &b));
+            let hgcd_t = time(&|| gcd_via_hgcd(&a, &b));
+            let winner = if lehmer <= hgcd_t { "lehmer" } else { "hgcd" };
+            eprintln!("{limbs:7} {lehmer:12.3} {hgcd_t:12.3}  {winner}");
+        }
+    }
+
+    #[test]
+    fn hgcd_reduction_invariants() {
+        use super::{abs_diff_bits, gcd_lehmer, hgcd, pair_min_size};
+        use crate::bigint::BigInt;
+        let mut rng = SplitMix64 { state: 0x5eed_cafe_f00d_babe };
+        let one = BigInt::from_biguint(BigUint::one());
+        // Sizes span the batched base case (≤ 6144 bits) and the recursion
+        // above it; reps taper as the sizes grow.
+        for &(bits, reps) in &[
+            (8usize, 120),
+            (12, 120),
+            (16, 120),
+            (24, 120),
+            (40, 120),
+            (64, 120),
+            (100, 120),
+            (200, 60),
+            (400, 60),
+            (1000, 40),
+            (3000, 20),
+            (8000, 10),
+            (16000, 6),
+            (40000, 3),
+        ] {
+            for _ in 0..reps {
+                // Both operands full width (top bit forced), satisfying hgcd's
+                // precondition #min > ⌊bits/2⌋ + 1 — as the driver guarantees.
+                let mut a = draw_below(&mut rng, &pow2(bits));
+                let mut b = draw_below(&mut rng, &pow2(bits));
+                a.set_bit(bits - 1);
+                b.set_bit(bits - 1);
+                let s = bits / 2 + 1;
+
+                let (t, ra, rb) = hgcd(&a, &b);
+                // The transform reproduces the reduced pair from the inputs.
+                assert_eq!(
+                    t.apply(&a, &b),
+                    (ra.clone(), rb.clone()),
+                    "transform inconsistent at {bits} bits"
+                );
+                // Postcondition: the pair straddles the boundary.
+                assert!(pair_min_size(&ra, &rb) > s, "over-reduced at {bits} bits");
+                assert!(abs_diff_bits(&ra, &rb) <= s, "under-reduced at {bits} bits");
+                // gcd is preserved and the transform is unimodular. det is ±1,
+                // not always +1: Möller's non-swapping steps are det +1, but
+                // the Lehmer batches in the base case are products of swapping
+                // Euclid steps (det −1 each), so an odd-length batch flips it.
+                assert_eq!(gcd_lehmer(&ra, &rb), gcd_lehmer(&a, &b));
+                let det = t.m00.mul_ref(&t.m11).sub_ref(&t.m01.mul_ref(&t.m10));
+                assert_eq!(
+                    det.magnitude(),
+                    one.magnitude(),
+                    "transform must be unimodular (det = ±1) at {bits} bits"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gcd_via_hgcd_matches_lehmer() {
+        use super::{gcd_lehmer, gcd_via_hgcd};
+        let mut rng = SplitMix64 { state: 0x4859_2b17_ac3f_1d05 };
+        // Sizes below the driver's Lehmer handoff, across the batched base
+        // case, and through the recursion (dispatch is 64 limbs = 4096 bits;
+        // the recursion engages above 96 limbs = 6144 bits).
+        for &bits in &[
+            130usize, 200, 256, 400, 512, 777, 1024, 1500, 2048, 3000, 4096, 5000, 8192, 16000,
+            50000,
+        ] {
+            let bound = pow2(bits);
+            for _ in 0..4 {
+                let a = draw_below(&mut rng, &bound);
+                let b = draw_below(&mut rng, &bound);
+                assert_eq!(
+                    gcd_via_hgcd(&a, &b),
+                    gcd_lehmer(&a, &b),
+                    "hgcd != lehmer at {bits} bits"
+                );
+            }
+        }
+        // Structured: 2^2000 against 2^2000 − 1 (coprime), and a shared factor.
+        let big = pow2(2000);
+        let odd = big.sub_ref(&BigUint::one());
+        assert_eq!(gcd_via_hgcd(&big, &odd), gcd_lehmer(&big, &odd));
+        let m = mersenne(1279);
+        let shared = m.mul_ref(&BigUint::from_u64(6));
+        let other = m.mul_ref(&BigUint::from_u64(10));
+        assert_eq!(gcd_via_hgcd(&shared, &other), gcd_lehmer(&shared, &other));
+
+        // Above the dispatch threshold the public gcd takes the Half-GCD path;
+        // one large case pins that route against Lehmer too.
+        let bound = pow2(super::HGCD_THRESHOLD_LIMBS * 64 + 512);
+        let a = draw_below(&mut rng, &bound);
+        let b = draw_below(&mut rng, &bound);
+        assert_eq!(gcd(&a, &b), gcd_lehmer(&a, &b), "public dispatch diverged");
     }
 
     fn biguint_from_hex(hex: &str) -> BigUint {

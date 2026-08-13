@@ -1831,12 +1831,7 @@ fn montgomery_n0_inv(n0: u64) -> u64 {
 
 /// Signed product `a · b`, for the Toom-3 evaluate/interpolate arithmetic.
 fn bigint_mul(a: &BigInt, b: &BigInt) -> BigInt {
-    let sign = match (a.sign(), b.sign()) {
-        (Sign::Zero, _) | (_, Sign::Zero) => Sign::Zero,
-        (lhs, rhs) if lhs == rhs => Sign::Positive,
-        _ => Sign::Negative,
-    };
-    BigInt::from_parts(sign, a.magnitude().mul_ref(b.magnitude()))
+    a.mul_ref(b)
 }
 
 /// `x / divisor` where `divisor` divides `x` exactly — the interpolation
@@ -1965,6 +1960,18 @@ impl BigInt {
         }
 
         Self::from_parts(self.sign, self.magnitude.mul_ref(factor))
+    }
+
+    /// Signed product `self * other` (the Half-GCD matrix arithmetic composes
+    /// 2×2 matrices of full-size signed entries).
+    #[must_use]
+    pub(crate) fn mul_ref(&self, other: &Self) -> Self {
+        let sign = match (self.sign, other.sign) {
+            (Sign::Zero, _) | (_, Sign::Zero) => Sign::Zero,
+            (lhs, rhs) if lhs == rhs => Sign::Positive,
+            _ => Sign::Negative,
+        };
+        Self::from_parts(sign, self.magnitude.mul_ref(&other.magnitude))
     }
 
     /// Reduce modulo a positive modulus and return the least non-negative residue.

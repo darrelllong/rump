@@ -6,7 +6,8 @@
 //! sources: Knuth's Algorithm D for division (*TAOCP* vol. 2, §4.3.1),
 //! Montgomery multiplication with an explicit public Montgomery domain
 //! (Montgomery 1985; Koç, Acar & Kaliski 1996), schoolbook, Karatsuba, and
-//! Toom–Cook multiplication, Lehmer's gcd (Knuth §4.5.2, Algorithm L), and the
+//! Toom–Cook multiplication, Lehmer's gcd (Knuth §4.5.2, Algorithm L) with
+//! subquadratic Half-GCD at scale (Möller, Math. Comp. 77 (2008)), and the
 //! Jacobi symbol by quadratic reciprocity (*Handbook of Applied Cryptography*,
 //! Algorithm 2.149). Every algorithm carries its citation at its definition.
 //!
