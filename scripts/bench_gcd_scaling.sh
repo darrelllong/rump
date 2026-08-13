@@ -12,15 +12,19 @@
 #   PILOT_MP_BIN=target/bench_gmp/pilot_gmp \
 #     scripts/bench_gcd_scaling.sh > bench/gmp_gcd_scaling_<host>.md
 #
-# gcd runs to a full megabit. The quadratic ops stop at 262144 bits, where a
-# single reading already costs ~half a second — a megabit row would spend
-# minutes per reading measuring nothing the trend has not already shown.
+# Every op runs to a full megabit. A single quadratic reading costs seconds at
+# the top sizes, so those rows get a longer session cap: the same convergence
+# discipline, given enough budget to gather a usable sample rather than
+# truncating the table.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 GCD_SIZES=(8192 16384 32768 65536 131072 262144 524288 1048576)
-FRIEND_SIZES=(8192 16384 32768 65536 131072 262144)
+FRIEND_SIZES=(8192 16384 32768 65536 131072 262144 524288 1048576)
+# Bit width above which a row gets the long session.
+LONG_ABOVE=262144
+LONG_SESSION=180
 
 echo "# gcd & friends at scale"
 echo
@@ -35,6 +39,11 @@ for size in "${GCD_SIZES[@]}"; do
 done
 for op in gcdext modinv jacobi; do
     for size in "${FRIEND_SIZES[@]}"; do
-        bash "$ROOT_DIR/scripts/bench_primitives.sh" "${op}_${size}"
+        if (( size > LONG_ABOVE )); then
+            PILOT_MP_SESSION=$LONG_SESSION \
+                bash "$ROOT_DIR/scripts/bench_primitives.sh" "${op}_${size}"
+        else
+            bash "$ROOT_DIR/scripts/bench_primitives.sh" "${op}_${size}"
+        fi
     done
 done

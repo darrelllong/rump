@@ -304,6 +304,24 @@ impl Mat2 {
             m11: self.m11.sub_ref(&self.m01.mul_biguint_ref(q)),
         }
     }
+
+    /// Fold in the swapping Euclid step `(a, b) ← (b, a − q·b)` — the shape
+    /// the gcd drivers use, which keeps the pair ordered by moving the old
+    /// smaller element on top: left-multiply by `[[0, 1], [1, −q]]`.
+    fn step_swap(&self, q: &BigUint) -> Self {
+        Self {
+            m00: self.m10.clone(),
+            m01: self.m11.clone(),
+            m10: self.m00.sub_ref(&self.m10.mul_biguint_ref(q)),
+            m11: self.m01.sub_ref(&self.m11.mul_biguint_ref(q)),
+        }
+    }
+
+    /// Exchange the rows — the transform-side mirror of swapping the pair.
+    fn swap_rows(&mut self) {
+        core::mem::swap(&mut self.m00, &mut self.m10);
+        core::mem::swap(&mut self.m01, &mut self.m11);
+    }
 }
 
 /// `x >> bits`, out of place.
@@ -648,6 +666,99 @@ fn gcd_via_hgcd(a: &BigUint, b: &BigUint) -> BigUint {
     }
 }
 
+/// Below this many limbs in the smaller operand the Bézout functions stay on
+/// Lehmer; at or above it they ride the Half-GCD driver. The crossover sits
+/// *below* plain gcd's: Lehmer's extended form carries full-width signed
+/// cofactors through every batch, where the driver folds all cofactor work
+/// into one matrix accumulation per round — measured on M4, the driver ties
+/// Lehmer near 448 limbs and is 2× ahead by 16384 (PERFORMANCE.md).
+/// Correctness does not depend on the value — the suite validates with this
+/// set to 2, forcing every size through the driver and its canonicalization.
+const HGCD_EXT_THRESHOLD_LIMBS: usize = 512;
+
+/// Extended-gcd counterpart of [`gcd_via_hgcd`]: the same rounds, with the
+/// reduce transform accumulated instead of discarded. The loop maintains
+/// `(aa, bb) = ACC·(a, b)`; when the pair drops below the crossover the
+/// Lehmer engine finishes from `(aa, bb)`, and its Bézout pair converts to
+/// one for the original operands through the transform —
+/// `g = s'·aa + t'·bb = (s'·ACC₀₀ + t'·ACC₁₀)·a + (s'·ACC₀₁ + t'·ACC₁₁)·b`.
+///
+/// The returned pair satisfies the Bézout identity but need not be the
+/// classical pair: hgcd's size-guarded quotients can leave the true
+/// continued-fraction path near each boundary, shifting the cofactors by a
+/// multiple of `(b/g, −a/g)`. Callers that promise the classical pair
+/// normalize with [`canonicalize_bezout`].
+fn gcd_extended_via_hgcd(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
+    let mut acc = Mat2::identity();
+    let (mut aa, mut bb) = if a >= b {
+        (a.clone(), b.clone())
+    } else {
+        acc.swap_rows();
+        (b.clone(), a.clone())
+    };
+    loop {
+        if bb.is_zero() {
+            // aa = ACC₀₀·a + ACC₀₁·b: the top row is already the answer.
+            return (aa, acc.m00, acc.m01);
+        }
+        if bb.limbs().len() < HGCD_EXT_THRESHOLD_LIMBS {
+            let (g, s_top, t_top) = gcd_extended_lehmer(&aa, &bb);
+            let s = s_top.mul_ref(&acc.m00).add_ref(&t_top.mul_ref(&acc.m10));
+            let t = s_top.mul_ref(&acc.m01).add_ref(&t_top.mul_ref(&acc.m11));
+            return (g, s, t);
+        }
+        let boundary = aa.bits() / 2 + 1;
+        if bb.bits() <= boundary || abs_diff_bits(&aa, &bb) <= boundary {
+            let (q, r) = aa.div_rem(&bb);
+            acc = acc.step_swap(&q);
+            aa = core::mem::replace(&mut bb, r);
+            continue;
+        }
+        let (round, ra, rb) = hgcd(&aa, &bb);
+        acc = round.compose(&acc);
+        if ra >= rb {
+            (aa, bb) = (ra, rb);
+        } else {
+            acc.swap_rows();
+            (aa, bb) = (rb, ra);
+        }
+    }
+}
+
+/// Reduce a valid Bézout pair for `(a, b)` to the classical one. The cofactor
+/// of `a` is unique modulo `b/g` — any two valid pairs differ by a multiple
+/// of `(b/g, −a/g)` — and classical extended Euclid returns the
+/// representative of least absolute value. Select it, then recover the
+/// second cofactor exactly from the identity `t = (g − s·a)/b`.
+///
+/// Precondition: `a, b > 0` (the zero-operand cases return directly from the
+/// driver in classical form).
+fn canonicalize_bezout(
+    a: &BigUint,
+    b: &BigUint,
+    g: &BigUint,
+    s: &BigInt,
+) -> (BigInt, BigInt) {
+    let modulus = b.div_rem(g).0; // b/g, exact by definition of g
+    if modulus.is_one() {
+        // b divides a; classical Euclid ends in one step with (g, 0, 1).
+        return (BigInt::zero(), BigInt::from_biguint(BigUint::one()));
+    }
+    let residue = s.modulo_positive(&modulus); // s mod (b/g), in [0, b/g)
+    let twice = residue.add_ref(&residue);
+    let s_min = if twice > modulus {
+        BigInt::from_parts(Sign::Negative, modulus.sub_ref(&residue))
+    } else {
+        BigInt::from_biguint(residue)
+    };
+    // t = (g − s·a)/b, an exact division by the Bézout identity.
+    let numerator = BigInt::from_biguint(g.clone()).sub_ref(&s_min.mul_biguint_ref(a));
+    let (quotient, remainder) = numerator.magnitude().div_rem(b);
+    debug_assert!(remainder.is_zero(), "g − s·a is divisible by b exactly");
+    let t_min = BigInt::from_parts(numerator.sign(), quotient);
+    (s_min, t_min)
+}
+
 /// Greatest common divisor by Lehmer's algorithm: classical Euclid with each
 /// run of steps whose quotient the leading 64-bit digits fix batched into one
 /// 2×2 transform of the full operands. Same result as plain Euclid, an order of
@@ -731,6 +842,20 @@ pub fn gcd(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 /// ```
 #[must_use]
 pub fn gcd_extended(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
+    if a.limbs().len().min(b.limbs().len()) >= HGCD_EXT_THRESHOLD_LIMBS
+        && !a.is_zero()
+        && !b.is_zero()
+    {
+        let (g, s, _t) = gcd_extended_via_hgcd(a, b);
+        let (s, t) = canonicalize_bezout(a, b, &g, &s);
+        return (g, s, t);
+    }
+    gcd_extended_lehmer(a, b)
+}
+
+/// The Lehmer-engine extended Euclid: [`gcd_extended`]'s below-crossover
+/// path, and the finishing step of the Half-GCD driver above it.
+fn gcd_extended_lehmer(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
     // Invariant: r0 = s0·a + t0·b and r1 = s1·a + t1·b throughout. The loop
     // reproduces classical extended Euclid step for step (a leading `a < b`
     // enters as one quotient-zero swap), only with runs of steps batched.
@@ -955,11 +1080,25 @@ pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
         return None;
     }
 
+    let reduced = a.modulo(n);
+
+    // Above the crossover, ride the Half-GCD driver: the inverse is the
+    // cofactor of `a mod n` in the Bézout identity for (n, a mod n), and
+    // reducing it mod n makes the result unique — identical to the Lehmer
+    // path's, whichever valid Bézout pair the transform produced.
+    if n.limbs().len().min(reduced.limbs().len()) >= HGCD_EXT_THRESHOLD_LIMBS {
+        let (g, _s, t) = gcd_extended_via_hgcd(n, &reduced);
+        if !g.is_one() {
+            return None;
+        }
+        return Some(t.modulo_positive(n));
+    }
+
     // Extended Euclid on (n, a mod n) over the shared Lehmer engine, tracking
     // only the coefficient of `a mod n`: modulo n the modulus contributes
     // nothing, so r0 ≡ u0·(a mod n) (mod n), and when r0 reaches gcd = 1 the
     // coefficient u0 is the inverse.
-    let (mut r0, mut r1) = (n.clone(), a.modulo(n));
+    let (mut r0, mut r1) = (n.clone(), reduced);
     let (mut u0, mut u1) = (BigInt::zero(), BigInt::from_biguint(BigUint::one()));
 
     while !r1.is_zero() {
@@ -1410,6 +1549,41 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "timing probe for the Lehmer/HGCD extended-gcd crossover; run with --ignored"]
+    fn hgcd_ext_crossover_timing() {
+        use super::{canonicalize_bezout, gcd_extended_lehmer, gcd_extended_via_hgcd};
+        use std::hint::black_box;
+        use std::time::Instant;
+        let mut rng = SplitMix64 { state: 0xe87e_9d5a_11c0_ffee };
+        eprintln!("{:>7} {:>12} {:>12}  winner", "limbs", "lehmer_ms", "hgcd_ms");
+        for &limbs in &[128usize, 256, 384, 512, 1024, 4096, 16384] {
+            let bits = limbs * 64;
+            let mut a = draw_below(&mut rng, &pow2(bits));
+            let mut b = draw_below(&mut rng, &pow2(bits));
+            a.set_bit(bits - 1);
+            b.set_bit(bits - 1);
+            let time = |f: &dyn Fn()| {
+                let mut best = f64::INFINITY;
+                for _ in 0..2 {
+                    let t0 = Instant::now();
+                    f();
+                    best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+                }
+                best
+            };
+            let lehmer = time(&|| {
+                black_box(gcd_extended_lehmer(&a, &b));
+            });
+            let hgcd_t = time(&|| {
+                let (g, s, _t) = gcd_extended_via_hgcd(&a, &b);
+                black_box(canonicalize_bezout(&a, &b, &g, &s));
+            });
+            let winner = if lehmer <= hgcd_t { "lehmer" } else { "hgcd" };
+            eprintln!("{limbs:7} {lehmer:12.3} {hgcd_t:12.3}  {winner}");
+        }
+    }
+
+    #[test]
     fn hgcd_reduction_invariants() {
         use super::{abs_diff_bits, gcd_lehmer, hgcd, pair_min_size};
         use crate::bigint::BigInt;
@@ -1498,12 +1672,40 @@ mod tests {
         let other = m.mul_ref(&BigUint::from_u64(10));
         assert_eq!(gcd_via_hgcd(&shared, &other), gcd_lehmer(&shared, &other));
 
-        // Above the dispatch threshold the public gcd takes the Half-GCD path;
-        // one large case pins that route against Lehmer too.
+        // Above the dispatch thresholds the public functions take the
+        // Half-GCD paths; large cases pin those routes against the Lehmer
+        // engines they must reproduce exactly.
         let bound = pow2(super::HGCD_THRESHOLD_LIMBS * 64 + 512);
         let a = draw_below(&mut rng, &bound);
         let b = draw_below(&mut rng, &bound);
-        assert_eq!(gcd(&a, &b), gcd_lehmer(&a, &b), "public dispatch diverged");
+        assert_eq!(gcd(&a, &b), gcd_lehmer(&a, &b), "public gcd dispatch diverged");
+
+        let ext_bound = pow2(super::HGCD_EXT_THRESHOLD_LIMBS * 64 + 512);
+        let p = draw_below(&mut rng, &ext_bound);
+        let q = draw_below(&mut rng, &ext_bound);
+        assert_eq!(
+            super::gcd_extended(&p, &q),
+            super::gcd_extended_lehmer(&p, &q),
+            "public gcd_extended dispatch diverged from the classical triple"
+        );
+        let mut n = p.clone();
+        if !n.is_odd() {
+            n = n.add_ref(&BigUint::one());
+        }
+        match mod_inverse(&q, &n) {
+            Some(inverse) => {
+                // The inverse is unique mod n; the identity is a complete check.
+                assert_eq!(
+                    BigUint::mod_mul(&q.modulo(&n), &inverse, &n),
+                    BigUint::one(),
+                    "public mod_inverse dispatch returned a non-inverse"
+                );
+            }
+            None => assert!(
+                !gcd(&q, &n).is_one(),
+                "public mod_inverse dispatch missed an existing inverse"
+            ),
+        }
     }
 
     fn biguint_from_hex(hex: &str) -> BigUint {

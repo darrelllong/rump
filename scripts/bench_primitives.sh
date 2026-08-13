@@ -16,6 +16,7 @@
 #   PILOT_MP_BIN     pilot_mp binary   (default target/release/pilot_mp)
 #   PILOT_PRESET     pilot-bench preset (default normal)
 #   PILOT_MP_SESSION session-limit seconds per op (default 30)
+#   PILOT_MP_HEAVY_SESSION  session for sqrtmod/isprime (default 120)
 #
 # Sample size is left to pilot-bench's own convergence: it collects readings
 # until the mean's CI meets the preset. A per-op session limit (-s) is a
@@ -23,9 +24,13 @@
 # rather than being killed. It only bites on heavy-tailed primitives
 # (sqrt_mod, is_probable_prime), whose cost depends on number-theoretic
 # structure of the random input so their sample variance never stabilizes and
-# the mean CI never converges. For those, the mean below is a large-sample
-# estimate and the extrema columns are the meaningful result. Forcing a
-# minimum via -m interacts badly with subsession sizing, so it is not used.
+# the mean CI never converges. Those two get a larger budget: their expensive
+# events sit in the ~8 % tail (a sieve survivor paying a full Miller–Rabin
+# exponentiation; a high-2-adic-valuation prime paying the whole Tonelli–Shanks
+# descent), and a session too short to hold a few hundred trials can miss the
+# tail entirely and report a mean that reflects only the cheap majority.
+# Forcing a minimum via -m interacts badly with subsession sizing, so the
+# budget is time, not a reading count.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -33,6 +38,7 @@ BENCH="${PILOT_BENCH_CLI:-$HOME/pilot-bench/build/cli/bench}"
 MP="${PILOT_MP_BIN:-$ROOT_DIR/target/release/pilot_mp}"
 PILOT_PRESET="${PILOT_PRESET:-normal}"
 SESSION="${PILOT_MP_SESSION:-30}"
+HEAVY_SESSION="${PILOT_MP_HEAVY_SESSION:-120}"
 
 for bin in "$BENCH" "$MP"; do
     [[ -x "$bin" ]] || { echo "error: not executable: $bin" >&2; exit 1; }
@@ -50,10 +56,14 @@ trap 'rm -rf "$WORK"' EXIT
 measure() {
     local op=$1
     local out="$WORK/$op"
+    local session="$SESSION"
+    case "$op" in
+        sqrtmod_* | isprime_*) session="$HEAVY_SESSION" ;;
+    esac
     rm -rf "$out"
     # Exit 13 = hit the session limit; that is a clean stop with readings
     # written, so it is not an error here.
-    "$BENCH" run_program --preset "$PILOT_PRESET" -s "$SESSION" -o "$out" \
+    "$BENCH" run_program --preset "$PILOT_PRESET" -s "$session" -o "$out" \
         --pi "${op},ms/op,0,1,1" -- "$MP" "$op" >/dev/null 2>&1 || true
     python3 - "$op" "$out/readings.csv" "$out/pi_results.csv" <<'PY'
 import sys, statistics
