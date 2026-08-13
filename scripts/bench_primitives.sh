@@ -19,10 +19,11 @@
 #   PILOT_MP_HEAVY_SESSION  session for sqrtmod/isprime (default 120)
 #
 # Sample size is left to pilot-bench's own convergence: it collects readings
-# until the mean's CI meets the preset. A per-op session limit (-s) is a
-# ceiling, not a leash — pilot stops *cleanly with its readings* (exit 13)
-# rather than being killed. It only bites on heavy-tailed primitives
-# (sqrt_mod, is_probable_prime), whose cost depends on number-theoretic
+# until the mean's CI meets the preset. The per-op session limit (-s) is an
+# upper bound on collection time: pilot stops cleanly and keeps its readings
+# (exit 13) rather than being killed. The limit matters only for the
+# heavy-tailed primitives (sqrt_mod, is_probable_prime), whose cost depends
+# on number-theoretic
 # structure of the random input so their sample variance never stabilizes and
 # the mean CI never converges. Those two get a larger budget: their expensive
 # events sit in the ~8 % tail (a sieve survivor paying a full Miller–Rabin

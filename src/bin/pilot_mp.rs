@@ -1,7 +1,8 @@
 //! Microbenchmark harness for rump's multiprecision primitives.
 //!
-//!   `pilot_mp <op>`    draw ONE fresh random operand, run the primitive
-//!                      enough times to beat the clock, print `ms/op`
+//!   `pilot_mp <op>`    draw ONE fresh random operand, repeat the primitive
+//!                      until the elapsed interval exceeds the 2 ms
+//!                      calibration floor, print the per-operation time in ms
 //!   `pilot_mp --list`  every operation name
 //!
 //! Each invocation seeds its operands from the OS clock + pid, so it is a
@@ -89,8 +90,8 @@ struct IntPool {
     /// Exponent pinned at 2^16 + 1 — two set bits, so the ladder is sixteen
     /// squarings and one multiply. This is the exponent floor: the row
     /// measures the kernel's scaling with the exponent's contribution at its
-    /// minimum. That the value is RSA's classical public exponent is
-    /// deliberate familiarity, not the rationale.
+    /// minimum. The value is RSA's classical public exponent; the rationale
+    /// is the exponent floor, not the workload.
     e65537: BigUint,
     /// Fresh random exponent of pinned 256-bit length — the realistic-exponent
     /// axis. Exponentiation costs (exponent bits) × (kernel cost), so holding
@@ -348,7 +349,8 @@ fn all_ops() -> Vec<String> {
 
 // ─── One reading ────────────────────────────────────────────────────────────
 
-/// Run the op on its single random operand enough times to beat the clock,
+/// Repeat the op on its single random operand until the elapsed interval
+/// exceeds the calibration floor,
 /// then print the per-op cost in ms. The whole batch uses the *same* operand,
 /// so the reading reflects that operand's data-dependent cost; the fresh draw
 /// per process is what makes the collection of readings a random sample.
