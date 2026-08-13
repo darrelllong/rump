@@ -67,13 +67,25 @@ degree of GF(2^m)):
 | `modmul` | one `mul` then a reduction, general (non-Montgomery) modulus |
 | `montmul` `montsqr` | one Montgomery multiply / square, operands already in the domain |
 | `montsetup` | building a `MontgomeryCtx` (the one division and R² setup) |
-| `montpow_e65537` | Montgomery exponentiation to the **fixed exponent 65537** (2¹⁶+1, the RSA public exponent F4) — an RSA verify/encrypt |
-| `montpow_rand` | Montgomery exponentiation to a fresh **256-bit random** exponent — a private-key / Diffie–Hellman shape |
+| `montpow_e65537` | Montgomery exponentiation, exponent fixed at 2¹⁶+1 (two set bits: 16 squarings + one multiply) — the **exponent floor**; doubles as classical RSA verify |
+| `montpow_rand` | Montgomery exponentiation, fresh random exponent of **fixed 256-bit length** — the realistic-exponent axis; doubles as a classical DH/DSA private exponent |
 | `modpow` | `mod_pow` to a 256-bit random exponent (dispatches to the Montgomery ladder for odd moduli) |
 | `gcd` `gcdext` `modinv` `jacobi` | the number-theory family |
 | `sqrtmod` | `sqrt_mod` — a modular square root by Tonelli–Shanks (several exponentiations) |
 | `isprime` | `is_probable_prime` — trial-division sieve then Miller–Rabin |
 | `gf2m_*` | binary-field multiply / square / sqrt / pow / inverse |
+
+The two `montpow_*` rows carry classical public-key workload names, and that is
+deliberate familiarity, nothing more — rump is a general-purpose multiprecision
+library, and rows tied to a cryptosystem's conventions are called out as such.
+They earn their place by what they isolate. Exponentiation costs
+(exponent bits) × (kernel cost), two independent axes: `montpow_e65537` pins
+the exponent at its floor (two set bits — sixteen squarings and one multiply)
+so the row measures the kernel's scaling alone, and `montpow_rand` pins it at a
+fixed realistic length so the size fit stays a one-variable fit. The linearity
+in exponent bits makes every other length derivable from these two — a
+full-width 2048-bit exponent costs 8× the `montpow_rand` row, no extra
+measurement needed.
 
 Hosts: **M4** (Apple M4, macOS), **EPYC** (AMD EPYC 7452, Linux), and **Pi**
 (Raspberry Pi 5, Cortex-A76, Debian) — two ARM cores at opposite ends (a wide
@@ -171,11 +183,13 @@ The comparison sorts rump's primitives into groups, and the grouping is by
   `gcd_extended`, and `mod_inverse` used to run **17–89×** slower on classical
   Euclid; they now run **4–13×** after the switch to **double-digit Lehmer**.
   `jacobi`, which did a full division per step, now runs **2–12×** on a
-  **division-free binary reciprocity** (it was 12–29×). All four remain O(n²), so
-  on the wide M4/EPYC cores the ratio still creeps up with size — GMP's
-  **Half-GCD** is subquadratic. (On the Pi the Euclid ratios *narrow* with size,
-  from ~10–12× at 256-bit to ~4× at 4096-bit, as rump's fixed per-call overhead
-  amortizes.)
+  **division-free binary reciprocity** (it was 12–29×). At these sizes all four
+  run O(n²) engines, so on the wide M4/EPYC cores the ratio creeps up — GMP's
+  **Half-GCD (HGCD)** is subquadratic everywhere. `gcd` stops conceding that
+  above ~131 kbit, where it dispatches to its own Half-GCD (see *GCD at scale*
+  below); its three siblings still pay the quadratic curve at every size. (On
+  the Pi the ratios *narrow* with size instead, from ~10–12× at 256-bit to ~4×
+  at 4096-bit, as rump's fixed per-call overhead amortizes.)
 
 - **`mul`/`sqr` — 1.3–7.5×, widening on the wide cores.** rump climbs
   schoolbook → Karatsuba → **Toom-3 → Toom-4**; Toom-3 crosses in above ~8192
@@ -213,7 +227,7 @@ above ~131 kbit — the section below). What remains, biggest first:
 
 The tables above stop at 4096 bits, where the whole family runs its Lehmer (or
 binary) engine. `gcd` no longer stops there: past ~131 kbit (2048 limbs) it
-dispatches to **Half-GCD** (Möller, *On Schönhage's algorithm and subquadratic
+dispatches to **Half-GCD (HGCD)** (Möller, *On Schönhage's algorithm and subquadratic
 integer gcd computation*, Math. Comp. 77 (2008), 589–607 — the algorithm behind
 GMP's `mpn_hgcd`), which computes the reduction matrix from the operands' top
 halves by recursion and replaces Lehmer's O(n²) with O(M(n)·log n). This

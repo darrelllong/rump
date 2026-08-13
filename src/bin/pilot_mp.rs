@@ -86,7 +86,16 @@ struct IntPool {
     /// as sizes grow, and hunting one beyond a few thousand bits costs minutes
     /// — unpayable per pilot trial, and pointless for every other op.
     prime: Option<BigUint>,
+    /// Exponent pinned at 2^16 + 1 — two set bits, so the ladder is sixteen
+    /// squarings and one multiply. This is the exponent floor: the row
+    /// measures the kernel's scaling with the exponent's contribution at its
+    /// minimum. That the value is RSA's classical public exponent is
+    /// deliberate familiarity, not the rationale.
     e65537: BigUint,
+    /// Fresh random exponent of pinned 256-bit length — the realistic-exponent
+    /// axis. Exponentiation costs (exponent bits) × (kernel cost), so holding
+    /// the length constant keeps the size sweep a one-variable fit, and the
+    /// linearity makes every other length derivable from this row.
     exp_rand: BigUint,
 }
 
