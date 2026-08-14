@@ -101,6 +101,7 @@ All measurements are single-threaded, against GMP 6.3.0 on every host:
 | **M4** | Apple M4 | 10 | 32 GiB | macOS 26.5.1 |
 | **EPYC** | 2 × AMD EPYC 7452 (Zen 2) | 64 (128 threads) | 256 GiB | Ubuntu 24.04.4 LTS |
 | **Pi** | Raspberry Pi 5 Model B Rev 1.1 (4 × Cortex-A76) | 4 | 8 GiB | Debian 13 |
+| **A18** | Apple Mac17,5 (Apple A18 Pro) | 6 | 8 GiB | macOS 26.5 |
 
 GMP numbers come from `pilot_gmp`, a C mirror of `pilot_mp` driven through
 the same pilot-bench harness: the same operand distribution, calibration
@@ -124,28 +125,28 @@ Karatsuba split, still below the Toom crossover (~8192 bits). `sqrtmod` and
 so their fitted exponents move with the sample's composition — read their
 extrema (see above).
 
-| Method | Complexity | M4 α | EPYC α | Pi α |
-|---|---|---|---|---|
-| `add` | O(n) | 0.85 | 0.73 | 0.82 |
-| `sub` | O(n) | 0.91 | 0.72 | 0.74 |
-| `mul` | schoolbook → Karatsuba → Toom-3/4 | 1.88 | 1.80 | 1.81 |
-| `sqr` | schoolbook → Karatsuba → Toom-3/4 | 1.85 | 1.72 | 1.83 |
-| `divrem` | O(n²) Algorithm D | 1.08 | 1.05 | 1.14 |
-| `modulo` | O(n²) | 1.09 | 1.06 | 1.14 |
-| `modmul` | O(n²) mul + reduce | 1.51 | 1.48 | 1.52 |
-| `montmul` | O(n²) | 1.59 | 1.58 | 1.73 |
-| `montsqr` | O(n²) | 1.59 | 1.54 | 1.73 |
-| `montpow_e65537` | O(n²) (17-bit exponent) | 1.64 | 1.62 | 1.78 |
-| `montpow_rand` | O(e·n²), e = 256 | 1.74 | 1.60 | 1.84 |
-| `montsetup` | O(n²) (one division) | 1.25 | 1.26 | 1.40 |
-| `gcd` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.14 | 1.14 | 1.12 |
-| `gcdext` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.01 | 1.09 | 1.09 |
-| `modinv` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.00 | 1.07 | 1.07 |
-| `jacobi` | binary → Lehmer quotients → HGCD-threaded state, O(M(n) log n) | 1.41 | 1.52 | 1.51 |
-| `modpow` | O(e·n²), e = 256 | 1.74 | 1.60 | 1.83 |
-| `sqrtmod` | O(n³) Tonelli–Shanks (input-dependent) | 2.60 | 2.72 | 1.07 |
-| `isprime` | mixture on random operands (input-dependent) | 2.03 | 1.97 | 2.56 |
-| `isprime_true` | twelve Miller–Rabin rounds: O(n·M(n)) | 2.29 | 2.64 | 2.80 |
+| Method | Complexity | M4 α | EPYC α | Pi α | A18 α |
+|---|---|---|---|---|---|
+| `add` | O(n) | 0.85 | 0.73 | 0.82 | 0.78 |
+| `sub` | O(n) | 0.91 | 0.72 | 0.74 | 0.94 |
+| `mul` | schoolbook → Karatsuba → Toom-3/4 | 1.88 | 1.80 | 1.81 | 1.91 |
+| `sqr` | schoolbook → Karatsuba → Toom-3/4 | 1.85 | 1.72 | 1.83 | 1.83 |
+| `divrem` | O(n²) Algorithm D | 1.08 | 1.05 | 1.14 | 1.02 |
+| `modulo` | O(n²) | 1.09 | 1.06 | 1.14 | 1.02 |
+| `modmul` | O(n²) mul + reduce | 1.51 | 1.48 | 1.52 | 1.43 |
+| `montmul` | O(n²) | 1.59 | 1.58 | 1.73 | 1.51 |
+| `montsqr` | O(n²) | 1.59 | 1.54 | 1.73 | 1.58 |
+| `montpow_e65537` | O(n²) (17-bit exponent) | 1.64 | 1.62 | 1.78 | 1.66 |
+| `montpow_rand` | O(e·n²), e = 256 | 1.74 | 1.60 | 1.84 | 1.74 |
+| `montsetup` | O(n²) (one division) | 1.25 | 1.26 | 1.40 | 1.20 |
+| `gcd` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.14 | 1.14 | 1.12 | 1.15 |
+| `gcdext` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.01 | 1.09 | 1.09 | 1.00 |
+| `modinv` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.00 | 1.07 | 1.07 | 0.97 |
+| `jacobi` | binary → Lehmer quotients → HGCD-threaded state, O(M(n) log n) | 1.41 | 1.52 | 1.51 | 1.39 |
+| `modpow` | O(e·n²), e = 256 | 1.74 | 1.60 | 1.83 | 1.72 |
+| `sqrtmod` | O(n³) Tonelli–Shanks (input-dependent) | 2.60 | 2.72 | 1.07 | 2.57 |
+| `isprime` | mixture on random operands (input-dependent) | 2.03 | 1.97 | 2.56 | 2.78 |
+| `isprime_true` | twelve Miller–Rabin rounds: O(n·M(n)) | 2.29 | 2.64 | 2.80 | 2.63 |
 
 ## Cost by method
 
@@ -157,15 +158,19 @@ extrema (see above).
 | `add` | M4 | 4.16 ns | 12.8 ns | 21.5 ns | 46.3 ns |
 |  | EPYC | 11.7 ns | 26.7 ns | 45.7 ns | 91.3 ns |
 |  | Pi | 17.1 ns | 44.7 ns | 89 ns | 163 ns |
+|  | A18 | 8.31 ns | 18 ns | 38.2 ns | 73.1 ns |
 | `sub` | M4 | 5.04 ns | 14.2 ns | 30.8 ns | 63.5 ns |
 |  | EPYC | 15.8 ns | 34.3 ns | 61.2 ns | 119 ns |
 |  | Pi | 23 ns | 53.1 ns | 101 ns | 180 ns |
+|  | A18 | 7.05 ns | 22.3 ns | 47.2 ns | 95.2 ns |
 | `mul` | M4 | 26.7 ns | 192 ns | 1.22 µs | 4.6 µs |
 |  | EPYC | 54.8 ns | 389 ns | 2.04 µs | 7.81 µs~ |
 |  | Pi | 82.3 ns | 815 ns | 3.61 µs | 12.2 µs |
+|  | A18 | 37.7 ns | 279 ns | 1.91 µs | 6.97 µs |
 | `sqr` | M4 | 28.1 ns | 192 ns | 1.19 µs | 4.55 µs~ |
 |  | EPYC | 69.3 ns | 397 ns | 2.04 µs | 8.11 µs~ |
 |  | Pi | 82 ns | 820 ns | 3.58 µs | 12.8 µs |
+|  | A18 | 45.5 ns | 289 ns | 1.95 µs | 6.84 µs |
 
 **Division & reduction** — mean per operation
 
@@ -174,12 +179,15 @@ extrema (see above).
 | `divrem` | M4 | 95.4 ns | 317 ns | 720 ns | 2.02 µs |
 |  | EPYC | 155 ns | 441 ns | 1.07 µs | 3.01 µs~ |
 |  | Pi | 248 ns | 820 ns | 2.05 µs | 6.17 µs |
+|  | A18 | 164 ns | 432 ns | 1.09 µs | 2.87 µs |
 | `modulo` | M4 | 94.2 ns | 312 ns | 710 ns | 2.05 µs |
 |  | EPYC | 155 ns | 438 ns | 1.09 µs | 3.05 µs |
 |  | Pi | 248 ns | 818 ns | 2.06 µs | 6.11 µs |
+|  | A18 | 164 ns | 427 ns | 1.07 µs | 2.9 µs |
 | `modmul` | M4 | 171 ns | 924 ns | 3.3 µs | 11.4 µs |
 |  | EPYC | 288 ns | 1.44 µs | 5.08 µs | 17.9 µs |
 |  | Pi | 484 ns | 2.85 µs | 9.71 µs | 33.2 µs |
+|  | A18 | 326 ns | 1.21 µs | 4.96 µs | 17.3 µs |
 
 **Montgomery domain** — mean per operation
 
@@ -188,18 +196,23 @@ extrema (see above).
 | `montmul` | M4 | 66.4 ns | 388 ns | 1.33 µs | 5.86 µs |
 |  | EPYC | 125 ns | 738 ns | 2.65 µs | 10.3 µs |
 |  | Pi | 198 ns | 1.65 µs | 6.23 µs | 24.4 µs |
+|  | A18 | 124 ns | 558 ns | 2.1 µs | 8.73 µs |
 | `montsqr` | M4 | 65.6 ns | 386 ns | 1.33 µs | 5.7 µs |
 |  | EPYC | 140 ns | 727 ns | 2.67 µs | 10.4 µs |
 |  | Pi | 198 ns | 1.66 µs | 6.23 µs | 24.4 µs |
+|  | A18 | 107 ns | 571 ns | 2.12 µs | 8.86 µs |
 | `montpow_e65537` | M4 | 833 ns | 5.58 µs | 19.7 µs | 82.9 µs |
 |  | EPYC | 1.68 µs | 11.5 µs | 39.7 µs | 155 µs |
 |  | Pi | 2.49 µs | 24.7 µs | 91.7 µs | 357 µs |
+|  | A18 | 1.24 µs | 9 µs | 31.9 µs | 127 µs |
 | `montpow_rand` | M4 | 11.5 µs | 96.8 µs | 348 µs | 1.51 ms |
 |  | EPYC | 32.1 µs | 207 µs | 729 µs | 2.79 ms |
 |  | Pi | 39.4 µs | 438 µs | 1.66 ms | 6.48 ms |
+|  | A18 | 17.6 µs | 149 µs | 561 µs | 2.24 ms |
 | `montsetup` | M4 | 289 ns | 1.03 µs | 2.87 µs | 9.83 µs |
 |  | EPYC | 454 ns | 1.65 µs | 4.63 µs | 15.8 µs |
 |  | Pi | 653 ns | 3.13 µs | 9.63 µs | 33.6 µs |
+|  | A18 | 503 ns | 1.5 µs | 4.49 µs | 14.5 µs |
 
 **Number theory** — mean per operation
 
@@ -208,18 +221,23 @@ extrema (see above).
 | `gcd` | M4 | 2.07 µs | 9.7 µs | 20.9 µs | 49.1 µs |
 |  | EPYC | 6.11 µs | 30.6 µs | 66.3 µs | 146 µs |
 |  | Pi | 9.77 µs | 45.9 µs | 98.7 µs | 221 µs |
+|  | A18 | 3.02 µs | 14.2 µs | 33.5 µs | 72.3 µs |
 | `gcdext` | M4 | 6.2 µs | 20.9 µs | 42.3 µs | 107 µs |
 |  | EPYC | 13.7 µs | 52.7 µs | 123 µs | 279 µs~ |
 |  | Pi | 18 µs | 70.3 µs | 156 µs | 381 µs |
+|  | A18 | 9.55 µs | 32.3 µs | 67 µs | 158 µs |
 | `modinv` | M4 | 4.7 µs | 16 µs | 32.4 µs | 79 µs |
 |  | EPYC | 10.6 µs | 42.8 µs | 93.4 µs | 211 µs |
 |  | Pi | 14.7 µs | 58.5 µs | 126 µs | 294 µs |
+|  | A18 | 7.89 µs | 22.3 µs | 52.3 µs | 118 µs |
 | `jacobi` | M4 | 1.22 µs | 7.48 µs | 24.4 µs | 57.9 µs |
 |  | EPYC | 2.64 µs | 20.3 µs | 75.8 µs | 165 µs |
 |  | Pi | 3.81 µs | 30.1 µs | 101 µs | 235 µs |
+|  | A18 | 1.89 µs | 11.3 µs | 38.2 µs | 83.7 µs |
 | `modpow` | M4 | 11.8 µs | 97.9 µs | 350 µs | 1.53 ms |
 |  | EPYC | 32.5 µs | 209 µs | 736 µs | 2.82 ms |
 |  | Pi | 40.1 µs | 444 µs | 1.67 ms | 6.48 ms |
+|  | A18 | 18.7 µs | 146 µs | 586 µs | 2.26 ms |
 
 **Variable-time (input-dependent)** — mean per operation
 
@@ -228,16 +246,22 @@ extrema (see above).
 | `sqrtmod` | M4 | 18.3 µs~ | 480 µs~ | 3.28 ms~ | 25.7 ms~ |
 |  | EPYC | 33.6 µs~ | 952 µs~ | 7.61 ms~ | 66.9 ms~ |
 |  | Pi | 58.7 µs~ | 1.43 ms~ | 14.7 ms~ | 350 µs |
+|  | A18 | 24.8 µs~ | 524 µs~ | 3.88 ms~ | 32.3 ms~ |
 | `isprime` | M4 | 4.91 µs~ | 29.9 µs~ | 217 µs~ | 1.41 ms~ |
 |  | EPYC | 3.25 µs~ | 276 µs~ | 203 µs~ | 969 µs~ |
 |  | Pi | 4.29 µs~ | 177 µs~ | 233 µs~ | 9.45 ms~ |
+|  | A18 | 1.24 µs~ | 38.5 µs~ | 439 µs~ | 2.54 ms~ |
 | `isprime_true` | M4 | 444 µs | 9.31 ms | 54.1 ms~ | – |
 |  | EPYC | 327 µs | 9.54 ms | 66.5 ms | 511 ms |
 |  | Pi | 508 µs | 20.9 ms | 155 ms | 1.2 s |
+|  | A18 | 260 µs | 8.22 ms | 47.4 ms | 413 ms~ |
 
 EPYC runs ~1.3–1.8× behind the M4 across the board (lower single-thread clock),
-and the Pi ~2–5× behind it (a small board core) — the same shapes, shifted up.
-The scaling graphs plot all three.
+the A18 ~1.5–2× behind it (the same core family two generations back, on a
+phone-class power budget, with the widest run-to-run spreads of the four —
+its frequency governor is visible in the order statistics), and the Pi
+~2–5× behind (a small board core) — the same shapes, shifted up. The
+scaling graphs plot all four.
 
 ![arithmetic scaling](assets/scaling-arithmetic.svg)
 
@@ -288,6 +312,23 @@ are in the tables above.
 | `gcdext` | 13.7 µs / 1.05 µs / 13.0× | 52.7 µs / 4.53 µs / 11.7× | 123 µs / 11 µs / 11.1× | 279 µs / 30.5 µs / 9.1× |
 | `modinv` | 10.6 µs / 969 ns / 10.9× | 42.8 µs / 4.17 µs / 10.3× | 93.4 µs / 9.89 µs / 9.4× | 211 µs / 26.5 µs / 8.0× |
 | `jacobi` | 2.64 µs / 826 ns / 3.2× | 20.3 µs / 3.94 µs / 5.1× | 75.8 µs / 8.92 µs / 8.5× | 165 µs / 21.9 µs / 7.5× |
+
+### A18
+
+| Method | 256b | 1024b | 2048b | 4096b |
+|---|---|---|---|---|
+| `add` | 8.31 ns / 5.05 ns / 1.6× | 18 ns / 7.71 ns / 2.3× | 38.2 ns / 11.7 ns / 3.3× | 73.1 ns / 20.1 ns / 3.6× |
+| `sub` | 7.05 ns / 6.92 ns / 1.0× | 22.3 ns / 9.35 ns / 2.4× | 47.2 ns / 15 ns / 3.2× | 95.2 ns / 23.5 ns / 4.1× |
+| `mul` | 37.7 ns / 19.1 ns / 2.0× | 279 ns / 143 ns / 2.0× | 1.91 µs / 481 ns / 4.0× | 6.97 µs / 1.35 µs / 5.2× |
+| `sqr` | 45.5 ns / 16.9 ns / 2.7× | 289 ns / 96.4 ns / 3.0× | 1.95 µs / 300 ns / 6.5× | 6.84 µs / 1.07 µs / 6.4× |
+| `divrem` | 164 ns / 24.5 ns / 6.7× | 432 ns / 126 ns / 3.4× | 1.09 µs / 302 ns / 3.6× | 2.87 µs / 914 ns / 3.1× |
+| `modulo` | 164 ns / 27.2 ns / 6.0× | 427 ns / 134 ns / 3.2× | 1.07 µs / 323 ns / 3.3× | 2.9 µs / 967 ns / 3.0× |
+| `modmul` | 326 ns / 77.7 ns / 4.2× | 1.21 µs / 440 ns / 2.8× | 4.96 µs / 1.3 µs / 3.8× | 17.3 µs / 4.2 µs / 4.1× |
+| `modpow` | 18.7 µs / 12 µs / 1.6× | 146 µs / 74.9 µs / 2.0× | 586 µs / 290 µs / 2.0× | 2.26 ms / 974 µs / 2.3× |
+| `gcd` | 3.02 µs / 698 ns / 4.3× | 14.2 µs / 3.4 µs / 4.2× | 33.5 µs / 7.75 µs / 4.3× | 72.3 µs / 17.4 µs / 4.2× |
+| `gcdext` | 9.55 µs / 957 ns / 10.0× | 32.3 µs / 4.13 µs / 7.8× | 67 µs / 9.18 µs / 7.3× | 158 µs / 21.9 µs / 7.2× |
+| `modinv` | 7.89 µs / 898 ns / 8.8× | 22.3 µs / 3.76 µs / 5.9× | 52.3 µs / 8.51 µs / 6.1× | 118 µs / 19.8 µs / 6.0× |
+| `jacobi` | 1.89 µs / 720 ns / 2.6× | 11.3 µs / 3.31 µs / 3.4× | 38.2 µs / 7.28 µs / 5.2× | 83.7 µs / 17.2 µs / 4.9× |
 
 ### Pi
 

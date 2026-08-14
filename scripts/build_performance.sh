@@ -10,19 +10,20 @@ M4=bench/primitives_hardy.md
 M4_HEAVY_EXT=bench/heavy_extended_hardy.md
 EPYC=bench/primitives_moore.md
 PI=bench/primitives_darby.md
+A18=bench/primitives_verne.md
 GCD_SCALE=bench/gcd_scaling_hardy.md
 GMP_GCD_SCALE=bench/gmp_gcd_scaling_hardy.md
 OUT=PERFORMANCE.md
 
 # Regenerate the scaling SVGs too, so they never drift from the tables.
 for fam in arithmetic division montgomery number-theory; do
-    $PA plot "$fam" "assets/scaling-$fam.svg" "M4=$M4" "EPYC=$EPYC" "Pi=$PI" >/dev/null
+    $PA plot "$fam" "assets/scaling-$fam.svg" "M4=$M4" "EPYC=$EPYC" "Pi=$PI" "A18=$A18" >/dev/null
 done
 # The variable-time figure carries the extended heavy-tail record (5120-8192
 # bits) alongside the primitives sizes, so the curve runs as far as the
 # extrema table it sits under.
 $PA plot variable-time assets/scaling-variable-time.svg \
-    "M4=$M4,$M4_HEAVY_EXT" "EPYC=$EPYC" "Pi=$PI" >/dev/null
+    "M4=$M4,$M4_HEAVY_EXT" "EPYC=$EPYC" "Pi=$PI" "A18=$A18" >/dev/null
 $PA plot gcd-at-scale assets/scaling-gcd-at-scale.svg \
     "rump=$GCD_SCALE" "GMP=$GMP_GCD_SCALE" >/dev/null
 
@@ -131,6 +132,7 @@ All measurements are single-threaded, against GMP 6.3.0 on every host:
 | **M4** | Apple M4 | 10 | 32 GiB | macOS 26.5.1 |
 | **EPYC** | 2 × AMD EPYC 7452 (Zen 2) | 64 (128 threads) | 256 GiB | Ubuntu 24.04.4 LTS |
 | **Pi** | Raspberry Pi 5 Model B Rev 1.1 (4 × Cortex-A76) | 4 | 8 GiB | Debian 13 |
+| **A18** | Apple Mac17,5 (Apple A18 Pro) | 6 | 8 GiB | macOS 26.5 |
 
 GMP numbers come from `pilot_gmp`, a C mirror of `pilot_mp` driven through
 the same pilot-bench harness: the same operand distribution, calibration
@@ -156,7 +158,7 @@ extrema (see above).
 
 MD
 
-$PA fit "M4=$M4" "EPYC=$EPYC" "Pi=$PI"
+$PA fit "M4=$M4" "EPYC=$EPYC" "Pi=$PI" "A18=$A18"
 
 cat <<'MD'
 
@@ -164,13 +166,16 @@ cat <<'MD'
 
 MD
 
-$PA means "M4=$M4" "EPYC=$EPYC" "Pi=$PI"
+$PA means "M4=$M4" "EPYC=$EPYC" "Pi=$PI" "A18=$A18"
 
 cat <<'MD'
 
 EPYC runs ~1.3–1.8× behind the M4 across the board (lower single-thread clock),
-and the Pi ~2–5× behind it (a small board core) — the same shapes, shifted up.
-The scaling graphs plot all three.
+the A18 ~1.5–2× behind it (the same core family two generations back, on a
+phone-class power budget, with the widest run-to-run spreads of the four —
+its frequency governor is visible in the order statistics), and the Pi
+~2–5× behind (a small board core) — the same shapes, shifted up. The
+scaling graphs plot all four.
 
 ![arithmetic scaling](assets/scaling-arithmetic.svg)
 
@@ -201,6 +206,14 @@ cat <<'MD'
 MD
 
 $PA compare "$EPYC" bench/gmp_moore.md | grep -v '`isprime`'
+
+cat <<'MD'
+
+### A18
+
+MD
+
+$PA compare "$A18" bench/gmp_verne.md | grep -v '`isprime`'
 
 cat <<'MD'
 
