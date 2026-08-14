@@ -7,8 +7,8 @@
 use rump::{
     crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
     is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
-    miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_pow, primes_below, product_tree,
-    random_below, random_coprime_below, random_nonzero_below, random_probable_prime,
+    lll_reduce, miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_pow, primes_below,
+    product_tree, random_below, random_coprime_below, random_nonzero_below, random_probable_prime,
     rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
     smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, BarrettCtx, BigInt, BigUint, Gf2m,
     MontgomeryCtx, PolyModP, PolyZ, Rng, Sign,
@@ -666,4 +666,14 @@ fn manual_polynomials() {
     assert_eq!(fs[0].0.degree(), Some(1)); // x
     assert_eq!(fs[1].0.degree(), Some(2)); // x^2 + 1
     assert!(fs.iter().all(|(_, e)| *e == 1));
+}
+
+#[test]
+fn manual_lattice() {
+    let row = |xs: &[i64]| xs.iter().map(|&x| BigInt::from_i64(x)).collect::<Vec<_>>();
+    // A badly skewed basis for a 2-D lattice.
+    let mut basis = vec![row(&[201, 37]), row(&[1648, 297])];
+    lll_reduce(&mut basis);
+    // Reduction returns short vectors spanning the same lattice.
+    assert_eq!(basis, vec![row(&[1, 32]), row(&[40, 1])]);
 }

@@ -825,6 +825,25 @@ assert_eq!(fs[1].0.degree(), Some(2)); // x^2 + 1
 assert!(fs.iter().all(|(_, e)| *e == 1));
 ```
 
+## Lattice reduction
+
+`lll_reduce` applies the Lenstra–Lenstra–Lovász algorithm to an ordered
+lattice basis — the rows of a `&mut [Vec<BigInt>]` — replacing it in place
+with a short, nearly orthogonal basis of the same lattice. It is exact
+(integer Gram–Schmidt, Cohen's Algorithm 2.6.3), never rational or
+floating-point. The Lovász parameter defaults to `δ = 3/4`;
+`lll_reduce_delta` takes it as a fraction in `(1/4, 1)`, larger reducing
+more aggressively. The rows must be linearly independent.
+
+```rust
+let row = |xs: &[i64]| xs.iter().map(|&x| BigInt::from_i64(x)).collect::<Vec<_>>();
+// A badly skewed basis for a 2-D lattice.
+let mut basis = vec![row(&[201, 37]), row(&[1648, 297])];
+lll_reduce(&mut basis);
+// Reduction returns short vectors spanning the same lattice.
+assert_eq!(basis, vec![row(&[1, 32]), row(&[40, 1])]);
+```
+
 ## Random sampling
 
 Implement `Rng` — one method, `fill_bytes` — and every sampler is driven by

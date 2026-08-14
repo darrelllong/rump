@@ -88,6 +88,12 @@ about it.
 | Distinct-degree factorization | `PolyModP::distinct_degree` | Cohen, §3.4.3 (Distinct Degree Factorization); the Frobenius `x ↦ xᵖ` reduced modulo the running polynomial. |
 | Equal-degree split (Cantor–Zassenhaus) | `PolyModP::equal_degree_split` (used by `factor`, `roots`, `is_irreducible`) | Cantor & Zassenhaus, *A new algorithm for factoring polynomials over finite fields*, Math. Comp. 36 (1981), 587–592; Cohen, §3.4.4 (Final Splitting). The `p = 2` case uses the trace map, the standard characteristic-2 instance. |
 
+## Lattice reduction (`src/lattice.rs`)
+
+| Algorithm | Location | Reference |
+|---|---|---|
+| LLL reduction (integral) | `lll_reduce`, `lll_reduce_delta` | Lenstra, Lenstra & Lovász, *Factoring polynomials with rational coefficients*, Math. Ann. 261 (1982), 515–534; integral form Cohen, *A Course in Computational Algebraic Number Theory*, §2.6.3 (The Integral LLL Algorithm). |
+
 ## GF(2^m) binary fields (`src/gf2m.rs`)
 
 | Algorithm | Location | Reference |
