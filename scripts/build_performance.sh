@@ -8,6 +8,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 PA="python3 scripts/perf_analysis.py"
 M4=bench/primitives_hardy.md
 M4_HEAVY_EXT=bench/heavy_extended_hardy.md
+EPYC_HEAVY_EXT=bench/heavy_extended_moore.md
+PI_HEAVY_EXT=bench/heavy_extended_darby.md
 EPYC=bench/primitives_moore.md
 PI=bench/primitives_darby.md
 A18=bench/primitives_verne.md
@@ -19,11 +21,13 @@ OUT=PERFORMANCE.md
 for fam in arithmetic division montgomery number-theory; do
     $PA plot "$fam" "assets/scaling-$fam.svg" "M4=$M4" "EPYC=$EPYC" "Pi=$PI" "A18=$A18" >/dev/null
 done
-# The variable-time figure carries the extended heavy-tail record (5120-8192
-# bits) alongside the primitives sizes, so the curve runs as far as the
-# extrema table it sits under.
+# The variable-time figure carries every host's extended heavy-tail record
+# (5120-8192 bits) alongside the primitives sizes, so each curve runs as far
+# as its host's record does, and the conditioned square-root rows appear as
+# their own series.
 $PA plot variable-time assets/scaling-variable-time.svg \
-    "M4=$M4,$M4_HEAVY_EXT" "EPYC=$EPYC" "Pi=$PI" "A18=$A18" >/dev/null
+    "M4=$M4,$M4_HEAVY_EXT" "EPYC=$EPYC,$EPYC_HEAVY_EXT" \
+    "Pi=$PI,$PI_HEAVY_EXT" "A18=$A18" >/dev/null
 $PA plot gcd-at-scale assets/scaling-gcd-at-scale.svg \
     "rump=$GCD_SCALE" "GMP=$GMP_GCD_SCALE" >/dev/null
 
@@ -107,6 +111,8 @@ degree of GF(2^m)):
 | `gcd` `gcdext` `modinv` `jacobi` | the number-theory family |
 | `sqrtmod` | `sqrt_mod` — a modular square root by Tonelli–Shanks (several exponentiations) |
 | `isprime` | `is_probable_prime` on a fully random operand — the outcome mixture; its extrema carry the variable-time signal, its p99 the one-round composite cost |
+| `sqrtmod_blum` | `sqrt_mod` on a guaranteed residue, prime pinned to `p ≡ 3 (mod 4)` — the `(p+1)/4` shortcut, isolated |
+| `sqrtmod_descent` | `sqrt_mod` on a guaranteed residue, prime pinned to `p ≡ 1 (mod 4)` — the Tonelli–Shanks descent, isolated |
 | `isprime_true` | `is_probable_prime` on a random prime of the row's width — the outcome-conditioned accept cost: the sieve plus all twelve Miller–Rabin rounds, the cost a caller plans around |
 | `gf2m_*` | binary-field multiply / square / sqrt / pow / inverse |
 
@@ -384,15 +390,36 @@ Ranked by `max/min` spread (M4). A spread near 1.0 is data-independent; a large
 spread means the primitive's cost depends on its input, which is why rump is
 explicitly variable-time and must not be used where timing may not leak secrets.
 
-Two operations produce the large spreads:
-- **`isprime`** ranges from a ~20 ns small-factor rejection to a full
-  twelve-round Miller–Rabin pass on a prime — a spread past **500,000×** at
-  2048 bits; the exact figure tracks how many primes the random sample
-  contained.
-- **`sqrt_mod`** varies with the prime's 2-adic structure — a Blum prime takes
-  the `(p+1)/4` shortcut, an NTT-friendly prime the full descent (200–450×).
-- Everything else — plain arithmetic, the Montgomery kernels, the Lehmer'd
-  Euclid family, GF(2^m) — sits at **1.0–1.6×**: cost tracks operand width, which
+Two operations produce the large spreads, and both are **mixtures** whose
+populations the conditioned rows separate:
+
+- **`isprime`** mixes a small-factor rejection in nanoseconds
+  (overwhelmingly likely on a random operand) with a full twelve-round
+  Miller–Rabin pass on a prime; `isprime_true` isolates the prime outcome.
+- **`sqrt_mod`** mixes three populations. Half of all inputs are
+  non-residues and exit at the Jacobi test — the row's minimum. Residues
+  split again by the prime's 2-adic structure: `p ≡ 3 (mod 4)` takes the
+  `(p+1)/4` shortcut (`sqrtmod_blum`, spreads 1.0–1.4 on every host), and
+  `p ≡ 1 (mod 4)` pays the Tonelli–Shanks descent (`sqrtmod_descent`),
+  whose cost grows with the square of `s = v₂(p−1)`: measured at 1024
+  bits, `s = 1` costs 377 µs, `s = 16` 1.0 ms, `s = 256` 15 ms. `s` is
+  geometric — `P(s = k | p ≡ 1 mod 4) = 2^(1−k)` — so the tail is rare
+  and unbounded; Cipolla's algorithm (queue item 8) removes it.
+
+**The mixture rows' medians must not be compared across sizes.** The
+non-residue population holds exactly half of `sqrt_mod`'s probability
+mass, so its per-cell median is an order statistic sitting on a cluster
+boundary — a fair coin between the rejection cost and the extraction
+cost. A five-session re-measurement demonstrated it: the 2048-bit median
+read 2.88 ms, 2.87 ms, 35 µs, 45 µs, 42 µs across sessions, and the
+4096-bit median flipped the other way in the same experiment. Each
+landing point is a genuine population cost (2.88 ms *is* the Blum path at
+2048 bits; 107 µs *is* the rejection at 4096); which population owns the
+median is the coin. Read the conditioned rows for costs, the mixture rows
+for extrema.
+
+- Everything else — plain arithmetic, the Montgomery kernels, the Euclid
+  family, GF(2^m) — sits at **1.0–1.6×**: cost tracks operand width, which
   is public, not the operand values.
 
 MD

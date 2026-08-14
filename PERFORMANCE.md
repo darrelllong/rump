@@ -76,6 +76,8 @@ degree of GF(2^m)):
 | `gcd` `gcdext` `modinv` `jacobi` | the number-theory family |
 | `sqrtmod` | `sqrt_mod` — a modular square root by Tonelli–Shanks (several exponentiations) |
 | `isprime` | `is_probable_prime` on a fully random operand — the outcome mixture; its extrema carry the variable-time signal, its p99 the one-round composite cost |
+| `sqrtmod_blum` | `sqrt_mod` on a guaranteed residue, prime pinned to `p ≡ 3 (mod 4)` — the `(p+1)/4` shortcut, isolated |
+| `sqrtmod_descent` | `sqrt_mod` on a guaranteed residue, prime pinned to `p ≡ 1 (mod 4)` — the Tonelli–Shanks descent, isolated |
 | `isprime_true` | `is_probable_prime` on a random prime of the row's width — the outcome-conditioned accept cost: the sieve plus all twelve Miller–Rabin rounds, the cost a caller plans around |
 | `gf2m_*` | binary-field multiply / square / sqrt / pow / inverse |
 
@@ -145,6 +147,8 @@ extrema (see above).
 | `jacobi` | binary → Lehmer quotients → HGCD-threaded state, O(M(n) log n) | 1.41 | 1.52 | 1.51 | 1.39 |
 | `modpow` | O(e·n²), e = 256 | 1.74 | 1.60 | 1.83 | 1.72 |
 | `sqrtmod` | O(n³) Tonelli–Shanks (input-dependent) | 2.60 | 2.72 | 1.07 | 2.57 |
+| `sqrtmod_blum` | Tonelli–Shanks, p ≡ 3 (mod 4): the (p+1)/4 shortcut | 2.70 | 2.65 | 2.72 | – |
+| `sqrtmod_descent` | Tonelli–Shanks, p ≡ 1 (mod 4): the 2-adic descent | 2.68 | 2.64 | 2.71 | – |
 | `isprime` | mixture on random operands (input-dependent) | 2.03 | 1.97 | 2.56 | 2.78 |
 | `isprime_true` | twelve Miller–Rabin rounds: O(n·M(n)) | 2.29 | 2.64 | 2.80 | 2.63 |
 
@@ -247,6 +251,12 @@ extrema (see above).
 |  | EPYC | 33.6 µs~ | 952 µs~ | 7.61 ms~ | 66.9 ms~ |
 |  | Pi | 58.7 µs~ | 1.43 ms~ | 14.7 ms~ | 350 µs |
 |  | A18 | 24.8 µs~ | 524 µs~ | 3.88 ms~ | 32.3 ms~ |
+| `sqrtmod_blum` | M4 | 13 µs | 394 µs | 2.88 ms | 23.8 ms |
+|  | EPYC | 28 µs | 835 µs | 5.76 ms | 45.3 ms |
+|  | Pi | 44.8 µs | 1.78 ms | 13 ms | – |
+| `sqrtmod_descent` | M4 | 40.3 µs | 1.2 ms | 8.49 ms | 72.1 ms |
+|  | EPYC | 85.5 µs | 2.51 ms | 17.2 ms | 136 ms |
+|  | Pi | 135 µs | 5.31 ms | 39.1 ms | – |
 | `isprime` | M4 | 4.91 µs~ | 29.9 µs~ | 217 µs~ | 1.41 ms~ |
 |  | EPYC | 3.25 µs~ | 276 µs~ | 203 µs~ | 969 µs~ |
 |  | Pi | 4.29 µs~ | 177 µs~ | 233 µs~ | 9.45 ms~ |
@@ -512,15 +522,36 @@ Ranked by `max/min` spread (M4). A spread near 1.0 is data-independent; a large
 spread means the primitive's cost depends on its input, which is why rump is
 explicitly variable-time and must not be used where timing may not leak secrets.
 
-Two operations produce the large spreads:
-- **`isprime`** ranges from a ~20 ns small-factor rejection to a full
-  twelve-round Miller–Rabin pass on a prime — a spread past **500,000×** at
-  2048 bits; the exact figure tracks how many primes the random sample
-  contained.
-- **`sqrt_mod`** varies with the prime's 2-adic structure — a Blum prime takes
-  the `(p+1)/4` shortcut, an NTT-friendly prime the full descent (200–450×).
-- Everything else — plain arithmetic, the Montgomery kernels, the Lehmer'd
-  Euclid family, GF(2^m) — sits at **1.0–1.6×**: cost tracks operand width, which
+Two operations produce the large spreads, and both are **mixtures** whose
+populations the conditioned rows separate:
+
+- **`isprime`** mixes a small-factor rejection in nanoseconds
+  (overwhelmingly likely on a random operand) with a full twelve-round
+  Miller–Rabin pass on a prime; `isprime_true` isolates the prime outcome.
+- **`sqrt_mod`** mixes three populations. Half of all inputs are
+  non-residues and exit at the Jacobi test — the row's minimum. Residues
+  split again by the prime's 2-adic structure: `p ≡ 3 (mod 4)` takes the
+  `(p+1)/4` shortcut (`sqrtmod_blum`, spreads 1.0–1.4 on every host), and
+  `p ≡ 1 (mod 4)` pays the Tonelli–Shanks descent (`sqrtmod_descent`),
+  whose cost grows with the square of `s = v₂(p−1)`: measured at 1024
+  bits, `s = 1` costs 377 µs, `s = 16` 1.0 ms, `s = 256` 15 ms. `s` is
+  geometric — `P(s = k | p ≡ 1 mod 4) = 2^(1−k)` — so the tail is rare
+  and unbounded; Cipolla's algorithm (queue item 8) removes it.
+
+**The mixture rows' medians must not be compared across sizes.** The
+non-residue population holds exactly half of `sqrt_mod`'s probability
+mass, so its per-cell median is an order statistic sitting on a cluster
+boundary — a fair coin between the rejection cost and the extraction
+cost. A five-session re-measurement demonstrated it: the 2048-bit median
+read 2.88 ms, 2.87 ms, 35 µs, 45 µs, 42 µs across sessions, and the
+4096-bit median flipped the other way in the same experiment. Each
+landing point is a genuine population cost (2.88 ms *is* the Blum path at
+2048 bits; 107 µs *is* the rejection at 4096); which population owns the
+median is the coin. Read the conditioned rows for costs, the mixture rows
+for extrema.
+
+- Everything else — plain arithmetic, the Montgomery kernels, the Euclid
+  family, GF(2^m) — sits at **1.0–1.6×**: cost tracks operand width, which
   is public, not the operand values.
 
 | Operation | size | min | p50 | p99 | max | max/min |
@@ -542,7 +573,7 @@ Two operations produce the large spreads:
 |  | 7168 | 120 µs | 123 µs | 123 µs | 131 ms | 1,086 |
 |  | 8192 | 145 µs | 146 µs | 197 ms | 591 ms | 4,081 |
 
-The remaining 81 rows — every other operation and size — span **1.0–4.5×**: their cost is set by operand width, not operand value. On rows costing only a few nanoseconds (`add`/`sub` at 256 bits) the spread measures timer and scheduler granularity, not operand dependence.
+The remaining 97 rows — every other operation and size — span **1.0–4.5×**: their cost is set by operand width, not operand value. On rows costing only a few nanoseconds (`add`/`sub` at 256 bits) the spread measures timer and scheduler granularity, not operand dependence.
 
 ![variable-time scaling](assets/scaling-variable-time.svg)
 

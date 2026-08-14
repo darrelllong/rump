@@ -83,6 +83,9 @@ struct IntPool {
     /// scaling-sweep sizes (up to a million bits) would swamp a cheap op's
     /// measurement with pool construction.
     mont: Option<MontState>,
+    /// A guaranteed quadratic residue modulo the pool's prime, for the
+    /// residue-class-conditioned square-root rows.
+    residue: Option<BigUint>,
     /// A random probable prime, built only for the ops that read one
     /// (`sqrtmod`, `isprime_true`): prime density thins as sizes grow, and
     /// hunting one beyond a few thousand bits costs seconds per trial —
@@ -141,12 +144,42 @@ impl IntPool {
             MontState { ctx, a_mont, b_mont }
         });
         // A prime near a fresh random point, for the prime-conditioned ops.
-        let prime = matches!(op, "sqrtmod" | "isprime_true").then(|| {
+        // The residue-class-conditioned square-root rows pin the prime's
+        // class — p ≡ 3 (mod 4) takes the (p+1)/4 shortcut, p ≡ 1 (mod 4)
+        // the Tonelli–Shanks descent — decomposing the *residue half* of
+        // the mixture. The unconditioned row's third and largest
+        // population, non-residue rejection at the Jacobi test, stays in
+        // that row: no weighted average of the conditioned rows
+        // reconstructs it. The descent row's own spread is the geometric
+        // s = v₂(p−1) tail (P(s = k | p ≡ 1 mod 4) = 2^(1−k) for k ≥ 2),
+        // a property of the prime, not of the operand. The class filter
+        // halves candidate density, so these rows' prime hunts cost about
+        // twice the unconditioned row's per reading.
+        let prime = matches!(
+            op,
+            "sqrtmod" | "sqrtmod_blum" | "sqrtmod_descent" | "isprime_true"
+        )
+        .then(|| {
+            let wanted_mod4 = match op {
+                "sqrtmod_blum" => Some(3),
+                "sqrtmod_descent" => Some(1),
+                _ => None,
+            };
             let mut candidate = rng.odd(bits);
-            while !is_probable_prime(&candidate) {
+            loop {
+                let class_ok = wanted_mod4.is_none_or(|r| candidate.rem_u64(4) == r);
+                if class_ok && is_probable_prime(&candidate) {
+                    break candidate;
+                }
                 candidate = candidate.add_ref(&BigUint::from_u64(2));
             }
-            candidate
+        });
+        // A guaranteed quadratic residue for the conditioned square-root
+        // rows, so they measure root extraction rather than the Jacobi
+        // rejection exit.
+        let residue = matches!(op, "sqrtmod_blum" | "sqrtmod_descent").then(|| {
+            let p = prime.as_ref().expect("conditioned ops build a prime");
+            BigUint::mod_mul(&a, &a, p)
         });
         // Reused output storage for the ops that write in place; seeded from
         // `a` so its capacity already covers a full-width result.
@@ -158,6 +191,7 @@ impl IntPool {
             modulus,
             mont,
             prime,
+            residue,
             out,
             e65537: BigUint::from_u64(65_537),
             exp_rand: rng.biguint(256),
@@ -197,6 +231,9 @@ impl FieldPool {
 // ─── The operations ─────────────────────────────────────────────────────────
 
 /// A benchmark closure over the process's single random operand set.
+// One Bench exists per process, so the variants' size disparity buys
+// nothing to fix and costs a pointer chase to "improve".
+#[allow(clippy::large_enum_variant)]
 enum Bench {
     Int(IntPool, fn(&mut IntPool)),
     Field(FieldPool, fn(&FieldPool)),
@@ -278,6 +315,10 @@ fn int_op(name: &str) -> Option<fn(&mut IntPool)> {
         "sqrtmod" => |p| {
             black_box(sqrt_mod(&p.a, p.prime()));
         },
+        "sqrtmod_blum" | "sqrtmod_descent" => |p| {
+            let residue = p.residue.as_ref().expect("op builds a residue");
+            black_box(sqrt_mod(residue, p.prime()));
+        },
         "isprime" => |p| {
             black_box(is_probable_prime(&p.a));
         },
@@ -333,6 +374,8 @@ const INT_OPS: &[&str] = &[
     "modinv",
     "jacobi",
     "sqrtmod",
+    "sqrtmod_blum",
+    "sqrtmod_descent",
     "isprime",
     "isprime_true",
 ];

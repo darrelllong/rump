@@ -107,7 +107,7 @@ INT_FAMILIES = {
     "division": ["divrem", "modulo", "modmul"],
     "montgomery": ["montmul", "montsqr", "montpow_e65537", "montpow_rand", "montsetup"],
     "number-theory": ["gcd", "gcdext", "modinv", "jacobi", "modpow"],
-    "variable-time": ["sqrtmod", "isprime", "isprime_true"],
+    "variable-time": ["sqrtmod", "sqrtmod_blum", "sqrtmod_descent", "isprime", "isprime_true"],
 }
 
 # Theoretical complexity per method (n = bit width), for the fit table.
@@ -129,6 +129,8 @@ THEORY = {
     "gcdext": "Lehmer O(n²) → Half-GCD O(M(n)·log n)",
     "modinv": "Lehmer O(n²) → Half-GCD O(M(n)·log n)",
     "jacobi": "binary → Lehmer quotients → HGCD-threaded state, O(M(n) log n)",
+    "sqrtmod_blum": "Tonelli–Shanks, p ≡ 3 (mod 4): the (p+1)/4 shortcut",
+    "sqrtmod_descent": "Tonelli–Shanks, p ≡ 1 (mod 4): the 2-adic descent",
     "sqrtmod": "O(n³) Tonelli–Shanks (input-dependent)",
     "isprime": "mixture on random operands (input-dependent)",
     "isprime_true": "twelve Miller–Rabin rounds: O(n·M(n))",
