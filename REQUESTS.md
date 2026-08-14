@@ -181,6 +181,15 @@ For the record, so the boundary stays where it is:
 Kept as a record of what the list has already produced, so the boundary that
 worked stays visible.
 
+- **All of Tiers 1 and 2** (9ec0872) — items 1 through 5 above.
+  `BigUint::div_rem_u64` / `to_u64`, `primes_below`,
+  `sqrt_mod_prime_power` (every root mod `p^e`: quadratic Hensel for odd
+  `p`, the mod-8 dyadic structure, valuation reduction for `p | a`),
+  `BigUint::to_f64_lossy` / `ln_approx`, and Bernstein's `product_tree` /
+  `remainder_tree` / `smooth_parts`. The signatures are as requested;
+  `sqrt_mod_prime_power`'s returned set is `p^⌊v/2⌋` roots when `p^v ∥ a`,
+  so beware calling it with `a` divisible by a large base prime.
+
 - **`MontgomeryCtx::add_mont` / `sub_mont`, `BigUint::mod_add` / `mod_sub`**
   (93b4d57). Pollard's rho iterates `x ↦ x² + c` inside the Montgomery domain,
   and the `+ c` was a hand-written conditional subtraction downstream, correct
