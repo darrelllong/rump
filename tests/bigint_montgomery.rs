@@ -314,10 +314,13 @@ fn mul_and_square_match_division_reference() {
 
 #[test]
 fn squaring_kernel_stresses_carry_chains() {
-    // The squaring kernel doubles its cross-term sum in a separate pass;
-    // values with long all-ones runs and isolated high bits push that pass's
-    // carries the furthest. Compare against the generic multiply through the
-    // public API at several widths, including the key sizes.
+    // `square_mont` runs the dedicated squaring kernel (mont_sqr: cross terms
+    // once, a separate doubling pass, then the diagonal) while `mul_mont` runs
+    // the generic multiply (mont_mul: full schoolbook product). These are
+    // distinct kernels, so this comparison is a genuine differential test of
+    // the squaring path — not, as before, a function against itself. Values
+    // with long all-ones runs and isolated high bits push the doubling pass's
+    // carries the furthest; compare at several widths, including key sizes.
     let mut rng = rng();
     for modulus_words in [2usize, 4, 8, 16, 32, 64] {
         let modulus = structured_odd_modulus(modulus_words, &mut rng);
