@@ -264,6 +264,127 @@ impl PolyZ {
         coeffs.extend(self.coeffs.iter().cloned());
         Self { coeffs }
     }
+
+    /// The resultant `res(self, other)` — the determinant of the two
+    /// polynomials' Sylvester matrix, zero exactly when they share a
+    /// non-constant factor over ℚ. Computed by Bareiss fraction-free
+    /// elimination, which keeps every intermediate entry an integer minor
+    /// determinant, so no rational arithmetic is needed (Bareiss, Math.
+    /// Comp. 22 (1968); Cohen, §3.3.1).
+    ///
+    /// Conventions at the degenerate ends: the resultant of two non-zero
+    /// constants is `1`; `res(f, c)` for a non-zero constant `c` is
+    /// `c^deg f`; and the resultant is `0` if either argument is the zero
+    /// polynomial.
+    #[must_use]
+    pub fn resultant(&self, other: &Self) -> BigInt {
+        if self.is_zero() || other.is_zero() {
+            return BigInt::zero();
+        }
+        let m = self.degree().expect("non-zero");
+        let n = other.degree().expect("non-zero");
+        if m == 0 && n == 0 {
+            return BigInt::one();
+        }
+        if n == 0 {
+            // res(f, c) = c^deg f.
+            return other.leading_coefficient().pow_u64(m as u64);
+        }
+        if m == 0 {
+            return self.leading_coefficient().pow_u64(n as u64);
+        }
+        let matrix = sylvester_matrix(self, other);
+        bareiss_determinant(matrix)
+    }
+
+    /// The discriminant `disc(self) = (−1)^(d(d−1)/2) · res(self, self') /
+    /// lc(self)`, where `d = deg self`. Zero exactly when `self` has a
+    /// repeated factor over ℚ. The division by the leading coefficient is
+    /// exact for an integer polynomial (Cohen, §3.3.2). The discriminant of
+    /// a constant or the zero polynomial is `0` by convention.
+    #[must_use]
+    pub fn discriminant(&self) -> BigInt {
+        let Some(d) = self.degree() else {
+            return BigInt::zero();
+        };
+        if d == 0 {
+            return BigInt::zero();
+        }
+        let res = self.resultant(&self.derivative());
+        // sign = (−1)^(d(d−1)/2)
+        let signed = if (d * (d - 1) / 2) % 2 == 0 {
+            res
+        } else {
+            res.negated()
+        };
+        signed.div_exact(&self.leading_coefficient())
+    }
+}
+
+/// The Sylvester matrix of two non-constant polynomials `a` (degree `m`)
+/// and `b` (degree `n`): an `(m+n)×(m+n)` matrix whose top `n` rows are
+/// shifted copies of `a`'s coefficients (high-to-low) and bottom `m` rows
+/// shifted copies of `b`'s. Row-major.
+fn sylvester_matrix(a: &PolyZ, b: &PolyZ) -> Vec<Vec<BigInt>> {
+    let m = a.degree().expect("non-constant");
+    let n = b.degree().expect("non-constant");
+    let size = m + n;
+    let mut matrix = vec![vec![BigInt::zero(); size]; size];
+    // a's coefficients high-to-low, length m+1.
+    let a_hi: Vec<BigInt> = a.coefficients().iter().rev().cloned().collect();
+    let b_hi: Vec<BigInt> = b.coefficients().iter().rev().cloned().collect();
+    for i in 0..n {
+        for (j, coeff) in a_hi.iter().enumerate() {
+            matrix[i][i + j] = coeff.clone();
+        }
+    }
+    for i in 0..m {
+        for (j, coeff) in b_hi.iter().enumerate() {
+            matrix[n + i][i + j] = coeff.clone();
+        }
+    }
+    matrix
+}
+
+/// The determinant of an integer matrix by Bareiss fraction-free Gaussian
+/// elimination: each elimination step divides exactly by the previous
+/// pivot, so all intermediates stay integral, and the last pivot is the
+/// determinant (up to the sign accumulated by row swaps).
+fn bareiss_determinant(mut matrix: Vec<Vec<BigInt>>) -> BigInt {
+    let n = matrix.len();
+    if n == 0 {
+        return BigInt::one();
+    }
+    let mut sign_negative = false;
+    let mut previous = BigInt::one();
+    for k in 0..n - 1 {
+        if matrix[k][k].is_zero() {
+            // Find a row below with a non-zero entry in this column.
+            let Some(swap) = (k + 1..n).find(|&r| !matrix[r][k].is_zero()) else {
+                return BigInt::zero(); // singular
+            };
+            matrix.swap(k, swap);
+            sign_negative = !sign_negative;
+        }
+        let pivot = matrix[k][k].clone();
+        for i in k + 1..n {
+            for j in k + 1..n {
+                // matrix[i][j] ← (matrix[i][j]·pivot − matrix[i][k]·matrix[k][j]) / previous
+                let cross = matrix[i][j]
+                    .mul_ref(&pivot)
+                    .sub_ref(&matrix[i][k].mul_ref(&matrix[k][j]));
+                matrix[i][j] = cross.div_exact(&previous);
+            }
+            matrix[i][k] = BigInt::zero();
+        }
+        previous = pivot;
+    }
+    let det = matrix[n - 1][n - 1].clone();
+    if sign_negative {
+        det.negated()
+    } else {
+        det
+    }
 }
 
 /// A univariate polynomial over ℤ/mℤ for a fixed modulus `m ≥ 2`,
@@ -731,6 +852,177 @@ mod tests {
         let a = PolyModP::new(vec![BigUint::one(), BigUint::one(), BigUint::one()], &m);
         let b = PolyModP::new(vec![BigUint::one(), BigUint::from_u64(2)], &m);
         let _ = a.div_rem(&b);
+    }
+
+    // An independent resultant oracle: the determinant of the Sylvester
+    // matrix by rational (fraction) Gaussian elimination — no shared code
+    // with the production Bareiss path. The elimination reads and writes
+    // distinct rows of one matrix, so it indexes by row rather than
+    // iterating.
+    #[allow(clippy::needless_range_loop)]
+    fn resultant_rational_oracle(a: &PolyZ, b: &PolyZ) -> BigInt {
+        use crate::bigint::Sign;
+        if a.is_zero() || b.is_zero() {
+            return BigInt::zero();
+        }
+        let (m, n) = (a.degree().unwrap(), b.degree().unwrap());
+        if m == 0 && n == 0 {
+            return BigInt::one();
+        }
+        let size = m + n;
+        // Rationals as (num, den) BigInt pairs, den > 0.
+        type Q = (BigInt, BigInt);
+        let q = |v: BigInt| -> Q { (v, BigInt::one()) };
+        let qmul = |x: &Q, y: &Q| -> Q { (x.0.mul_ref(&y.0), x.1.mul_ref(&y.1)) };
+        let qsub = |x: &Q, y: &Q| -> Q {
+            (
+                x.0.mul_ref(&y.1).sub_ref(&y.0.mul_ref(&x.1)),
+                x.1.mul_ref(&y.1),
+            )
+        };
+        let qdiv = |x: &Q, y: &Q| -> Q {
+            let mut num = x.0.mul_ref(&y.1);
+            let mut den = x.1.mul_ref(&y.0);
+            if den.sign() == Sign::Negative {
+                num = num.negated();
+                den = den.negated();
+            }
+            (num, den)
+        };
+        let qzero = |x: &Q| -> bool { x.0.is_zero() };
+        let mut mat = vec![vec![q(BigInt::zero()); size]; size];
+        let a_hi: Vec<BigInt> = a.coefficients().iter().rev().cloned().collect();
+        let b_hi: Vec<BigInt> = b.coefficients().iter().rev().cloned().collect();
+        for i in 0..n {
+            for (j, c) in a_hi.iter().enumerate() {
+                mat[i][i + j] = q(c.clone());
+            }
+        }
+        for i in 0..m {
+            for (j, c) in b_hi.iter().enumerate() {
+                mat[n + i][i + j] = q(c.clone());
+            }
+        }
+        let mut det = q(BigInt::one());
+        for col in 0..size {
+            let Some(piv) = (col..size).find(|&r| !qzero(&mat[r][col])) else {
+                return BigInt::zero();
+            };
+            if piv != col {
+                mat.swap(col, piv);
+                det = (det.0.negated(), det.1);
+            }
+            det = qmul(&det, &mat[col][col]);
+            let inv = mat[col][col].clone();
+            let pivot_row = mat[col].clone();
+            for r in col + 1..size {
+                let factor = qdiv(&mat[r][col], &inv);
+                for (cell, pivot_cell) in mat[r].iter_mut().zip(&pivot_row).skip(col) {
+                    let prod = qmul(&factor, pivot_cell);
+                    *cell = qsub(cell, &prod);
+                }
+            }
+        }
+        // det is an integer; num/den divides evenly.
+        det.0.div_exact(&det.1)
+    }
+
+    #[test]
+    fn resultant_matches_rational_oracle_and_known_values() {
+        let mut rng = SplitMix64 {
+            state: 0x8e50_0000_0001,
+        };
+        for _ in 0..500 {
+            let a = rng.poly_z(5, 8);
+            let b = rng.poly_z(5, 8);
+            assert_eq!(
+                a.resultant(&b),
+                resultant_rational_oracle(&a, &b),
+                "resultant vs rational oracle"
+            );
+            // Symmetry up to sign: res(a,b) = (-1)^(deg a · deg b) res(b,a).
+            if let (Some(da), Some(db)) = (a.degree(), b.degree()) {
+                let expected = if (da * db) % 2 == 0 {
+                    b.resultant(&a)
+                } else {
+                    b.resultant(&a).negated()
+                };
+                assert_eq!(a.resultant(&b), expected, "resultant symmetry");
+            }
+        }
+        // Known values.
+        let xm = |r: i64| PolyZ::from_i64_slice(&[-r, 1]); // x - r
+                                                           // res(x-2, x-3) = -1 (Sylvester convention).
+        assert_eq!(xm(2).resultant(&xm(3)), BigInt::from_i64(-1));
+        // Shares root 1 → 0.
+        assert_eq!(
+            PolyZ::from_i64_slice(&[-1, 0, 1]).resultant(&xm(1)),
+            BigInt::zero()
+        );
+        // res(2x, 3) = 3^1.
+        assert_eq!(
+            PolyZ::from_i64_slice(&[0, 2]).resultant(&PolyZ::from_i64_slice(&[3])),
+            BigInt::from_i64(3)
+        );
+        // Two nonzero constants → 1.
+        assert_eq!(
+            PolyZ::from_i64_slice(&[5]).resultant(&PolyZ::from_i64_slice(&[7])),
+            BigInt::one()
+        );
+        // Zero polynomial → 0.
+        assert_eq!(xm(1).resultant(&PolyZ::zero()), BigInt::zero());
+    }
+
+    #[test]
+    fn resultant_multiplicativity() {
+        let mut rng = SplitMix64 {
+            state: 0x3711_0000_0001,
+        };
+        for _ in 0..300 {
+            let f = rng.poly_z(4, 6);
+            let g = rng.poly_z(3, 6);
+            let h = rng.poly_z(3, 6);
+            if f.is_zero() || g.is_zero() || h.is_zero() {
+                continue;
+            }
+            // res(f, g·h) = res(f, g)·res(f, h).
+            assert_eq!(
+                f.resultant(&g.mul(&h)),
+                f.resultant(&g).mul_ref(&f.resultant(&h)),
+                "resultant multiplicativity"
+            );
+        }
+    }
+
+    #[test]
+    fn discriminant_known_forms() {
+        // disc(x^2 + bx + c) = b^2 - 4c.
+        for b in -4i64..=4 {
+            for c in -4i64..=4 {
+                assert_eq!(
+                    PolyZ::from_i64_slice(&[c, b, 1]).discriminant(),
+                    BigInt::from_i64(b * b - 4 * c),
+                    "disc quadratic b={b} c={c}"
+                );
+            }
+        }
+        // disc(x^3 + px + q) = -4p^3 - 27q^2.
+        for p in -3i64..=3 {
+            for q in -3i64..=3 {
+                assert_eq!(
+                    PolyZ::from_i64_slice(&[q, p, 0, 1]).discriminant(),
+                    BigInt::from_i64(-4 * p * p * p - 27 * q * q),
+                    "disc depressed cubic p={p} q={q}"
+                );
+            }
+        }
+        // A polynomial with a repeated root has discriminant 0:
+        // (x-1)^2(x-2) = x^3 - 4x^2 + 5x - 2.
+        let repeated = PolyZ::from_i64_slice(&[-2, 5, -4, 1]);
+        assert_eq!(repeated.discriminant(), BigInt::zero());
+        // Constant and zero → 0.
+        assert_eq!(PolyZ::from_i64_slice(&[7]).discriminant(), BigInt::zero());
+        assert_eq!(PolyZ::zero().discriminant(), BigInt::zero());
     }
 
     #[test]

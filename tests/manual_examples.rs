@@ -618,4 +618,19 @@ fn manual_polynomials() {
     let g = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[6, -5, 1]), &p); // x^2 - 5x + 6
     let shared = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-2, 1]), &p); // x - 2
     assert_eq!(f.gcd(&g), shared);
+
+    // disc(x^2 + 5x + 6) = 25 - 24 = 1.
+    let quad = PolyZ::from_i64_slice(&[6, 5, 1]);
+    assert_eq!(quad.discriminant(), BigInt::from_i64(1));
+
+    // (x-1)(x-2) and (x-1)(x-3) share (x-1): resultant zero.
+    let u = PolyZ::from_i64_slice(&[2, -3, 1]); // x^2 - 3x + 2
+    let v = PolyZ::from_i64_slice(&[3, -4, 1]); // x^2 - 4x + 3
+    assert_eq!(u.resultant(&v), BigInt::zero());
+
+    // A perfect square has discriminant zero: (x-1)^2 = x^2 - 2x + 1.
+    assert_eq!(
+        PolyZ::from_i64_slice(&[1, -2, 1]).discriminant(),
+        BigInt::zero()
+    );
 }

@@ -3161,6 +3161,22 @@ impl BigInt {
         Self::from_biguint(crate::number_theory::gcd(&self.magnitude, &other.magnitude))
     }
 
+    /// `self^exponent` for a machine-word exponent, by binary
+    /// exponentiation — the signed counterpart of [`BigUint::pow_u64`],
+    /// carrying the sign through (a negative base to an odd power stays
+    /// negative). `self^0 = 1`.
+    #[must_use]
+    pub(crate) fn pow_u64(&self, exponent: u64) -> Self {
+        let magnitude = self.magnitude.pow_u64(exponent);
+        // The sign is negative iff the base is negative and the exponent odd.
+        let sign = if self.sign == Sign::Negative && exponent % 2 == 1 {
+            Sign::Negative
+        } else {
+            Sign::Positive
+        };
+        Self::from_parts(sign, magnitude)
+    }
+
     /// Reduce modulo a positive modulus and return the least non-negative residue.
     ///
     /// # Panics
