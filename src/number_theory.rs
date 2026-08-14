@@ -1147,6 +1147,141 @@ fn gcd_extended_lehmer(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
     (r0, s0, t0)
 }
 
+// ─── Batch smoothness (Bernstein) ──────────────────────────────────────────
+
+/// The product tree of `values`: level 0 is the values themselves, each
+/// higher level the pairwise products of the level below, the top level a
+/// single root equal to the product of all of them. An odd node at any
+/// level carries up unpaired. Empty input yields an empty tree.
+///
+/// The tree is the shared structure of [`remainder_tree`]: building it once
+/// and reducing a modulus down it costs O(M(N)·log n) for total input size
+/// N, against O(n) full-width divisions done separately. A zero leaf is
+/// permitted here (its product is zero), but [`remainder_tree`] cannot
+/// divide by it.
+///
+/// Reference: Bernstein, *How to find smooth parts of integers* (2004);
+/// the product/remainder tree is the standard fast multiple-reduction.
+#[must_use]
+pub fn product_tree(values: &[BigUint]) -> Vec<Vec<BigUint>> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    let mut levels = vec![values.to_vec()];
+    while levels.last().expect("non-empty").len() > 1 {
+        let below = levels.last().expect("non-empty");
+        let mut up = Vec::with_capacity(below.len().div_ceil(2));
+        let mut i = 0;
+        while i < below.len() {
+            if i + 1 < below.len() {
+                up.push(below[i].mul_ref(&below[i + 1]));
+            } else {
+                up.push(below[i].clone());
+            }
+            i += 2;
+        }
+        levels.push(up);
+    }
+    levels
+}
+
+/// `modulus mod vᵢ` for every leaf `vᵢ` of a [`product_tree`], by one
+/// descent: reduce the modulus against the root, then reduce each running
+/// remainder against the two child products below it, so the divisor
+/// shrinks toward the leaf rather than the whole modulus dividing each.
+/// Returns the leaf remainders in input order; empty tree yields an empty
+/// vector.
+///
+/// # Panics
+///
+/// Panics if any leaf is zero — reduction divides by it.
+#[must_use]
+pub fn remainder_tree(tree: &[Vec<BigUint>], modulus: &BigUint) -> Vec<BigUint> {
+    let Some(root_level) = tree.last() else {
+        return Vec::new();
+    };
+    // Remainders against the top level.
+    let mut remainders: Vec<BigUint> = root_level.iter().map(|v| modulus.modulo(v)).collect();
+    // Descend: level index from top−1 down to 0; a node's parent remainder
+    // reduces against the node's own value.
+    for level in (0..tree.len() - 1).rev() {
+        let here = &tree[level];
+        let mut next = Vec::with_capacity(here.len());
+        for (j, value) in here.iter().enumerate() {
+            next.push(remainders[j / 2].modulo(value));
+        }
+        remainders = next;
+    }
+    remainders
+}
+
+/// The smooth part of each value over the prime set `primes`: the largest
+/// divisor composed only of those primes, with multiplicity. A value is
+/// fully smooth exactly when its smooth part equals itself.
+///
+/// The primes' product `z` is reduced against every value at once by a
+/// remainder tree. A prime `p ∈ primes` dividing `vᵢ` divides `z` and so
+/// divides `z mod vᵢ`; raising that remainder to `2^s` (mod `vᵢ`), with
+/// `2^s` past every prime's multiplicity in `vᵢ`, accumulates each such
+/// prime to its full exponent, and the gcd with `vᵢ` is the smooth part.
+/// No prime outside the base survives the gcd, since any `q` dividing both
+/// `vᵢ` and `z mod vᵢ` divides `z` and is therefore in the base. One
+/// batched pass replaces per-value trial division (Bernstein, 2004).
+///
+/// Trivial values pass through: `0` (divisible by every prime) maps to
+/// `0`, `1` maps to `1`, and neither joins the tree.
+#[must_use]
+pub fn smooth_parts(values: &[BigUint], primes: &[u64]) -> Vec<BigUint> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    // z = ∏ primes, itself via a product tree for the near-linear cost.
+    let prime_values: Vec<BigUint> = primes.iter().map(|&p| BigUint::from_u64(p)).collect();
+    let z = match product_tree(&prime_values).last() {
+        Some(root) => root[0].clone(),
+        None => BigUint::one(), // no primes: nothing is smooth beyond 1
+    };
+
+    // The remainder tree divides by each value, so trivial values (0 has
+    // no valid reduction; 1 reduces everything to 0) are handled directly
+    // and only the rest form the tree. The smooth part of 0 is 0 — every
+    // prime divides it — and of 1 is 1.
+    let nontrivial: Vec<BigUint> = values
+        .iter()
+        .filter(|v| !v.is_zero() && !v.is_one())
+        .cloned()
+        .collect();
+    let tree = product_tree(&nontrivial);
+    let residues = remainder_tree(&tree, &z);
+    let mut smooth_iter = nontrivial.iter().zip(residues).map(|(value, residue)| {
+        // Raise the residue to 2^s mod v with 2^s ≥ ⌊log₂ v⌋, the largest
+        // multiplicity any prime can have in v. `s` squarings give exponent
+        // 2^s, so s = ⌈log₂(bits)⌉ suffices — a dozen squarings at 4 kbit,
+        // not four thousand.
+        let bits = value.bits();
+        let squarings = bits.ilog2() as usize + 1; // 2^squarings > bits
+        let mut acc = residue; // already z mod value from the tree
+        for _ in 0..squarings {
+            acc = BigUint::mod_mul(&acc, &acc, value);
+        }
+        // gcd(v, acc) is the product of the smooth prime powers in v.
+        gcd(value, &acc)
+    });
+
+    values
+        .iter()
+        .map(|value| {
+            if value.is_zero() || value.is_one() {
+                value.clone()
+            } else {
+                smooth_iter
+                    .next()
+                    .expect("one smooth part per nontrivial value")
+            }
+        })
+        .collect()
+}
+
 // ─── Rational reconstruction ───────────────────────────────────────────────
 
 /// Rational reconstruction with explicit bounds: the unique fraction `p/q`
@@ -1839,6 +1974,192 @@ fn jacobi_hgcd_engine(x: BigUint, y: BigUint, state: JacobiState, tail_limbs: us
     }
 }
 
+/// Every square root of `a` modulo `p^e` for a prime `p` and exponent
+/// `e ≥ 1`, ascending, empty when `a` is a non-residue.
+///
+/// Sieving credits a prime power by the count of `x` with `x² ≡ kn`
+/// (mod `p^e`); this returns them all, so a value divisible by `p³` is
+/// counted at each of its roots. The awkward structure a caller should not
+/// have to own lives here: for odd `p` a residue has two roots lifted from
+/// one by Hensel's construction; for `p = 2` the count runs 1, 2, 4 as `e`
+/// passes 1, 2, 3, and an odd `a` is a residue mod `2^e` (`e ≥ 3`) exactly
+/// when `a ≡ 1 (mod 8)`; and an `a` divisible by `p` reduces by its
+/// valuation, each unit root fanning into `p^(v/2)` roots of the power.
+///
+/// The returned count is input-proportional and can be large: `p^⌊v/2⌋`
+/// roots when `p^v` exactly divides `a` (`v` even, `v < e`), and
+/// `p^⌊e/2⌋` when `p^e` divides `a`. A 32-bit base prime with `v = 2`
+/// therefore returns `p` roots — do not call this where `a` may be
+/// divisible by a large `p` without expecting the allocation.
+///
+/// Reference: the odd-prime lift is Hensel's lemma (Cohen, *A Course in
+/// Computational Algebraic Number Theory*, §1.6); the dyadic and
+/// valuation cases follow the standard structure of squares in `ℤ/2^eℤ`.
+///
+/// Primality of `p` is the caller's contract and is not checked. A
+/// composite `p` returns a value satisfying no useful guarantee: the set
+/// may be incomplete, and unlike [`sqrt_mod`] it is not verified by
+/// squaring.
+///
+/// # Panics
+///
+/// Panics when `e == 0` or `p < 2`. A composite `p` can also reach an
+/// internal inversion that panics (`2·root` must be a unit modulo `p^k`),
+/// though a prime `p` never does.
+#[must_use]
+pub fn sqrt_mod_prime_power(a: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
+    assert!(e >= 1, "prime-power exponent must be at least 1");
+    assert!(*p >= BigUint::from_u64(2), "p must be a prime at least 2");
+    let modulus = p.pow_u64(u64::from(e));
+    let a = a.modulo(&modulus);
+
+    // Valuation of a with respect to p, capped at e (a ≡ 0 mod p^e beyond).
+    let (unit, v) = if a.is_zero() {
+        (BigUint::zero(), e)
+    } else {
+        let (cofactor, val) = remove_factor(&a, p);
+        (
+            cofactor,
+            u32::try_from(val)
+                .expect("valuation below e ≤ u32::MAX")
+                .min(e),
+        )
+    };
+
+    // a ≡ 0 (mod p^e): x² ≡ 0 means x ≡ 0 (mod p^⌈e/2⌉).
+    if v >= e {
+        let step_exp = e.div_ceil(2);
+        let step = p.pow_u64(u64::from(step_exp));
+        let mut roots = Vec::new();
+        let mut x = BigUint::zero();
+        while x < modulus {
+            roots.push(x.clone());
+            x = x.add_ref(&step);
+        }
+        return roots;
+    }
+    // An odd valuation leaves an unsquarable p after the even part comes out.
+    if v % 2 == 1 {
+        return Vec::new();
+    }
+
+    // a = p^v · unit; solve t² ≡ unit (mod p^(e−v)) for the unit, then
+    // x = p^(v/2)·t, each unit root fanning into p^(v/2) roots mod p^e.
+    let reduced_exp = e - v;
+    let unit_roots = sqrt_mod_prime_power_unit(&unit, p, reduced_exp);
+    if unit_roots.is_empty() {
+        return Vec::new();
+    }
+    let k = v / 2;
+    let scale = p.pow_u64(u64::from(k)); // p^(v/2): the root's leading factor
+    let fan_modulus = p.pow_u64(u64::from(reduced_exp)); // the unit roots' modulus
+    let fan_count = scale.clone(); // p^(v/2) offsets fan each unit root
+    let mut roots = Vec::new();
+    for t0 in &unit_roots {
+        let mut j = BigUint::zero();
+        while j < fan_count {
+            // x = scale · (t0 + j·fan_modulus)
+            let t = t0.add_ref(&j.mul_ref(&fan_modulus));
+            roots.push(scale.mul_ref(&t).modulo(&modulus));
+            j = j.add_ref(&BigUint::one());
+        }
+    }
+    roots.sort();
+    roots
+}
+
+/// Square roots of a `p`-unit `u` modulo `p^e` — the [`sqrt_mod_prime_power`]
+/// core, assuming `gcd(u, p) = 1`.
+fn sqrt_mod_prime_power_unit(u: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
+    let modulus = p.pow_u64(u64::from(e));
+    let u = u.modulo(&modulus);
+    let two = BigUint::from_u64(2);
+
+    if *p == two {
+        // Dyadic units: residue structure by e.
+        let r = u.rem_u64(1u64 << e.min(3));
+        return match e {
+            1 => vec![BigUint::one()], // any odd u ≡ 1 (mod 2)
+            2 => {
+                if r % 4 == 1 {
+                    vec![BigUint::one(), BigUint::from_u64(3)]
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => {
+                if r % 8 != 1 {
+                    return Vec::new();
+                }
+                // Lift a root of u mod 8 (namely 1) up to mod 2^e by
+                // Newton correction, then generate the four roots
+                // ±root, ±root + 2^(e−1).
+                let mut root = BigUint::one();
+                let mut k = 3u32;
+                while k < e {
+                    // root' = root − (root² − u)/(2·root) is ill-defined
+                    // dyadically; instead correct bit by bit: if the new
+                    // bit is wrong, flip it.
+                    k += 1;
+                    let modk = p.pow_u64(u64::from(k));
+                    let sq = root.mul_ref(&root).modulo(&modk);
+                    if sq != u.modulo(&modk) {
+                        // Lifting a root from mod 2^(k−1) to mod 2^k: the
+                        // discrepancy is at bit k−1, and adding 2^(k−2)
+                        // flips exactly it, since (r + 2^(k−2))² differs
+                        // from r² by 2^(k−1)·r (≡ 2^(k−1), r odd) plus a
+                        // 2^(2k−4) term that vanishes mod 2^k for k ≥ 4.
+                        let mut fix = BigUint::zero();
+                        fix.set_bit((k - 2) as usize);
+                        root = root.add_ref(&fix).modulo(&modk);
+                    }
+                }
+                let neg = modulus.sub_ref(&root);
+                let mut half = BigUint::zero();
+                half.set_bit((e - 1) as usize);
+                let alt = root.add_ref(&half).modulo(&modulus);
+                let alt_neg = modulus.sub_ref(&alt);
+                let mut roots = vec![root, neg, alt, alt_neg];
+                roots.sort();
+                roots.dedup();
+                roots
+            }
+        };
+    }
+
+    // Odd p: one base root mod p, Hensel-lifted to mod p^e; the two roots
+    // are r and p^e − r.
+    let Some(base) = sqrt_mod(&u, p) else {
+        return Vec::new();
+    };
+    let mut root = base;
+    let mut k = 1u32;
+    while k < e {
+        // Newton's correction converges quadratically — root² ≡ u holds to
+        // twice as many p-adic digits each step — so the precision doubles,
+        // capped at e, turning e−1 inversions into ⌈log₂ e⌉.
+        let next = (2 * k).min(e);
+        let modk = p.pow_u64(u64::from(next));
+        // Newton: root ← root − f(root)/f'(root), f = x² − u, f' = 2x.
+        let f = root
+            .mul_ref(&root)
+            .modulo(&modk)
+            .add_ref(&modk)
+            .sub_ref(&u.modulo(&modk))
+            .modulo(&modk);
+        let two_root = two.mul_ref(&root).modulo(&modk);
+        let inv = mod_inverse(&two_root, &modk).expect("2·root is a unit mod p^k");
+        let correction = f.mul_ref(&inv).modulo(&modk);
+        root = root.add_ref(&modk).sub_ref(&correction).modulo(&modk);
+        k = next;
+    }
+    let other = modulus.sub_ref(&root);
+    let mut roots = vec![root, other];
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
 /// Legendre symbol `(a/p)` for an odd prime `p`, or `None` when `p` is even
 /// or zero.
 ///
@@ -2173,6 +2494,53 @@ fn is_witness(
     }
 
     value != one
+}
+
+/// Every prime below `bound` (exclusive), ascending, by the sieve of
+/// Eratosthenes. The bulk companion to [`is_probable_prime`]: where that
+/// tests one candidate, this enumerates a range, for callers assembling a
+/// small-prime table (a factor base, a trial-division wheel, a wheel's
+/// spokes).
+///
+/// A `Vec` is materialized; for a very large bound a segmented or
+/// streaming form would cost less memory, but the whole-vector form is
+/// what the immediate callers use. Cost is O(bound·log log bound) time and
+/// O(bound) *bytes* of sieve (one `bool` per odd number; a bit-packed
+/// sieve would use eight times less).
+#[must_use]
+pub fn primes_below(bound: u64) -> Vec<u64> {
+    if bound <= 2 {
+        return Vec::new();
+    }
+    // Odd-only sieve: index i represents the odd number 2i + 3, so the
+    // sieve covers 3, 5, 7, … below `bound`.
+    let odd_count = usize::try_from((bound - 3) / 2 + 1).expect("sieve fits addressable memory");
+    let mut composite = vec![false; odd_count];
+    let number = |i: usize| 2 * (i as u64) + 3;
+    let mut i = 0usize;
+    while number(i) * number(i) < bound {
+        if !composite[i] {
+            let p = number(i);
+            // Cross out p², p²+2p, … (odd multiples of p only).
+            let mut multiple = p * p;
+            while multiple < bound {
+                let index = usize::try_from((multiple - 3) / 2).expect("index within sieve");
+                composite[index] = true;
+                multiple += 2 * p;
+            }
+        }
+        i += 1;
+    }
+    let mut primes = vec![2u64];
+    for (i, &is_composite) in composite.iter().enumerate() {
+        // The sieve slot for an odd number at or above `bound` (when
+        // `bound` is itself odd, its own slot exists) is not a prime below
+        // the bound.
+        if !is_composite && number(i) < bound {
+            primes.push(number(i));
+        }
+    }
+    primes
 }
 
 /// Miller-Rabin probable-prime test with a fixed witness set.
@@ -3637,6 +4005,218 @@ mod tests {
             p += 1;
         }
         is_prime
+    }
+
+    #[test]
+    fn remainder_tree_matches_direct_reduction() {
+        use super::{product_tree, remainder_tree};
+        let mut rng = SplitMix64 {
+            state: 0x73ee_0007_0000_0001,
+        };
+        for &count in &[1usize, 2, 3, 5, 8, 17, 64] {
+            let values: Vec<BigUint> = (0..count)
+                .map(|_| {
+                    let mut v = draw_below(&mut rng, &pow2(256));
+                    v.set_bit(0); // non-zero
+                    v
+                })
+                .collect();
+            let modulus = draw_below(&mut rng, &pow2(2048));
+            let tree = product_tree(&values);
+            // The root is the product of all values.
+            let mut product = BigUint::one();
+            for v in &values {
+                product = product.mul_ref(v);
+            }
+            assert_eq!(tree.last().unwrap()[0], product, "root is the product");
+            // Each leaf remainder equals a direct reduction.
+            let batched = remainder_tree(&tree, &modulus);
+            for (v, r) in values.iter().zip(&batched) {
+                assert_eq!(*r, modulus.modulo(v), "batched vs direct reduction");
+            }
+        }
+        assert!(product_tree(&[]).is_empty());
+        assert!(remainder_tree(&[], &BigUint::from_u64(5)).is_empty());
+    }
+
+    #[test]
+    fn smooth_parts_matches_trial_division() {
+        use super::{primes_below, smooth_parts};
+        let primes = primes_below(50); // 2,3,5,7,11,...,47
+                                       // Trial-division oracle for the smooth part of one value.
+        let smooth_part_naive = |value: &BigUint| -> BigUint {
+            let mut rest = value.clone();
+            let mut part = BigUint::one();
+            for &p in &primes {
+                let pv = BigUint::from_u64(p);
+                loop {
+                    let (q, r) = rest.div_rem_u64(p);
+                    if r != 0 {
+                        break;
+                    }
+                    rest = q;
+                    part = part.mul_ref(&pv);
+                }
+            }
+            part
+        };
+        let mut rng = SplitMix64 {
+            state: 0x5000_7000_0000_0001,
+        };
+        // Mixed batch: some fully smooth (products of small primes), some
+        // with a large prime factor, some coprime to the base.
+        let mut values = Vec::new();
+        // Fully smooth constructions.
+        for _ in 0..8 {
+            let mut v = BigUint::one();
+            for _ in 0..6 {
+                let p = primes[(rng.next_u64() as usize) % primes.len()];
+                v = v.mul_ref(&BigUint::from_u64(p));
+            }
+            values.push(v);
+        }
+        // Smooth core times a big prime.
+        for _ in 0..8 {
+            let mut core = BigUint::one();
+            for _ in 0..4 {
+                let p = primes[(rng.next_u64() as usize) % primes.len()];
+                core = core.mul_ref(&BigUint::from_u64(p));
+            }
+            let mut big = draw_below(&mut rng, &pow2(80));
+            big.set_bit(79);
+            big.set_bit(0);
+            while !is_probable_prime(&big) {
+                big = big.add_ref(&BigUint::from_u64(2));
+            }
+            values.push(core.mul_ref(&big));
+        }
+        // Random values.
+        for _ in 0..8 {
+            let mut v = draw_below(&mut rng, &pow2(200));
+            v.set_bit(0);
+            values.push(v);
+        }
+        let parts = smooth_parts(&values, &primes);
+        for (v, part) in values.iter().zip(&parts) {
+            assert_eq!(*part, smooth_part_naive(v), "smooth part of a value");
+            // The smooth part divides the value.
+            assert!(v.modulo(part).is_zero(), "smooth part divides the value");
+        }
+        // A fully-smooth value has smooth part equal to itself.
+        let smooth = BigUint::from_u64(2 * 2 * 3 * 5 * 7);
+        assert_eq!(
+            smooth_parts(std::slice::from_ref(&smooth), &primes)[0],
+            smooth
+        );
+        // Trivial values pass through the batch: 0 → 0, 1 → 1, in order,
+        // interleaved with nontrivial values.
+        let mixed = [
+            BigUint::zero(),
+            BigUint::from_u64(30),
+            BigUint::one(),
+            BigUint::from_u64(2 * 101),
+        ];
+        let parts = smooth_parts(&mixed, &primes);
+        assert_eq!(parts[0], BigUint::zero());
+        assert_eq!(parts[1], BigUint::from_u64(30));
+        assert_eq!(parts[2], BigUint::one());
+        assert_eq!(parts[3], BigUint::from_u64(2));
+        // Empty prime set: nothing is smooth beyond the trivial values.
+        assert_eq!(
+            smooth_parts(&[BigUint::from_u64(30)], &[]),
+            vec![BigUint::one()]
+        );
+        // Empty inputs.
+        assert!(smooth_parts(&[], &primes).is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "prime-power exponent must be at least 1")]
+    fn sqrt_mod_prime_power_rejects_zero_exponent() {
+        let _ = super::sqrt_mod_prime_power(&BigUint::one(), &BigUint::from_u64(7), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "division by zero")]
+    fn remainder_tree_rejects_zero_leaf() {
+        use super::{product_tree, remainder_tree};
+        let tree = product_tree(&[BigUint::from_u64(6), BigUint::zero()]);
+        let _ = remainder_tree(&tree, &BigUint::from_u64(30));
+    }
+
+    #[test]
+    fn primes_below_matches_primality_test() {
+        use super::{is_probable_prime, primes_below};
+        let primes = primes_below(10_000);
+        let mut previous = 0u64;
+        let mut set = std::collections::HashSet::new();
+        for &p in &primes {
+            assert!(p > previous, "ascending and distinct");
+            previous = p;
+            assert!(is_probable_prime(&BigUint::from_u64(p)), "{p} is prime");
+            set.insert(p);
+        }
+        for n in 2u64..10_000 {
+            assert_eq!(
+                set.contains(&n),
+                is_probable_prime(&BigUint::from_u64(n)),
+                "sieve disagrees with test at {n}"
+            );
+        }
+        // Known prime counts (primes strictly below the bound).
+        assert_eq!(primes_below(10).len(), 4); // 2,3,5,7
+        assert_eq!(primes_below(100).len(), 25);
+        assert_eq!(primes_below(1_000).len(), 168);
+        assert!(primes_below(2).is_empty());
+        assert_eq!(primes_below(3), vec![2]);
+    }
+
+    #[test]
+    fn sqrt_mod_prime_power_exhaustive_small() {
+        use super::sqrt_mod_prime_power;
+        for &p in &[2u64, 3, 5, 7, 11] {
+            let max_e = if p == 2 { 7 } else { 4 };
+            for e in 1u32..=max_e {
+                let m = p.pow(e);
+                for a in 0..m {
+                    let expected: Vec<u64> = (0..m).filter(|x| (x * x) % m == a).collect();
+                    let got: Vec<u64> =
+                        sqrt_mod_prime_power(&BigUint::from_u64(a), &BigUint::from_u64(p), e)
+                            .iter()
+                            .map(|r| r.to_u64().expect("root below p^e fits u64"))
+                            .collect();
+                    assert_eq!(got, expected, "roots of {a} mod {p}^{e}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sqrt_mod_prime_power_wide() {
+        use super::sqrt_mod_prime_power;
+        let mut rng = SplitMix64 {
+            state: 0x5170_0007_0000_0001,
+        };
+        let mut p = draw_below(&mut rng, &pow2(128));
+        p.set_bit(127);
+        p.set_bit(0);
+        while !is_probable_prime(&p) {
+            p = p.add_ref(&BigUint::from_u64(2));
+        }
+        let e = 3u32;
+        let modulus = p.pow_u64(u64::from(e));
+        let x = draw_below(&mut rng, &modulus);
+        let a = BigUint::mod_mul(&x, &x, &modulus);
+        let roots = sqrt_mod_prime_power(&a, &p, e);
+        assert_eq!(
+            roots.len(),
+            2,
+            "unit square mod odd prime power has two roots"
+        );
+        for r in &roots {
+            assert_eq!(BigUint::mod_mul(r, r, &modulus), a, "root squares to a");
+        }
+        assert!(roots.contains(&x) || roots.contains(&modulus.sub_ref(&x)));
     }
 
     #[test]

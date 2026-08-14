@@ -7,10 +7,11 @@
 use rump::{
     crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
     is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
-    miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_pow, random_below,
-    random_coprime_below, random_nonzero_below, random_probable_prime, rational_reconstruct,
-    rational_reconstruct_bounded, remove_factor, sqrt_mod, valuation, BarrettCtx, BigInt, BigUint,
-    Gf2m, MontgomeryCtx, Rng, Sign,
+    miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_pow, primes_below, product_tree,
+    random_below, random_coprime_below, random_nonzero_below, random_probable_prime,
+    rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
+    smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, BarrettCtx, BigInt, BigUint, Gf2m,
+    MontgomeryCtx, Rng, Sign,
 };
 
 #[test]
@@ -398,6 +399,63 @@ fn manual_number_theory_modular() {
     ])
     .expect("moduli are pairwise coprime");
     assert_eq!(x, BigUint::from_u64(23));
+}
+
+#[test]
+fn manual_bulk_primes_word_division_estimates() {
+    assert_eq!(primes_below(20), vec![2, 3, 5, 7, 11, 13, 17, 19]);
+
+    let n = BigUint::from_u64(1_000);
+    assert_eq!(n.div_rem_u64(7), (BigUint::from_u64(142), 6));
+    assert_eq!(n.to_u64(), Some(1_000));
+    assert_eq!(BigUint::from_u128(1u128 << 64).to_u64(), None);
+
+    assert_eq!(BigUint::from_u64(8).to_f64_lossy(), 8.0);
+    assert!((BigUint::from_u64(1_000).ln_approx() - 1_000f64.ln()).abs() < 1e-9);
+}
+
+#[test]
+fn manual_prime_power_square_roots() {
+    let roots = sqrt_mod_prime_power(&BigUint::from_u64(9), &BigUint::from_u64(2), 4);
+    assert_eq!(
+        roots,
+        vec![
+            BigUint::from_u64(3),
+            BigUint::from_u64(5),
+            BigUint::from_u64(11),
+            BigUint::from_u64(13),
+        ]
+    );
+}
+
+#[test]
+fn manual_batch_smoothness() {
+    let primes = primes_below(10); // 2, 3, 5, 7
+    let values = [
+        BigUint::from_u64(360),    // 2^3 · 3^2 · 5 — fully smooth
+        BigUint::from_u64(2 * 11), // 11 is not in the base
+    ];
+    let parts = smooth_parts(&values, &primes);
+    assert_eq!(parts[0], BigUint::from_u64(360));
+    assert_eq!(parts[1], BigUint::from_u64(2));
+
+    let values = [
+        BigUint::from_u64(7),
+        BigUint::from_u64(11),
+        BigUint::from_u64(13),
+    ];
+    let tree = product_tree(&values);
+    assert_eq!(tree.last().unwrap()[0], BigUint::from_u64(7 * 11 * 13)); // 1001
+
+    let residues = remainder_tree(&tree, &BigUint::from_u64(100));
+    assert_eq!(
+        residues,
+        vec![
+            BigUint::from_u64(100 % 7),
+            BigUint::from_u64(100 % 11),
+            BigUint::from_u64(100 % 13),
+        ]
+    );
 }
 
 #[test]

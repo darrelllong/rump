@@ -633,6 +633,63 @@ impl BigUint {
         digits
     }
 
+    /// The top (up to) 64 significant bits packed into a `u64`, with the
+    /// count of those bits — the shared mantissa of [`Self::to_f64_lossy`]
+    /// and [`Self::ln_approx`]. Below `2^64` this is the value and its bit
+    /// length; above it, the top limb's significant bits filled from the
+    /// limb below.
+    fn top_64_bits(&self) -> (u64, usize) {
+        let bits = self.bits();
+        if bits <= 64 {
+            return (self.limbs.first().copied().unwrap_or(0), bits);
+        }
+        // bits > 64 guarantees at least two limbs.
+        let hi = self.limbs[self.limbs.len() - 1];
+        let lo = self.limbs[self.limbs.len() - 2];
+        let top_bits = 64 - hi.leading_zeros() as usize; // 1..=64
+        let shift = 64 - top_bits;
+        let mantissa = if shift == 0 {
+            hi
+        } else {
+            (hi << shift) | (lo >> top_bits)
+        };
+        (mantissa, 64)
+    }
+
+    /// The value as an `f64` — the lossy narrowing the parameter heuristics
+    /// of factoring and lattice work are written in terms of. The result is
+    /// within one unit in the last place of the true value (the top 64 bits
+    /// are taken as the mantissa, then rounded to `f64`'s 53; the direction
+    /// is unspecified), and saturates to `f64::INFINITY` above the
+    /// double-precision range (~2^1024).
+    #[must_use]
+    pub fn to_f64_lossy(&self) -> f64 {
+        let bits = self.bits();
+        if bits == 0 {
+            return 0.0;
+        }
+        let (mantissa, mantissa_bits) = self.top_64_bits();
+        let exponent = bits - mantissa_bits;
+        mantissa as f64 * 2f64.powi(i32::try_from(exponent).unwrap_or(i32::MAX))
+    }
+
+    /// A natural logarithm of the value as an `f64`, for the size-driven
+    /// tuning heuristics stated in terms of `ln n` (the smoothness bound
+    /// `exp(½√(ln n · ln ln n))`, for one). Computed as
+    /// `ln(mantissa) + (bits − mantissa_bits)·ln 2` so it stays finite far
+    /// past the point where the value itself overflows `f64`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the value is zero, whose logarithm is undefined.
+    #[must_use]
+    pub fn ln_approx(&self) -> f64 {
+        assert!(!self.is_zero(), "ln is undefined at zero");
+        let bits = self.bits();
+        let (mantissa, mantissa_bits) = self.top_64_bits();
+        (mantissa as f64).ln() + ((bits - mantissa_bits) as f64) * core::f64::consts::LN_2
+    }
+
     /// The low 128 bits as a `u128`; bits above position 127 are silently
     /// dropped. For callers that have already pinned their operand range
     /// (fixed-field reductions and the like).
@@ -1601,6 +1658,34 @@ impl BigUint {
     pub fn modulo(&self, modulus: &Self) -> Self {
         let (_, remainder) = self.div_rem(modulus);
         remainder
+    }
+
+    /// Divide by a machine word, returning `(quotient, remainder)` in one
+    /// pass — the word-sized companion to [`Self::div_rem`], without the
+    /// heap-allocated divisor a `BigUint` division would need. This is the
+    /// shape a trial-division inner loop wants: recover the quotient and
+    /// the remainder together, per word-sized prime, per candidate.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `divisor == 0`.
+    #[must_use]
+    pub fn div_rem_u64(&self, divisor: u64) -> (Self, u64) {
+        assert!(divisor != 0, "division by zero");
+        Self::div_rem_limb(&self.limbs, divisor)
+    }
+
+    /// The value as a `u64` when it fits, `None` otherwise — the checked
+    /// narrowing that [`Self::low_u128`] leaves to the caller. Use this
+    /// where a value is *expected* to fit a word and the expectation
+    /// should be verified rather than assumed.
+    #[must_use]
+    pub fn to_u64(&self) -> Option<u64> {
+        match self.limbs.as_slice() {
+            [] => Some(0),
+            [single] => Some(*single),
+            _ => None,
+        }
     }
 
     /// Compute the remainder modulo a machine word.
@@ -3135,6 +3220,90 @@ mod tests {
             }
         }
         low
+    }
+
+    #[test]
+    fn float_estimates_match_reference() {
+        // Exact on values within f64's integer range.
+        let mut seed = 0xf10a_7000_0000_0001;
+        for _ in 0..2000 {
+            let v = lcg_next(&mut seed) >> (lcg_next(&mut seed) % 40);
+            let n = BigUint::from_u64(v);
+            assert_eq!(n.to_f64_lossy(), v as f64, "to_f64_lossy at {v}");
+            if v != 0 {
+                let approx = n.ln_approx();
+                let exact = (v as f64).ln();
+                assert!(
+                    (approx - exact).abs() < 1e-9,
+                    "ln at {v}: {approx} vs {exact}"
+                );
+            }
+        }
+        assert_eq!(BigUint::zero().to_f64_lossy(), 0.0);
+        // Powers of two land exactly, well past u64.
+        for bits in [64usize, 100, 200, 500, 1000] {
+            let mut p = BigUint::zero();
+            p.set_bit(bits);
+            let expect = 2f64.powi(bits as i32);
+            assert_eq!(p.to_f64_lossy(), expect, "2^{bits}");
+            let ln = p.ln_approx();
+            assert!(
+                (ln - (bits as f64) * core::f64::consts::LN_2).abs() < 1e-6,
+                "ln(2^{bits})"
+            );
+        }
+        // Saturation above the f64 range.
+        let mut huge = BigUint::zero();
+        huge.set_bit(2000);
+        assert_eq!(huge.to_f64_lossy(), f64::INFINITY, "2^2000 saturates");
+        // ln stays finite where the value does not.
+        assert!((huge.ln_approx() - 2000.0 * core::f64::consts::LN_2).abs() < 1e-3);
+        // A wide non-power: 3^500, checked against ln in log space.
+        let three_pow = BigUint::from_u64(3).pow_u64(500);
+        let ln = three_pow.ln_approx();
+        assert!((ln - 500.0 * 3f64.ln()).abs() < 1e-3, "ln(3^500)");
+    }
+
+    #[test]
+    fn div_rem_u64_and_to_u64() {
+        let mut seed = 0xd10e_5eed_0000_0001;
+        for _ in 0..2000 {
+            let words = 1 + (lcg_next(&mut seed) % 20) as usize;
+            let n = seeded_biguint(words, &mut seed);
+            let d = (lcg_next(&mut seed) | 1).max(2);
+            let (q, r) = n.div_rem_u64(d);
+            let (q_ref, r_ref) = n.div_rem(&BigUint::from_u64(d));
+            assert_eq!(q, q_ref, "quotient");
+            assert_eq!(BigUint::from_u64(r), r_ref, "remainder");
+            // The defining identity.
+            assert_eq!(
+                q.mul_ref(&BigUint::from_u64(d))
+                    .add_ref(&BigUint::from_u64(r)),
+                n
+            );
+        }
+        assert_eq!(
+            BigUint::from_u64(100).div_rem_u64(7),
+            (BigUint::from_u64(14), 2)
+        );
+        assert_eq!(BigUint::zero().div_rem_u64(5), (BigUint::zero(), 0));
+        // to_u64: exact below 2^64, None above.
+        assert_eq!(BigUint::zero().to_u64(), Some(0));
+        assert_eq!(BigUint::from_u64(u64::MAX).to_u64(), Some(u64::MAX));
+        let mut over = BigUint::zero();
+        over.set_bit(64);
+        assert_eq!(over.to_u64(), None);
+        assert_eq!(
+            BigUint::from_u128((1u128 << 64) - 1).to_u64(),
+            Some(u64::MAX)
+        );
+        assert_eq!(BigUint::from_u128(1u128 << 64).to_u64(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "division by zero")]
+    fn div_rem_u64_rejects_zero() {
+        let _ = BigUint::from_u64(5).div_rem_u64(0);
     }
 
     #[test]

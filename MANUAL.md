@@ -18,12 +18,12 @@ rust-mp = "0.2"
 ```rust
 use rump::{
     crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
-    is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi,
-    kronecker, lcm, legendre, miller_rabin_witness, mod_inverse, mod_pow,
-    mod_inverse_batch, rational_reconstruct, rational_reconstruct_bounded, random_below,
-    remove_factor, valuation,
-    random_coprime_below, random_nonzero_below, random_probable_prime, sqrt_mod, BigInt, BigUint,
-    BarrettCtx, Gf2m, MontgomeryCtx, Rng, Sign,
+    is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
+    miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_pow, primes_below, product_tree,
+    random_below, random_coprime_below, random_nonzero_below, random_probable_prime,
+    rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts,
+    sqrt_mod, sqrt_mod_prime_power, valuation, BarrettCtx, BigInt, BigUint, Gf2m, MontgomeryCtx,
+    Rng, Sign,
 };
 ```
 
@@ -614,6 +614,81 @@ assert_eq!(
 );
 ```
 
+### Bulk primes, word division, and size estimates
+
+`primes_below(bound)` sieves every prime below `bound` into a `Vec<u64>` —
+the bulk companion to `is_probable_prime`. `div_rem_u64` divides by a
+machine word returning quotient and remainder without a heap-allocated
+divisor, and `to_u64` narrows to a word when the value fits (`None`
+otherwise), the checked counterpart to `low_u128`. `to_f64_lossy`
+saturates to infinity above the `f64` range and `ln_approx` stays finite
+far past it, for size-driven parameter heuristics.
+
+```rust
+assert_eq!(primes_below(20), vec![2, 3, 5, 7, 11, 13, 17, 19]);
+
+let n = BigUint::from_u64(1_000);
+assert_eq!(n.div_rem_u64(7), (BigUint::from_u64(142), 6));
+assert_eq!(n.to_u64(), Some(1_000));
+assert_eq!(BigUint::from_u128(1u128 << 64).to_u64(), None);
+
+assert_eq!(BigUint::from_u64(8).to_f64_lossy(), 8.0);
+assert!((BigUint::from_u64(1_000).ln_approx() - 1_000f64.ln()).abs() < 1e-9);
+```
+
+### Prime-power square roots
+
+`sqrt_mod_prime_power(a, p, e)` returns every square root of `a` modulo
+`p^e`, ascending, empty for a non-residue — Hensel's lift for odd `p`, the
+mod-8 structure for `p = 2`, and the valuation reduction for `a` divisible
+by `p`.
+
+```rust
+// 9 has four square roots mod 16: 3, 5, 11, 13.
+let roots = sqrt_mod_prime_power(&BigUint::from_u64(9), &BigUint::from_u64(2), 4);
+assert_eq!(roots, vec![
+    BigUint::from_u64(3), BigUint::from_u64(5),
+    BigUint::from_u64(11), BigUint::from_u64(13),
+]);
+```
+
+### Batch smoothness
+
+`smooth_parts(values, primes)` returns the smooth part of each value over
+the prime set — the largest divisor built only from those primes, with
+multiplicity — in one batched pass. A value is fully smooth when its smooth
+part equals itself; a zero value maps to zero and a one to one.
+
+```rust
+let primes = primes_below(10); // 2, 3, 5, 7
+let values = [
+    BigUint::from_u64(360),  // 2^3 · 3^2 · 5 — fully smooth
+    BigUint::from_u64(2 * 11), // 11 is not in the base
+];
+let parts = smooth_parts(&values, &primes);
+assert_eq!(parts[0], BigUint::from_u64(360));
+assert_eq!(parts[1], BigUint::from_u64(2));
+```
+
+The batch is built from `product_tree` (the values' pairwise-product tree,
+root equal to their product) and `remainder_tree` (a modulus reduced
+against every leaf in one descent). Both are public for callers who want
+the reductions without the smoothness step; `remainder_tree` panics on a
+zero leaf, which it would divide by.
+
+```rust
+let values = [BigUint::from_u64(7), BigUint::from_u64(11), BigUint::from_u64(13)];
+let tree = product_tree(&values);
+assert_eq!(tree.last().unwrap()[0], BigUint::from_u64(7 * 11 * 13)); // 1001
+
+let residues = remainder_tree(&tree, &BigUint::from_u64(100));
+assert_eq!(residues, vec![
+    BigUint::from_u64(100 % 7),
+    BigUint::from_u64(100 % 11),
+    BigUint::from_u64(100 % 13),
+]);
+```
+
 ### Primality
 
 `is_probable_prime` runs trial division plus Miller-Rabin over the twelve
@@ -712,8 +787,11 @@ recoverable conditions:
 | Call | Panics when |
 |---|---|
 | `sub_ref` / `sub_assign_ref` | the result would be negative |
-| `div_rem` / `modulo` / `rem_u64` | the divisor or modulus is zero |
-| `BigUint::mod_mul` / `mod_pow` | the modulus is zero |
+| `div_rem` / `div_rem_u64` / `modulo` / `rem_u64` | the divisor or modulus is zero |
+| `BigUint::mod_mul` / `mod_pow` / `mod_add` / `mod_sub` | the modulus is zero |
+| `ln_approx` | the value is zero |
+| `sqrt_mod_prime_power` | `e == 0` or `p < 2` |
+| `remainder_tree` / `smooth_parts` | a value (leaf) is zero — but `smooth_parts` maps a zero value to zero rather than reducing it |
 
 Fallible mathematics — a missing inverse, a non-residue, an even Montgomery
 modulus, non-coprime CRT moduli — returns `Option` instead.
