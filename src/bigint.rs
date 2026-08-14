@@ -37,6 +37,31 @@ const TOOM3_THRESHOLD_LIMBS: usize = 128;
 // range stays on Toom-3. See PERFORMANCE.md.
 const TOOM4_THRESHOLD_LIMBS: usize = 3072;
 
+/// Digit alphabet for radix rendering: `0-9` then `a-z`.
+const RADIX_DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+
+/// Digit count at or above which parsing dispatches to divide and conquer
+/// (`RADIX_FROM_DC_THRESHOLD_DIGITS`), and the recursion floor below which
+/// sub-problems convert classically (`RADIX_FROM_DC_BASE_DIGITS`).
+/// Measured on M4 with the ignored `radix_dc_crossover_timing` probe over
+/// repeated runs: with the 512-digit floor the ladder engine ties
+/// classical parsing at ~600 decimal digits, leads from ~1,200 (1.4×),
+/// and reaches 3× at ~40,000 digits. Correctness does not depend on
+/// either value: the recursion's hard base case is the ladder's first
+/// entry, and the suite drives both engines over the same vectors.
+const RADIX_FROM_DC_THRESHOLD_DIGITS: usize = 1024;
+const RADIX_FROM_DC_BASE_DIGITS: usize = 512;
+
+/// Bit width at or above which rendering dispatches to divide and conquer
+/// (`RADIX_TO_DC_THRESHOLD_BITS`), and the recursion floor below which
+/// sub-values render classically (`RADIX_TO_DC_BASE_BITS`). Measured with
+/// the same probe: with the 512-bit floor the ladder render is 1.8× ahead
+/// of repeated division at 2,048 bits (~600 decimal digits), 6× at
+/// 16 kbit, 11× at 128 kbit — the quadratic curve falling away exactly as
+/// its complexity requires. Structurally safe at any values, as above.
+const RADIX_TO_DC_THRESHOLD_BITS: usize = 2048;
+const RADIX_TO_DC_BASE_BITS: usize = 512;
+
 /// Sign of a [`BigInt`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Sign {
@@ -301,6 +326,302 @@ impl BigUint {
         let bytes = self.to_be_bytes();
         out[byte_width - bytes.len()..].copy_from_slice(&bytes);
         out
+    }
+
+    /// Parse from a digit string in the given radix (2 through 36, digits
+    /// `0-9a-z`, upper case accepted), `None` on an empty string or an
+    /// invalid digit. Leading zeros are accepted; no sign, no whitespace,
+    /// no `0x` prefix — this is the value, not a literal.
+    ///
+    /// Below a measured digit-count crossover the conversion is the
+    /// classical method with a word-sized base: digits are consumed in
+    /// groups of the largest power of the radix that fits a limb, each
+    /// group folded in by one limb multiply-add — O(n²/64) limb work.
+    /// Above it, divide and conquer: the string splits against a ladder of
+    /// squared radix powers built once per conversion,
+    /// `high · radix^k + low`, for O(M(n)·log n) total (Knuth, TAOCP
+    /// vol. 2, §4.4; Brent and Zimmermann, *Modern Computer Arithmetic*,
+    /// §1.7). Power-of-two radices bypass both paths and pack bits
+    /// directly, O(n).
+    ///
+    /// # Panics
+    ///
+    /// Panics when `radix` is outside `2..=36`, matching the standard
+    /// library's `from_str_radix` contract.
+    #[must_use]
+    pub fn from_str_radix(text: &str, radix: u32) -> Option<Self> {
+        assert!((2..=36).contains(&radix), "radix must be in 2..=36");
+        if text.is_empty() {
+            return None;
+        }
+        let mut digits = Vec::with_capacity(text.len());
+        for c in text.chars() {
+            digits.push(u8::try_from(c.to_digit(radix)?).expect("digit below 36 fits u8"));
+        }
+        if radix.is_power_of_two() {
+            return Some(Self::from_digits_pow2(&digits, radix));
+        }
+        Some(Self::from_digits_dc(&digits, radix))
+    }
+
+    /// Render as a digit string in the given radix (2 through 36, lower
+    /// case, no sign, zero as `"0"`), by the mirror of the
+    /// [`Self::from_str_radix`] dispatch: bit extraction for power-of-two
+    /// radices, classical word-sized division below the divide-and-conquer
+    /// threshold, remainder-tree splitting against the radix-power ladder
+    /// above it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `radix` is outside `2..=36`.
+    #[must_use]
+    pub fn to_str_radix(&self, radix: u32) -> String {
+        assert!((2..=36).contains(&radix), "radix must be in 2..=36");
+        if self.is_zero() {
+            return "0".to_string();
+        }
+        let digits = if radix.is_power_of_two() {
+            self.to_digits_pow2(radix)
+        } else {
+            self.to_digits_dc(radix)
+        };
+        digits
+            .iter()
+            .map(|&d| char::from(RADIX_DIGITS[usize::from(d)]))
+            .collect()
+    }
+
+    /// Largest power of `radix` fitting a limb, with its digit count.
+    fn limb_radix_power(radix: u32) -> (u64, usize) {
+        let unit = u64::from(radix);
+        let mut power = unit;
+        let mut count = 1usize;
+        while let Some(next) = power.checked_mul(unit) {
+            power = next;
+            count += 1;
+        }
+        (power, count)
+    }
+
+    /// Bit-pack digits of a power-of-two radix, least significant first.
+    fn from_digits_pow2(digits: &[u8], radix: u32) -> Self {
+        let bits_per = radix.trailing_zeros() as usize;
+        let total_bits = digits.len() * bits_per;
+        let mut limbs = vec![0u64; total_bits.div_ceil(64)];
+        let mut position = 0usize;
+        for &digit in digits.iter().rev() {
+            let limb = position / 64;
+            let offset = position % 64;
+            limbs[limb] |= u64::from(digit) << offset;
+            if offset + bits_per > 64 {
+                limbs[limb + 1] |= u64::from(digit) >> (64 - offset);
+            }
+            position += bits_per;
+        }
+        let mut value = Self { limbs };
+        value.normalize();
+        value
+    }
+
+    /// Extract digits of a power-of-two radix, most significant first.
+    fn to_digits_pow2(&self, radix: u32) -> Vec<u8> {
+        let bits_per = radix.trailing_zeros() as usize;
+        let digit_count = self.bits().div_ceil(bits_per);
+        let mask = (1u64 << bits_per) - 1;
+        let mut digits = Vec::with_capacity(digit_count);
+        for index in (0..digit_count).rev() {
+            let position = index * bits_per;
+            let limb = position / 64;
+            let offset = position % 64;
+            let mut field = self.limbs[limb] >> offset;
+            if offset + bits_per > 64 && limb + 1 < self.limbs.len() {
+                field |= self.limbs[limb + 1] << (64 - offset);
+            }
+            digits.push(u8::try_from(field & mask).expect("masked field is below the radix"));
+        }
+        digits
+    }
+
+    /// Classical parse: fold digit groups in against the word-sized base.
+    fn from_digits_classical(digits: &[u8], radix: u32) -> Self {
+        let (big_base, chunk) = Self::limb_radix_power(radix);
+        let mut value = Self::zero();
+        let mut index = 0usize;
+        while index < digits.len() {
+            let take = (digits.len() - index).min(if index == 0 {
+                let rem = digits.len() % chunk;
+                if rem == 0 {
+                    chunk
+                } else {
+                    rem
+                }
+            } else {
+                chunk
+            });
+            let mut group = 0u64;
+            for &digit in &digits[index..index + take] {
+                group = group * u64::from(radix) + u64::from(digit);
+            }
+            let base = if take == chunk {
+                big_base
+            } else {
+                u64::from(radix).pow(u32::try_from(take).expect("group fits u32"))
+            };
+            value = value.mul_ref(&Self::from_u64(base));
+            value.add_assign_ref(&Self::from_u64(group));
+            index += take;
+        }
+        value
+    }
+
+    /// The squared-power ladder `radix^(chunk·2^i)`, built once per
+    /// conversion and shared down the recursion (Brent and Zimmermann
+    /// build it exactly once; rebuilding it per level is what turns the
+    /// subquadratic method back into a quadratic one). `chunk` is the
+    /// digit count of the first entry; entry `i` spans `chunk·2^i` digits.
+    fn radix_power_ladder(radix: u32, digit_count: usize) -> (Vec<Self>, usize) {
+        let (big_base, chunk) = Self::limb_radix_power(radix);
+        let mut ladder = vec![Self::from_u64(big_base)];
+        let mut span = chunk;
+        while span * 2 < digit_count {
+            let top = ladder.last().expect("ladder starts non-empty").square_ref();
+            ladder.push(top);
+            span *= 2;
+        }
+        (ladder, chunk)
+    }
+
+    /// The render-side ladder, capped by the value's bit width — sizing it
+    /// by a digit proxy overshoots by up to two entries, and the extra
+    /// entries are the most expensive squarings in the whole conversion.
+    fn radix_power_ladder_bits(radix: u32, bit_width: usize) -> (Vec<Self>, usize) {
+        let (big_base, chunk) = Self::limb_radix_power(radix);
+        let mut ladder = vec![Self::from_u64(big_base)];
+        while ladder.last().expect("non-empty").bits() * 2 < bit_width {
+            let top = ladder.last().expect("non-empty").square_ref();
+            ladder.push(top);
+        }
+        (ladder, chunk)
+    }
+
+    /// Divide-and-conquer parse: split against the shared power ladder.
+    fn from_digits_dc(digits: &[u8], radix: u32) -> Self {
+        if digits.len() < RADIX_FROM_DC_THRESHOLD_DIGITS {
+            return Self::from_digits_classical(digits, radix);
+        }
+        let (ladder, chunk) = Self::radix_power_ladder(radix, digits.len());
+        Self::from_digits_ladder(digits, radix, &ladder, chunk, RADIX_FROM_DC_BASE_DIGITS)
+    }
+
+    fn from_digits_ladder(
+        digits: &[u8],
+        radix: u32,
+        ladder: &[Self],
+        chunk: usize,
+        base_digits: usize,
+    ) -> Self {
+        // The first clause is the structural base case, independent of any
+        // tuning constant: with no ladder entry spanning fewer digits than
+        // the input, there is nothing to split. The second is the measured
+        // floor below which classical conversion wins.
+        if digits.len() <= chunk || digits.len() < base_digits {
+            return Self::from_digits_classical(digits, radix);
+        }
+        // The largest entry spanning fewer digits than the input.
+        let mut index = 0usize;
+        let mut span = chunk;
+        while index + 1 < ladder.len() && span * 2 < digits.len() {
+            index += 1;
+            span *= 2;
+        }
+        let split = digits.len() - span;
+        let high = Self::from_digits_ladder(&digits[..split], radix, ladder, chunk, base_digits);
+        let low = Self::from_digits_ladder(&digits[split..], radix, ladder, chunk, base_digits);
+        let mut value = high.mul_ref(&ladder[index]);
+        value.add_assign_ref(&low);
+        value
+    }
+
+    /// Classical render: divide out the word-sized base, emitting groups.
+    /// Callers route power-of-two radices to bit extraction first; radix 2
+    /// would pack 63 digits per limb and overrun the group buffer below.
+    fn to_digits_classical(&self, radix: u32) -> Vec<u8> {
+        debug_assert!(!radix.is_power_of_two(), "powers of two take the bit path");
+        let (big_base, chunk) = Self::limb_radix_power(radix);
+        let mut groups = Vec::new();
+        let mut rest = self.clone();
+        while !rest.is_zero() {
+            let (quotient, remainder) = Self::div_rem_limb(rest.limbs(), big_base);
+            groups.push(remainder);
+            rest = quotient;
+        }
+        let mut digits = Vec::with_capacity(groups.len() * chunk);
+        for (index, &group) in groups.iter().rev().enumerate() {
+            // Among the radices that reach this path — the dispatch sends
+            // powers of two to bit extraction — radix 3 packs the most
+            // digits per limb: 3^40 < 2^64. The assert above records the
+            // precondition the buffer size relies on.
+            let mut buffer = [0u8; 40];
+            let mut value = group;
+            for slot in buffer[..chunk].iter_mut().rev() {
+                *slot = u8::try_from(value % u64::from(radix)).expect("digit below radix");
+                value /= u64::from(radix);
+            }
+            // The most significant group drops its leading zeros; interior
+            // groups keep them — they are positional.
+            let start = if index == 0 {
+                buffer[..chunk]
+                    .iter()
+                    .position(|&d| d != 0)
+                    .unwrap_or(chunk - 1)
+            } else {
+                0
+            };
+            digits.extend_from_slice(&buffer[start..chunk]);
+        }
+        digits
+    }
+
+    /// Divide-and-conquer render: split by the shared power ladder, the
+    /// low half zero-padded to the split's exact digit span.
+    fn to_digits_dc(&self, radix: u32) -> Vec<u8> {
+        if self.bits() < RADIX_TO_DC_THRESHOLD_BITS {
+            return self.to_digits_classical(radix);
+        }
+        let (ladder, chunk) = Self::radix_power_ladder_bits(radix, self.bits());
+        self.to_digits_ladder(radix, &ladder, chunk, RADIX_TO_DC_BASE_BITS)
+    }
+
+    fn to_digits_ladder(
+        &self,
+        radix: u32,
+        ladder: &[Self],
+        chunk: usize,
+        base_bits: usize,
+    ) -> Vec<u8> {
+        // The first clause is the structural base case — a value no wider
+        // than the first ladder entry splits into nothing; the second is
+        // the measured floor below which classical division wins.
+        if self <= &ladder[0] || self.bits() < base_bits {
+            return self.to_digits_classical(radix);
+        }
+        // The largest entry below the value keeps the halves balanced.
+        let mut index = 0usize;
+        let mut span = chunk;
+        while index + 1 < ladder.len() && ladder[index + 1] < *self {
+            index += 1;
+            span *= 2;
+        }
+        let (high, low) = self.div_rem(&ladder[index]);
+        debug_assert!(
+            !high.is_zero(),
+            "the chosen ladder entry is below the value"
+        );
+        let mut digits = high.to_digits_ladder(radix, ladder, chunk, base_bits);
+        let low_digits = low.to_digits_ladder(radix, ladder, chunk, base_bits);
+        digits.resize(digits.len() + span - low_digits.len(), 0);
+        digits.extend_from_slice(&low_digits);
+        digits
     }
 
     /// The low 128 bits as a `u128`; bits above position 127 are silently
@@ -1935,6 +2256,57 @@ impl PartialOrd for BigInt {
     }
 }
 
+/// Error from parsing a [`BigUint`] or [`BigInt`] out of a string: the
+/// input was empty (or a bare sign), or held a character that is not a
+/// digit of the requested radix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct ParseBigIntError;
+
+impl core::fmt::Display for ParseBigIntError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("empty string or invalid digit")
+    }
+}
+
+impl std::error::Error for ParseBigIntError {}
+
+impl core::fmt::Display for BigUint {
+    /// Decimal rendering, through [`BigUint::to_str_radix`].
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.pad_integral(true, "", &self.to_str_radix(10))
+    }
+}
+
+impl core::str::FromStr for BigUint {
+    type Err = ParseBigIntError;
+
+    /// Decimal parsing, through [`BigUint::from_str_radix`].
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::from_str_radix(text, 10).ok_or(ParseBigIntError)
+    }
+}
+
+impl core::fmt::Display for BigInt {
+    /// Decimal rendering with a leading `-` for negative values.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.pad_integral(
+            self.sign != Sign::Negative,
+            "",
+            &self.magnitude.to_str_radix(10),
+        )
+    }
+}
+
+impl core::str::FromStr for BigInt {
+    type Err = ParseBigIntError;
+
+    /// Decimal parsing with an optional leading `-`.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::from_str_radix(text, 10).ok_or(ParseBigIntError)
+    }
+}
+
 impl Drop for BigUint {
     fn drop(&mut self) {
         // BigUint values may hold secrets — private exponents, prime
@@ -2172,6 +2544,43 @@ impl BigInt {
         Self::from_parts(self.sign, self.magnitude.mul_ref(factor))
     }
 
+    /// Parse from a digit string with an optional leading `-`, in the given
+    /// radix (2 through 36); `None` on an empty string, a bare sign, or an
+    /// invalid digit. `-0` parses to canonical zero.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `radix` is outside `2..=36`.
+    #[must_use]
+    pub fn from_str_radix(text: &str, radix: u32) -> Option<Self> {
+        let (negative, digits) = match text.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, text),
+        };
+        let magnitude = BigUint::from_str_radix(digits, radix)?;
+        let sign = if negative {
+            Sign::Negative
+        } else {
+            Sign::Positive
+        };
+        Some(Self::from_parts(sign, magnitude))
+    }
+
+    /// Render as a digit string in the given radix, a leading `-` for
+    /// negative values; the mirror of [`Self::from_str_radix`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when `radix` is outside `2..=36`.
+    #[must_use]
+    pub fn to_str_radix(&self, radix: u32) -> String {
+        let digits = self.magnitude.to_str_radix(radix);
+        match self.sign {
+            Sign::Negative => format!("-{digits}"),
+            _ => digits,
+        }
+    }
+
     /// Signed product `self * other` (the Half-GCD matrix arithmetic composes
     /// 2×2 matrices of full-size signed entries).
     #[must_use]
@@ -2266,6 +2675,211 @@ mod tests {
                 Ordering::Less => BigInt::from_parts(sb, b.magnitude().sub_ref(a.magnitude())),
                 Ordering::Equal => BigInt::zero(),
             },
+        }
+    }
+
+    #[test]
+    fn radix_round_trips_across_bases() {
+        let mut seed = 0x5eed_5eed_1234_5678;
+        for radix in 2u32..=36 {
+            for &words in &[1usize, 5, 32, 200] {
+                for _ in 0..2 {
+                    let value = seeded_biguint(words, &mut seed);
+                    let text = value.to_str_radix(radix);
+                    assert_eq!(
+                        BigUint::from_str_radix(&text, radix),
+                        Some(value.clone()),
+                        "round trip failed at radix {radix}, {words} words"
+                    );
+                    assert!(
+                        !text.starts_with('0') || text == "0",
+                        "no leading zeros at radix {radix}"
+                    );
+                    let negative = BigInt::from_parts(Sign::Negative, value);
+                    let text = negative.to_str_radix(radix);
+                    assert!(text.starts_with('-'));
+                    assert_eq!(
+                        BigInt::from_str_radix(&text, radix),
+                        Some(negative),
+                        "signed round trip failed at radix {radix}"
+                    );
+                }
+            }
+        }
+        assert_eq!(BigUint::zero().to_str_radix(10), "0");
+        assert_eq!(BigInt::zero().to_str_radix(10), "0");
+    }
+
+    #[test]
+    fn radix_matches_std_formatting() {
+        let mut seed = 0x0123_4567_89ab_cdef;
+        for _ in 0..200 {
+            let v = u128::from(lcg_next(&mut seed)) << 64 | u128::from(lcg_next(&mut seed));
+            let value = BigUint::from_u128(v);
+            assert_eq!(value.to_str_radix(10), v.to_string());
+            assert_eq!(value.to_str_radix(16), format!("{v:x}"));
+            assert_eq!(value.to_str_radix(8), format!("{v:o}"));
+            assert_eq!(value.to_str_radix(2), format!("{v:b}"));
+            assert_eq!(value.to_string(), v.to_string());
+            assert_eq!(v.to_string().parse::<BigUint>().ok(), Some(value));
+        }
+        // A fixed vector in the highest base: "rump" in base 36.
+        assert_eq!(
+            BigUint::from_str_radix("rump", 36),
+            Some(BigUint::from_u64(1_299_409))
+        );
+        assert_eq!(BigUint::from_u64(1_299_409).to_str_radix(36), "rump");
+        // A wide external vector, generated by CPython's integer formatter:
+        // 10^100 in base 36 — an oracle beyond the u128 range that shares
+        // nothing with this crate's engines.
+        let googol =
+            BigUint::from_str_radix(&format!("1{}", "0".repeat(100)), 10).expect("valid decimal");
+        let base36 = "2hqbczu2ow52bala8lgc3s5y9mm5tiy0vo9tke25466gfi6ax8gs22x7kuu8l1tds";
+        assert_eq!(googol.to_str_radix(36), base36);
+        assert_eq!(BigUint::from_str_radix(base36, 36), Some(googol));
+    }
+
+    #[test]
+    fn radix_divide_and_conquer_matches_classical() {
+        let mut seed = 0xfeed_beef_dead_cafe;
+        // 256 words is 3,169 digits even in base 36 — above the 1,024-digit
+        // dispatch threshold for every radix here — so the production path
+        // is divide and conquer throughout, with the classical engines as
+        // the oracle.
+        for &radix in &[3u32, 10, 36] {
+            let value = seeded_biguint(256, &mut seed);
+            let classical = value.to_digits_classical(radix);
+            let text = value.to_str_radix(radix);
+            let rendered: Vec<u8> = text
+                .bytes()
+                .map(|b| {
+                    u8::try_from(char::from(b).to_digit(radix).expect("own digits are valid"))
+                        .expect("digit fits")
+                })
+                .collect();
+            assert_eq!(rendered, classical, "render diverged at radix {radix}");
+            assert_eq!(
+                BigUint::from_digits_classical(&classical, radix),
+                value,
+                "classical parse diverged at radix {radix}"
+            );
+            assert_eq!(
+                BigUint::from_str_radix(&text, radix),
+                Some(value),
+                "dispatched parse diverged at radix {radix}"
+            );
+        }
+        // The big-value sweep for the dispatched path.
+        for &words in &[300usize, 500] {
+            let value = seeded_biguint(words, &mut seed);
+            let text = value.to_str_radix(10);
+            assert_eq!(BigUint::from_str_radix(&text, 10), Some(value));
+        }
+    }
+
+    #[test]
+    fn radix_rejects_malformed_input() {
+        assert_eq!(BigUint::from_str_radix("", 10), None);
+        assert_eq!(BigUint::from_str_radix("12a", 10), None);
+        assert_eq!(BigUint::from_str_radix("z", 35), None);
+        assert_eq!(
+            BigUint::from_str_radix("z", 36),
+            Some(BigUint::from_u64(35))
+        );
+        assert_eq!(BigUint::from_str_radix("+5", 10), None);
+        assert_eq!(BigUint::from_str_radix(" 5", 10), None);
+        assert_eq!(BigUint::from_str_radix("0x10", 10), None);
+        assert_eq!(
+            BigUint::from_str_radix("0007", 10),
+            Some(BigUint::from_u64(7))
+        );
+        assert_eq!(
+            BigUint::from_str_radix("FF", 16),
+            Some(BigUint::from_u64(255))
+        );
+        assert_eq!(BigInt::from_str_radix("-", 10), None);
+        assert_eq!(BigInt::from_str_radix("-0", 10), Some(BigInt::zero()));
+        assert_eq!(
+            BigInt::from_str_radix("-7", 10),
+            Some(BigInt::from_parts(Sign::Negative, BigUint::from_u64(7)))
+        );
+        assert_eq!(
+            "-42".parse::<BigInt>().map(|v| v.to_string()),
+            Ok("-42".into())
+        );
+        assert!("".parse::<BigUint>().is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "radix must be in 2..=36")]
+    fn radix_rejects_radix_one() {
+        let _ = BigUint::from_str_radix("0", 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "radix must be in 2..=36")]
+    fn radix_rejects_radix_thirty_seven() {
+        let _ = BigUint::from_u64(1).to_str_radix(37);
+    }
+
+    #[test]
+    #[ignore = "timing probe for the classical/divide-and-conquer radix crossover; run with --ignored"]
+    fn radix_dc_crossover_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let mut seed = 0x7157_ab1e_5eed_0001;
+        eprintln!(
+            "{:>8} {:>8} {:>12} {:>12} {:>12} {:>12}",
+            "words", "digits", "to_cl_ms", "to_dc_ms", "from_cl_ms", "from_dc_ms"
+        );
+        for &words in &[32usize, 64, 128, 256, 512, 1024, 2048] {
+            let value = seeded_biguint(words, &mut seed);
+            let digits = value.to_digits_classical(10);
+            let time = |f: &dyn Fn()| {
+                let mut best = f64::INFINITY;
+                for _ in 0..9 {
+                    let t0 = Instant::now();
+                    f();
+                    best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+                }
+                best
+            };
+            let to_cl = time(&|| {
+                black_box(value.to_digits_classical(10));
+            });
+            let to_dc = time(&|| {
+                black_box(value.to_digits_dc(10));
+            });
+            let from_cl = time(&|| {
+                black_box(BigUint::from_digits_classical(&digits, 10));
+            });
+            let from_dc = time(&|| {
+                black_box(BigUint::from_digits_dc(&digits, 10));
+            });
+            // Base-case sweeps for both recursions, bypassing the dispatch
+            // thresholds so the floors' own effects are visible.
+            let (ladder, chunk) = BigUint::radix_power_ladder(10, digits.len());
+            let bases: Vec<f64> = [512usize, 1024, 2048, 4096]
+                .iter()
+                .map(|&b| {
+                    time(&|| {
+                        black_box(BigUint::from_digits_ladder(&digits, 10, &ladder, chunk, b));
+                    })
+                })
+                .collect();
+            let (rladder, rchunk) = BigUint::radix_power_ladder_bits(10, value.bits());
+            let rbases: Vec<f64> = [512usize, 1024, 2048, 4096]
+                .iter()
+                .map(|&b| {
+                    time(&|| {
+                        black_box(value.to_digits_ladder(10, &rladder, rchunk, b));
+                    })
+                })
+                .collect();
+            eprintln!(
+                "{words:>8} {:>8} {to_cl:>12.3} {to_dc:>12.3} {from_cl:>12.3} {from_dc:>12.3}  parse[.5k,1k,2k,4k]={bases:.3?} render[.5k,1k,2k,4k]={rbases:.3?}",
+                digits.len()
+            );
         }
     }
 

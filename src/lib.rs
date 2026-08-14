@@ -54,7 +54,7 @@ mod number_theory;
 mod random;
 mod scrub;
 
-pub use bigint::{BigInt, BigUint, MontgomeryCtx, Sign};
+pub use bigint::{BigInt, BigUint, MontgomeryCtx, ParseBigIntError, Sign};
 pub use gf2m::Gf2m;
 pub use number_theory::{
     crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,

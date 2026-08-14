@@ -13,6 +13,25 @@ use rump::{
 };
 
 #[test]
+fn manual_biguint_radix_strings() {
+    let n = BigUint::from_str_radix("deadbeef", 16).expect("valid hex");
+    assert_eq!(n, BigUint::from_u64(0xdead_beef));
+    assert_eq!(n.to_str_radix(16), "deadbeef");
+    assert_eq!(n.to_string(), "3735928559");
+    assert_eq!("3735928559".parse::<BigUint>(), Ok(n));
+
+    assert_eq!(
+        BigUint::from_str_radix("rump", 36),
+        Some(BigUint::from_u64(1_299_409))
+    );
+    assert_eq!(BigUint::from_str_radix("12a", 10), None); // invalid digit
+
+    let debt = BigInt::from_str_radix("-7", 10).expect("signed parse");
+    assert_eq!(debt.to_string(), "-7");
+    assert_eq!("-0".parse::<BigInt>(), Ok(BigInt::zero()));
+}
+
+#[test]
 fn manual_biguint_construction_and_bytes() {
     assert!(BigUint::zero().is_zero());
     assert!(BigUint::one().is_one());

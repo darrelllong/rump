@@ -63,6 +63,36 @@ assert_eq!(wide.low_u128(), (7u128 << 64) | 9);
 assert_eq!(wide.low_bits(64), BigUint::from_u64(9)); // wide mod 2^64
 ```
 
+### Radix strings
+
+`from_str_radix` / `to_str_radix` convert against any radix from 2 to 36
+(digits `0-9a-z`, upper case accepted on input, lower case produced, no
+prefixes or whitespace); both panic outside that range, matching the
+standard library's contract. `BigInt`'s forms carry an optional leading
+`-`. `Display` and `FromStr` are the base-10 special case, so `format!`
+with `{}` and `.parse()` work as for machine integers, with two named
+divergences: a leading `+` is rejected (the parser reads values, not
+literals), and the `{:x}`/`{:o}`/`{:b}` format traits are not implemented
+— hexadecimal and binary come from `to_str_radix`. Power-of-two radices
+convert by direct bit packing; the rest run classical word-sized
+conversion at small sizes and divide-and-conquer against a ladder of
+squared radix powers above the measured crossovers.
+
+```rust
+let n = BigUint::from_str_radix("deadbeef", 16).expect("valid hex");
+assert_eq!(n, BigUint::from_u64(0xdead_beef));
+assert_eq!(n.to_str_radix(16), "deadbeef");
+assert_eq!(n.to_string(), "3735928559");
+assert_eq!("3735928559".parse::<BigUint>(), Ok(n));
+
+assert_eq!(BigUint::from_str_radix("rump", 36), Some(BigUint::from_u64(1_299_409)));
+assert_eq!(BigUint::from_str_radix("12a", 10), None); // invalid digit
+
+let debt = BigInt::from_str_radix("-7", 10).expect("signed parse");
+assert_eq!(debt.to_string(), "-7");
+assert_eq!("-0".parse::<BigInt>(), Ok(BigInt::zero()));
+```
+
 ### Predicates and comparison
 
 `is_zero`, `is_odd`, `is_one`, and `bits` (the number of significant bits);
