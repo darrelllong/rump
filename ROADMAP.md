@@ -6,6 +6,37 @@ implementations of RSA, elliptic-curve protocols, signatures, padding, or key
 formats. Proposed 2026-08-12; **to be triaged together before any of it is
 built**.
 
+## Approved work queue (2026-08-13)
+
+Items 1–9 of the priority table are approved and ordered; everything below
+them remains subject to the joint triage.
+
+1. **Half-GCD-threaded Jacobi** — thread the symbol state through the hgcd
+   recursion (every applied quotient already materializes in a Lehmer batch
+   or a guarded division); takes the symbol subquadratic and closes its
+   remaining 3.5× against this crate's own gcd. Brent–Zimmermann, ANTS-IX
+   2010; GMP's `hgcd_jacobi.c` as the structural reference.
+2. **In-place `add`/`sub`** — remove the fresh-allocation-per-call ratios on
+   the cheapest operations.
+3. **Baillie–PSW** — strong Lucas test composed with the existing
+   Miller–Rabin; the standard probable-prime test, no known pseudoprime.
+4. **Rational reconstruction** — stop the extended-gcd engine at the √m
+   boundary; unlocks exact linear algebra and CRT-lifted computation.
+5. **Radix string I/O** — `from_string`/`to_string` by divide-and-conquer
+   conversion.
+6. **Integer predicates** — `is_square`, `is_perfect_power`,
+   `nth_root_floor`, `sqrt_rem`, `popcount`, `trailing_zeros`, `valuation`,
+   `remove_factor`.
+7. **Batch inversion** — Montgomery's trick: one inversion for n elements.
+8. **Cipolla's square root** — complements Tonelli–Shanks exactly where its
+   measured heavy tail lives (high 2-adic valuation of p − 1).
+9. **Barrett reduction context** — a modulus context for even moduli, where
+   Montgomery cannot operate.
+
+Each item lands with the established discipline: primary source, independent
+oracle, differential verification, measured thresholds where dispatch is
+involved, and documentation in the formal register.
+
 Each section below is scrubbed by implementability. **Efficient** means softly
 polynomial in the operand bit-length with a literature algorithm we can cite
 and implement at craftsman level — the standard the rest of the crate holds.
