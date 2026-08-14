@@ -12,7 +12,7 @@ always says `use rump::...`:
 
 ```toml
 [dependencies]
-rust-mp = "0.1"
+rust-mp = "0.2"
 ```
 
 ```rust
