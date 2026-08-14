@@ -19,9 +19,17 @@
 //!
 //! - **Variable-time.** Operations take data-dependent paths; do not use
 //!   them where timing must not leak secrets.
-//! - **Scrubbed memory.** Every [`BigUint`] wipes its limbs on drop, and the
-//!   Montgomery exponentiation ladder wipes its workspaces on exit, so
-//!   values do not linger in freed heap memory.
+//! - **Best-effort scrubbing, not a forensic guarantee.** Every [`BigUint`]
+//!   volatile-wipes its live limbs on drop, and the Montgomery
+//!   exponentiation ladder ([`MontgomeryCtx::pow`] / `pow_encoded`) wipes its
+//!   workspaces on exit. This shortens the window in which a value sits in
+//!   freed memory; it does not guarantee no copy survives. Spare `Vec`
+//!   capacity is not wiped, a reallocation on any growth path hands the old
+//!   buffer to the allocator with its limbs intact, and the in-domain
+//!   [`MontgomeryCtx::mul_mont`] / `square_mont` leave their scratch dirty
+//!   for speed (documented at each). Treat this as defense in depth, not a
+//!   side-channel or anti-forensic control. `BigUint` also derives `Debug`,
+//!   which prints every limb: do not log a value holding key material.
 //!
 //! Safety policy: `#![deny(unsafe_code)]` crate-wide; the audited
 //! exceptions are the volatile-write scrub helper in `scrub`, which cannot

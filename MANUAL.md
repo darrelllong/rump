@@ -28,8 +28,13 @@ use rump::{
 ```
 
 Two properties hold everywhere: operations are **variable-time** (do not use
-them where timing must not leak secrets), and every `BigUint` **wipes its
-limbs on drop**, with exponentiation workspaces wiped on exit.
+them where timing must not leak secrets), and memory scrubbing is
+**best-effort, not a forensic guarantee**. Every `BigUint` volatile-wipes its
+live limbs on drop and the exponentiation ladder wipes its workspaces on exit,
+but spare capacity is not wiped, a reallocation leaves the old buffer intact,
+the in-domain `mul_mont` / `square_mont` leave their scratch dirty for speed,
+and `Debug` prints every limb — treat it as defense in depth, not a
+side-channel or anti-forensic control.
 
 ## BigUint
 
@@ -278,8 +283,8 @@ zero below positives), so `<`, `.max()`, and `slice::sort` all apply.
 Arithmetic never does: rump does not overload `+` or `*`, so every
 multiprecision operation is an explicit method call (`add_ref`, `mul_ref`,
 `negated`, …) and therefore visible in the code that pays for it. Values move
-without copying; `Clone` duplicates the limbs; every value scrubs its limbs
-on drop.
+without copying; `Clone` duplicates the limbs; every value best-effort wipes
+its live limbs on drop (see the scrubbing caveat above).
 
 A complete example — a bubble sort of signed integers, written exactly as it
 would be for any ordered type:
@@ -887,6 +892,8 @@ recoverable conditions:
 | `ln_approx` | the value is zero |
 | `sqrt_mod_prime_power` | `e == 0` or `p < 2` |
 | `remainder_tree` / `smooth_parts` | a value (leaf) is zero — but `smooth_parts` maps a zero value to zero rather than reducing it |
+| `to_be_bytes_padded` | the value needs more than the requested byte length |
+| `MontgomeryCtx::decode` / `mul_mont` / `square_mont` / `pow_encoded` | an in-domain operand is wider than the modulus (more limbs than the modulus width) — a programming error, since domain residues are below the modulus. `encode` reduces its argument first and never panics on width |
 
 Fallible mathematics — a missing inverse, a non-residue, an even Montgomery
 modulus, non-coprime CRT moduli — returns `Option` instead.
