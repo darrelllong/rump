@@ -373,7 +373,9 @@ def extrema_table(arm):
         print(
             f"\nThe remaining {len(rest)} rows — every other operation and size —"
             f" span **{min(rest):.1f}–{max(rest):.1f}×**: their cost is set by"
-            f" operand width, not operand value."
+            f" operand width, not operand value. On rows costing only a few"
+            f" nanoseconds (`add`/`sub` at 256 bits) the spread measures timer"
+            f" and scheduler granularity, not operand dependence."
         )
 
 

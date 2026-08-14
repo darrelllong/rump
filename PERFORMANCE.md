@@ -126,8 +126,8 @@ extrema (see above).
 
 | Method | Complexity | M4 α | EPYC α | Pi α |
 |---|---|---|---|---|
-| `add` | O(n) | 0.35 | 0.28 | 0.44 |
-| `sub` | O(n) | 0.49 | 0.50 | 0.56 |
+| `add` | O(n) | 0.85 | 0.73 | 0.82 |
+| `sub` | O(n) | 0.91 | 0.72 | 0.74 |
 | `mul` | schoolbook → Karatsuba → Toom-3/4 | 1.88 | 1.80 | 1.81 |
 | `sqr` | schoolbook → Karatsuba → Toom-3/4 | 1.85 | 1.72 | 1.83 |
 | `divrem` | O(n²) Algorithm D | 1.08 | 1.05 | 1.14 |
@@ -154,12 +154,12 @@ extrema (see above).
 
 | Method | host | 256b | 1024b | 2048b | 4096b |
 |---|---|---:|---:|---:|---:|
-| `add` | M4 | 45 ns | 54 ns | 75.4 ns | 125 ns |
-|  | EPYC | 79.6 ns | 108 ns | 131 ns | 179 ns~ |
-|  | Pi | 91.4 ns | 163 ns | 217 ns | 313 ns |
-| `sub` | M4 | 22.2 ns | 28.4 ns | 44 ns | 93.9 ns |
-|  | EPYC | 36.6 ns | 53.1 ns | 84.5 ns | 152 ns |
-|  | Pi | 43.6 ns | 77.7 ns | 122 ns | 210 ns |
+| `add` | M4 | 4.16 ns | 12.8 ns | 21.5 ns | 46.3 ns |
+|  | EPYC | 11.7 ns | 26.7 ns | 45.7 ns | 91.3 ns |
+|  | Pi | 17.1 ns | 44.7 ns | 89 ns | 163 ns |
+| `sub` | M4 | 5.04 ns | 14.2 ns | 30.8 ns | 63.5 ns |
+|  | EPYC | 15.8 ns | 34.3 ns | 61.2 ns | 119 ns |
+|  | Pi | 23 ns | 53.1 ns | 101 ns | 180 ns |
 | `mul` | M4 | 26.7 ns | 192 ns | 1.22 µs | 4.6 µs |
 |  | EPYC | 54.8 ns | 389 ns | 2.04 µs | 7.81 µs~ |
 |  | Pi | 82.3 ns | 815 ns | 3.61 µs | 12.2 µs |
@@ -259,8 +259,8 @@ are in the tables above.
 
 | Method | 256b | 1024b | 2048b | 4096b |
 |---|---|---|---|---|
-| `add` | 45 ns / 3.02 ns / 14.9× | 54 ns / 4.5 ns / 12.0× | 75.4 ns / 7 ns / 10.8× | 125 ns / 13.3 ns / 9.4× |
-| `sub` | 22.2 ns / 4.29 ns / 5.2× | 28.4 ns / 5.8 ns / 4.9× | 44 ns / 8.41 ns / 5.2× | 93.9 ns / 14.2 ns / 6.6× |
+| `add` | 4.16 ns / 3.02 ns / 1.4× | 12.8 ns / 4.5 ns / 2.8× | 21.5 ns / 7 ns / 3.1× | 46.3 ns / 13.3 ns / 3.5× |
+| `sub` | 5.04 ns / 4.29 ns / 1.2× | 14.2 ns / 5.8 ns / 2.4× | 30.8 ns / 8.41 ns / 3.7× | 63.5 ns / 14.2 ns / 4.5× |
 | `mul` | 26.7 ns / 11.4 ns / 2.3× | 192 ns / 78.6 ns / 2.4× | 1.22 µs / 265 ns / 4.6× | 4.6 µs / 764 ns / 6.0× |
 | `sqr` | 28.1 ns / 10 ns / 2.8× | 192 ns / 61.2 ns / 3.1× | 1.19 µs / 192 ns / 6.2× | 4.55 µs / 606 ns / 7.5× |
 | `divrem` | 95.4 ns / 14.4 ns / 6.6× | 317 ns / 84.3 ns / 3.8× | 720 ns / 213 ns / 3.4× | 2.02 µs / 613 ns / 3.3× |
@@ -276,8 +276,8 @@ are in the tables above.
 
 | Method | 256b | 1024b | 2048b | 4096b |
 |---|---|---|---|---|
-| `add` | 79.6 ns / 6.97 ns / 11.4× | 108 ns / 11.1 ns / 9.8× | 131 ns / 16.5 ns / 7.9× | 179 ns / 27.3 ns / 6.6× |
-| `sub` | 36.6 ns / 12.1 ns / 3.0× | 53.1 ns / 15.7 ns / 3.4× | 84.5 ns / 20.4 ns / 4.1× | 152 ns / 30.9 ns / 4.9× |
+| `add` | 11.7 ns / 6.97 ns / 1.7× | 26.7 ns / 11.1 ns / 2.4× | 45.7 ns / 16.5 ns / 2.8× | 91.3 ns / 27.3 ns / 3.3× |
+| `sub` | 15.8 ns / 12.1 ns / 1.3× | 34.3 ns / 15.7 ns / 2.2× | 61.2 ns / 20.4 ns / 3.0× | 119 ns / 30.9 ns / 3.9× |
 | `mul` | 54.8 ns / 20.5 ns / 2.7× | 389 ns / 183 ns / 2.1× | 2.04 µs / 607 ns / 3.4× | 7.81 µs / 1.9 µs / 4.1× |
 | `sqr` | 69.3 ns / 14.2 ns / 4.9× | 397 ns / 118 ns / 3.4× | 2.04 µs / 411 ns / 5.0× | 8.11 µs / 1.3 µs / 6.3× |
 | `divrem` | 155 ns / 38.6 ns / 4.0× | 441 ns / 146 ns / 3.0× | 1.07 µs / 361 ns / 3.0× | 3.01 µs / 1.12 µs / 2.7× |
@@ -293,8 +293,8 @@ are in the tables above.
 
 | Method | 256b | 1024b | 2048b | 4096b |
 |---|---|---|---|---|
-| `add` | 91.4 ns / 11.5 ns / 7.9× | 163 ns / 17.2 ns / 9.5× | 217 ns / 24.9 ns / 8.7× | 313 ns / 40.4 ns / 7.7× |
-| `sub` | 43.6 ns / 19.9 ns / 2.2× | 77.7 ns / 25.3 ns / 3.1× | 122 ns / 31.1 ns / 3.9× | 210 ns / 46.3 ns / 4.5× |
+| `add` | 17.1 ns / 11.5 ns / 1.5× | 44.7 ns / 17.2 ns / 2.6× | 89 ns / 24.9 ns / 3.6× | 163 ns / 40.4 ns / 4.0× |
+| `sub` | 23 ns / 19.9 ns / 1.2× | 53.1 ns / 25.3 ns / 2.1× | 101 ns / 31.1 ns / 3.2× | 180 ns / 46.3 ns / 3.9× |
 | `mul` | 82.3 ns / 62.6 ns / 1.3× | 815 ns / 641 ns / 1.3× | 3.61 µs / 1.97 µs / 1.8× | 12.2 µs / 6.33 µs / 1.9× |
 | `sqr` | 82 ns / 43.9 ns / 1.9× | 820 ns / 412 ns / 2.0× | 3.58 µs / 1.28 µs / 2.8× | 12.8 µs / 3.93 µs / 3.3× |
 | `divrem` | 248 ns / 71.4 ns / 3.5× | 820 ns / 316 ns / 2.6× | 2.05 µs / 960 ns / 2.1× | 6.17 µs / 3.36 µs / 1.8× |
@@ -338,9 +338,17 @@ The comparison sorts rump's primitives into groups, and the grouping is by
   assembly base-case, not the algorithm. GMP escalates to Toom-6.5/8.5 → FFT far
   above rump's range.
 
-- **`add`/`sub` — 2–15×.** Nearly all of this is allocation: rump returns a
-  fresh `Vec` per call where GMP's `mpn` layer writes into an existing buffer.
-  The absolute difference is tens of nanoseconds per call.
+- **`add`/`sub` — 1.2–4.5×, formerly 2–15×.** Both pilots now measure the
+  same shape: the result written into long-lived storage (GMP's
+  `mpz_add(r, a, b)` into a reused `r`; rump's three-operand `assign_add` /
+  `assign_sub` into a reused buffer — one carry or borrow pass, no
+  allocation once the buffer is settled). What remains is code generation:
+  rump's carry chain is portable Rust over `u128` accumulators where GMP's
+  is assembly `adc`/`sbc`. The band is nearly host-independent — M4
+  1.2–4.5×, EPYC 1.3–3.9×, Pi 1.2–4.0× — tightest at 256 bits, where call
+  overhead dominates both sides, and widening with operand length as the
+  carry chains dominate. The absolute differences run from under a
+  nanosecond (M4 `sub` at 256 bits) to ~130 ns (Pi at 4096).
 
 - **Operations with no `mpz` counterpart.** The public Montgomery domain
   (`mul_mont`, `square_mont`, `pow`), `sqrt_mod`, and the GF(2^m) field
@@ -361,15 +369,20 @@ Lehmer batch or a guarded division, taking the symbol to O(M(n)·log n) and
 the 1 Mbit ratio from 41× to 11.9×, where the symbol costs what `gcd`
 costs (published treatment: Brent and Zimmermann, *An O(M(n) log n)
 algorithm for the Jacobi symbol*, ANTS-IX, 2010; the threading design is
-Möller's, GMP's `mpn_hgcd_jacobi`). The section below measures the results
-at scale.
+Möller's, GMP's `mpn_hgcd_jacobi`), and in-place `add`/`sub` — the signed
+type's `add_assign_ref`/`sub_assign_ref` reusing the magnitude's buffer in
+every sign combination, the unsigned type's three-operand
+`assign_add`/`assign_sub` writing into caller-held storage, and a
+buffer-reusing `Clone::clone_from` — which moved the cheapest operations'
+ratios from 2–15× to 1.2–4.5× (the `add`/`sub` bullet above). The section
+below measures the family at scale.
 
-Remaining, in priority order:
-
-1. **In-place `add`/`sub`.** The 2–15× ratios on the cheapest operations are
-   allocation: a fresh `Vec` per call against GMP's in-place `mpn` writes.
-   The absolute difference is tens of nanoseconds per call, which bounds the
-   value of the work.
+This closes the backlog of rump-against-GMP ratio work: in the primitive
+comparison above, what still separates the columns is constant factors —
+GMP's assembly base cases, Toom against FFT — not algorithms. Measured work
+inside rump itself remains on the approved queue (ROADMAP.md): Cipolla's
+square root, aimed at `sqrt_mod`'s 2-adic heavy tail in the extrema section
+below, and Montgomery's batch inversion.
 
 ## GCD at scale
 
@@ -486,7 +499,7 @@ Two operations produce the large spreads:
 |  | 5120 | 168 µs | 176 µs | 142 ms | 142 ms | 847.6 |
 |  | 6144 | 247 µs | 81.6 ms | 246 ms | 249 ms | 1,008 |
 
-The remaining 81 rows — every other operation and size — span **1.0–3.4×**: their cost is set by operand width, not operand value.
+The remaining 81 rows — every other operation and size — span **1.0–4.5×**: their cost is set by operand width, not operand value. On rows costing only a few nanoseconds (`add`/`sub` at 256 bits) the spread measures timer and scheduler granularity, not operand dependence.
 
 ![variable-time scaling](assets/scaling-variable-time.svg)
 

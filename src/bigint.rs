@@ -49,16 +49,58 @@ pub enum Sign {
 }
 
 /// Unsigned multiprecision integer stored as little-endian `u64` limbs.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct BigUint {
     limbs: Vec<u64>,
 }
 
+impl Clone for BigUint {
+    fn clone(&self) -> Self {
+        Self {
+            limbs: self.limbs.clone(),
+        }
+    }
+
+    /// Copy `source`'s value into `self`'s existing limb buffer
+    /// (`Vec::clone_from`): no allocation when the buffer's capacity covers
+    /// `source`. The derived implementation would discard the buffer and
+    /// allocate a fresh one, which is the cost this type exists to avoid on
+    /// its cheapest operations.
+    fn clone_from(&mut self, source: &Self) {
+        // Scrub the limbs this copy abandons before the truncation strands
+        // them: `Drop` covers only the initialized prefix, and the crate
+        // promises that values do not linger. The volatile scrub, not a
+        // plain fill — stores to memory nothing can legally read again are
+        // stores the optimizer may otherwise delete.
+        let n = source.limbs.len();
+        if self.limbs.len() > n {
+            crate::scrub::zeroize_slice(&mut self.limbs[n..]);
+        }
+        self.limbs.clone_from(&source.limbs);
+    }
+}
+
 /// Signed multiprecision integer: a sign joined to a [`BigUint`] magnitude.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct BigInt {
     sign: Sign,
     magnitude: BigUint,
+}
+
+impl Clone for BigInt {
+    fn clone(&self) -> Self {
+        Self {
+            sign: self.sign,
+            magnitude: self.magnitude.clone(),
+        }
+    }
+
+    /// Copy `source`'s value, reusing the magnitude's limb buffer — see
+    /// [`BigUint::clone_from`].
+    fn clone_from(&mut self, source: &Self) {
+        self.sign = source.sign;
+        self.magnitude.clone_from(&source.magnitude);
+    }
 }
 
 /// Montgomery arithmetic context for a fixed odd modulus.
@@ -424,6 +466,114 @@ impl BigUint {
         let mut out = self.clone();
         out.add_assign_ref(other);
         out
+    }
+
+    /// Write `lhs + rhs` into `self`, reusing its limb buffer — the
+    /// three-operand form (the shape of GMP's `mpz_add`) for callers that
+    /// hold the result's storage across calls. One carry pass over the
+    /// operands; no allocation once the buffer's capacity covers the result.
+    /// Contrast [`Self::add_assign_ref`], which *accumulates* into `self`;
+    /// this form replaces it.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal `u128` accumulator cannot be split back
+    /// into `u64` limbs, which would indicate a logic error.
+    pub fn assign_add(&mut self, lhs: &Self, rhs: &Self) {
+        debug_assert!(
+            lhs.limbs.last() != Some(&0) && rhs.limbs.last() != Some(&0),
+            "operands arrive canonical; the result's canonical form relies on it"
+        );
+        let (long, short) = if lhs.limbs.len() >= rhs.limbs.len() {
+            (lhs, rhs)
+        } else {
+            (rhs, lhs)
+        };
+        // Shape the buffer to the working width. Any tail beyond it is
+        // scrubbed (volatile, as in `Drop`) before the shrink strands it —
+        // `Drop` covers only the initialized prefix.
+        let n = long.limbs.len();
+        if self.limbs.len() > n {
+            crate::scrub::zeroize_slice(&mut self.limbs[n..]);
+        }
+        self.limbs.resize(n, 0);
+        let mut carry = 0u128;
+        for i in 0..n {
+            let rhs_limb = if i < short.limbs.len() {
+                u128::from(short.limbs[i])
+            } else {
+                0
+            };
+            let sum = u128::from(long.limbs[i]) + rhs_limb + carry;
+            self.limbs[i] = low_u64(sum);
+            carry = sum >> 64;
+        }
+        // Canonical without a normalize pass: `long`'s top limb is
+        // non-zero, so the top result limb can be zero only when the sum
+        // carried out — and that carry is pushed.
+        if carry != 0 {
+            self.limbs
+                .push(u64::try_from(carry).expect("final carry from u64 addition is at most 1"));
+        }
+    }
+
+    /// Write `lhs - rhs` into `self`, reusing its limb buffer — the
+    /// three-operand counterpart of [`Self::assign_add`]. One borrow pass;
+    /// no allocation once the buffer's capacity covers the result.
+    /// Contrast [`Self::sub_assign_ref`], which subtracts *from* `self`;
+    /// this form replaces it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `lhs < rhs`.
+    pub fn assign_sub(&mut self, lhs: &Self, rhs: &Self) {
+        assert!(lhs.cmp(rhs) != Ordering::Less, "BigUint underflow");
+        // Shape the buffer as in `assign_add`, scrubbing any abandoned
+        // tail before it shrinks. The normalize below pops only zeros, so
+        // the shrink it performs strands nothing.
+        let n = lhs.limbs.len();
+        if self.limbs.len() > n {
+            crate::scrub::zeroize_slice(&mut self.limbs[n..]);
+        }
+        self.limbs.resize(n, 0);
+        let mut borrow = 0u128;
+        for i in 0..n {
+            let minuend = u128::from(lhs.limbs[i]);
+            let subtrahend = if i < rhs.limbs.len() {
+                u128::from(rhs.limbs[i])
+            } else {
+                0
+            } + borrow;
+            if minuend >= subtrahend {
+                self.limbs[i] = low_u64(minuend - subtrahend);
+                borrow = 0;
+            } else {
+                self.limbs[i] = low_u64((1u128 << 64) + minuend - subtrahend);
+                borrow = 1;
+            }
+        }
+        self.normalize();
+    }
+
+    /// `self ← minuend - self`, in place — the reversed subtraction the
+    /// signed in-place operations need when the result's magnitude is the
+    /// *other* operand's minus this one's. Panics if `minuend < self`.
+    fn rsub_assign_ref(&mut self, minuend: &Self) {
+        assert!(minuend.cmp(self) != Ordering::Less, "BigUint underflow");
+        self.limbs.resize(minuend.limbs.len(), 0);
+        let mut borrow = 0u128;
+        for i in 0..self.limbs.len() {
+            let lhs = u128::from(minuend.limbs[i]);
+            let subtrahend = u128::from(self.limbs[i]) + borrow;
+            if lhs >= subtrahend {
+                self.limbs[i] = low_u64(lhs - subtrahend);
+                borrow = 0;
+            } else {
+                self.limbs[i] = low_u64((1u128 << 64) + lhs - subtrahend);
+                borrow = 1;
+            }
+        }
+        self.normalize();
     }
 
     /// Subtract another bigint in place. Panics if `self < other`.
@@ -1929,50 +2079,77 @@ impl BigInt {
     /// Return `self + other`.
     #[must_use]
     pub fn add_ref(&self, other: &Self) -> Self {
-        match (self.sign, other.sign) {
-            (Sign::Zero, _) => other.clone(),
-            (_, Sign::Zero) => self.clone(),
-            (Sign::Positive, Sign::Positive) => {
-                Self::from_parts(Sign::Positive, self.magnitude.add_ref(&other.magnitude))
-            }
-            (Sign::Negative, Sign::Negative) => {
-                Self::from_parts(Sign::Negative, self.magnitude.add_ref(&other.magnitude))
-            }
-            (Sign::Positive, Sign::Negative) => self.sub_ref(&other.negated()),
-            (Sign::Negative, Sign::Positive) => other.sub_ref(&self.negated()),
-        }
+        let mut out = self.clone();
+        out.add_assign_ref(other);
+        out
+    }
+
+    /// Add another integer in place, reusing the magnitude's limb buffer in
+    /// every sign combination.
+    pub fn add_assign_ref(&mut self, other: &Self) {
+        self.combine_assign(other.sign, &other.magnitude);
     }
 
     /// Return `self - other`.
     #[must_use]
     pub fn sub_ref(&self, other: &Self) -> Self {
-        match (self.sign, other.sign) {
-            (_, Sign::Zero) => self.clone(),
-            (Sign::Zero, _) => other.negated(),
-            (Sign::Positive, Sign::Negative) => {
-                Self::from_parts(Sign::Positive, self.magnitude.add_ref(&other.magnitude))
+        let mut out = self.clone();
+        out.sub_assign_ref(other);
+        out
+    }
+
+    /// Subtract another integer in place, reusing the magnitude's limb
+    /// buffer in every sign combination. Full signed semantics — the sign
+    /// follows the result, and nothing panics — unlike
+    /// [`BigUint::sub_assign_ref`], whose domain has no negative values.
+    pub fn sub_assign_ref(&mut self, other: &Self) {
+        let negated = match other.sign {
+            Sign::Positive => Sign::Negative,
+            Sign::Negative => Sign::Positive,
+            Sign::Zero => Sign::Zero,
+        };
+        self.combine_assign(negated, &other.magnitude);
+    }
+
+    /// The shared core of the signed in-place operations:
+    /// `self ← self + s·m`, where `(s, m)` is `other`'s decomposition for
+    /// addition and its negation for subtraction. Like signs grow this
+    /// magnitude in place; unlike signs cancel — the smaller magnitude
+    /// leaves the larger (reversed in place when the larger is `m`), and the
+    /// sign follows the survivor. Zero results clear the buffer without
+    /// releasing it, preserving the type's canonical form (`Sign::Zero`
+    /// with an empty magnitude).
+    fn combine_assign(&mut self, sign: Sign, magnitude: &BigUint) {
+        debug_assert!(
+            (sign == Sign::Zero) == magnitude.is_zero(),
+            "operand arrives in canonical form: Sign::Zero iff zero magnitude"
+        );
+        if sign == Sign::Zero {
+            return;
+        }
+        if self.sign == Sign::Zero {
+            self.magnitude.clone_from(magnitude);
+            self.sign = sign;
+            return;
+        }
+        if self.sign == sign {
+            self.magnitude.add_assign_ref(magnitude);
+            return;
+        }
+        match self.magnitude.cmp(magnitude) {
+            Ordering::Greater => self.magnitude.sub_assign_ref(magnitude),
+            Ordering::Less => {
+                self.magnitude.rsub_assign_ref(magnitude);
+                self.sign = sign;
             }
-            (Sign::Negative, Sign::Positive) => {
-                Self::from_parts(Sign::Negative, self.magnitude.add_ref(&other.magnitude))
+            Ordering::Equal => {
+                // Scrub before clearing: `Drop` covers only the initialized
+                // prefix, and these limbs may be Bézout coefficients of
+                // secret operands. The capacity is kept for reuse.
+                crate::scrub::zeroize_slice(self.magnitude.limbs.as_mut_slice());
+                self.magnitude.limbs.clear();
+                self.sign = Sign::Zero;
             }
-            (Sign::Positive, Sign::Positive) => match self.magnitude.cmp(&other.magnitude) {
-                Ordering::Greater => {
-                    Self::from_parts(Sign::Positive, self.magnitude.sub_ref(&other.magnitude))
-                }
-                Ordering::Less => {
-                    Self::from_parts(Sign::Negative, other.magnitude.sub_ref(&self.magnitude))
-                }
-                Ordering::Equal => Self::zero(),
-            },
-            (Sign::Negative, Sign::Negative) => match self.magnitude.cmp(&other.magnitude) {
-                Ordering::Greater => {
-                    Self::from_parts(Sign::Negative, self.magnitude.sub_ref(&other.magnitude))
-                }
-                Ordering::Less => {
-                    Self::from_parts(Sign::Positive, other.magnitude.sub_ref(&self.magnitude))
-                }
-                Ordering::Equal => Self::zero(),
-            },
         }
     }
 
@@ -2064,6 +2241,271 @@ mod tests {
             a.mul_ref(&b),
             BigUint::from_u128(777_777_777_777_000_000_000_000)
         );
+    }
+
+    /// The specification for the signed in-place operations: the flattened
+    /// composition of the previous `add_ref`/`sub_ref` case analysis over
+    /// the unsigned primitives, retained as a structural oracle.
+    fn signed_add_oracle(a: &BigInt, b: &BigInt) -> BigInt {
+        use core::cmp::Ordering;
+        match (a.sign(), b.sign()) {
+            (Sign::Zero, _) => b.clone(),
+            (_, Sign::Zero) => a.clone(),
+            (sa, sb) if sa == sb => BigInt::from_parts(sa, a.magnitude().add_ref(b.magnitude())),
+            (sa, sb) => match a.magnitude().cmp(b.magnitude()) {
+                Ordering::Greater => BigInt::from_parts(sa, a.magnitude().sub_ref(b.magnitude())),
+                Ordering::Less => BigInt::from_parts(sb, b.magnitude().sub_ref(a.magnitude())),
+                Ordering::Equal => BigInt::zero(),
+            },
+        }
+    }
+
+    #[test]
+    fn assign_add_sub_match_two_operand_forms() {
+        let mut seed = 0x5851_f42d_4c95_7f2d;
+        let mut out = BigUint::zero();
+        for &(wa, wb) in &[(0usize, 0usize), (1, 1), (1, 48), (48, 1), (8, 8), (48, 48)] {
+            for _ in 0..12 {
+                let a = seeded_biguint(wa, &mut seed);
+                let b = seeded_biguint(wb, &mut seed);
+                out.assign_add(&a, &b);
+                assert_eq!(out, a.add_ref(&b));
+                assert!(out.limbs.last() != Some(&0), "canonical form");
+                let (hi, lo) = if a >= b { (&a, &b) } else { (&b, &a) };
+                out.assign_sub(hi, lo);
+                assert_eq!(out, hi.sub_ref(lo));
+                assert!(out.limbs.last() != Some(&0), "canonical form");
+            }
+        }
+        // A full carry ripple: (2^(64k) - 1) + 1 = 2^(64k).
+        let ones = BigUint {
+            limbs: vec![u64::MAX; 5],
+        };
+        let one = BigUint::from_u64(1);
+        out.assign_add(&ones, &one);
+        let mut expect = BigUint::zero();
+        expect.set_bit(320);
+        assert_eq!(out, expect);
+        // And the borrow ripple back down.
+        out.assign_sub(&expect, &one);
+        assert_eq!(out, ones);
+    }
+
+    #[test]
+    fn assign_add_reuses_the_buffer() {
+        let mut seed = 0x0123_4567_89ab_cdef;
+        let a = seeded_biguint(32, &mut seed);
+        let b = seeded_biguint(32, &mut seed);
+        // The first call may grow the buffer once (the result width plus the
+        // carry slot); from then on the no-allocation contract holds.
+        let mut out = BigUint::zero();
+        out.assign_add(&a, &b);
+        let ptr = out.limbs.as_ptr();
+        for _ in 0..8 {
+            out.assign_add(&a, &b);
+            assert_eq!(out.limbs.as_ptr(), ptr, "assign_add must not reallocate");
+            out.assign_sub(&a, &b.sub_ref(&b)); // a - 0 = a, exercising short rhs
+            assert_eq!(out.limbs.as_ptr(), ptr, "assign_sub must not reallocate");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "BigUint underflow")]
+    fn assign_sub_panics_on_underflow() {
+        let mut out = BigUint::zero();
+        out.assign_sub(&BigUint::from_u64(3), &BigUint::from_u64(5));
+    }
+
+    /// The verification counterpart of the crate's audited scrub
+    /// exception: reading a buffer's abandoned tail cannot be expressed in
+    /// safe Rust, so proving the shrink paths scrub it requires one raw
+    /// read-back. Confined to this test; the pointers are captured while
+    /// the limbs are live and the buffer's identity is asserted unchanged
+    /// before each read.
+    #[test]
+    #[allow(unsafe_code)]
+    fn shrinking_paths_scrub_abandoned_limbs() {
+        let read8 =
+            |p: *const u64| -> Vec<u64> { (0..8).map(|i| unsafe { p.add(i).read() }).collect() };
+        let wide = BigUint {
+            limbs: vec![0xdead_beef_0bad_cafe; 8],
+        };
+        let narrow = BigUint::from_u64(1);
+
+        let mut x = wide.clone();
+        let p = x.limbs.as_ptr();
+        x.clone_from(&narrow);
+        assert_eq!(x.limbs.as_ptr(), p, "clone_from reuses the buffer");
+        assert!(
+            read8(p)[1..].iter().all(|&w| w == 0),
+            "clone_from stranded live limbs"
+        );
+
+        let mut out = wide.clone();
+        let p = out.limbs.as_ptr();
+        out.assign_add(&narrow, &narrow);
+        assert_eq!(out.limbs.as_ptr(), p, "assign_add reuses the buffer");
+        assert!(
+            read8(p)[1..].iter().all(|&w| w == 0),
+            "assign_add stranded live limbs"
+        );
+
+        let mut out2 = wide.clone();
+        let p = out2.limbs.as_ptr();
+        out2.assign_sub(&narrow, &narrow);
+        assert_eq!(out2.limbs.as_ptr(), p, "assign_sub reuses the buffer");
+        assert!(
+            read8(p).iter().all(|&w| w == 0),
+            "assign_sub stranded live limbs"
+        );
+
+        let a = BigInt::from_parts(Sign::Positive, wide.clone());
+        let mut z = a.clone();
+        let p = z.magnitude.limbs.as_ptr();
+        z.sub_assign_ref(&a);
+        assert_eq!(
+            z.magnitude.limbs.as_ptr(),
+            p,
+            "cancellation keeps the buffer"
+        );
+        assert!(
+            read8(p).iter().all(|&w| w == 0),
+            "cancellation stranded live limbs"
+        );
+    }
+
+    #[test]
+    fn shrinking_paths_stay_canonical_and_keep_capacity() {
+        let mut seed = 0xdead_beef_0bad_cafe;
+        let wide = seeded_biguint(8, &mut seed);
+        let narrow = seeded_biguint(2, &mut seed);
+        let mut x = wide.clone();
+        x.clone_from(&narrow);
+        assert_eq!(x, narrow);
+        let mut out = wide.clone();
+        out.assign_add(&narrow, &narrow);
+        assert_eq!(out, narrow.add_ref(&narrow));
+        let mut out2 = wide.clone();
+        out2.assign_sub(&narrow, &narrow);
+        assert!(out2.is_zero());
+        assert!(out2.limbs.last() != Some(&0), "canonical zero is empty");
+        // Cancellation clears to canonical zero with capacity kept.
+        let mut z = BigInt::from_parts(Sign::Positive, wide.clone());
+        z.sub_assign_ref(&BigInt::from_parts(Sign::Positive, wide.clone()));
+        assert_eq!(z, BigInt::zero());
+        assert!(
+            z.magnitude().limbs.capacity() >= 8,
+            "capacity kept for reuse"
+        );
+    }
+
+    #[test]
+    fn clone_from_reuses_and_matches() {
+        let mut seed = 0xfeed_face_cafe_beef;
+        let big = seeded_biguint(48, &mut seed);
+        let small = seeded_biguint(3, &mut seed);
+        let mut x = big.clone();
+        let capacity = x.limbs.capacity();
+        let ptr = x.limbs.as_ptr();
+        x.clone_from(&small);
+        assert_eq!(x, small);
+        assert_eq!(x.limbs.capacity(), capacity, "shrinking keeps the buffer");
+        assert_eq!(x.limbs.as_ptr(), ptr);
+        x.clone_from(&big);
+        assert_eq!(x, big, "regrowing within capacity restores the value");
+        assert_eq!(
+            x.limbs.as_ptr(),
+            ptr,
+            "regrowth within capacity must not reallocate"
+        );
+        let mut y = BigInt::from_parts(Sign::Negative, big.clone());
+        y.clone_from(&BigInt::from_parts(Sign::Positive, small.clone()));
+        assert_eq!(y, BigInt::from_parts(Sign::Positive, small));
+    }
+
+    #[test]
+    fn signed_in_place_matches_case_analysis_oracle() {
+        let mut seed = 0x2545_f491_4f6c_dd1d;
+        let signed = |sign, words: usize, seed: &mut u64| {
+            if words == 0 {
+                BigInt::zero()
+            } else {
+                BigInt::from_parts(sign, seeded_biguint(words, seed))
+            }
+        };
+        let mut cases: Vec<(BigInt, BigInt)> = Vec::new();
+        for &sa in &[Sign::Positive, Sign::Negative] {
+            for &sb in &[Sign::Positive, Sign::Negative] {
+                for &(wa, wb) in &[(0usize, 6usize), (6, 0), (0, 0), (1, 6), (6, 1), (6, 6)] {
+                    for _ in 0..6 {
+                        cases.push((signed(sa, wa, &mut seed), signed(sb, wb, &mut seed)));
+                    }
+                }
+                // Exact cancellation: equal magnitudes, opposite signs.
+                let m = seeded_biguint(5, &mut seed);
+                cases.push((BigInt::from_parts(sa, m.clone()), BigInt::from_parts(sb, m)));
+            }
+        }
+        for (a, b) in &cases {
+            let mut sum = a.clone();
+            sum.add_assign_ref(b);
+            assert_eq!(
+                sum,
+                signed_add_oracle(a, b),
+                "add: {:?} + {:?}",
+                a.sign(),
+                b.sign()
+            );
+            let mut diff = a.clone();
+            diff.sub_assign_ref(b);
+            assert_eq!(
+                diff,
+                signed_add_oracle(a, &b.negated()),
+                "sub: {:?} - {:?}",
+                a.sign(),
+                b.sign()
+            );
+            // Canonical zero: Sign::Zero with an empty magnitude.
+            if sum.sign() == Sign::Zero {
+                assert!(sum.magnitude().is_zero());
+            }
+            if diff.sign() == Sign::Zero {
+                assert!(diff.magnitude().is_zero());
+            }
+        }
+    }
+
+    #[test]
+    fn signed_arithmetic_matches_i128() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15;
+        let to_bigint = |v: i64| {
+            let sign = if v > 0 {
+                Sign::Positive
+            } else if v < 0 {
+                Sign::Negative
+            } else {
+                Sign::Zero
+            };
+            BigInt::from_parts(sign, BigUint::from_u64(v.unsigned_abs()))
+        };
+        let to_i128 = |v: &BigInt| -> i128 {
+            let mag = v.magnitude().limbs.first().copied().unwrap_or(0);
+            match v.sign() {
+                Sign::Negative => -i128::from(mag),
+                _ => i128::from(mag),
+            }
+        };
+        for _ in 0..4000 {
+            let a = lcg_next(&mut seed) as i64 >> 8;
+            let b = lcg_next(&mut seed) as i64 >> 8;
+            let (ba, bb) = (to_bigint(a), to_bigint(b));
+            let mut sum = ba.clone();
+            sum.add_assign_ref(&bb);
+            assert_eq!(to_i128(&sum), i128::from(a) + i128::from(b));
+            let mut diff = ba.clone();
+            diff.sub_assign_ref(&bb);
+            assert_eq!(to_i128(&diff), i128::from(a) - i128::from(b));
+        }
     }
 
     #[test]

@@ -17,8 +17,13 @@ them remains subject to the joint triage.
    limbs, the same as gcd's. At 1 Mbit the ratio to GMP fell 41× → 11.9×
    and the symbol now costs what this crate's gcd costs, equal to within
    0.1% (PERFORMANCE.md, *GCD at scale*).
-2. **In-place `add`/`sub`** — remove the fresh-allocation-per-call ratios on
-   the cheapest operations.
+2. **In-place `add`/`sub`** — completed 2026-08-13. Three-operand
+   `assign_add`/`assign_sub` on the unsigned type, sign-complete in-place
+   `add_assign_ref`/`sub_assign_ref` on the signed type, and a
+   buffer-reusing `clone_from`, every shrinking path scrubbing the limbs it
+   abandons; the benchmark's `add`/`sub` rows now measure reused-output
+   writes on both sides, and the ratios fell from 2–15× to 1.2–4.5×
+   (PERFORMANCE.md).
 3. **Baillie–PSW** — strong Lucas test composed with the existing
    Miller–Rabin; the standard probable-prime test, no known pseudoprime.
 4. **Rational reconstruction** — stop the extended-gcd engine at the √m
@@ -37,6 +42,10 @@ them remains subject to the joint triage.
 Each item lands with the established discipline: primary source, independent
 oracle, differential verification, measured thresholds where dispatch is
 involved, and documentation in the formal register.
+
+Triage ordering rule (2026-08-15): everything gated on factorization — the
+**Gated** entries below — is deferred to the end of the plan; the
+factorization-free surface lands first.
 
 Each section below is scrubbed by implementability. **Efficient** means softly
 polynomial in the operand bit-length with a literature algorithm we can cite

@@ -23,9 +23,10 @@
 //!   Montgomery exponentiation ladder wipes its workspaces on exit, so
 //!   values do not linger in freed heap memory.
 //!
-//! Safety policy: `#![deny(unsafe_code)]` crate-wide; the sole audited
-//! exception is the volatile-write scrub helper in `scrub`, which cannot be
-//! expressed in safe Rust. `#![deny(missing_docs)]` holds every public item
+//! Safety policy: `#![deny(unsafe_code)]` crate-wide; the audited
+//! exceptions are the volatile-write scrub helper in `scrub`, which cannot
+//! be expressed in safe Rust, and the test probe that verifies the scrub
+//! on every buffer-shrinking path by reading the raw tail back. `#![deny(missing_docs)]` holds every public item
 //! to a doc comment, and `MANUAL.md` carries a worked, test-pinned example
 //! for each.
 //!

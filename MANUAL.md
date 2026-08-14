@@ -78,10 +78,15 @@ assert_eq!(BigUint::zero().bits(), 0);
 ### Arithmetic
 
 `add_ref` / `sub_ref` / `mul_ref` return new values; `add_assign_ref` /
-`sub_assign_ref` work in place. `square_ref` squares, and `sqrt_floor` is
-the integer square root (largest `r` with `r² ≤ self`). Subtraction panics
-on underflow — the type is unsigned; use [`BigInt`](#signed-integers-bigint-and-sign)
-when signs can go negative.
+`sub_assign_ref` work in place. `assign_add` / `assign_sub` are the
+three-operand forms — the result written into `self`, whose buffer is
+reused: a long-lived output allocates only until its capacity covers the
+result, then never again (the shape of GMP's `mpz_add`).
+`Clone::clone_from` likewise copies a value into existing storage.
+`square_ref` squares, and `sqrt_floor` is the integer square root (largest
+`r` with `r² ≤ self`). Subtraction panics on underflow — the type is
+unsigned; use
+[`BigInt`](#signed-integers-bigint-and-sign) when signs can go negative.
 
 ```rust
 let a = BigUint::from_u64(1_000);
@@ -97,6 +102,13 @@ let mut acc = BigUint::from_u64(1_000);
 acc.add_assign_ref(&b);
 acc.sub_assign_ref(&b);
 assert_eq!(acc, a);
+
+// Three-operand form: `out`'s storage is reused across calls.
+let mut out = BigUint::zero();
+out.assign_add(&a, &b);
+assert_eq!(out, BigUint::from_u64(1_037));
+out.assign_sub(&a, &b);
+assert_eq!(out, BigUint::from_u64(963));
 ```
 
 ### Shifts and bit access
@@ -155,9 +167,11 @@ assert_eq!(product, BigUint::from_u64(22)); // 123 · 456 = 56 088 ≡ 22 (mod 9
 
 A `BigInt` is a `Sign` joined to a `BigUint` magnitude. Construct with
 `from_biguint` (non-negative) or `from_parts`; read back with `sign()` and
-`magnitude()`; `negated` flips the sign. `add_ref` / `sub_ref` are signed;
-`mul_biguint_ref` scales by an unsigned factor. `modulo_positive` maps into
-the canonical range `[0, n)` — the piece extended Euclid needs.
+`magnitude()`; `negated` flips the sign. `add_ref` / `sub_ref` are signed,
+and `add_assign_ref` / `sub_assign_ref` are their in-place forms, reusing
+the magnitude's buffer in every sign combination (nothing panics — the
+sign follows the result); `mul_biguint_ref` scales by an unsigned factor.
+`modulo_positive` maps into the canonical range `[0, n)` — the piece extended Euclid needs.
 
 ```rust
 let ten = BigInt::from_biguint(BigUint::from_u64(10));

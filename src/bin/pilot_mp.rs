@@ -99,6 +99,11 @@ struct IntPool {
     /// the length constant keeps the size sweep a one-variable fit, and the
     /// linearity makes every other length derivable from this row.
     exp_rand: BigUint,
+    /// Long-lived output storage for the in-place ops (`add`, `sub`),
+    /// mirroring the GMP pilot's reused result `mpz_t`: after the first few
+    /// calls its capacity covers every result, and the measurement is the
+    /// arithmetic alone rather than an allocation per call.
+    out: BigUint,
 }
 
 /// The Montgomery-domain slice of the pool.
@@ -143,6 +148,9 @@ impl IntPool {
             }
             candidate
         });
+        // Reused output storage for the ops that write in place; seeded from
+        // `a` so its capacity already covers a full-width result.
+        let out = a.clone();
         Self {
             a,
             b,
@@ -150,6 +158,7 @@ impl IntPool {
             modulus,
             mont,
             prime,
+            out,
             e65537: BigUint::from_u64(65_537),
             exp_rand: rng.biguint(256),
         }
@@ -189,12 +198,12 @@ impl FieldPool {
 
 /// A benchmark closure over the process's single random operand set.
 enum Bench {
-    Int(IntPool, fn(&IntPool)),
+    Int(IntPool, fn(&mut IntPool)),
     Field(FieldPool, fn(&FieldPool)),
 }
 
 impl Bench {
-    fn run(&self) {
+    fn run(&mut self) {
         match self {
             Bench::Int(p, f) => f(p),
             Bench::Field(p, f) => f(p),
@@ -202,18 +211,22 @@ impl Bench {
     }
 }
 
-fn int_op(name: &str) -> Option<fn(&IntPool)> {
+fn int_op(name: &str) -> Option<fn(&mut IntPool)> {
     Some(match name {
+        // The two cheapest operations write into the pool's reused output
+        // buffer — the same shape as the GMP pilot's `mpz_add(r, a, b)` into
+        // a long-lived `r` — so both columns measure the arithmetic, not one
+        // side's allocator.
         "add" => |p| {
-            black_box(p.a.add_ref(&p.b));
+            let IntPool { out, a, b, .. } = p;
+            out.assign_add(a, b);
+            black_box(out);
         },
         "sub" => |p| {
-            let (hi, lo) = if p.a >= p.b {
-                (&p.a, &p.b)
-            } else {
-                (&p.b, &p.a)
-            };
-            black_box(hi.sub_ref(lo));
+            let IntPool { out, a, b, .. } = p;
+            let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
+            out.assign_sub(hi, lo);
+            black_box(out);
         },
         "mul" => |p| {
             black_box(p.a.mul_ref(&p.b));
@@ -363,7 +376,7 @@ fn all_ops() -> Vec<String> {
 /// then print the per-op cost in ms. The whole batch uses the *same* operand,
 /// so the reading reflects that operand's data-dependent cost; the fresh draw
 /// per process is what makes the collection of readings a random sample.
-fn one_reading(bench: &Bench) {
+fn one_reading(bench: &mut Bench) {
     let target = Duration::from_millis(2);
     let mut reps = 1usize;
     let ms = loop {
@@ -389,8 +402,8 @@ fn main() {
             }
         }
         Some(name) => {
-            let bench = build(name).unwrap_or_else(|| panic!("unknown op: {name}"));
-            one_reading(&bench);
+            let mut bench = build(name).unwrap_or_else(|| panic!("unknown op: {name}"));
+            one_reading(&mut bench);
         }
         None => {
             eprintln!("usage: pilot_mp <op> | --list");

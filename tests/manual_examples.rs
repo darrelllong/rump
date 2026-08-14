@@ -59,6 +59,13 @@ fn manual_biguint_arithmetic() {
     acc.add_assign_ref(&b);
     acc.sub_assign_ref(&b);
     assert_eq!(acc, a);
+
+    // Three-operand form: `out`'s storage is reused across calls.
+    let mut out = BigUint::zero();
+    out.assign_add(&a, &b);
+    assert_eq!(out, BigUint::from_u64(1_037));
+    out.assign_sub(&a, &b);
+    assert_eq!(out, BigUint::from_u64(963));
 }
 
 #[test]

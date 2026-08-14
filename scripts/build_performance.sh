@@ -239,9 +239,17 @@ The comparison sorts rump's primitives into groups, and the grouping is by
   assembly base-case, not the algorithm. GMP escalates to Toom-6.5/8.5 → FFT far
   above rump's range.
 
-- **`add`/`sub` — 2–15×.** Nearly all of this is allocation: rump returns a
-  fresh `Vec` per call where GMP's `mpn` layer writes into an existing buffer.
-  The absolute difference is tens of nanoseconds per call.
+- **`add`/`sub` — 1.2–4.5×, formerly 2–15×.** Both pilots now measure the
+  same shape: the result written into long-lived storage (GMP's
+  `mpz_add(r, a, b)` into a reused `r`; rump's three-operand `assign_add` /
+  `assign_sub` into a reused buffer — one carry or borrow pass, no
+  allocation once the buffer is settled). What remains is code generation:
+  rump's carry chain is portable Rust over `u128` accumulators where GMP's
+  is assembly `adc`/`sbc`. The band is nearly host-independent — M4
+  1.2–4.5×, EPYC 1.3–3.9×, Pi 1.2–4.0× — tightest at 256 bits, where call
+  overhead dominates both sides, and widening with operand length as the
+  carry chains dominate. The absolute differences run from under a
+  nanosecond (M4 `sub` at 256 bits) to ~130 ns (Pi at 4096).
 
 - **Operations with no `mpz` counterpart.** The public Montgomery domain
   (`mul_mont`, `square_mont`, `pow`), `sqrt_mod`, and the GF(2^m) field
@@ -262,15 +270,20 @@ Lehmer batch or a guarded division, taking the symbol to O(M(n)·log n) and
 the 1 Mbit ratio from 41× to 11.9×, where the symbol costs what `gcd`
 costs (published treatment: Brent and Zimmermann, *An O(M(n) log n)
 algorithm for the Jacobi symbol*, ANTS-IX, 2010; the threading design is
-Möller's, GMP's `mpn_hgcd_jacobi`). The section below measures the results
-at scale.
+Möller's, GMP's `mpn_hgcd_jacobi`), and in-place `add`/`sub` — the signed
+type's `add_assign_ref`/`sub_assign_ref` reusing the magnitude's buffer in
+every sign combination, the unsigned type's three-operand
+`assign_add`/`assign_sub` writing into caller-held storage, and a
+buffer-reusing `Clone::clone_from` — which moved the cheapest operations'
+ratios from 2–15× to 1.2–4.5× (the `add`/`sub` bullet above). The section
+below measures the family at scale.
 
-Remaining, in priority order:
-
-1. **In-place `add`/`sub`.** The 2–15× ratios on the cheapest operations are
-   allocation: a fresh `Vec` per call against GMP's in-place `mpn` writes.
-   The absolute difference is tens of nanoseconds per call, which bounds the
-   value of the work.
+This closes the backlog of rump-against-GMP ratio work: in the primitive
+comparison above, what still separates the columns is constant factors —
+GMP's assembly base cases, Toom against FFT — not algorithms. Measured work
+inside rump itself remains on the approved queue (ROADMAP.md): Cipolla's
+square root, aimed at `sqrt_mod`'s 2-adic heavy tail in the extrema section
+below, and Montgomery's batch inversion.
 
 ## GCD at scale
 
