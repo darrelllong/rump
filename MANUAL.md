@@ -342,8 +342,10 @@ assert_eq!(
 
 `MontgomeryCtx::new` precomputes the Montgomery constants for one odd
 modulus (`None` for even or zero); `modulus()` returns it. Long computations
-encode once, stay in the domain with `mul_mont` / `square_mont`, and decode
-at the boundary; `one_mont()` is the encoding of one. `mul`, `square`, and
+encode once, stay in the domain with `mul_mont` / `square_mont` /
+`add_mont` / `sub_mont` — the encoding is linear, so domain addition and
+subtraction are one compare-and-correct each — and decode at the boundary;
+`one_mont()` is the encoding of one. `mul`, `square`, and
 `pow` are the one-shot forms that convert internally. `pow_encoded` reuses
 an already encoded base across exponents.
 
@@ -369,6 +371,11 @@ assert_eq!(ctx.decode(&product_mont), BigUint::from_u64(30));
 assert_eq!(
     ctx.decode(&ctx.square_mont(&a_mont)),
     BigUint::from_u64(25)
+);
+assert_eq!(ctx.decode(&ctx.add_mont(&a_mont, &b_mont)), BigUint::from_u64(11));
+assert_eq!(
+    ctx.decode(&ctx.sub_mont(&a_mont, &b_mont)),
+    BigUint::from_u64(96) // 5 − 6 ≡ −1 ≡ 96 (mod 97)
 );
 assert_eq!(ctx.decode(ctx.one_mont()), BigUint::one());
 

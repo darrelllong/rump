@@ -247,6 +247,14 @@ fn manual_montgomery_domain() {
     let product_mont = ctx.mul_mont(&a_mont, &b_mont);
     assert_eq!(ctx.decode(&product_mont), BigUint::from_u64(30));
     assert_eq!(ctx.decode(&ctx.square_mont(&a_mont)), BigUint::from_u64(25));
+    assert_eq!(
+        ctx.decode(&ctx.add_mont(&a_mont, &b_mont)),
+        BigUint::from_u64(11)
+    );
+    assert_eq!(
+        ctx.decode(&ctx.sub_mont(&a_mont, &b_mont)),
+        BigUint::from_u64(96) // 5 − 6 ≡ −1 ≡ 96 (mod 97)
+    );
     assert_eq!(ctx.decode(ctx.one_mont()), BigUint::one());
 
     // Reuse an encoded base across exponents.

@@ -14,8 +14,8 @@ enforcing a clean API.
   vol. 2, §4.3.1) with a Horner path for single-limb divisors.
 - **`MontgomeryCtx`** — a public Montgomery domain (Montgomery 1985; the
   separated-operand-scanning shape from Koç, Acar & Kaliski, IEEE Micro 1996):
-  encode once, multiply and exponentiate in-domain (`mul_mont`,
-  `square_mont`, `pow`, `pow_encoded`), convert at the boundary. Fixed 4-bit
+  encode once, compute in-domain (`mul_mont`, `square_mont`, `add_mont`,
+  `sub_mont`, `pow`, `pow_encoded`), convert at the boundary. Fixed 4-bit
   window exponentiation.
 - **Number theory** — `gcd`, `lcm`, and `gcd_extended` (Bézout
   coefficients); the quadratic-residue symbols `jacobi` (binary reciprocity,

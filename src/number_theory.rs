@@ -1373,25 +1373,13 @@ const NON_RESIDUE_SCAN_BOUND: u32 = 128;
 /// 153–163.
 fn sqrt_mod_cipolla(a: &BigUint, p: &BigUint, ctx: &MontgomeryCtx) -> Option<BigUint> {
     let one = BigUint::one();
-    let add_mod = |x: &BigUint, y: &BigUint| -> BigUint {
-        let sum = x.add_ref(y);
-        if sum >= *p {
-            sum.sub_ref(p)
-        } else {
-            sum
-        }
-    };
     // t = 1, 2, …: the first with t² − a a non-residue, under the same
     // scan bound as the descent's search.
     let mut t = BigUint::one();
     let mut attempts = 0u32;
     let w = loop {
         let t_squared = BigUint::mod_mul(&t, &t, p);
-        let difference = if t_squared >= *a {
-            t_squared.sub_ref(a)
-        } else {
-            p.add_ref(&t_squared).sub_ref(a)
-        };
+        let difference = BigUint::mod_sub(&t_squared, a, p);
         if jacobi(&difference, p) == Some(-1) {
             break difference;
         }
@@ -1415,12 +1403,12 @@ fn sqrt_mod_cipolla(a: &BigUint, p: &BigUint, ctx: &MontgomeryCtx) -> Option<Big
         // Square: (u² + w·v², 2uv).
         let u_squared = ctx.square_mont(&u);
         let cross = ctx.mul_mont(&u, &v);
-        u = add_mod(&u_squared, &ctx.mul_mont(&w_mont, &ctx.square_mont(&v)));
-        v = add_mod(&cross, &cross);
+        u = ctx.add_mont(&u_squared, &ctx.mul_mont(&w_mont, &ctx.square_mont(&v)));
+        v = ctx.add_mont(&cross, &cross);
         if exponent.bit(bit) {
             // Multiply by the base t + x: (u·t + w·v, u + v·t).
-            let new_u = add_mod(&ctx.mul_mont(&u, &t_mont), &ctx.mul_mont(&w_mont, &v));
-            let new_v = add_mod(&u, &ctx.mul_mont(&v, &t_mont));
+            let new_u = ctx.add_mont(&ctx.mul_mont(&u, &t_mont), &ctx.mul_mont(&w_mont, &v));
+            let new_v = ctx.add_mont(&u, &ctx.mul_mont(&v, &t_mont));
             u = new_u;
             v = new_v;
         }
@@ -1996,11 +1984,8 @@ pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
 /// Miller-Rabin witness test and the Tonelli–Shanks descent.
 fn decompose_n_minus_one(n: &BigUint) -> (BigUint, usize) {
     let mut odd_factor = n.sub_ref(&BigUint::one());
-    let mut two_adic_exponent = 0usize;
-    while !odd_factor.is_odd() {
-        odd_factor.shr1();
-        two_adic_exponent += 1;
-    }
+    let two_adic_exponent = odd_factor.trailing_zeros().expect("n exceeds one");
+    odd_factor.shr_bits(two_adic_exponent);
     (odd_factor, two_adic_exponent)
 }
 
@@ -2310,12 +2295,8 @@ fn selfridge_discriminant(n: &BigUint) -> Option<i64> {
     let mut positive = true;
     let mut attempts = 0u32;
     loop {
-        let reduced = BigUint::from_u64(d_abs).modulo(n);
-        let residue = if positive || reduced.is_zero() {
-            reduced
-        } else {
-            n.sub_ref(&reduced)
-        };
+        let signed = i64::try_from(d_abs).expect("discriminant search stays far below i64::MAX");
+        let residue = BigInt::from_i64(if positive { signed } else { -signed }).modulo_positive(n);
         match jacobi(&residue, n) {
             Some(-1) => {
                 let magnitude =
@@ -2357,29 +2338,7 @@ fn selfridge_discriminant(n: &BigUint) -> Option<i64> {
 /// Montgomery encoding because dividing by two is multiplication by the
 /// constant `2⁻¹ mod n`.
 fn strong_lucas_core(n: &BigUint, ctx: &MontgomeryCtx, discriminant: i64) -> bool {
-    let to_residue = |value: i64| -> BigUint {
-        let reduced = BigUint::from_u64(value.unsigned_abs()).modulo(n);
-        if value < 0 && !reduced.is_zero() {
-            n.sub_ref(&reduced)
-        } else {
-            reduced
-        }
-    };
-    let add_mod = |a: &BigUint, b: &BigUint| -> BigUint {
-        let sum = a.add_ref(b);
-        if sum >= *n {
-            sum.sub_ref(n)
-        } else {
-            sum
-        }
-    };
-    let sub_mod = |a: &BigUint, b: &BigUint| -> BigUint {
-        if a >= b {
-            a.sub_ref(b)
-        } else {
-            n.add_ref(a).sub_ref(b)
-        }
-    };
+    let to_residue = |value: i64| -> BigUint { BigInt::from_i64(value).modulo_positive(n) };
     let half_mod = |value: &BigUint| -> BigUint {
         let mut halved = if value.is_odd() {
             value.add_ref(n)
@@ -2393,13 +2352,11 @@ fn strong_lucas_core(n: &BigUint, ctx: &MontgomeryCtx, discriminant: i64) -> boo
     let d_mont = ctx.encode(&to_residue(discriminant));
     let q_mont = ctx.encode(&to_residue((1 - discriminant) / 4));
 
-    // n + 1 = 2^s · d with d odd; s ≥ 1 since n is odd.
+    // n + 1 = 2^s · d with d odd; s ≥ 1 since n is odd. One pass over the
+    // limbs rather than a shift per bit.
     let mut d = n.add_ref(&BigUint::one());
-    let mut s = 0usize;
-    while !d.is_odd() {
-        d.shr1();
-        s += 1;
-    }
+    let s = d.trailing_zeros().expect("n + 1 is non-zero");
+    d.shr_bits(s);
 
     // (U₁, V₁, Q¹) = (1, P, Q) with P = 1, then one double-and-maybe-step
     // per remaining bit of d, most significant first.
@@ -2408,11 +2365,11 @@ fn strong_lucas_core(n: &BigUint, ctx: &MontgomeryCtx, discriminant: i64) -> boo
     let mut q_pow = q_mont.clone();
     for bit in (0..d.bits() - 1).rev() {
         u = ctx.mul_mont(&u, &v);
-        v = sub_mod(&ctx.square_mont(&v), &add_mod(&q_pow, &q_pow));
+        v = ctx.sub_mont(&ctx.square_mont(&v), &ctx.add_mont(&q_pow, &q_pow));
         q_pow = ctx.square_mont(&q_pow);
         if d.bit(bit) {
-            let stepped_u = half_mod(&add_mod(&u, &v));
-            v = half_mod(&add_mod(&ctx.mul_mont(&d_mont, &u), &v));
+            let stepped_u = half_mod(&ctx.add_mont(&u, &v));
+            v = half_mod(&ctx.add_mont(&ctx.mul_mont(&d_mont, &u), &v));
             u = stepped_u;
             q_pow = ctx.mul_mont(&q_pow, &q_mont);
         }
@@ -2423,7 +2380,7 @@ fn strong_lucas_core(n: &BigUint, ctx: &MontgomeryCtx, discriminant: i64) -> boo
         return true;
     }
     for _ in 1..s {
-        v = sub_mod(&ctx.square_mont(&v), &add_mod(&q_pow, &q_pow));
+        v = ctx.sub_mont(&ctx.square_mont(&v), &ctx.add_mont(&q_pow, &q_pow));
         q_pow = ctx.square_mont(&q_pow);
         if v.is_zero() {
             return true;

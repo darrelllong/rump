@@ -1652,6 +1652,61 @@ impl BigUint {
         lhs.mul_ref(rhs).modulo(modulus)
     }
 
+    /// One-shot modular addition, on [`Self::mod_mul`]'s contract: any
+    /// operands, non-zero modulus (panic otherwise). Reduced operands take
+    /// one compare-and-correct; the domain contexts' `add` operations are
+    /// the reduced-only fast paths of this.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `modulus == 0`.
+    #[must_use]
+    pub fn mod_add(lhs: &Self, rhs: &Self, modulus: &Self) -> Self {
+        assert!(!modulus.is_zero(), "modulus must be non-zero");
+        let lhs = if lhs < modulus {
+            lhs.clone()
+        } else {
+            lhs.modulo(modulus)
+        };
+        let rhs = if rhs < modulus {
+            rhs.clone()
+        } else {
+            rhs.modulo(modulus)
+        };
+        let sum = lhs.add_ref(&rhs);
+        if sum >= *modulus {
+            sum.sub_ref(modulus)
+        } else {
+            sum
+        }
+    }
+
+    /// One-shot modular subtraction, on the same contract as
+    /// [`Self::mod_add`]; the wrap adds the modulus back.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `modulus == 0`.
+    #[must_use]
+    pub fn mod_sub(lhs: &Self, rhs: &Self, modulus: &Self) -> Self {
+        assert!(!modulus.is_zero(), "modulus must be non-zero");
+        let lhs = if lhs < modulus {
+            lhs.clone()
+        } else {
+            lhs.modulo(modulus)
+        };
+        let rhs = if rhs < modulus {
+            rhs.clone()
+        } else {
+            rhs.modulo(modulus)
+        };
+        if lhs >= rhs {
+            lhs.sub_ref(&rhs)
+        } else {
+            modulus.add_ref(&lhs).sub_ref(&rhs)
+        }
+    }
+
     /// Return `(quotient, remainder)` for Euclidean division. Panics on zero divisor.
     ///
     /// # Panics
@@ -1845,7 +1900,7 @@ impl BigUint {
         debug_assert!(modulus.is_odd(), "Montgomery path requires an odd modulus");
         let width = modulus.limbs.len();
         debug_assert!(
-            lhs.limbs.len() <= width && rhs.limbs.len() <= width,
+            lhs < modulus && rhs < modulus,
             "Montgomery operands must be reduced residues"
         );
 
@@ -2366,6 +2421,10 @@ impl MontgomeryCtx {
     /// per-call volatile wipe is omitted for speed. The product is returned as
     /// a `BigUint`, whose own `Drop` wipes it; the caller keeps the value.
     #[must_use]
+    /// Operands must be reduced residues (below the modulus): the single
+    /// conditional subtraction in the reduction relies on it, checked in
+    /// debug builds; a release caller violating it gets a non-canonical
+    /// result without notice.
     pub fn mul_mont(&self, lhs: &BigUint, rhs: &BigUint) -> BigUint {
         let mut workspace = Vec::new();
         BigUint::montgomery_mul_odd_with_workspace(
@@ -2382,6 +2441,46 @@ impl MontgomeryCtx {
     #[must_use]
     pub fn square_mont(&self, value: &BigUint) -> BigUint {
         self.mul_mont(value, value)
+    }
+
+    /// Add two residues in Montgomery form, staying in Montgomery form:
+    /// the reduced-operand fast path of [`BigUint::mod_add`], one
+    /// compare-and-subtract with no reduction machinery. The encoding is
+    /// linear — `x̃ + ỹ ≡ (x + y)·R (mod n)` — so modular addition acts on
+    /// domain residues exactly as on ordinary ones. Operands must be
+    /// reduced (below the modulus), the same precondition every domain
+    /// operation carries; it is checked in debug builds only, and a
+    /// release caller violating it gets a non-canonical result.
+    #[must_use]
+    pub fn add_mont(&self, lhs: &BigUint, rhs: &BigUint) -> BigUint {
+        debug_assert!(
+            lhs < &self.modulus && rhs < &self.modulus,
+            "domain operands arrive reduced"
+        );
+        let sum = lhs.add_ref(rhs);
+        if sum >= self.modulus {
+            sum.sub_ref(&self.modulus)
+        } else {
+            sum
+        }
+    }
+
+    /// Subtract one Montgomery-form residue from another, staying in
+    /// Montgomery form: the reduced-operand fast path of
+    /// [`BigUint::mod_sub`], the wrap adding the modulus back. Linear for
+    /// the same reason as [`Self::add_mont`], under the same
+    /// debug-checked reduced-operand contract.
+    #[must_use]
+    pub fn sub_mont(&self, lhs: &BigUint, rhs: &BigUint) -> BigUint {
+        debug_assert!(
+            lhs < &self.modulus && rhs < &self.modulus,
+            "domain operands arrive reduced"
+        );
+        if lhs >= rhs {
+            lhs.sub_ref(rhs)
+        } else {
+            self.modulus.add_ref(lhs).sub_ref(rhs)
+        }
     }
 
     /// The Montgomery encoding of one (`R mod n`).
@@ -2534,6 +2633,19 @@ impl BarrettCtx {
             debug_assert!(corrections <= 2, "HAC Note 14.44 bounds the corrections");
         }
         r
+    }
+
+    /// `(a + b) mod n`, operands reduced first — the additive counterpart
+    /// of [`Self::mul_mod`], keeping the two modular contexts symmetric.
+    #[must_use]
+    pub fn add_mod(&self, a: &BigUint, b: &BigUint) -> BigUint {
+        BigUint::mod_add(a, b, &self.modulus)
+    }
+
+    /// `(a − b) mod n`, operands reduced first.
+    #[must_use]
+    pub fn sub_mod(&self, a: &BigUint, b: &BigUint) -> BigUint {
+        BigUint::mod_sub(a, b, &self.modulus)
     }
 
     /// `(a · b) mod n`, both operands reduced first.
@@ -2744,6 +2856,17 @@ impl BigInt {
     #[must_use]
     pub fn from_biguint(magnitude: BigUint) -> Self {
         Self::from_parts(Sign::Positive, magnitude)
+    }
+
+    /// Construct from a machine-word signed value.
+    #[must_use]
+    pub fn from_i64(value: i64) -> Self {
+        let sign = if value < 0 {
+            Sign::Negative
+        } else {
+            Sign::Positive
+        };
+        Self::from_parts(sign, BigUint::from_u64(value.unsigned_abs()))
     }
 
     /// Return the sign.
@@ -3012,6 +3135,102 @@ mod tests {
             }
         }
         low
+    }
+
+    #[test]
+    fn mod_add_sub_match_machine_arithmetic() {
+        let mut seed = 0x30d5_0bad_0000_0001;
+        for _ in 0..2000 {
+            let m = (lcg_next(&mut seed) >> (lcg_next(&mut seed) % 32)) | 1;
+            let a = lcg_next(&mut seed) >> (lcg_next(&mut seed) % 32);
+            let b = lcg_next(&mut seed) >> (lcg_next(&mut seed) % 32);
+            let (bm, ba, bb) = (
+                BigUint::from_u64(m),
+                BigUint::from_u64(a),
+                BigUint::from_u64(b),
+            );
+            // Unreduced operands are within the contract.
+            assert_eq!(
+                BigUint::mod_add(&ba, &bb, &bm),
+                BigUint::from_u64(((u128::from(a) + u128::from(b)) % u128::from(m)) as u64)
+            );
+            let expect_sub =
+                (u128::from(a % m) + u128::from(m) - u128::from(b % m)) % u128::from(m);
+            assert_eq!(
+                BigUint::mod_sub(&ba, &bb, &bm),
+                BigUint::from_u64(expect_sub as u64)
+            );
+        }
+        // The Barrett pair delegates to the same operations.
+        let ctx = super::BarrettCtx::new(&BigUint::from_u64(1000)).expect("modulus >= 2");
+        assert_eq!(
+            ctx.add_mod(&BigUint::from_u64(999), &BigUint::from_u64(2)),
+            BigUint::from_u64(1)
+        );
+        assert_eq!(
+            ctx.sub_mod(&BigUint::from_u64(2), &BigUint::from_u64(999)),
+            BigUint::from_u64(3)
+        );
+        // from_i64 round-trips both signs into the canonical range.
+        assert_eq!(
+            BigInt::from_i64(-3).modulo_positive(&BigUint::from_u64(11)),
+            BigUint::from_u64(8)
+        );
+        assert_eq!(
+            BigInt::from_i64(3).modulo_positive(&BigUint::from_u64(11)),
+            BigUint::from_u64(3)
+        );
+        assert_eq!(BigInt::from_i64(0), BigInt::zero());
+        assert_eq!(
+            BigInt::from_i64(i64::MIN),
+            BigInt::from_parts(Sign::Negative, BigUint::from_u64(1u64 << 63))
+        );
+    }
+
+    #[test]
+    fn montgomery_domain_add_sub_match_plain_arithmetic() {
+        use super::MontgomeryCtx;
+        let mut seed = 0x0a0d_50b7_0000_0001;
+        for &words in &[1usize, 4, 32] {
+            let mut n = seeded_biguint(words, &mut seed);
+            n.limbs[0] |= 1;
+            let ctx = MontgomeryCtx::new(&n).expect("odd modulus");
+            for _ in 0..16 {
+                let a = seeded_biguint(words, &mut seed).modulo(&n);
+                let b = seeded_biguint(words, &mut seed).modulo(&n);
+                let (am, bm) = (ctx.encode(&a), ctx.encode(&b));
+                // Linearity: the domain sum decodes to the plain sum.
+                let sum = a.add_ref(&b).modulo(&n);
+                assert_eq!(ctx.decode(&ctx.add_mont(&am, &bm)), sum);
+                let diff = if a >= b {
+                    a.sub_ref(&b)
+                } else {
+                    n.add_ref(&a).sub_ref(&b)
+                };
+                assert_eq!(ctx.decode(&ctx.sub_mont(&am, &bm)), diff);
+            }
+            // Boundaries: zero, self-cancellation, both identities, the
+            // wrap, and the add correction's own boundary x + (n − x) = n.
+            let zero = BigUint::zero();
+            let top = ctx.encode(&n.sub_ref(&BigUint::one()));
+            assert_eq!(ctx.sub_mont(&top, &top), zero);
+            assert_eq!(ctx.add_mont(&top, &zero), top);
+            assert_eq!(ctx.sub_mont(&top, &zero), top);
+            assert!(
+                ctx.add_mont(&top, &ctx.sub_mont(&zero, &top)).is_zero(),
+                "x + (n - x) folds to exactly zero"
+            );
+            assert_eq!(
+                ctx.decode(&ctx.add_mont(&top, &top)),
+                n.sub_ref(&BigUint::from_u64(2)),
+                "(n-1) + (n-1) wraps to n-2"
+            );
+            assert_eq!(
+                ctx.decode(&ctx.sub_mont(&zero, &top)),
+                BigUint::one(),
+                "0 - (n-1) wraps to 1"
+            );
+        }
     }
 
     #[test]
