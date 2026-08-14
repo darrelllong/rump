@@ -31,8 +31,14 @@ them remains subject to the joint triage.
    against a sieve oracle sharing no code with the tests, both published
    pseudoprime tables below 10⁵, and structured adversarial cases; no
    composite passing both stages is known, none exists below 2⁶⁴.
-4. **Rational reconstruction** — stop the extended-gcd engine at the √m
-   boundary; unlocks exact linear algebra and CRT-lifted computation.
+4. **Rational reconstruction** — completed 2026-08-14. The extended
+   Euclidean walk stopped at the first remainder within the numerator
+   bound (von zur Gathen and Gerhard §5.10; Wang's technique),
+   Lehmer-batched with single-step exactness at the stop line;
+   `rational_reconstruct` (symmetric √((m−1)/2) bounds) and
+   `rational_reconstruct_bounded` (explicit bounds, 2·N·D < m enforced).
+   Verified against a naive uniqueness search exhaustively and by planted
+   round trips to 4096 bits.
 5. **Radix string I/O** — `from_string`/`to_string` by divide-and-conquer
    conversion.
 6. **Integer predicates** — `is_square`, `is_perfect_power`,
@@ -98,9 +104,9 @@ shared variable-time paths — decide that deliberately at triage.
 **Efficient — all of it.** `solve_linear_congruence`, `crt_pair`, `crt`,
 generalized CRT for non-coprime moduli, precompute/reconstruct contexts,
 `symmetric_residue`, product/remainder trees, and **rational
-reconstruction** — a direct corollary of the extended-gcd engine just built
-(stop Euclid at the √m boundary), and the key that unlocks exact linear
-algebra (§11). First-step candidate. Present: `crt_combine` (Garner).
+reconstruction** — landed 2026-08-14 (queue item 4), the key that unlocks
+exact linear algebra (§11). Present: `crt_combine` (Garner),
+`rational_reconstruct`, `rational_reconstruct_bounded`.
 
 ## 5. Exponentiation and multiplicative structure
 
@@ -243,7 +249,7 @@ exponentially many outputs — iterators only, never materialized.
 3. Modular contexts and exponentiation — **present** (Montgomery; Barrett absent)
 4. Modular inverse and square roots — **present** (one root, odd primes)
 5. Jacobi and Kronecker symbols — **present**
-6. CRT and rational reconstruction — **partial** (Garner; reconstruction absent)
+6. CRT and rational reconstruction — **present** (Garner; reconstruction landed 2026-08-14)
 7. Sieving and primality testing — **partial** (Miller–Rabin and BPSW; ranged sieving absent)
 8. Basic factorization — absent
 9. Polynomial arithmetic over ℤ and F_p — absent
@@ -252,6 +258,5 @@ exponentially many outputs — iterators only, never materialized.
 12. LLL — absent
 
 Triage still decides everything; on the current codebase, the shortest path
-through this list runs 6 → 7 → 8 → 9 → 10 → 11 → 12. Baillie–PSW, the
-first of its two named first steps, landed 2026-08-14; rational
-reconstruction is queue item 4.
+through this list runs 6 → 7 → 8 → 9 → 10 → 11 → 12. Its two named first
+steps — Baillie–PSW and rational reconstruction — both landed 2026-08-14.

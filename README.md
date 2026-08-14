@@ -26,7 +26,10 @@ enforcing a clean API.
   (`is_probable_prime`, `is_probable_prime_with_bases`), the reusable
   per-round primitive `miller_rabin_witness` for callers that bring their
   own witness schedule, and Baillie-PSW (`is_probable_prime_bpsw`, with
-  the strong Lucas stage exposed as `is_strong_lucas_probable_prime`).
+  the strong Lucas stage exposed as `is_strong_lucas_probable_prime`);
+  rational reconstruction (`rational_reconstruct`,
+  `rational_reconstruct_bounded`) recovering the unique bounded fraction
+  from its residue.
 
 - **`Gf2m`** — binary extension fields GF(2^m): XOR addition, word-level
   comb multiplication (*Guide to ECC*, Algorithm 2.36) with tap-wise

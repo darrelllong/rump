@@ -19,7 +19,8 @@ rust-mp = "0.1"
 use rump::{
     crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
     is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi,
-    kronecker, lcm, legendre, miller_rabin_witness, mod_inverse, mod_pow, random_below,
+    kronecker, lcm, legendre, miller_rabin_witness, mod_inverse, mod_pow,
+    rational_reconstruct, rational_reconstruct_bounded, random_below,
     random_coprime_below, random_nonzero_below, random_probable_prime, sqrt_mod, BigInt, BigUint,
     Gf2m, MontgomeryCtx, Rng, Sign,
 };
@@ -447,6 +448,45 @@ let x = crt_combine(&[
 ])
 .expect("moduli are pairwise coprime");
 assert_eq!(x, BigUint::from_u64(23));
+```
+
+### Rational reconstruction
+
+`rational_reconstruct` recovers the unique fraction `p/q` from its image
+`x ≡ p·q⁻¹ (mod m)`, with `|p|` and `q` at most `⌊√((m−1)/2)⌋`;
+`rational_reconstruct_bounded` takes explicit bounds `N`, `D` and panics
+unless `2·N·D < m` — the caller's contract, which is what makes the
+answer unique. `None` means no fraction within the bounds reduces to `x`.
+This is the recovery step of CRT-lifted and p-adic computation: compute
+with residues, then read the rational answer back. When reconstructing
+many values under one modulus, compute the bound once and use the bounded
+form — the symmetric wrapper recomputes a square root that costs more
+than the reconstruction itself at large sizes.
+
+```rust
+// 22/7 survives reduction mod 1009 and comes back intact.
+let m = BigUint::from_u64(1_009);
+let seven_inv = mod_inverse(&BigUint::from_u64(7), &m).expect("7 is invertible");
+let x = BigUint::mod_mul(&BigUint::from_u64(22), &seven_inv, &m);
+let (p, q) = rational_reconstruct(&x, &m).expect("22/7 is within the bounds");
+assert_eq!(p, BigInt::from_biguint(BigUint::from_u64(22)));
+assert_eq!(q, BigUint::from_u64(7));
+
+// Negative numerators carry their sign: −3/5 mod 1009.
+let five_inv = mod_inverse(&BigUint::from_u64(5), &m).expect("5 is invertible");
+let x = m.sub_ref(&BigUint::mod_mul(&BigUint::from_u64(3), &five_inv, &m));
+let (p, q) = rational_reconstruct(&x, &m).expect("-3/5 is within the bounds");
+assert_eq!(p, BigInt::from_parts(Sign::Negative, BigUint::from_u64(3)));
+assert_eq!(q, BigUint::from_u64(5));
+
+// The bounded form is explicit about its contract.
+assert_eq!(
+    rational_reconstruct_bounded(&x, &m, &BigUint::from_u64(3), &BigUint::from_u64(5)),
+    Some((
+        BigInt::from_parts(Sign::Negative, BigUint::from_u64(3)),
+        BigUint::from_u64(5)
+    ))
+);
 ```
 
 ### Primality

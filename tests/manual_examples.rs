@@ -8,8 +8,8 @@ use rump::{
     crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
     is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
     miller_rabin_witness, mod_inverse, mod_pow, random_below, random_coprime_below,
-    random_nonzero_below, random_probable_prime, sqrt_mod, BigInt, BigUint, Gf2m, MontgomeryCtx,
-    Rng, Sign,
+    random_nonzero_below, random_probable_prime, rational_reconstruct,
+    rational_reconstruct_bounded, sqrt_mod, BigInt, BigUint, Gf2m, MontgomeryCtx, Rng, Sign,
 };
 
 #[test]
@@ -324,6 +324,33 @@ fn manual_number_theory_primality() {
     assert!(!is_probable_prime_with_bases(&n, &[2]));
     assert!(!is_probable_prime(&n));
     assert!(miller_rabin_witness(&n, &BigUint::from_u64(3)));
+}
+
+#[test]
+fn manual_number_theory_rational_reconstruction() {
+    // 22/7 survives reduction mod 1009 and comes back intact.
+    let m = BigUint::from_u64(1_009);
+    let seven_inv = mod_inverse(&BigUint::from_u64(7), &m).expect("7 is invertible");
+    let x = BigUint::mod_mul(&BigUint::from_u64(22), &seven_inv, &m);
+    let (p, q) = rational_reconstruct(&x, &m).expect("22/7 is within the bounds");
+    assert_eq!(p, BigInt::from_biguint(BigUint::from_u64(22)));
+    assert_eq!(q, BigUint::from_u64(7));
+
+    // Negative numerators carry their sign: −3/5 mod 1009.
+    let five_inv = mod_inverse(&BigUint::from_u64(5), &m).expect("5 is invertible");
+    let x = m.sub_ref(&BigUint::mod_mul(&BigUint::from_u64(3), &five_inv, &m));
+    let (p, q) = rational_reconstruct(&x, &m).expect("-3/5 is within the bounds");
+    assert_eq!(p, BigInt::from_parts(Sign::Negative, BigUint::from_u64(3)));
+    assert_eq!(q, BigUint::from_u64(5));
+
+    // The bounded form is explicit about its contract.
+    assert_eq!(
+        rational_reconstruct_bounded(&x, &m, &BigUint::from_u64(3), &BigUint::from_u64(5)),
+        Some((
+            BigInt::from_parts(Sign::Negative, BigUint::from_u64(3)),
+            BigUint::from_u64(5)
+        ))
+    );
 }
 
 #[test]

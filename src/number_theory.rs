@@ -1147,6 +1147,125 @@ fn gcd_extended_lehmer(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
     (r0, s0, t0)
 }
 
+// ─── Rational reconstruction ───────────────────────────────────────────────
+
+/// Rational reconstruction with explicit bounds: the unique fraction `p/q`
+/// with `p ≡ q·x (mod m)`, `|p| ≤ num_bound`, `0 < q ≤ den_bound`, and
+/// `gcd(p, q) = 1` — or `None` when no such fraction exists.
+///
+/// The candidate comes from the extended Euclidean remainder sequence of
+/// `(m, x)`, stopped at the first remainder `r ≤ num_bound`: writing
+/// `r ≡ t·x (mod m)` for that row's cofactor `t`, the only possible answer
+/// is `p = ±r`, `q = |t|` (von zur Gathen and Gerhard, *Modern Computer
+/// Algebra*, 3rd ed. (2013), §5.10, rational number reconstruction). The
+/// technique is Wang's: *A p-adic algorithm for univariate partial
+/// fractions*, SYMSAC '81, 212–217; the explicit rational-number statement
+/// is Wang, Guy and Davenport, SIGSAM Bulletin 16(2) (1982), 2–3. See also
+/// Collins and Encarnación, *Efficient rational number reconstruction*,
+/// J. Symbolic Comput. 20(3) (1995), 287–297, for the accelerated variants
+/// this implementation does not need. The final checks `q ≤ den_bound` and
+/// `gcd(r, t) = 1` decide existence; uniqueness is the precondition
+/// `2·num_bound·den_bound < m`.
+///
+/// The walk batches Euclid steps with the crate's Lehmer machinery — a
+/// batch that would land at or below the stop line is discarded and
+/// replayed as single division steps, so the row the theorem names is hit
+/// exactly, at batch speed elsewhere.
+///
+/// # Panics
+///
+/// Panics unless `2·num_bound·den_bound < m` — the uniqueness precondition
+/// is the caller's contract, and violating it silently would conflate
+/// "no solution" with misuse.
+#[must_use]
+pub fn rational_reconstruct_bounded(
+    x: &BigUint,
+    m: &BigUint,
+    num_bound: &BigUint,
+    den_bound: &BigUint,
+) -> Option<(BigInt, BigUint)> {
+    assert!(
+        BigUint::from_u64(2).mul_ref(num_bound).mul_ref(den_bound) < *m,
+        "rational reconstruction requires 2·N·D < m"
+    );
+    if den_bound.is_zero() {
+        return None;
+    }
+    let x = x.modulo(m);
+    if x.is_zero() {
+        return Some((BigInt::zero(), BigUint::one()));
+    }
+
+    // Invariant: r0 ≡ t0·x and r1 ≡ t1·x (mod m); r0 > r1 after entry.
+    let (mut r0, mut r1) = (m.clone(), x);
+    let (mut t0, mut t1) = (BigInt::zero(), BigInt::from_biguint(BigUint::one()));
+
+    while r1 > *num_bound {
+        let n = r1.limbs().len();
+        if n >= 2 && r0.limbs().len() == n {
+            let (u_hat, v_hat) = leading_pair(&r0, &r1);
+            let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, None);
+            if m01 != 0 {
+                let next_r1 = combine_unsigned(m10, &r0, m11, &r1);
+                // Commit only while the batch stays strictly above the stop
+                // line; a batch that crosses it may skip the exact row the
+                // theorem names, so that stretch is walked step by step.
+                if next_r1 > *num_bound {
+                    let next_r0 = combine_unsigned(m00, &r0, m01, &r1);
+                    let next_t0 = combine_signed(m00, &t0, m01, &t1);
+                    let next_t1 = combine_signed(m10, &t0, m11, &t1);
+                    (r0, r1) = (next_r0, next_r1);
+                    (t0, t1) = (next_t0, next_t1);
+                    debug_assert!(r0 >= r1, "Lehmer transform preserves r0 >= r1");
+                    continue;
+                }
+            }
+        }
+        let (quotient, remainder) = r0.div_rem(&r1);
+        let next_t1 = t0.sub_ref(&t1.mul_biguint_ref(&quotient));
+        r0 = core::mem::replace(&mut r1, remainder);
+        t0 = core::mem::replace(&mut t1, next_t1);
+    }
+
+    // The candidate row: p = ±r1, q = |t1|.
+    let denominator = t1.magnitude().clone();
+    if denominator.is_zero() || denominator > *den_bound {
+        return None;
+    }
+    if !gcd(&r1, &denominator).is_one() {
+        return None;
+    }
+    let numerator = BigInt::from_parts(
+        match t1.sign() {
+            Sign::Negative => Sign::Negative,
+            _ => Sign::Positive,
+        },
+        r1,
+    );
+    Some((numerator, denominator))
+}
+
+/// Rational reconstruction with the symmetric default bounds
+/// `N = D = ⌊√((m−1)/2)⌋`, under which `2·N·D < m` holds automatically —
+/// the standard choice when numerator and denominator are equally
+/// unknown, as in recovering a fraction from its image modulo a large
+/// modulus (CRT-lifted linear algebra, p-adic lifting).
+///
+/// The bound itself costs more than the walk at large sizes —
+/// `sqrt_floor` is bisection, and at 8192 bits it is roughly 87× the
+/// reconstruction it serves. Callers reconstructing many values under one
+/// modulus should compute the bound once and call
+/// [`rational_reconstruct_bounded`] directly.
+///
+/// See [`rational_reconstruct_bounded`] for the contract and references.
+#[must_use]
+pub fn rational_reconstruct(x: &BigUint, m: &BigUint) -> Option<(BigInt, BigUint)> {
+    let mut half = m.sub_ref(&BigUint::one());
+    half.shr1();
+    let bound = half.sqrt_floor();
+    rational_reconstruct_bounded(x, m, &bound, &bound)
+}
+
 /// Least common multiple.
 ///
 /// This is the Carmichael-function building block used by the RSA code: the
@@ -3400,6 +3519,300 @@ mod tests {
         for n in [0u64, 1, 4, 6] {
             assert!(!is_strong_lucas_probable_prime(&BigUint::from_u64(n)));
         }
+    }
+
+    /// Classical single-step reconstruction — the same theorem walked one
+    /// division at a time, no Lehmer batches — as the oracle for the
+    /// batched production walk.
+    fn rational_reconstruct_classical(
+        x: &BigUint,
+        m: &BigUint,
+        num_bound: &BigUint,
+        den_bound: &BigUint,
+    ) -> Option<(crate::bigint::BigInt, BigUint)> {
+        use crate::bigint::{BigInt, Sign};
+        let x = x.modulo(m);
+        if den_bound.is_zero() {
+            return None;
+        }
+        if x.is_zero() {
+            return Some((BigInt::zero(), BigUint::one()));
+        }
+        let (mut r0, mut r1) = (m.clone(), x);
+        let (mut t0, mut t1) = (BigInt::zero(), BigInt::from_biguint(BigUint::one()));
+        while r1 > *num_bound {
+            let (quotient, remainder) = r0.div_rem(&r1);
+            let next_t1 = t0.sub_ref(&t1.mul_biguint_ref(&quotient));
+            r0 = core::mem::replace(&mut r1, remainder);
+            t0 = core::mem::replace(&mut t1, next_t1);
+        }
+        let q = t1.magnitude().clone();
+        if q.is_zero() || q > *den_bound || !gcd(&r1, &q).is_one() {
+            return None;
+        }
+        let sign = match t1.sign() {
+            Sign::Negative => Sign::Negative,
+            _ => Sign::Positive,
+        };
+        Some((BigInt::from_parts(sign, r1), q))
+    }
+
+    #[test]
+    fn rational_reconstruction_exhaustive_small() {
+        use super::rational_reconstruct;
+        use crate::bigint::{BigInt, Sign};
+        // Against a naive search: under 2·N·D < m the qualifying fraction
+        // is unique, so the search finding one pins the function exactly.
+        for m_small in 3u64..=120 {
+            let m = BigUint::from_u64(m_small);
+            let mut half = m.sub_ref(&BigUint::one());
+            half.shr1();
+            let bound = half.sqrt_floor();
+            let b = bound.limbs().first().copied().unwrap_or(0);
+            for x_small in 0..m_small {
+                let x = BigUint::from_u64(x_small);
+                let mut expected: Option<(BigInt, BigUint)> = None;
+                'search: for q in 1..=b {
+                    for p_abs in 0..=b {
+                        for negative in [false, true] {
+                            if negative && p_abs == 0 {
+                                continue;
+                            }
+                            // p ≡ q·x (mod m), gcd(p, q) = 1.
+                            let residue = (q * x_small) % m_small;
+                            let target = if negative {
+                                (m_small - p_abs % m_small) % m_small
+                            } else {
+                                p_abs % m_small
+                            };
+                            if residue == target
+                                && gcd(&BigUint::from_u64(p_abs), &BigUint::from_u64(q)).is_one()
+                            {
+                                let sign = if negative {
+                                    Sign::Negative
+                                } else {
+                                    Sign::Positive
+                                };
+                                expected = Some((
+                                    BigInt::from_parts(sign, BigUint::from_u64(p_abs)),
+                                    BigUint::from_u64(q),
+                                ));
+                                break 'search;
+                            }
+                        }
+                    }
+                }
+                assert_eq!(
+                    rational_reconstruct(&x, &m),
+                    expected,
+                    "diverged at x = {x_small}, m = {m_small}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rational_reconstruction_exhaustive_asymmetric_bounds() {
+        use super::rational_reconstruct_bounded;
+        use crate::bigint::{BigInt, Sign};
+        // Every (m, N, D, x) with m ≤ 40 and 2·N·D < m, against the naive
+        // uniqueness search — the asymmetric perimeter the symmetric sweep
+        // cannot reach.
+        for m_small in 3u64..=40 {
+            let m = BigUint::from_u64(m_small);
+            for n_bound in 0..m_small {
+                for d_bound in 0..m_small {
+                    if 2 * n_bound * d_bound >= m_small {
+                        continue;
+                    }
+                    for x_small in 0..m_small {
+                        let x = BigUint::from_u64(x_small);
+                        let mut expected: Option<(BigInt, BigUint)> = None;
+                        'search: for q in 1..=d_bound {
+                            for p_abs in 0..=n_bound {
+                                for negative in [false, true] {
+                                    if negative && p_abs == 0 {
+                                        continue;
+                                    }
+                                    let residue = (q * x_small) % m_small;
+                                    let target = if negative {
+                                        (m_small - p_abs % m_small) % m_small
+                                    } else {
+                                        p_abs % m_small
+                                    };
+                                    if residue == target
+                                        && gcd(&BigUint::from_u64(p_abs), &BigUint::from_u64(q))
+                                            .is_one()
+                                    {
+                                        let sign = if negative {
+                                            Sign::Negative
+                                        } else {
+                                            Sign::Positive
+                                        };
+                                        expected = Some((
+                                            BigInt::from_parts(sign, BigUint::from_u64(p_abs)),
+                                            BigUint::from_u64(q),
+                                        ));
+                                        break 'search;
+                                    }
+                                }
+                            }
+                        }
+                        assert_eq!(
+                            rational_reconstruct_bounded(
+                                &x,
+                                &m,
+                                &BigUint::from_u64(n_bound),
+                                &BigUint::from_u64(d_bound)
+                            ),
+                            expected,
+                            "diverged at x = {x_small}, m = {m_small}, N = {n_bound}, D = {d_bound}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rational_reconstruction_round_trips() {
+        use super::{mod_inverse, rational_reconstruct};
+        use crate::bigint::{BigInt, Sign};
+        let mut rng = SplitMix64 {
+            state: 0x5eed_f00d_ca11_ab1e,
+        };
+        for &bits in &[64usize, 256, 1024, 4096] {
+            let mut recovered = 0usize;
+            while recovered < 6 {
+                let m = {
+                    let mut m = draw_below(&mut rng, &pow2(bits));
+                    m.set_bit(bits - 1);
+                    m.set_bit(0);
+                    m
+                };
+                let mut half = m.sub_ref(&BigUint::one());
+                half.shr1();
+                let bound = half.sqrt_floor();
+                let p_abs = draw_below(&mut rng, &bound);
+                let q = draw_below(&mut rng, &bound);
+                if q.is_zero() || !gcd(&p_abs, &q).is_one() {
+                    continue;
+                }
+                let Some(q_inv) = mod_inverse(&q, &m) else {
+                    continue;
+                };
+                let negative = rng.next_u64() & 1 == 1;
+                // x = ±p·q⁻¹ mod m.
+                let mut x = BigUint::mod_mul(&p_abs, &q_inv, &m);
+                if negative && !x.is_zero() {
+                    x = m.sub_ref(&x);
+                }
+                let sign = if negative && !p_abs.is_zero() {
+                    Sign::Negative
+                } else {
+                    Sign::Positive
+                };
+                let expected = (BigInt::from_parts(sign, p_abs), q);
+                assert_eq!(
+                    rational_reconstruct(&x, &m).expect("planted fraction must be found"),
+                    expected,
+                    "round trip failed at {bits} bits"
+                );
+                recovered += 1;
+            }
+            // The theorem's tightest points, planted exactly: |p| = N with
+            // q = 1, p = 1 with q = D, and p = 0.
+            let mut m = draw_below(&mut rng, &pow2(bits));
+            m.set_bit(bits - 1);
+            m.set_bit(0);
+            let mut half = m.sub_ref(&BigUint::one());
+            half.shr1();
+            let bound = half.sqrt_floor();
+            assert_eq!(
+                super::rational_reconstruct(&bound, &m),
+                Some((BigInt::from_biguint(bound.clone()), BigUint::one())),
+                "|p| = N, q = 1 at {bits} bits"
+            );
+            if let Some(d_inv) = super::mod_inverse(&bound, &m) {
+                assert_eq!(
+                    super::rational_reconstruct(&d_inv, &m),
+                    Some((BigInt::from_biguint(BigUint::one()), bound.clone())),
+                    "p = 1, q = D at {bits} bits"
+                );
+            }
+            assert_eq!(
+                super::rational_reconstruct(&BigUint::zero(), &m),
+                Some((BigInt::zero(), BigUint::one())),
+                "p = 0 at {bits} bits"
+            );
+        }
+    }
+
+    #[test]
+    fn rational_reconstruction_batched_matches_classical() {
+        use super::{rational_reconstruct, rational_reconstruct_bounded};
+        let mut rng = SplitMix64 {
+            state: 0x0dd5_ba11_ad00_0004,
+        };
+        for &bits in &[256usize, 1024, 2048, 4096] {
+            for _ in 0..6 {
+                let mut m = draw_below(&mut rng, &pow2(bits));
+                m.set_bit(bits - 1);
+                let x = draw_below(&mut rng, &m);
+                let mut half = m.sub_ref(&BigUint::one());
+                half.shr1();
+                let bound = half.sqrt_floor();
+                assert_eq!(
+                    rational_reconstruct(&x, &m),
+                    rational_reconstruct_classical(&x, &m, &bound, &bound),
+                    "batched walk diverged from classical at {bits} bits"
+                );
+                // Asymmetric bounds exercise the den_bound rejection.
+                let tight = bound.sqrt_floor();
+                assert_eq!(
+                    rational_reconstruct_bounded(&x, &m, &bound, &tight),
+                    rational_reconstruct_classical(&x, &m, &bound, &tight),
+                    "asymmetric bounds diverged at {bits} bits"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rational_reconstruction_edges() {
+        use super::{rational_reconstruct, rational_reconstruct_bounded};
+        use crate::bigint::BigInt;
+        let m = BigUint::from_u64(101);
+        // x = 0 is 0/1.
+        assert_eq!(
+            rational_reconstruct(&BigUint::zero(), &m),
+            Some((BigInt::zero(), BigUint::one()))
+        );
+        // x within the numerator bound is x/1.
+        assert_eq!(
+            rational_reconstruct(&BigUint::from_u64(5), &m),
+            Some((BigInt::from_biguint(BigUint::from_u64(5)), BigUint::one()))
+        );
+        // A zero denominator bound admits nothing.
+        assert_eq!(
+            rational_reconstruct_bounded(
+                &BigUint::from_u64(5),
+                &m,
+                &BigUint::from_u64(7),
+                &BigUint::zero()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "2·N·D < m")]
+    fn rational_reconstruction_rejects_bad_bounds() {
+        use super::rational_reconstruct_bounded;
+        let m = BigUint::from_u64(100);
+        let ten = BigUint::from_u64(10);
+        // 2·10·10 = 200 ≥ 100: the uniqueness precondition fails.
+        let _ = rational_reconstruct_bounded(&BigUint::from_u64(3), &m, &ten, &ten);
     }
 
     #[test]
