@@ -730,6 +730,40 @@ assert!(is_strong_lucas_probable_prime(&BigUint::from_u64(5_459)));
 assert!(!is_probable_prime_bpsw(&BigUint::from_u64(5_459)));
 ```
 
+## Polynomials
+
+`PolyZ` is a dense univariate polynomial over ℤ and `PolyModP` one over
+ℤ/mℤ; both store coefficients low-to-high and normalize away trailing
+zeros, so the zero polynomial is the empty coefficient list. `PolyZ`
+offers `add`/`sub`/`mul`, `evaluate` (Horner), `derivative`, `content` and
+`primitive_part`, and `pseudo_div_rem` (integer-preserving division by
+premultiplication). `PolyModP` adds `div_rem`/`rem`/`gcd`/`make_monic`/
+`pow_mod` — the division-based operations invert a leading coefficient, so
+they require a prime modulus and panic on a non-invertible pivot.
+
+```rust
+// (x + 1)(x + 2) = x^2 + 3x + 2, over ℤ.
+let a = PolyZ::from_i64_slice(&[1, 1]); // x + 1
+let b = PolyZ::from_i64_slice(&[2, 1]); // x + 2
+assert_eq!(a.mul(&b), PolyZ::from_i64_slice(&[2, 3, 1]));
+
+// Evaluation and derivative.
+assert_eq!(a.mul(&b).evaluate(&BigInt::from_i64(3)), BigInt::from_i64(20)); // 9+9+2
+assert_eq!(a.mul(&b).derivative(), PolyZ::from_i64_slice(&[3, 2])); // 2x + 3
+
+// content and primitive part of 6x^2 + 9x + 15.
+let c = PolyZ::from_i64_slice(&[15, 9, 6]);
+assert_eq!(c.content(), BigInt::from_i64(3));
+assert_eq!(c.primitive_part(), PolyZ::from_i64_slice(&[5, 3, 2]));
+
+// Over ℤ/7ℤ: (x - 1)(x - 2) and (x - 2)(x - 3) share x - 2.
+let p = BigUint::from_u64(7);
+let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[2, -3, 1]), &p); // x^2 - 3x + 2
+let g = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[6, -5, 1]), &p); // x^2 - 5x + 6
+let shared = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-2, 1]), &p); // x - 2
+assert_eq!(f.gcd(&g), shared);
+```
+
 ## Random sampling
 
 Implement `Rng` — one method, `fill_bytes` — and every sampler is driven by

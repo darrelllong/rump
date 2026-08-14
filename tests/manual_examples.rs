@@ -11,7 +11,7 @@ use rump::{
     random_below, random_coprime_below, random_nonzero_below, random_probable_prime,
     rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
     smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, BarrettCtx, BigInt, BigUint, Gf2m,
-    MontgomeryCtx, Rng, Sign,
+    MontgomeryCtx, PolyModP, PolyZ, Rng, Sign,
 };
 
 #[test]
@@ -591,4 +591,31 @@ fn manual_ordinary_code_sorting() {
         values,
         vec![neg(40), neg(3), big(0), big(17), big(251), wide]
     );
+}
+
+#[test]
+fn manual_polynomials() {
+    // (x + 1)(x + 2) = x^2 + 3x + 2, over ℤ.
+    let a = PolyZ::from_i64_slice(&[1, 1]); // x + 1
+    let b = PolyZ::from_i64_slice(&[2, 1]); // x + 2
+    assert_eq!(a.mul(&b), PolyZ::from_i64_slice(&[2, 3, 1]));
+
+    // Evaluation and derivative.
+    assert_eq!(
+        a.mul(&b).evaluate(&BigInt::from_i64(3)),
+        BigInt::from_i64(20)
+    ); // 9+9+2
+    assert_eq!(a.mul(&b).derivative(), PolyZ::from_i64_slice(&[3, 2])); // 2x + 3
+
+    // content and primitive part of 6x^2 + 9x + 15.
+    let c = PolyZ::from_i64_slice(&[15, 9, 6]);
+    assert_eq!(c.content(), BigInt::from_i64(3));
+    assert_eq!(c.primitive_part(), PolyZ::from_i64_slice(&[5, 3, 2]));
+
+    // Over ℤ/7ℤ: (x - 1)(x - 2) and (x - 2)(x - 3) share x - 2.
+    let p = BigUint::from_u64(7);
+    let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[2, -3, 1]), &p); // x^2 - 3x + 2
+    let g = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[6, -5, 1]), &p); // x^2 - 5x + 6
+    let shared = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-2, 1]), &p); // x - 2
+    assert_eq!(f.gcd(&g), shared);
 }

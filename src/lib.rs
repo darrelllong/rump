@@ -51,6 +51,7 @@
 mod bigint;
 mod gf2m;
 mod number_theory;
+mod poly;
 mod random;
 mod scrub;
 
@@ -63,6 +64,7 @@ pub use number_theory::{
     rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
     smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation,
 };
+pub use poly::{PolyModP, PolyZ};
 pub use random::{
     random_below, random_coprime_below, random_nonzero_below, random_probable_prime, Rng,
 };

@@ -3116,6 +3116,51 @@ impl BigInt {
         Self::from_parts(sign, self.magnitude.mul_ref(&other.magnitude))
     }
 
+    /// One.
+    #[must_use]
+    pub fn one() -> Self {
+        Self::from_parts(Sign::Positive, BigUint::one())
+    }
+
+    /// Whether the value is exactly zero.
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        self.sign == Sign::Zero
+    }
+
+    /// Whether the value is exactly one.
+    #[must_use]
+    pub fn is_one(&self) -> bool {
+        self.sign == Sign::Positive && self.magnitude.is_one()
+    }
+
+    /// Exact signed quotient `self / divisor` where the division is known
+    /// to leave no remainder — the interpolation and primitive-part steps
+    /// of polynomial arithmetic. The sign follows the usual rule; the
+    /// magnitudes divide evenly.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `divisor` is zero, or (in debug) if the division is
+    /// inexact.
+    #[must_use]
+    pub(crate) fn div_exact(&self, divisor: &Self) -> Self {
+        let (quotient, remainder) = self.magnitude.div_rem(&divisor.magnitude);
+        debug_assert!(remainder.is_zero(), "div_exact requires an exact division");
+        let sign = match (self.sign, divisor.sign) {
+            (Sign::Zero, _) => Sign::Zero,
+            (lhs, rhs) if lhs == rhs => Sign::Positive,
+            _ => Sign::Negative,
+        };
+        Self::from_parts(sign, quotient)
+    }
+
+    /// Greatest common divisor, non-negative, of two signed integers.
+    #[must_use]
+    pub(crate) fn gcd(&self, other: &Self) -> Self {
+        Self::from_biguint(crate::number_theory::gcd(&self.magnitude, &other.magnitude))
+    }
+
     /// Reduce modulo a positive modulus and return the least non-negative residue.
     ///
     /// # Panics
