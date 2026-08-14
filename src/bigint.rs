@@ -2442,6 +2442,135 @@ impl PartialOrd for BigInt {
     }
 }
 
+/// Barrett reduction context for a fixed modulus of either parity — the
+/// complement to [`MontgomeryCtx`], which requires an odd modulus.
+///
+/// Precomputes `μ = ⌊b^{2k} / n⌋` for `b = 2⁶⁴` and `k` the modulus's limb
+/// count; each reduction then costs two multiplications of roughly the
+/// modulus's width instead of a division (*Handbook of Applied
+/// Cryptography*, Algorithm 14.42; Barrett, CRYPTO '86). The estimate
+/// `q̂ = ⌊⌊x/b^{k−1}⌋·μ / b^{k+1}⌋` undershoots the true quotient by at
+/// most two (HAC Note 14.44), so at most two corrective subtractions
+/// follow.
+///
+/// The products here are computed in full where the algorithm needs only
+/// a high and a low half, and the consequence is measured plainly (M4, 64
+/// distinct inputs per size, three agreeing runs): `reduce` runs about
+/// 1.1× *ahead* of a division below ~1–2 kbit, up to ~1.5× *behind* it at
+/// 2–4 kbit — Knuth's division beats two full products there — and back
+/// to parity near 8 kbit, where Toom multiplication engages. The
+/// context's value is the capability: a fixed-modulus context on *even*
+/// moduli, where Montgomery cannot operate. The half-product refinement
+/// that would restore the classical advantage is HAC Note 14.45(ii) and
+/// (iii), also Brent and Zimmermann, *Modern Computer Arithmetic*, §2.4.
+///
+/// Like the rest of the crate, variable-time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BarrettCtx {
+    modulus: BigUint,
+    mu: BigUint,
+    limb_count: usize,
+}
+
+impl BarrettCtx {
+    /// Build the context: one division to precompute `μ`. `None` for a
+    /// modulus below 2.
+    #[must_use]
+    pub fn new(modulus: &BigUint) -> Option<Self> {
+        if modulus.bits() < 2 {
+            return None;
+        }
+        let limb_count = modulus.limbs().len();
+        let mut numerator = BigUint::zero();
+        numerator.set_bit(128 * limb_count);
+        let (mu, _) = numerator.div_rem(modulus);
+        Some(Self {
+            modulus: modulus.clone(),
+            mu,
+            limb_count,
+        })
+    }
+
+    /// The modulus this context reduces by.
+    #[must_use]
+    pub fn modulus(&self) -> &BigUint {
+        &self.modulus
+    }
+
+    /// `x mod n` for `x < b^{2k}` — every product of two reduced values
+    /// qualifies. Wider inputs fall back to the division this context
+    /// exists to avoid, so callers keep their operands reduced.
+    #[must_use]
+    pub fn reduce(&self, x: &BigUint) -> BigUint {
+        let k = self.limb_count;
+        if x.bits() > 128 * k {
+            return x.modulo(&self.modulus);
+        }
+        if *x < self.modulus {
+            return x.clone();
+        }
+        // q̂ = ⌊⌊x/b^(k−1)⌋·μ/b^(k+1)⌋ — the two shifts are limb-aligned.
+        let mut q = x.clone();
+        q.shr_bits(64 * (k - 1));
+        q = q.mul_ref(&self.mu);
+        q.shr_bits(64 * (k + 1));
+        // r = (x − q̂·n) mod b^(k+1); the difference of the two low windows,
+        // lifted by b^(k+1) when it wraps.
+        let window = 64 * (k + 1);
+        let x_low = x.low_bits(window);
+        let qn_low = q.mul_ref(&self.modulus).low_bits(window);
+        let mut r = if x_low >= qn_low {
+            x_low.sub_ref(&qn_low)
+        } else {
+            let mut lift = BigUint::zero();
+            lift.set_bit(window);
+            lift.add_ref(&x_low).sub_ref(&qn_low)
+        };
+        // The estimate is short by at most two.
+        let mut corrections = 0u32;
+        while r >= self.modulus {
+            r = r.sub_ref(&self.modulus);
+            corrections += 1;
+            debug_assert!(corrections <= 2, "HAC Note 14.44 bounds the corrections");
+        }
+        r
+    }
+
+    /// `(a · b) mod n`, both operands reduced first.
+    #[must_use]
+    pub fn mul_mod(&self, a: &BigUint, b: &BigUint) -> BigUint {
+        let a = self.reduce(a);
+        let b = self.reduce(b);
+        self.reduce(&a.mul_ref(&b))
+    }
+
+    /// `a² mod n`.
+    #[must_use]
+    pub fn square_mod(&self, a: &BigUint) -> BigUint {
+        let a = self.reduce(a);
+        self.reduce(&a.square_ref())
+    }
+
+    /// `base^exponent mod n` by left-to-right binary exponentiation over
+    /// Barrett reductions — the exponentiation route for even moduli,
+    /// where Montgomery cannot operate. `0^0 = 1` by the usual convention.
+    #[must_use]
+    pub fn pow_mod(&self, base: &BigUint, exponent: &BigUint) -> BigUint {
+        let base = self.reduce(base);
+        let mut result = self.reduce(&BigUint::one());
+        if exponent.is_zero() {
+            return result;
+        }
+        for bit in (0..exponent.bits()).rev() {
+            result = self.reduce(&result.square_ref());
+            if exponent.bit(bit) {
+                result = self.reduce(&result.mul_ref(&base));
+            }
+        }
+        result
+    }
+}
+
 /// Error from parsing a [`BigUint`] or [`BigInt`] out of a string: the
 /// input was empty (or a bare sign), or held a character that is not a
 /// digit of the requested radix.
@@ -2883,6 +3012,126 @@ mod tests {
             }
         }
         low
+    }
+
+    #[test]
+    fn barrett_matches_division_reduction() {
+        use super::BarrettCtx;
+        let mut seed = 0xba22_e77e_0000_0001;
+        for &words in &[1usize, 4, 16, 64] {
+            for parity_even in [false, true] {
+                let mut n = seeded_biguint(words, &mut seed);
+                if parity_even {
+                    n.limbs[0] &= !1;
+                } else {
+                    n.limbs[0] |= 1;
+                }
+                if n.bits() < 2 {
+                    continue;
+                }
+                let ctx = BarrettCtx::new(&n).expect("modulus is at least 2");
+                for _ in 0..8 {
+                    // Products of reduced values — the advertised domain.
+                    let a = seeded_biguint(words, &mut seed).modulo(&n);
+                    let b = seeded_biguint(words, &mut seed).modulo(&n);
+                    let wide = a.mul_ref(&b);
+                    assert_eq!(ctx.reduce(&wide), wide.modulo(&n));
+                    assert_eq!(ctx.mul_mod(&a, &b), BigUint::mod_mul(&a, &b, &n));
+                    assert_eq!(ctx.square_mod(&a), BigUint::mod_mul(&a, &a, &n));
+                }
+                // The full-width boundary of the contract: b^2k − 1.
+                let mut edge = BigUint::zero();
+                edge.set_bit(128 * words);
+                let edge = edge.sub_ref(&BigUint::one());
+                assert_eq!(ctx.reduce(&edge), edge.modulo(&n));
+                // Beyond the contract the fallback still answers.
+                let mut wide = seeded_biguint(3 * words, &mut seed);
+                wide.set_bit(3 * words * 64 - 1);
+                assert_eq!(ctx.reduce(&wide), wide.modulo(&n));
+                assert_eq!(ctx.reduce(&BigUint::zero()), BigUint::zero());
+            }
+        }
+        // Tiny and structured moduli.
+        for n_small in [2u64, 3, 4, 16, 255, 256, 257, u64::MAX] {
+            let n = BigUint::from_u64(n_small);
+            let ctx = BarrettCtx::new(&n).expect("at least 2");
+            for x in [
+                Some(0u64),
+                Some(1),
+                Some(n_small - 1),
+                Some(n_small),
+                n_small.checked_add(1),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let x2 = BigUint::from_u64(x).square_ref();
+                assert_eq!(ctx.reduce(&x2), x2.modulo(&n), "n = {n_small}, x = {x}");
+            }
+        }
+        assert!(BarrettCtx::new(&BigUint::one()).is_none());
+        assert!(BarrettCtx::new(&BigUint::zero()).is_none());
+        // The tightest shapes for the quotient estimate: moduli at the
+        // limb-boundary edges, b^(k-1) and b^k - 1.
+        for k in [2usize, 3, 8] {
+            for n in [
+                {
+                    let mut v = BigUint::zero();
+                    v.set_bit(64 * (k - 1));
+                    v
+                },
+                {
+                    let mut v = BigUint::zero();
+                    v.set_bit(64 * (k - 1));
+                    v.add_ref(&BigUint::one())
+                },
+                {
+                    let mut v = BigUint::zero();
+                    v.set_bit(64 * k);
+                    v.sub_ref(&BigUint::one())
+                },
+            ] {
+                let ctx = BarrettCtx::new(&n).expect("at least 2");
+                let mut seed2 = 0x0b0b_0b0b_0000_0001 ^ (k as u64);
+                for _ in 0..6 {
+                    let a = seeded_biguint(k, &mut seed2).modulo(&n);
+                    let wide = a.square_ref();
+                    assert_eq!(ctx.reduce(&wide), wide.modulo(&n), "edge modulus, k = {k}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn barrett_pow_matches_mod_pow() {
+        use super::BarrettCtx;
+        use crate::number_theory::mod_pow;
+        let mut seed = 0xba22_e77e_0000_0002;
+        for &words in &[1usize, 4, 16] {
+            for parity_even in [false, true] {
+                let mut n = seeded_biguint(words, &mut seed);
+                if parity_even {
+                    n.limbs[0] &= !1;
+                } else {
+                    n.limbs[0] |= 1;
+                }
+                if n.is_zero() || n.is_one() {
+                    continue;
+                }
+                let ctx = BarrettCtx::new(&n).expect("at least 2");
+                let base = seeded_biguint(words, &mut seed);
+                let exponent = seeded_biguint(2, &mut seed);
+                assert_eq!(
+                    ctx.pow_mod(&base, &exponent),
+                    mod_pow(&base, &exponent, &n),
+                    "{words} words, even = {parity_even}"
+                );
+                assert_eq!(
+                    ctx.pow_mod(&base, &BigUint::zero()),
+                    BigUint::one().modulo(&n)
+                );
+            }
+        }
     }
 
     #[test]

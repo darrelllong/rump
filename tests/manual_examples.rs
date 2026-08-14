@@ -7,10 +7,10 @@
 use rump::{
     crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
     is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
-    miller_rabin_witness, mod_inverse, mod_pow, random_below, random_coprime_below,
-    random_nonzero_below, random_probable_prime, rational_reconstruct,
-    rational_reconstruct_bounded, remove_factor, sqrt_mod, valuation, BigInt, BigUint, Gf2m,
-    MontgomeryCtx, Rng, Sign,
+    miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_pow, random_below,
+    random_coprime_below, random_nonzero_below, random_probable_prime, rational_reconstruct,
+    rational_reconstruct_bounded, remove_factor, sqrt_mod, valuation, BarrettCtx, BigInt, BigUint,
+    Gf2m, MontgomeryCtx, Rng, Sign,
 };
 
 #[test]
@@ -33,6 +33,35 @@ fn manual_biguint_roots_powers_bits() {
     assert_eq!(BigUint::from_u64(0b1011_0000).popcount(), 3);
     assert_eq!(BigUint::from_u64(0b1011_0000).trailing_zeros(), Some(4));
     assert_eq!(BigUint::zero().trailing_zeros(), None);
+}
+
+#[test]
+fn manual_barrett_contexts() {
+    let even = BigUint::from_u64(1_000);
+    let ctx = BarrettCtx::new(&even).expect("modulus is at least 2");
+    assert_eq!(
+        ctx.mul_mod(&BigUint::from_u64(123), &BigUint::from_u64(456)),
+        BigUint::from_u64(88) // 56 088 mod 1000
+    );
+    assert_eq!(
+        ctx.pow_mod(&BigUint::from_u64(7), &BigUint::from_u64(13)),
+        mod_pow(&BigUint::from_u64(7), &BigUint::from_u64(13), &even)
+    );
+}
+
+#[test]
+fn manual_number_theory_batch_inversion() {
+    let m = BigUint::from_u64(97);
+    let values = [
+        BigUint::from_u64(3),
+        BigUint::from_u64(10),
+        BigUint::from_u64(96),
+    ];
+    let inverses = mod_inverse_batch(&values, &m).expect("all coprime to 97");
+    for (inv, v) in inverses.iter().zip(&values) {
+        assert!(BigUint::mod_mul(inv, v, &m).is_one());
+    }
+    assert_eq!(mod_inverse_batch(&[BigUint::from_u64(0)], &m), None);
 }
 
 #[test]

@@ -20,9 +20,10 @@ use rump::{
     crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
     is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi,
     kronecker, lcm, legendre, miller_rabin_witness, mod_inverse, mod_pow,
-    rational_reconstruct, rational_reconstruct_bounded, random_below, remove_factor, valuation,
+    mod_inverse_batch, rational_reconstruct, rational_reconstruct_bounded, random_below,
+    remove_factor, valuation,
     random_coprime_below, random_nonzero_below, random_probable_prime, sqrt_mod, BigInt, BigUint,
-    Gf2m, MontgomeryCtx, Rng, Sign,
+    BarrettCtx, Gf2m, MontgomeryCtx, Rng, Sign,
 };
 ```
 
@@ -316,6 +317,27 @@ assert_eq!(
 limbs from the top and stops at the first difference; and the sort is
 oblivious to whether an element fits in one word or a hundred.
 
+## Barrett contexts
+
+`BarrettCtx` is the fixed-modulus reduction context for **either parity**
+— the complement to `MontgomeryCtx`, which requires an odd modulus. One
+division precomputes `μ`; `reduce` then costs two multiplications
+(HAC Algorithm 14.42), with `mul_mod`, `square_mod`, and `pow_mod` built
+on it. `None` for a modulus below 2.
+
+```rust
+let even = BigUint::from_u64(1_000);
+let ctx = BarrettCtx::new(&even).expect("modulus is at least 2");
+assert_eq!(
+    ctx.mul_mod(&BigUint::from_u64(123), &BigUint::from_u64(456)),
+    BigUint::from_u64(88) // 56 088 mod 1000
+);
+assert_eq!(
+    ctx.pow_mod(&BigUint::from_u64(7), &BigUint::from_u64(13)),
+    mod_pow(&BigUint::from_u64(7), &BigUint::from_u64(13), &even)
+);
+```
+
 ## The Montgomery domain
 
 `MontgomeryCtx::new` precomputes the Montgomery constants for one odd
@@ -478,10 +500,12 @@ assert_eq!(kronecker(&BigUint::one(), &BigUint::zero()), 1); // (1/0) = 1
 ### Modular arithmetic
 
 `mod_pow` for any non-zero modulus (Montgomery when odd), `mod_inverse`
-(`None` when the gcd exceeds one), `sqrt_mod` by Tonelli–Shanks (`None` for
-non-residues; the result is verified by squaring, so a composite modulus
-also yields `None`), and `crt_combine` for Chinese remaindering (`None` when
-the moduli are not pairwise coprime).
+(`None` when the gcd exceeds one), `sqrt_mod` by Tonelli–Shanks with a
+dispatch to Cipolla's algorithm where the prime's 2-adic depth makes the
+descent quadratic (`None` for non-residues; the result is verified by
+squaring, so a composite modulus also yields `None`), and `crt_combine`
+for Chinese remaindering (`None` when the moduli are not pairwise
+coprime).
 
 ```rust
 let p = BigUint::from_u64(41);
@@ -509,6 +533,23 @@ let x = crt_combine(&[
 ])
 .expect("moduli are pairwise coprime");
 assert_eq!(x, BigUint::from_u64(23));
+```
+
+### Batch inversion
+
+`mod_inverse_batch` inverts a whole slice for one inversion and
+`3(n − 1)` multiplications — Montgomery's trick. `None` when any element
+shares a factor with the modulus (which element is not identified — that
+would cost the inversions the trick avoids).
+
+```rust
+let m = BigUint::from_u64(97);
+let values = [BigUint::from_u64(3), BigUint::from_u64(10), BigUint::from_u64(96)];
+let inverses = mod_inverse_batch(&values, &m).expect("all coprime to 97");
+for (inv, v) in inverses.iter().zip(&values) {
+    assert!(BigUint::mod_mul(inv, v, &m).is_one());
+}
+assert_eq!(mod_inverse_batch(&[BigUint::from_u64(0)], &m), None);
 ```
 
 ### Valuation

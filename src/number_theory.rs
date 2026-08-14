@@ -1267,6 +1267,233 @@ pub fn rational_reconstruct(x: &BigUint, m: &BigUint) -> Option<(BigInt, BigUint
     rational_reconstruct_bounded(x, m, &bound, &bound)
 }
 
+/// Above this ratio of `s²` to the modulus bit width, [`sqrt_mod`] leaves
+/// the Tonelli–Shanks descent for [`sqrt_mod_cipolla`]: the descent pays
+/// on the order of `s²` base-field multiplications while Cipolla's ladder
+/// is flat in `s`, so the crossover sits where `s²` reaches a fixed
+/// multiple of the exponentiation cost, itself linear in the bit width.
+/// Measured on M4 with constructed primes `k·2^s + 1` by the ignored
+/// `cipolla_crossover_timing` probe, which times *both* engines at every
+/// `s` on a grid bracketing the crossing: the engines cross at `s ≈ 70`
+/// at 1024 bits, `s ≈ 93` at 2048, `s ≈ 124` at 4096 — `s²/bits` of 4.8,
+/// 4.2, and 3.8 — and this factor sits near their center. Correctness
+/// does not depend on the value: the suite drives both engines over the
+/// same primes.
+const CIPOLLA_THRESHOLD_FACTOR: usize = 4;
+
+/// The Tonelli–Shanks descent for `p − 1 = q·2^s`, `a` a residue already
+/// reduced modulo the odd prime `p` (Cohen, Algorithm 1.5.1). `None` when
+/// the bounded non-residue scan exhausts or the descent finds no order to
+/// reduce — both composite-modulus signatures.
+fn sqrt_mod_descent(
+    a: &BigUint,
+    p: &BigUint,
+    ctx: &MontgomeryCtx,
+    q: &BigUint,
+    s: usize,
+) -> Option<BigUint> {
+    let one = BigUint::one();
+    // Any quadratic non-residue drives the descent; the scan is bounded so
+    // an odd perfect-square modulus — which has no Jacobi non-residue at
+    // all — terminates in None instead of scanning forever.
+    let mut z = BigUint::from_u64(2);
+    let mut attempts = 0u32;
+    while jacobi(&z, p) != Some(-1) {
+        z = z.add_ref(&one);
+        attempts += 1;
+        if attempts > NON_RESIDUE_SCAN_BOUND {
+            return None;
+        }
+    }
+
+    let mut m = s;
+    let mut c = ctx.pow(&z, q);
+    let mut t = ctx.pow(a, q);
+    let mut r = {
+        let mut half = q.add_ref(&one);
+        half.shr1();
+        ctx.pow(a, &half)
+    };
+
+    while t != one {
+        // Least i with t^(2^i) = 1; it exists below m while p is prime.
+        let mut i = 0usize;
+        let mut probe = t.clone();
+        while probe != one && i < m {
+            probe = ctx.square(&probe);
+            i += 1;
+        }
+        if i == m {
+            // Reachable only for composite p; the caller's final check
+            // would also catch it, but there is nothing left to descend.
+            return None;
+        }
+
+        let mut b = c;
+        for _ in 0..(m - i - 1) {
+            b = ctx.square(&b);
+        }
+        m = i;
+        c = ctx.square(&b);
+        t = ctx.mul(&t, &c);
+        r = ctx.mul(&r, &b);
+    }
+    Some(r)
+}
+
+/// Bound on the deterministic non-residue scans in both square-root
+/// engines. For a prime modulus each draw fails with probability ~1/2, so
+/// 128 consecutive misses has probability 2⁻¹²⁸ — never observed for a
+/// prime; for an odd perfect-square modulus, whose Jacobi symbol is never
+/// −1, the bound is what turns an unbounded loop into `None`.
+const NON_RESIDUE_SCAN_BOUND: u32 = 128;
+
+/// Cipolla's modular square root, for an odd prime `p` and a quadratic
+/// residue `a` already reduced modulo `p`.
+///
+/// Choose `t` with `w = t² − a` a non-residue (each try succeeds with
+/// probability ~1/2; consecutive small `t` serve, the character being
+/// equidistributed). In `F_p² = F_p[x]/(x² − w)`, the element `t + x` has
+/// norm `(t + x)(t + x)^p = (t + x)(t − x) = t² − w = a`, and `(t + x)^((p+1)/2)` is an
+/// element of the base field whose square is `a`. The ladder runs
+/// left-to-right over `(p+1)/2` as Montgomery-domain pairs `(u, v)`
+/// standing for `u + v·x`: squaring is `(u² + w·v², 2uv)` and the
+/// multiply by the fixed base `t + x` is `(u·t + w·v, u + v·t)`. Cost is
+/// flat in `s = v₂(p−1)` — the property [`sqrt_mod`]'s dispatch buys —
+/// against the descent's `s²` growth.
+///
+/// For composite `p` the returned value need not square to `a`;
+/// [`sqrt_mod`]'s final verification is the contract, exactly as for the
+/// descent. `None` only when the bounded parameter search exhausts —
+/// impossible for a prime modulus in any observable sense, and exactly
+/// what an odd perfect-square modulus produces.
+///
+/// Reference: Cipolla, *Un metodo per la risoluzione della congruenza di
+/// secondo grado*, Rend. Accad. Sci. Fis. Mat. Napoli (3) 9 (1903),
+/// 153–163.
+fn sqrt_mod_cipolla(a: &BigUint, p: &BigUint, ctx: &MontgomeryCtx) -> Option<BigUint> {
+    let one = BigUint::one();
+    let add_mod = |x: &BigUint, y: &BigUint| -> BigUint {
+        let sum = x.add_ref(y);
+        if sum >= *p {
+            sum.sub_ref(p)
+        } else {
+            sum
+        }
+    };
+    // t = 1, 2, …: the first with t² − a a non-residue, under the same
+    // scan bound as the descent's search.
+    let mut t = BigUint::one();
+    let mut attempts = 0u32;
+    let w = loop {
+        let t_squared = BigUint::mod_mul(&t, &t, p);
+        let difference = if t_squared >= *a {
+            t_squared.sub_ref(a)
+        } else {
+            p.add_ref(&t_squared).sub_ref(a)
+        };
+        if jacobi(&difference, p) == Some(-1) {
+            break difference;
+        }
+        t = t.add_ref(&one);
+        attempts += 1;
+        if attempts > NON_RESIDUE_SCAN_BOUND {
+            return None;
+        }
+    };
+
+    let w_mont = ctx.encode(&w);
+    let t_mont = ctx.encode(&t);
+    // (p + 1)/2, the exponent taking t + x to the root.
+    let mut exponent = p.add_ref(&one);
+    exponent.shr1();
+
+    // Ladder state (u, v) = u + v·x, starting at the identity 1 + 0·x.
+    let mut u = ctx.encode(&one);
+    let mut v = BigUint::zero();
+    for bit in (0..exponent.bits()).rev() {
+        // Square: (u² + w·v², 2uv).
+        let u_squared = ctx.square_mont(&u);
+        let cross = ctx.mul_mont(&u, &v);
+        u = add_mod(&u_squared, &ctx.mul_mont(&w_mont, &ctx.square_mont(&v)));
+        v = add_mod(&cross, &cross);
+        if exponent.bit(bit) {
+            // Multiply by the base t + x: (u·t + w·v, u + v·t).
+            let new_u = add_mod(&ctx.mul_mont(&u, &t_mont), &ctx.mul_mont(&w_mont, &v));
+            let new_v = add_mod(&u, &ctx.mul_mont(&v, &t_mont));
+            u = new_u;
+            v = new_v;
+        }
+    }
+    // For prime p the result lies in the base field (v ≡ 0); the caller's
+    // verification covers the composite case.
+    Some(ctx.decode(&u))
+}
+
+/// Simultaneous modular inversion — Montgomery's trick: the inverses of
+/// `n` values for the price of one inversion and `3(n − 1)`
+/// multiplications.
+///
+/// Prefix products `P_i = x_1···x_i` climb forward; one inversion of
+/// `P_n` and a backward unwind recover every `x_i⁻¹`:
+/// `x_i⁻¹ = P_n⁻¹·P_{i−1}·(x_{i+1}···x_n)`, the trailing product carried
+/// in the accumulator as it walks back. `None` when any element shares a
+/// factor with the modulus — the batch learns *that* from the single
+/// inversion, but not which element, and identifying the culprit would
+/// cost the per-element inversions the trick exists to avoid. The empty
+/// batch inverts to the empty vector.
+///
+/// The gain approaches the ratio of one inversion to three
+/// multiplications: measured on M4 at 2048 bits, 1.5× at a batch of two,
+/// 3.3× at a hundred, levelling near 3.4× — this crate's Lehmer inversion
+/// costs about ten multiplications, which caps the trick's ceiling at
+/// that ratio over three.
+///
+/// A modulus of zero yields `None` (nothing is invertible in no ring); a
+/// modulus of one yields the trivial ring's answer, zero for every
+/// element, matching [`mod_inverse`].
+///
+/// Reference: Montgomery, *Speeding the Pollard and elliptic curve
+/// methods of factorization*, Math. Comp. 48 (1987), 243–264, where the
+/// device batches the curve-arithmetic inversions.
+#[must_use]
+pub fn mod_inverse_batch(values: &[BigUint], modulus: &BigUint) -> Option<Vec<BigUint>> {
+    if modulus.is_zero() {
+        return None;
+    }
+    if modulus.is_one() {
+        return Some(vec![BigUint::zero(); values.len()]);
+    }
+    if values.is_empty() {
+        return Some(Vec::new());
+    }
+    // Forward prefix products, each reduced.
+    let mut prefixes = Vec::with_capacity(values.len());
+    let mut running = values[0].modulo(modulus);
+    prefixes.push(running.clone());
+    for value in &values[1..] {
+        running = BigUint::mod_mul(&running, value, modulus);
+        prefixes.push(running.clone());
+    }
+    // One inversion pays for the whole batch.
+    let mut accumulator = mod_inverse(prefixes.last().expect("non-empty batch"), modulus)?;
+    // Backward unwind: at step i the accumulator holds (x_1···x_i)⁻¹.
+    let mut inverses = vec![BigUint::zero(); values.len()];
+    for i in (1..values.len()).rev() {
+        inverses[i] = BigUint::mod_mul(&accumulator, &prefixes[i - 1], modulus);
+        accumulator = BigUint::mod_mul(&accumulator, &values[i], modulus);
+    }
+    inverses[0] = accumulator;
+    debug_assert!(
+        inverses
+            .iter()
+            .zip(values)
+            .all(|(inv, x)| BigUint::mod_mul(inv, x, modulus).is_one()),
+        "every batched inverse verifies against its element"
+    );
+    Some(inverses)
+}
+
 /// The `p`-adic valuation of `n`: the exponent of the largest power of
 /// `p` dividing `n`. A thin reading of [`remove_factor`], for call sites
 /// that want the exponent alone. `p` need not be prime — any `p ≥ 2` is
@@ -1777,19 +2004,25 @@ fn decompose_n_minus_one(n: &BigUint) -> (BigUint, usize) {
     (odd_factor, two_adic_exponent)
 }
 
-/// Modular square root by Tonelli–Shanks: some `r` with `r^2 ≡ a (mod p)`
-/// for an odd prime `p`, or `None` when `a` is a non-residue.
+/// Modular square root: some `r` with `r^2 ≡ a (mod p)` for an odd prime
+/// `p`, or `None` when `a` is a non-residue.
 ///
-/// References: Cohen, Algorithm 1.5.1 (the general 2-adic descent);
-/// *Handbook of Applied Cryptography*, §3.5.1 for the `p ≡ 3 (mod 4)`
-/// shortcut `a^((p+1)/4)`. The quadratic non-residue the descent needs is
-/// found by scanning `2, 3, 4, …` — deterministic, and expected to end
-/// within a couple of draws since half of all residues qualify.
+/// Three engines serve by the prime's shape. `p ≡ 3 (mod 4)` takes the
+/// `a^((p+1)/4)` shortcut (*Handbook of Applied Cryptography*, §3.5.1).
+/// Otherwise, writing `p − 1 = q·2^s`, a shallow 2-adic structure runs the
+/// Tonelli–Shanks descent (Cohen, Algorithm 1.5.1), whose cost grows with
+/// `s²`; past a measured depth (`s² > 4·bits`) the dispatch switches to
+/// Cipolla's algorithm (Cipolla 1903), whose cost is flat in `s`. The non-residue each engine needs is found
+/// by a bounded deterministic scan — expected to end within a couple of
+/// draws, since half of all residues qualify, and abandoned after 128
+/// misses, an event of probability `2^{-128}` for a prime modulus.
 ///
 /// The other root is `p - r`. `p = 2` and `a ≡ 0` return `a mod p` and zero
 /// respectively. Primality of `p` is the caller's contract, but the result
-/// is verified by squaring before it is returned, so a composite `p` yields
-/// `None` rather than garbage.
+/// is verified by squaring before it is returned, and the scan bound above
+/// keeps the search finite, so a composite `p` — odd perfect squares
+/// included, which admit no non-residue-by-Jacobi at all — yields `None`
+/// rather than garbage or an unbounded loop.
 ///
 /// ```
 /// use rump::{sqrt_mod, BigUint};
@@ -1831,48 +2064,15 @@ pub fn sqrt_mod(a: &BigUint, p: &BigUint) -> Option<BigUint> {
         exponent.shr_bits(2);
         ctx.pow(&a, &exponent)
     } else {
-        // General descent on p - 1 = q · 2^s with q odd.
+        // p - 1 = q · 2^s with q odd. A deep 2-adic descent goes to
+        // Cipolla, whose cost is flat where Tonelli–Shanks pays
+        // quadratically in s.
         let (q, s) = decompose_n_minus_one(p);
-
-        // Any quadratic non-residue drives the descent.
-        let mut z = BigUint::from_u64(2);
-        while jacobi(&z, p) != Some(-1) {
-            z = z.add_ref(&one);
+        if s * s > CIPOLLA_THRESHOLD_FACTOR * p.bits() {
+            sqrt_mod_cipolla(&a, p, &ctx)?
+        } else {
+            sqrt_mod_descent(&a, p, &ctx, &q, s)?
         }
-
-        let mut m = s;
-        let mut c = ctx.pow(&z, &q);
-        let mut t = ctx.pow(&a, &q);
-        let mut r = {
-            let mut half = q.add_ref(&one);
-            half.shr1();
-            ctx.pow(&a, &half)
-        };
-
-        while t != one {
-            // Least i with t^(2^i) = 1; it exists below m while p is prime.
-            let mut i = 0usize;
-            let mut probe = t.clone();
-            while probe != one && i < m {
-                probe = ctx.square(&probe);
-                i += 1;
-            }
-            if i == m {
-                // Reachable only for composite p; the final check below
-                // would also catch it, but there is nothing left to descend.
-                return None;
-            }
-
-            let mut b = c;
-            for _ in 0..(m - i - 1) {
-                b = ctx.square(&b);
-            }
-            m = i;
-            c = ctx.square(&b);
-            t = ctx.mul(&t, &c);
-            r = ctx.mul(&r, &b);
-        }
-        r
     };
 
     // The square is the contract; verifying it makes composite p yield None
@@ -3631,6 +3831,225 @@ mod tests {
             _ => Sign::Positive,
         };
         Some((BigInt::from_parts(sign, r1), q))
+    }
+
+    /// A probable prime `k·2^s + 1` with `k` odd — the constructed
+    /// high-valuation primes the Cipolla tests and probe need.
+    fn prime_with_two_adic_valuation(bits: usize, s: usize, rng: &mut SplitMix64) -> BigUint {
+        loop {
+            let mut k = draw_below(rng, &pow2(bits - s - 1));
+            k.set_bit(0);
+            k.set_bit(bits - s - 1);
+            let mut p = k;
+            p.shl_bits(s);
+            p = p.add_ref(&BigUint::one());
+            // A word-sized trial screen rejects most candidates for a few
+            // remainders each, keeping the constructor off the suite's
+            // critical path.
+            if [3u64, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47]
+                .iter()
+                .any(|&q| p.rem_u64(q) == 0)
+            {
+                continue;
+            }
+            if is_probable_prime(&p) {
+                return p;
+            }
+        }
+    }
+
+    #[test]
+    fn cipolla_agrees_with_the_descent() {
+        use super::{sqrt_mod, sqrt_mod_cipolla};
+        use crate::bigint::MontgomeryCtx;
+        let mut rng = SplitMix64 {
+            state: 0xc1b0_11a0_0000_0001,
+        };
+        // Low-s primes route through Tonelli–Shanks; Cipolla, called
+        // directly on the same operands, must land on the same root pair.
+        for &(bits, s) in &[(256usize, 2usize), (256, 5), (512, 3), (1024, 4)] {
+            let p = prime_with_two_adic_valuation(bits, s, &mut rng);
+            let x = draw_below(&mut rng, &p);
+            let a = BigUint::mod_mul(&x, &x, &p);
+            if a.is_zero() {
+                continue;
+            }
+            let descent_root = sqrt_mod(&a, &p).expect("a is a residue by construction");
+            let ctx = MontgomeryCtx::new(&p).expect("odd prime");
+            let cipolla_root =
+                sqrt_mod_cipolla(&a, &p, &ctx).expect("prime modulus never exhausts the scan");
+            assert!(
+                cipolla_root == descent_root || cipolla_root == p.sub_ref(&descent_root),
+                "engines disagree at {bits} bits, s = {s}"
+            );
+            assert!(BigUint::mod_mul(&cipolla_root, &cipolla_root, &p) == a);
+        }
+        // High-s primes route through Cipolla inside the dispatch; the
+        // returned root must verify, and the deepest case must be fast
+        // enough to sit in a unit test at all — which is the point.
+        for &(bits, s) in &[(512usize, 128usize), (1024, 256), (2048, 512)] {
+            let p = prime_with_two_adic_valuation(bits, s, &mut rng);
+            assert!(
+                s * s > super::CIPOLLA_THRESHOLD_FACTOR * p.bits(),
+                "the constructed prime must cross the dispatch"
+            );
+            let x = draw_below(&mut rng, &p);
+            let a = BigUint::mod_mul(&x, &x, &p);
+            if a.is_zero() {
+                continue;
+            }
+            let root = sqrt_mod(&a, &p).expect("a is a residue by construction");
+            assert_eq!(
+                BigUint::mod_mul(&root, &root, &p),
+                a,
+                "{bits} bits, s = {s}"
+            );
+        }
+        // Non-residues stay None regardless of the engine.
+        let p = prime_with_two_adic_valuation(512, 128, &mut rng);
+        let mut z = BigUint::from_u64(2);
+        while super::jacobi(&z, &p) != Some(-1) {
+            z = z.add_ref(&BigUint::one());
+        }
+        assert_eq!(sqrt_mod(&z, &p), None);
+        // The trivial residues, through both engines.
+        for &(bits, s) in &[(256usize, 2usize), (512, 128)] {
+            let p = prime_with_two_adic_valuation(bits, s, &mut rng);
+            // Either square root of one is a correct answer.
+            let root_of_one = sqrt_mod(&BigUint::one(), &p).expect("1 is a residue");
+            assert!(
+                root_of_one.is_one() || root_of_one == p.sub_ref(&BigUint::one()),
+                "the root of 1 is ±1"
+            );
+            let minus_one = p.sub_ref(&BigUint::one());
+            let root = sqrt_mod(&minus_one, &p);
+            // −1 is a residue exactly when p ≡ 1 (mod 4) — true for every
+            // constructed prime with s ≥ 2 — and the root must verify.
+            let r = root.expect("-1 is a residue for p = 1 mod 4");
+            assert_eq!(BigUint::mod_mul(&r, &r, &p), minus_one);
+        }
+    }
+
+    #[test]
+    fn sqrt_mod_terminates_on_odd_square_modulus() {
+        use super::sqrt_mod;
+        // An odd perfect square has no Jacobi non-residue, so both engines'
+        // parameter scans would once run forever; the bound turns the
+        // pathology into None. 4097² routes to the descent's scan; a
+        // high-valuation square would route to Cipolla's.
+        let square = BigUint::from_u64(4097).square_ref();
+        assert_eq!(sqrt_mod(&BigUint::from_u64(4), &square), None);
+    }
+
+    #[test]
+    #[ignore = "timing probe for the Tonelli-Shanks/Cipolla crossover; run with --ignored"]
+    fn cipolla_crossover_timing() {
+        use super::{decompose_n_minus_one, sqrt_mod_cipolla, sqrt_mod_descent};
+        use crate::bigint::MontgomeryCtx;
+        use std::hint::black_box;
+        use std::time::Instant;
+        let mut rng = SplitMix64 {
+            state: 0xc1b0_11a0_dead_beef,
+        };
+        // Both engines at every s, on a grid bracketing √(4·bits): the
+        // crossing is read directly off the two columns.
+        eprintln!(
+            "{:>6} {:>6} {:>12} {:>12}",
+            "bits", "s", "descent_us", "cipolla_us"
+        );
+        for &bits in &[1024usize, 2048, 4096] {
+            let center = (4.0 * bits as f64).sqrt() as usize;
+            for step in -3i64..=3 {
+                let s = usize::try_from((center as i64 + step * 16).max(2)).expect("positive");
+                let p = prime_with_two_adic_valuation(bits, s, &mut rng);
+                let (q, s_actual) = decompose_n_minus_one(&p);
+                assert_eq!(s_actual, s, "constructed valuation");
+                let ctx = MontgomeryCtx::new(&p).expect("odd prime");
+                let x = draw_below(&mut rng, &p);
+                let a = BigUint::mod_mul(&x, &x, &p);
+                let time = |f: &dyn Fn()| {
+                    let mut best = f64::INFINITY;
+                    for _ in 0..5 {
+                        let t0 = Instant::now();
+                        f();
+                        best = best.min(t0.elapsed().as_secs_f64() * 1e6);
+                    }
+                    best
+                };
+                let descent = time(&|| {
+                    black_box(sqrt_mod_descent(&a, &p, &ctx, &q, s));
+                });
+                let cipolla = time(&|| {
+                    black_box(sqrt_mod_cipolla(&a, &p, &ctx));
+                });
+                eprintln!("{bits:>6} {s:>6} {descent:>12.1} {cipolla:>12.1}");
+            }
+        }
+    }
+
+    #[test]
+    fn batch_inversion_matches_element_wise() {
+        use super::{mod_inverse, mod_inverse_batch};
+        let mut rng = SplitMix64 {
+            state: 0x7007_ba7c_4000_0001,
+        };
+        for &bits in &[64usize, 256, 1024, 2048] {
+            let mut modulus = draw_below(&mut rng, &pow2(bits));
+            modulus.set_bit(bits - 1);
+            modulus.set_bit(0);
+            for &count in &[1usize, 2, 3, 17, 100] {
+                // All-coprime batches: retry elements until invertible.
+                let mut values = Vec::new();
+                while values.len() < count {
+                    let candidate = draw_below(&mut rng, &modulus);
+                    if mod_inverse(&candidate, &modulus).is_some() {
+                        values.push(candidate);
+                    }
+                }
+                let batch =
+                    mod_inverse_batch(&values, &modulus).expect("all elements are invertible");
+                for (inverse, value) in batch.iter().zip(&values) {
+                    assert_eq!(
+                        Some(inverse.clone()),
+                        mod_inverse(value, &modulus),
+                        "batched inverse diverged at {bits} bits, batch of {count}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn batch_inversion_edges() {
+        use super::mod_inverse_batch;
+        let m = BigUint::from_u64(101);
+        assert_eq!(mod_inverse_batch(&[], &m), Some(Vec::new()));
+        // Degenerate moduli follow mod_inverse's own answers.
+        let five = [BigUint::from_u64(5)];
+        assert_eq!(mod_inverse_batch(&five, &BigUint::zero()), None);
+        assert_eq!(mod_inverse_batch(&[], &BigUint::zero()), None);
+        assert_eq!(
+            mod_inverse_batch(&five, &BigUint::one()),
+            Some(vec![BigUint::zero()])
+        );
+        // A poisoned batch: 505 shares the factor 101.
+        let values = [
+            BigUint::from_u64(3),
+            BigUint::from_u64(505),
+            BigUint::from_u64(7),
+        ];
+        assert_eq!(mod_inverse_batch(&values, &m), None);
+        // Duplicates, ones, and unreduced elements are all fine.
+        let values = [
+            BigUint::from_u64(1),
+            BigUint::from_u64(9),
+            BigUint::from_u64(9),
+            BigUint::from_u64(102), // ≡ 1
+        ];
+        let batch = mod_inverse_batch(&values, &m).expect("all coprime to 101");
+        assert!(BigUint::mod_mul(&batch[3], &BigUint::from_u64(102), &m).is_one());
+        assert_eq!(batch[0], BigUint::one());
+        assert_eq!(batch[1], batch[2]);
     }
 
     #[test]

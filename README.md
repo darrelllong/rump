@@ -20,13 +20,15 @@ enforcing a clean API.
 - **Number theory** — `gcd`, `lcm`, and `gcd_extended` (Bézout
   coefficients); the quadratic-residue symbols `jacobi` (binary reciprocity,
   HAC Algorithm 2.149), `legendre`, and `kronecker` (Cohen Algorithm
-  1.4.10); `sqrt_mod` (Tonelli–Shanks with the `p ≡ 3 (mod 4)` shortcut,
+  1.4.10); `sqrt_mod` (the `p ≡ 3 (mod 4)` shortcut, the Tonelli–Shanks
+  descent, and Cipolla's algorithm past a measured 2-adic depth,
   result verified by squaring); `mod_pow`, `mod_inverse`, and `crt_combine`
   (Garner, HAC Algorithm 14.71); fixed-base Miller-Rabin
   (`is_probable_prime`, `is_probable_prime_with_bases`), the reusable
   per-round primitive `miller_rabin_witness` for callers that bring their
   own witness schedule, and Baillie-PSW (`is_probable_prime_bpsw`, with
   the strong Lucas stage exposed as `is_strong_lucas_probable_prime`);
+  batch inversion (`mod_inverse_batch`, Montgomery's trick);
   rational reconstruction (`rational_reconstruct`,
   `rational_reconstruct_bounded`) recovering the unique bounded fraction
   from its residue; `valuation`/`remove_factor` by a squared-power

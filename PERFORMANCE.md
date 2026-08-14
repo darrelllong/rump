@@ -431,9 +431,12 @@ below measures the family at scale.
 This closes the backlog of rump-against-GMP ratio work: in the primitive
 comparison above, what still separates the columns is constant factors —
 GMP's assembly base cases, Toom against FFT — not algorithms. Measured work
-inside rump itself remains on the approved queue (ROADMAP.md): Cipolla's
-square root, aimed at `sqrt_mod`'s 2-adic heavy tail in the extrema section
-below, and Montgomery's batch inversion.
+inside rump itself has since landed: Cipolla's square root now caps
+`sqrt_mod`'s 2-adic tail at its measured dispatch crossover (the extrema
+section below), and Montgomery's batch inversion trades one Lehmer
+inversion for three multiplications per element. The queue's remaining
+constant-factor candidates — Barrett's half products, the perfect-power
+residue filters — are recorded in ROADMAP.md.
 
 ## GCD at scale
 
@@ -534,9 +537,12 @@ populations the conditioned rows separate:
   `(p+1)/4` shortcut (`sqrtmod_blum`, spreads 1.0–1.4 on every host), and
   `p ≡ 1 (mod 4)` pays the Tonelli–Shanks descent (`sqrtmod_descent`),
   whose cost grows with the square of `s = v₂(p−1)`: measured at 1024
-  bits, `s = 1` costs 377 µs, `s = 16` 1.0 ms, `s = 256` 15 ms. `s` is
-  geometric — `P(s = k | p ≡ 1 mod 4) = 2^(1−k)` — so the tail is rare
-  and unbounded; Cipolla's algorithm (queue item 8) removes it.
+  bits, `s = 1` costs 377 µs, `s = 16` 1.0 ms, `s = 256` 15 ms (the deep
+  points measured through the descent engine directly — the shipped
+  dispatch hands them to Cipolla). `s` is geometric —
+  `P(s = k | p ≡ 1 mod 4) = 2^(1−k)` — so the descent's tail is rare and
+  unbounded; the Cipolla dispatch (queue item 8, landed) caps it at the
+  crossover cost, about 2.2× the shortcut at 1024 bits.
 
 **The mixture rows' medians must not be compared across sizes.** The
 non-residue population holds exactly half of `sqrt_mod`'s probability

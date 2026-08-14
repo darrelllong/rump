@@ -47,11 +47,21 @@ them remains subject to the joint triage.
    filters), `is_perfect_power`, `popcount`, `trailing_zeros`, `pow_u64`,
    and `valuation`/`remove_factor` by a squared-power ladder. Verified
    against machine-integer and Python oracles, 55,000+ cases in review.
-7. **Batch inversion** — Montgomery's trick: one inversion for n elements.
-8. **Cipolla's square root** — complements Tonelli–Shanks exactly where its
-   measured heavy tail lives (high 2-adic valuation of p − 1).
-9. **Barrett reduction context** — a modulus context for even moduli, where
-   Montgomery cannot operate.
+7. **Batch inversion** — completed 2026-08-14. `mod_inverse_batch`:
+   one inversion and 3(n−1) multiplications for n elements (Montgomery,
+   Math. Comp. 48 (1987)); measured 1.5× at a batch of two, levelling
+   near 3.4× — the ratio of one Lehmer inversion to three multiplications.
+8. **Cipolla's square root** — completed 2026-08-14. Dispatched inside
+   `sqrt_mod` when s² > 4·bits (crossings measured at s ≈ 70/93/124 for
+   1024/2048/4096 bits by a both-engines probe); the descent's s² tail is
+   capped at the crossover cost. Both engines' non-residue scans are
+   bounded, so composite moduli — odd squares included — yield None.
+9. **Barrett reduction context** — completed 2026-08-14. `BarrettCtx`
+   (HAC 14.42/14.44) for either parity: reduce/mul_mod/square_mod/pow_mod.
+   Full products where half-products would serve: ~1.1× ahead of division
+   below 2 kbit, up to 1.5× behind at 2–4 kbit, parity near 8 kbit — the
+   value is the even-modulus capability; HAC Note 14.45's half products
+   are the follow-up.
 
 Each item lands with the established discipline: primary source, independent
 oracle, differential verification, measured thresholds where dispatch is
@@ -92,10 +102,9 @@ present: `gcd`, `gcd_extended` (Lehmer → Half-GCD), `lcm`.
 ## 3. Modular integers
 
 **Efficient — all of it** except one design question. The basic set is
-present; add Barrett reduction (a context for even moduli, where Montgomery
-cannot go), pseudo-Mersenne reduction, fixed-base tables, Straus/Pippenger
-multi-exponentiation, and Montgomery's batch inversion (one inversion for n
-elements — nearly free to add and widely useful).
+present, with Barrett reduction (queue item 9) and Montgomery's batch
+inversion (queue item 7) landed 2026-08-14; still open: pseudo-Mersenne
+reduction, fixed-base tables, Straus/Pippenger multi-exponentiation.
 
 **Design gate, not an efficiency gate:** constant-time exponentiation
 contradicts the crate's documented variable-time contract. Supporting it
@@ -133,11 +142,10 @@ the Hilbert symbol (needs §2's `valuation`). The subquadratic Jacobi
 
 ## 7. Modular roots
 
-**Efficient (prime modulus):** Tonelli–Shanks (present), Cipolla — worth
-having because it wins exactly where Tonelli–Shanks's heavy tail lives (high
-2-adic valuation, documented in our benchmarks) — the mod-4/mod-8 special
-cases, Hensel lifting to prime powers, nth roots mod p, root verification,
-and both-roots return.
+**Efficient (prime modulus):** Tonelli–Shanks and Cipolla (both present —
+Cipolla landed 2026-08-14 as queue item 8, dispatched where the descent's
+2-adic tail lives); still open: the mod-8 special cases, Hensel lifting to
+prime powers, nth roots mod p, and both-roots return.
 
 **Gated on factoring:** `mod_sqrt_composite` requires the modulus's
 factorization by definition (it *is* integer factoring in disguise) — take
@@ -249,7 +257,7 @@ exponentially many outputs — iterators only, never materialized.
 
 1. Arbitrary-precision integers — **largely present**
 2. GCD and extended GCD — **present** (Lehmer + Half-GCD)
-3. Modular contexts and exponentiation — **present** (Montgomery; Barrett absent)
+3. Modular contexts and exponentiation — **present** (Montgomery and Barrett)
 4. Modular inverse and square roots — **present** (one root, odd primes)
 5. Jacobi and Kronecker symbols — **present**
 6. CRT and rational reconstruction — **present** (Garner; reconstruction landed 2026-08-14)
