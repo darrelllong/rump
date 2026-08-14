@@ -23,9 +23,10 @@ enforcing a clean API.
   1.4.10); `sqrt_mod` (Tonelli–Shanks with the `p ≡ 3 (mod 4)` shortcut,
   result verified by squaring); `mod_pow`, `mod_inverse`, and `crt_combine`
   (Garner, HAC Algorithm 14.71); fixed-base Miller-Rabin
-  (`is_probable_prime`, `is_probable_prime_with_bases`) and the reusable
+  (`is_probable_prime`, `is_probable_prime_with_bases`), the reusable
   per-round primitive `miller_rabin_witness` for callers that bring their
-  own witness schedule.
+  own witness schedule, and Baillie-PSW (`is_probable_prime_bpsw`, with
+  the strong Lucas stage exposed as `is_strong_lucas_probable_prime`).
 
 - **`Gf2m`** — binary extension fields GF(2^m): XOR addition, word-level
   comb multiplication (*Guide to ECC*, Algorithm 2.36) with tap-wise

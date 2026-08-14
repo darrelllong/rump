@@ -17,7 +17,8 @@ rust-mp = "0.1"
 
 ```rust
 use rump::{
-    crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_with_bases, jacobi,
+    crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
+    is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi,
     kronecker, lcm, legendre, miller_rabin_witness, mod_inverse, mod_pow, random_below,
     random_coprime_below, random_nonzero_below, random_probable_prime, sqrt_mod, BigInt, BigUint,
     Gf2m, MontgomeryCtx, Rng, Sign,
@@ -469,6 +470,24 @@ assert!(!miller_rabin_witness(&n, &BigUint::from_u64(2)));
 assert!(!is_probable_prime_with_bases(&n, &[2]));
 assert!(!is_probable_prime(&n));
 assert!(miller_rabin_witness(&n, &BigUint::from_u64(3)));
+```
+
+`is_probable_prime_bpsw` is the Baillie–PSW test: trial division, one
+strong base-2 Miller–Rabin round, then the strong Lucas test with
+Selfridge's parameters (`is_strong_lucas_probable_prime` exposes that
+stage alone). The two stages fail on disjoint kinds of composites as far
+as anyone has found — no composite passing both is known, and none exists
+below 2⁶⁴, where the test is therefore deterministic.
+
+```rust
+assert!(is_probable_prime_bpsw(&BigUint::from_u64(65_537)));
+
+// 2047 fools base 2; the Lucas stage rejects it.
+assert!(!is_probable_prime_bpsw(&BigUint::from_u64(2_047)));
+
+// 5459 is a strong Lucas pseudoprime; the base-2 stage rejects it.
+assert!(is_strong_lucas_probable_prime(&BigUint::from_u64(5_459)));
+assert!(!is_probable_prime_bpsw(&BigUint::from_u64(5_459)));
 ```
 
 ## Random sampling

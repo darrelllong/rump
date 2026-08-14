@@ -5,10 +5,11 @@
 //! it in both places — a drifted manual fails here.
 
 use rump::{
-    crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_with_bases, jacobi,
-    kronecker, lcm, legendre, miller_rabin_witness, mod_inverse, mod_pow, random_below,
-    random_coprime_below, random_nonzero_below, random_probable_prime, sqrt_mod, BigInt, BigUint,
-    Gf2m, MontgomeryCtx, Rng, Sign,
+    crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
+    is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
+    miller_rabin_witness, mod_inverse, mod_pow, random_below, random_coprime_below,
+    random_nonzero_below, random_probable_prime, sqrt_mod, BigInt, BigUint, Gf2m, MontgomeryCtx,
+    Rng, Sign,
 };
 
 #[test]
@@ -323,6 +324,18 @@ fn manual_number_theory_primality() {
     assert!(!is_probable_prime_with_bases(&n, &[2]));
     assert!(!is_probable_prime(&n));
     assert!(miller_rabin_witness(&n, &BigUint::from_u64(3)));
+}
+
+#[test]
+fn manual_number_theory_baillie_psw() {
+    assert!(is_probable_prime_bpsw(&BigUint::from_u64(65_537)));
+
+    // 2047 fools base 2; the Lucas stage rejects it.
+    assert!(!is_probable_prime_bpsw(&BigUint::from_u64(2_047)));
+
+    // 5459 is a strong Lucas pseudoprime; the base-2 stage rejects it.
+    assert!(is_strong_lucas_probable_prime(&BigUint::from_u64(5_459)));
+    assert!(!is_probable_prime_bpsw(&BigUint::from_u64(5_459)));
 }
 
 /// xorshift64: deterministic and compact. Fine for a manual; NOT a CSPRNG.

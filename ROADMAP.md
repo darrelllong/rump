@@ -24,8 +24,13 @@ them remains subject to the joint triage.
    abandons; the benchmark's `add`/`sub` rows now measure reused-output
    writes on both sides, and the ratios fell from 2–15× to 1.2–4.5×
    (PERFORMANCE.md).
-3. **Baillie–PSW** — strong Lucas test composed with the existing
-   Miller–Rabin; the standard probable-prime test, no known pseudoprime.
+3. **Baillie–PSW** — completed 2026-08-14. Strong Lucas with Selfridge's
+   Method A (Montgomery-domain ladder) composed with one strong base-2
+   Miller–Rabin round behind the shared trial-division screen
+   (`is_probable_prime_bpsw`, `is_strong_lucas_probable_prime`). Verified
+   against a sieve oracle sharing no code with the tests, both published
+   pseudoprime tables below 10⁵, and structured adversarial cases; no
+   composite passing both stages is known, none exists below 2⁶⁴.
 4. **Rational reconstruction** — stop the extended-gcd engine at the √m
    boundary; unlocks exact linear algebra and CRT-lifted computation.
 5. **Radix string I/O** — `from_string`/`to_string` by divide-and-conquer
@@ -132,9 +137,9 @@ the factorization as a parameter.
 ## 8. Prime operations
 
 **Efficient:** ranged sieving (`sieve`, `segmented_sieve`, `prime_iterator`,
-`primes_in_interval`), `trial_division`, Miller–Rabin (present), **strong
-Lucas and Baillie–PSW** — the standard probable-prime test, cheap on top of
-what exists, first-step candidate — `next_prime` / `previous_prime`
+`primes_in_interval`), `trial_division`, Miller–Rabin (present), strong
+Lucas and Baillie–PSW (present — queue item 3, landed 2026-08-14),
+`next_prime` / `previous_prime`
 (expected polynomial), and certificates for structured forms: Pratt,
 Pocklington, Proth, Pépin, with `verify_prime_certificate`.
 
@@ -239,7 +244,7 @@ exponentially many outputs — iterators only, never materialized.
 4. Modular inverse and square roots — **present** (one root, odd primes)
 5. Jacobi and Kronecker symbols — **present**
 6. CRT and rational reconstruction — **partial** (Garner; reconstruction absent)
-7. Sieving and primality testing — **partial** (Miller–Rabin; BPSW absent)
+7. Sieving and primality testing — **partial** (Miller–Rabin and BPSW; ranged sieving absent)
 8. Basic factorization — absent
 9. Polynomial arithmetic over ℤ and F_p — absent
 10. Prime and extension fields — **partial** (GF(2^m) only)
@@ -247,6 +252,6 @@ exponentially many outputs — iterators only, never materialized.
 12. LLL — absent
 
 Triage still decides everything; on the current codebase, the shortest path
-through this list runs 6 → 7 → 8 → 9 → 10 → 11 → 12, with rational
-reconstruction and Baillie–PSW as the first two steps — both efficient, both
-small, both immediately useful.
+through this list runs 6 → 7 → 8 → 9 → 10 → 11 → 12. Baillie–PSW, the
+first of its two named first steps, landed 2026-08-14; rational
+reconstruction is queue item 4.

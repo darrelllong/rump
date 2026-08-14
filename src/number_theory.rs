@@ -123,7 +123,10 @@ struct QuotientLog {
 
 impl QuotientLog {
     fn new() -> Self {
-        Self { q_mod_4: [0; 184], len: 0 }
+        Self {
+            q_mod_4: [0; 184],
+            len: 0,
+        }
     }
 }
 
@@ -142,7 +145,10 @@ fn replay_batch(state: &mut JacobiState, first_reduced_is_a: bool, log: &Quotien
 /// (top of the larger) taken from each, ready for [`lehmer_transform`].
 fn leading_pair(a: &BigUint, b: &BigUint) -> (i128, i128) {
     let shift = a.bits().saturating_sub(124);
-    (leading_i128(a.limbs(), shift), leading_i128(b.limbs(), shift))
+    (
+        leading_i128(a.limbs(), shift),
+        leading_i128(b.limbs(), shift),
+    )
 }
 
 // The Lehmer transform is applied to the operands (and, for the extended
@@ -249,11 +255,28 @@ fn combine_unsigned(c0: i128, x0: &BigUint, c1: i128, x1: &BigUint) -> BigUint {
 
 /// `c0·x0 + c1·x1` as a signed `BigInt`, for the Bézout cofactor sequences.
 fn combine_signed(c0: i128, x0: &BigInt, c1: i128, x1: &BigInt) -> BigInt {
-    let width = x0.magnitude().limbs().len().max(x1.magnitude().limbs().len()) + 3;
+    let width = x0
+        .magnitude()
+        .limbs()
+        .len()
+        .max(x1.magnitude().limbs().len())
+        + 3;
     let mut pos = vec![0u64; width];
     let mut neg = vec![0u64; width];
-    route_term(&mut pos, &mut neg, c0, x0.sign() == Sign::Negative, x0.magnitude().limbs());
-    route_term(&mut pos, &mut neg, c1, x1.sign() == Sign::Negative, x1.magnitude().limbs());
+    route_term(
+        &mut pos,
+        &mut neg,
+        c0,
+        x0.sign() == Sign::Negative,
+        x0.magnitude().limbs(),
+    );
+    route_term(
+        &mut pos,
+        &mut neg,
+        c1,
+        x1.sign() == Sign::Negative,
+        x1.magnitude().limbs(),
+    );
     match cmp_slices(&pos, &neg) {
         core::cmp::Ordering::Less => {
             BigInt::from_parts(Sign::Negative, BigUint::from_limbs(sub_slices(&neg, &pos)))
@@ -429,16 +452,33 @@ struct Mat2 {
 impl Mat2 {
     fn identity() -> Self {
         let one = || BigInt::from_biguint(BigUint::one());
-        Self { m00: one(), m01: BigInt::zero(), m10: BigInt::zero(), m11: one() }
+        Self {
+            m00: one(),
+            m01: BigInt::zero(),
+            m10: BigInt::zero(),
+            m11: one(),
+        }
     }
 
     /// The matrix product `self · other`.
     fn compose(&self, other: &Self) -> Self {
         Self {
-            m00: self.m00.mul_ref(&other.m00).add_ref(&self.m01.mul_ref(&other.m10)),
-            m01: self.m00.mul_ref(&other.m01).add_ref(&self.m01.mul_ref(&other.m11)),
-            m10: self.m10.mul_ref(&other.m00).add_ref(&self.m11.mul_ref(&other.m10)),
-            m11: self.m10.mul_ref(&other.m01).add_ref(&self.m11.mul_ref(&other.m11)),
+            m00: self
+                .m00
+                .mul_ref(&other.m00)
+                .add_ref(&self.m01.mul_ref(&other.m10)),
+            m01: self
+                .m00
+                .mul_ref(&other.m01)
+                .add_ref(&self.m01.mul_ref(&other.m11)),
+            m10: self
+                .m10
+                .mul_ref(&other.m00)
+                .add_ref(&self.m11.mul_ref(&other.m10)),
+            m11: self
+                .m10
+                .mul_ref(&other.m01)
+                .add_ref(&self.m11.mul_ref(&other.m11)),
         }
     }
 
@@ -554,10 +594,7 @@ fn hgcd_adjust(
         );
         sum.magnitude().clone()
     };
-    (
-        attach(alpha, &t.m00, &t.m01),
-        attach(beta, &t.m10, &t.m11),
-    )
+    (attach(alpha, &t.m00, &t.m01), attach(beta, &t.m10, &t.m11))
 }
 
 /// `#(a − b)` — bit-size of the absolute difference.
@@ -590,7 +627,11 @@ fn sdiv_step(
     state: Option<&mut JacobiState>,
 ) -> bool {
     let a_is_larger = *a >= *b;
-    let (hi, lo) = if a_is_larger { (a.clone(), b.clone()) } else { (b.clone(), a.clone()) };
+    let (hi, lo) = if a_is_larger {
+        (a.clone(), b.clone())
+    } else {
+        (b.clone(), a.clone())
+    };
     if lo.is_zero() {
         return false;
     }
@@ -760,11 +801,7 @@ fn hgcd_base(
 /// integer gcd computation*, Math. Comp. 77 (2008), 589–607, Figure 4 — the
 /// algorithm behind GMP's `mpn_hgcd`. O(M(n)·log n) with fast multiplication
 /// carrying the matrix work.
-fn hgcd(
-    a: &BigUint,
-    b: &BigUint,
-    mut state: Option<&mut JacobiState>,
-) -> (Mat2, BigUint, BigUint) {
+fn hgcd(a: &BigUint, b: &BigUint, mut state: Option<&mut JacobiState>) -> (Mat2, BigUint, BigUint) {
     let n = pair_size(a, b);
     let s = n / 2 + 1; // Möller's S = ⌊N/2⌋ + 1
     debug_assert!(
@@ -858,7 +895,11 @@ const HGCD_THRESHOLD_LIMBS: usize = 2048;
 /// drops to its difference — which the previous round just certified small.
 /// Below the crossover the tail goes to Lehmer, whose constant wins there.
 fn gcd_via_hgcd(a: &BigUint, b: &BigUint) -> BigUint {
-    let (mut aa, mut bb) = if a >= b { (a.clone(), b.clone()) } else { (b.clone(), a.clone()) };
+    let (mut aa, mut bb) = if a >= b {
+        (a.clone(), b.clone())
+    } else {
+        (b.clone(), a.clone())
+    };
     loop {
         if bb.is_zero() {
             return aa;
@@ -947,12 +988,7 @@ fn gcd_extended_via_hgcd(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) 
 ///
 /// Precondition: `a, b > 0` (the zero-operand cases return directly from the
 /// driver in classical form).
-fn canonicalize_bezout(
-    a: &BigUint,
-    b: &BigUint,
-    g: &BigUint,
-    s: &BigInt,
-) -> (BigInt, BigInt) {
+fn canonicalize_bezout(a: &BigUint, b: &BigUint, g: &BigUint, s: &BigInt) -> (BigInt, BigInt) {
     let modulus = b.div_rem(g).0; // b/g, exact by definition of g
     if modulus.is_one() {
         // b divides a; classical Euclid ends in one step with (g, 0, 1).
@@ -1299,7 +1335,11 @@ fn jacobi_lehmer_with_state(x: BigUint, y: BigUint, state: JacobiState) -> i8 {
         // The digits certified nothing (unequal lengths, or a boundary case):
         // one exact division step, reducing the larger slot in place.
         let d = u8::from(x_is_hi);
-        let (q, r) = if x_is_hi { x.div_rem(&y) } else { y.div_rem(&x) };
+        let (q, r) = if x_is_hi {
+            x.div_rem(&y)
+        } else {
+            y.div_rem(&x)
+        };
         state.update(d, (q.limbs().first().copied().unwrap_or(0) & 3) as u8);
         if x_is_hi {
             x = r;
@@ -1367,7 +1407,11 @@ fn jacobi_hgcd_engine(x: BigUint, y: BigUint, state: JacobiState, tail_limbs: us
         // in the Lehmer engine's guarded path.
         if pair_min_size(&x, &y) <= s || abs_diff_bits(&x, &y) <= s {
             let x_is_hi = x >= y;
-            let (q, r) = if x_is_hi { x.div_rem(&y) } else { y.div_rem(&x) };
+            let (q, r) = if x_is_hi {
+                x.div_rem(&y)
+            } else {
+                y.div_rem(&x)
+            };
             state.update(
                 u8::from(x_is_hi),
                 (q.limbs().first().copied().unwrap_or(0) & 3) as u8,
@@ -1857,9 +1901,14 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
 /// exposing a factor shared with a candidate discriminant, or `n` a perfect
 /// square, for which no discriminant has symbol `-1` and which is therefore
 /// ruled out directly once three candidates have failed (Baillie and
-/// Wagstaff, §6). A zero symbol with `n` *equal* to the candidate
-/// discriminant carries no information (n is 5, 7, 11, …) and the search
-/// continues past it.
+/// Wagstaff, §6). A zero symbol whose gcd with `n` is `n` itself carries no
+/// information (n is 5, 7, 11, …) and the search continues past it.
+///
+/// The search terminates for every valid input: once squares are excluded,
+/// the map `D ↦ (D/n)` is a non-principal character, `-1` on half the
+/// residues, so a qualifying discriminant exists and arrives quickly — the
+/// maximum |D| over all odd `n < 2·10⁶` is 59, far below the `i64` bound
+/// the conversion below asserts.
 fn selfridge_discriminant(n: &BigUint) -> Option<i64> {
     debug_assert!(n.is_odd() && !n.is_one());
     let mut d_abs: u64 = 5;
@@ -1878,7 +1927,11 @@ fn selfridge_discriminant(n: &BigUint) -> Option<i64> {
                     i64::try_from(d_abs).expect("discriminant search stays far below i64::MAX");
                 return Some(if positive { magnitude } else { -magnitude });
             }
-            Some(0) if *n != BigUint::from_u64(d_abs) => return None,
+            // A zero symbol means gcd(|D|, n) > 1. A proper divisor proves
+            // n composite; gcd equal to n itself (n divides the candidate
+            // discriminant) carries no information — n may be the prime 5,
+            // 7, 11, … — and the search continues.
+            Some(0) if gcd(&BigUint::from_u64(d_abs), n) != *n => return None,
             _ => {}
         }
         attempts += 1;
@@ -1960,8 +2013,8 @@ fn strong_lucas_core(n: &BigUint, ctx: &MontgomeryCtx, discriminant: i64) -> boo
     let mut q_pow = q_mont.clone();
     for bit in (0..d.bits() - 1).rev() {
         u = ctx.mul_mont(&u, &v);
-        v = sub_mod(&ctx.square(&v), &add_mod(&q_pow, &q_pow));
-        q_pow = ctx.square(&q_pow);
+        v = sub_mod(&ctx.square_mont(&v), &add_mod(&q_pow, &q_pow));
+        q_pow = ctx.square_mont(&q_pow);
         if d.bit(bit) {
             let stepped_u = half_mod(&add_mod(&u, &v));
             v = half_mod(&add_mod(&ctx.mul_mont(&d_mont, &u), &v));
@@ -1975,8 +2028,8 @@ fn strong_lucas_core(n: &BigUint, ctx: &MontgomeryCtx, discriminant: i64) -> boo
         return true;
     }
     for _ in 1..s {
-        v = sub_mod(&ctx.square(&v), &add_mod(&q_pow, &q_pow));
-        q_pow = ctx.square(&q_pow);
+        v = sub_mod(&ctx.square_mont(&v), &add_mod(&q_pow, &q_pow));
+        q_pow = ctx.square_mont(&q_pow);
         if v.is_zero() {
             return true;
         }
@@ -2015,12 +2068,20 @@ pub fn is_strong_lucas_probable_prime(n: &BigUint) -> bool {
 ///
 /// The two probabilistic stages fail on disjoint kinds of composites as far
 /// as anyone has found: no composite passing both is known, and none exists
-/// below 2⁶⁴ (the base-2 strong-pseudoprime enumeration by Feitsma and
-/// Galway, checked exhaustively against the Lucas stage), so below that
-/// bound the test is deterministic. Contrast [`is_probable_prime`]'s twelve
-/// fixed Miller–Rabin bases, which are deterministic to 3.3·10²⁴ but share
-/// a single failure mode above it; the two tests back different horses,
-/// and this one is the standard in contemporary libraries.
+/// below 2⁶⁴ — Feitsma's enumeration of the base-2 Fermat pseudoprimes to
+/// that bound (verified independently by Galway), whose strong subset has
+/// been checked exhaustively against the Lucas stage — so below 2⁶⁴ the
+/// test is deterministic. [`is_probable_prime`]'s twelve fixed bases are
+/// deterministic further, to 3.3·10²⁴ (Sorenson and Webster), and the two
+/// tests fail differently above their bounds, which is why both exist.
+///
+/// Above 2⁶⁴ this is a probable-prime test, not a proof, and its
+/// parameters are a fixed function of the candidate: as with any fixed
+/// schedule, treat values from an untrusted source with additional
+/// candidate-derived witnesses ([`miller_rabin_witness`]), as the parent
+/// cryptography crate's `is_probable_prime_untrusted` does. No composite
+/// passing this test is known at any size — but absence of a known
+/// counterexample is not a proof, and the crate does not treat it as one.
 ///
 /// References: Baillie and Wagstaff, *Lucas pseudoprimes*, Math. Comp. 35
 /// (1980), 1391–1417; Pomerance, Selfridge and Wagstaff, *The pseudoprimes
@@ -2106,10 +2167,7 @@ mod tests {
         if x.is_zero() {
             return Some(i8::from(y.is_one()));
         }
-        let mut state = JacobiState::new(
-            (x.limbs()[0] & 3) as u8,
-            (y.limbs()[0] & 3) as u8,
-        );
+        let mut state = JacobiState::new((x.limbs()[0] & 3) as u8, (y.limbs()[0] & 3) as u8);
         loop {
             let d = u8::from(x >= y);
             let (q, r) = if d == 1 { x.div_rem(&y) } else { y.div_rem(&x) };
@@ -2131,8 +2189,13 @@ mod tests {
     fn jacobi_crossover_timing() {
         use std::hint::black_box;
         use std::time::Instant;
-        let mut rng = SplitMix64 { state: 0x7ac0_b1de_ba7c_4ed5 };
-        eprintln!("{:>7} {:>12} {:>12}  winner", "limbs", "binary_ms", "lehmer_ms");
+        let mut rng = SplitMix64 {
+            state: 0x7ac0_b1de_ba7c_4ed5,
+        };
+        eprintln!(
+            "{:>7} {:>12} {:>12}  winner",
+            "limbs", "binary_ms", "lehmer_ms"
+        );
         for &limbs in &[2usize, 4, 8, 16, 32, 64, 128, 256, 512] {
             let bits = limbs * 64;
             let mut n = draw_below(&mut rng, &pow2(bits));
@@ -2220,7 +2283,9 @@ mod tests {
         }
         // Random sweep across sizes; the development threshold routes the
         // public function through the Lehmer-batched engine everywhere.
-        let mut rng = SplitMix64 { state: 0x0dd5_ba11_5eed_c0de };
+        let mut rng = SplitMix64 {
+            state: 0x0dd5_ba11_5eed_c0de,
+        };
         for &bits in &[16usize, 64, 128, 256, 777, 1024, 2048, 4096] {
             for _ in 0..30 {
                 let mut n = draw_below(&mut rng, &pow2(bits));
@@ -2246,7 +2311,9 @@ mod tests {
     #[test]
     fn jacobi_state_through_hgcd_matches_binary() {
         use super::{hgcd, jacobi_lehmer_with_state, JacobiState};
-        let mut rng = SplitMix64 { state: 0x7ac0_b1a5_ca55_e77e };
+        let mut rng = SplitMix64 {
+            state: 0x7ac0_b1a5_ca55_e77e,
+        };
         // Sizes span the batched base case (≤ 6144 bits) and the recursion
         // above it. Each case threads the state through one hgcd call and
         // hands the reduced pair to the Lehmer engine mid-flight — exactly
@@ -2291,7 +2358,9 @@ mod tests {
     #[test]
     fn jacobi_hgcd_driver_matches_lehmer() {
         use super::{jacobi_hgcd, jacobi_lehmer, JACOBI_HGCD_THRESHOLD_LIMBS};
-        let mut rng = SplitMix64 { state: 0x5eed_7e57_0dd1_7e57 };
+        let mut rng = SplitMix64 {
+            state: 0x5eed_7e57_0dd1_7e57,
+        };
         let full_width_odd = |rng: &mut SplitMix64, limbs: usize| {
             let bits = limbs * 64;
             let mut y = draw_below(rng, &pow2(bits));
@@ -2347,8 +2416,13 @@ mod tests {
         };
         use std::hint::black_box;
         use std::time::Instant;
-        let mut rng = SplitMix64 { state: 0xc0de_57a7_e0f0_a11e };
-        eprintln!("{:>7} {:>12} {:>12}  winner", "limbs", "lehmer_ms", "hgcd_ms");
+        let mut rng = SplitMix64 {
+            state: 0xc0de_57a7_e0f0_a11e,
+        };
+        eprintln!(
+            "{:>7} {:>12} {:>12}  winner",
+            "limbs", "lehmer_ms", "hgcd_ms"
+        );
         for &limbs in &[256usize, 512, 1024, 1536, 2048, 3072, 4096, 8192, 16384] {
             let bits = limbs * 64;
             let mut y = draw_below(&mut rng, &pow2(bits));
@@ -2389,10 +2463,16 @@ mod tests {
         assert_eq!(id.apply(&a, &b), (a.clone(), b.clone()));
         // reduce_top by 5: a ← a − 5·b = 10, b unchanged.
         let m = id.reduce_top(&BigUint::from_u64(5));
-        assert_eq!(m.apply(&a, &b), (BigUint::from_u64(10), BigUint::from_u64(46)));
+        assert_eq!(
+            m.apply(&a, &b),
+            (BigUint::from_u64(10), BigUint::from_u64(46))
+        );
         // reduce_bottom by 4: b ← b − 4·a' = 46 − 40 = 6.
         let m2 = m.reduce_bottom(&BigUint::from_u64(4));
-        assert_eq!(m2.apply(&a, &b), (BigUint::from_u64(10), BigUint::from_u64(6)));
+        assert_eq!(
+            m2.apply(&a, &b),
+            (BigUint::from_u64(10), BigUint::from_u64(6))
+        );
     }
 
     #[test]
@@ -2401,8 +2481,13 @@ mod tests {
         use super::{gcd_lehmer, gcd_via_hgcd};
         use std::hint::black_box;
         use std::time::Instant;
-        let mut rng = SplitMix64 { state: 0x7a11_5eed_0dd5_ba11 };
-        eprintln!("{:>7} {:>12} {:>12}  winner", "limbs", "lehmer_ms", "hgcd_ms");
+        let mut rng = SplitMix64 {
+            state: 0x7a11_5eed_0dd5_ba11,
+        };
+        eprintln!(
+            "{:>7} {:>12} {:>12}  winner",
+            "limbs", "lehmer_ms", "hgcd_ms"
+        );
         for &limbs in &[64usize, 128, 256, 512, 1024, 2048, 4096, 8192] {
             let bits = limbs * 64;
             let mut a = draw_below(&mut rng, &pow2(bits));
@@ -2434,8 +2519,13 @@ mod tests {
         use super::{canonicalize_bezout, gcd_extended_lehmer, gcd_extended_via_hgcd};
         use std::hint::black_box;
         use std::time::Instant;
-        let mut rng = SplitMix64 { state: 0xe87e_9d5a_11c0_ffee };
-        eprintln!("{:>7} {:>12} {:>12}  winner", "limbs", "lehmer_ms", "hgcd_ms");
+        let mut rng = SplitMix64 {
+            state: 0xe87e_9d5a_11c0_ffee,
+        };
+        eprintln!(
+            "{:>7} {:>12} {:>12}  winner",
+            "limbs", "lehmer_ms", "hgcd_ms"
+        );
         for &limbs in &[128usize, 256, 384, 512, 1024, 4096, 16384] {
             let bits = limbs * 64;
             let mut a = draw_below(&mut rng, &pow2(bits));
@@ -2467,7 +2557,9 @@ mod tests {
     fn hgcd_reduction_invariants() {
         use super::{abs_diff_bits, gcd_lehmer, hgcd, pair_min_size};
         use crate::bigint::BigInt;
-        let mut rng = SplitMix64 { state: 0x5eed_cafe_f00d_babe };
+        let mut rng = SplitMix64 {
+            state: 0x5eed_cafe_f00d_babe,
+        };
         let one = BigInt::from_biguint(BigUint::one());
         // Sizes span the batched base case (≤ 6144 bits) and the recursion
         // above it; reps taper as the sizes grow.
@@ -2524,7 +2616,9 @@ mod tests {
     #[test]
     fn gcd_via_hgcd_matches_lehmer() {
         use super::{gcd_lehmer, gcd_via_hgcd};
-        let mut rng = SplitMix64 { state: 0x4859_2b17_ac3f_1d05 };
+        let mut rng = SplitMix64 {
+            state: 0x4859_2b17_ac3f_1d05,
+        };
         // Sizes below the driver's Lehmer handoff, across the batched base
         // case, and through the recursion (dispatch is 64 limbs = 4096 bits;
         // the recursion engages above 96 limbs = 6144 bits).
@@ -2558,7 +2652,11 @@ mod tests {
         let bound = pow2(super::HGCD_THRESHOLD_LIMBS * 64 + 512);
         let a = draw_below(&mut rng, &bound);
         let b = draw_below(&mut rng, &bound);
-        assert_eq!(gcd(&a, &b), gcd_lehmer(&a, &b), "public gcd dispatch diverged");
+        assert_eq!(
+            gcd(&a, &b),
+            gcd_lehmer(&a, &b),
+            "public gcd dispatch diverged"
+        );
 
         let ext_bound = pow2(super::HGCD_EXT_THRESHOLD_LIMBS * 64 + 512);
         let p = draw_below(&mut rng, &ext_bound);
@@ -3165,17 +3263,46 @@ mod tests {
         );
     }
 
+    /// Sieve of Eratosthenes: the oracle that shares no code with the
+    /// functions under test — the probable-prime tests all open with the
+    /// same trial-division screen, so their mutual agreement cannot detect
+    /// a defect in it.
+    fn eratosthenes(limit: usize) -> Vec<bool> {
+        let mut is_prime = vec![true; limit];
+        is_prime[0] = false;
+        if limit > 1 {
+            is_prime[1] = false;
+        }
+        let mut p = 2usize;
+        while p * p < limit {
+            if is_prime[p] {
+                let mut multiple = p * p;
+                while multiple < limit {
+                    is_prime[multiple] = false;
+                    multiple += p;
+                }
+            }
+            p += 1;
+        }
+        is_prime
+    }
+
     #[test]
-    fn bpsw_agrees_with_deterministic_miller_rabin_below_100k() {
+    fn primality_tests_match_the_sieve_below_300k() {
         use super::is_probable_prime_bpsw;
-        // The twelve fixed bases are deterministic for every n < 3.3·10²⁴
-        // (Sorenson & Webster), so agreement here is agreement with truth.
-        for n in 0u64..100_000 {
-            let candidate = BigUint::from_u64(n);
+        const LIMIT: usize = 300_000;
+        let sieve = eratosthenes(LIMIT);
+        for (n, &expected) in sieve.iter().enumerate() {
+            let candidate = BigUint::from_u64(n as u64);
             assert_eq!(
                 is_probable_prime_bpsw(&candidate),
+                expected,
+                "bpsw diverged from the sieve at {n}"
+            );
+            assert_eq!(
                 is_probable_prime(&candidate),
-                "bpsw diverged at {n}"
+                expected,
+                "twelve-base Miller–Rabin diverged from the sieve at {n}"
             );
         }
     }
@@ -3197,7 +3324,10 @@ mod tests {
                 is_strong_lucas_probable_prime(&value),
                 "{n} must pass the Lucas stage alone"
             );
-            assert!(!is_probable_prime_bpsw(&value), "{n} must fail the composed test");
+            assert!(
+                !is_probable_prime_bpsw(&value),
+                "{n} must fail the composed test"
+            );
         }
         // Strong pseudoprimes to base 2 below 10⁵ (OEIS A001262), likewise
         // re-derived: composites the base-2 stage alone must pass — and the
@@ -3217,14 +3347,23 @@ mod tests {
                 !is_strong_lucas_probable_prime(&value),
                 "the Lucas stage must reject {n}"
             );
-            assert!(!is_probable_prime_bpsw(&value), "{n} must fail the composed test");
+            assert!(
+                !is_probable_prime_bpsw(&value),
+                "{n} must fail the composed test"
+            );
         }
     }
 
     #[test]
     fn bpsw_agrees_with_deterministic_miller_rabin_on_random_words() {
         use super::is_probable_prime_bpsw;
-        let mut rng = SplitMix64 { state: 0xb5c0_5e1f_2ide_a55e_u64 ^ 0x0f0f_0f0f };
+        // Above the sieve's reach the twelve-base test is the practical
+        // reference (deterministic to 3.3·10²⁴, Sorenson & Webster). The
+        // two tests share only the trial-division screen, which the sieve
+        // test above checks against an independent oracle.
+        let mut rng = SplitMix64 {
+            state: 0xb5c0_5e1f_ba11_1e50,
+        };
         for _ in 0..4000 {
             let candidate = BigUint::from_u64(rng.next_u64());
             assert_eq!(
@@ -3232,6 +3371,34 @@ mod tests {
                 is_probable_prime(&candidate),
                 "bpsw diverged on a random 64-bit value"
             );
+        }
+    }
+
+    #[test]
+    fn strong_lucas_accepts_primes_and_handles_edges() {
+        use super::is_strong_lucas_probable_prime;
+        // Positive coverage for the standalone stage: every prime passes.
+        for p in [2u64, 3, 5, 7, 13, 101, 1009, 65_537, 4_294_967_291] {
+            assert!(
+                is_strong_lucas_probable_prime(&BigUint::from_u64(p)),
+                "prime {p} must pass the standalone Lucas stage"
+            );
+        }
+        assert!(is_strong_lucas_probable_prime(&mersenne(127)));
+        // A 256-bit prime, found with the twelve-base test.
+        let mut rng = SplitMix64 {
+            state: 0x10c4_ea51_ed00_0001,
+        };
+        let mut p = draw_below(&mut rng, &pow2(256));
+        p.set_bit(255);
+        p.set_bit(0);
+        while !is_probable_prime(&p) {
+            p = p.add_ref(&BigUint::from_u64(2));
+        }
+        assert!(is_strong_lucas_probable_prime(&p));
+        // Wrapper edges the composed test never routes here.
+        for n in [0u64, 1, 4, 6] {
+            assert!(!is_strong_lucas_probable_prime(&BigUint::from_u64(n)));
         }
     }
 
@@ -3248,13 +3415,21 @@ mod tests {
         assert!(!is_probable_prime_bpsw(&big_root.square_ref()));
         // Mersenne primes and their composite neighbours at width.
         for exponent in [61usize, 89, 107, 127] {
-            assert!(is_probable_prime_bpsw(&mersenne(exponent)), "M{exponent} is prime");
+            assert!(
+                is_probable_prime_bpsw(&mersenne(exponent)),
+                "M{exponent} is prime"
+            );
         }
-        assert!(!is_probable_prime_bpsw(&mersenne(67)), "M67 = 193707721 · 761838257287");
+        assert!(
+            !is_probable_prime_bpsw(&mersenne(67)),
+            "M67 = 193707721 · 761838257287"
+        );
         assert!(!is_probable_prime_bpsw(&mersenne(2047)));
         // Large random primes from the crate's own generator, and their
         // pairwise products.
-        let mut rng = SplitMix64 { state: 0x1234_5678_9abc_def0 };
+        let mut rng = SplitMix64 {
+            state: 0x1234_5678_9abc_def0,
+        };
         for bits in [256usize, 512, 1024] {
             let mut p = draw_below(&mut rng, &pow2(bits));
             p.set_bit(bits - 1);

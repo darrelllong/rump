@@ -57,8 +57,9 @@ mod scrub;
 pub use bigint::{BigInt, BigUint, MontgomeryCtx, Sign};
 pub use gf2m::Gf2m;
 pub use number_theory::{
-    crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_with_bases, jacobi,
-    kronecker, lcm, legendre, miller_rabin_witness, mod_inverse, mod_pow, sqrt_mod,
+    crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
+    is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
+    miller_rabin_witness, mod_inverse, mod_pow, sqrt_mod,
 };
 pub use random::{
     random_below, random_coprime_below, random_nonzero_below, random_probable_prime, Rng,
