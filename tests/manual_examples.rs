@@ -9,8 +9,40 @@ use rump::{
     is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
     miller_rabin_witness, mod_inverse, mod_pow, random_below, random_coprime_below,
     random_nonzero_below, random_probable_prime, rational_reconstruct,
-    rational_reconstruct_bounded, sqrt_mod, BigInt, BigUint, Gf2m, MontgomeryCtx, Rng, Sign,
+    rational_reconstruct_bounded, remove_factor, sqrt_mod, valuation, BigInt, BigUint, Gf2m,
+    MontgomeryCtx, Rng, Sign,
 };
+
+#[test]
+fn manual_biguint_roots_powers_bits() {
+    let n = BigUint::from_u64(1_000_000);
+    let (root, rem) = n.sqrt_rem();
+    assert_eq!(root, BigUint::from_u64(1_000));
+    assert!(rem.is_zero());
+    assert!(n.is_square());
+    assert!(!BigUint::from_u64(1_000_001).is_square());
+
+    assert_eq!(
+        BigUint::from_u64(1_000_000).nth_root_floor(3),
+        BigUint::from_u64(100)
+    );
+    assert!(BigUint::from_u64(729).is_perfect_power()); // 3^6
+    assert!(!BigUint::from_u64(730).is_perfect_power());
+
+    assert_eq!(BigUint::from_u64(3).pow_u64(6), BigUint::from_u64(729));
+    assert_eq!(BigUint::from_u64(0b1011_0000).popcount(), 3);
+    assert_eq!(BigUint::from_u64(0b1011_0000).trailing_zeros(), Some(4));
+    assert_eq!(BigUint::zero().trailing_zeros(), None);
+}
+
+#[test]
+fn manual_number_theory_valuation() {
+    let n = BigUint::from_u64(3_888); // 2^4 · 3^5
+    assert_eq!(valuation(&n, &BigUint::from_u64(2)), 4);
+    let (cofactor, exponent) = remove_factor(&n, &BigUint::from_u64(3));
+    assert_eq!(exponent, 5);
+    assert_eq!(cofactor, BigUint::from_u64(16));
+}
 
 #[test]
 fn manual_biguint_radix_strings() {

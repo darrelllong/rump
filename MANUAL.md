@@ -20,7 +20,7 @@ use rump::{
     crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
     is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi,
     kronecker, lcm, legendre, miller_rabin_witness, mod_inverse, mod_pow,
-    rational_reconstruct, rational_reconstruct_bounded, random_below,
+    rational_reconstruct, rational_reconstruct_bounded, random_below, remove_factor, valuation,
     random_coprime_below, random_nonzero_below, random_probable_prime, sqrt_mod, BigInt, BigUint,
     Gf2m, MontgomeryCtx, Rng, Sign,
 };
@@ -61,6 +61,37 @@ assert_eq!(value.to_be_bytes_padded(4), vec![0x00, 0x00, 0x01, 0x00]);
 let wide = BigUint::from_u128((7u128 << 64) | 9);
 assert_eq!(wide.low_u128(), (7u128 << 64) | 9);
 assert_eq!(wide.low_bits(64), BigUint::from_u64(9)); // wide mod 2^64
+```
+
+### Roots, powers, and bit counts
+
+`sqrt_rem` returns the integer square root with its remainder — Newton's
+iteration, certified by the first non-decrease — and `sqrt_floor` is its
+root half. `nth_root_floor(k)` generalizes to any k ≥ 1 (panics at k = 0).
+`is_square` answers by residue filters and one certified root;
+`is_perfect_power` checks one certified root per prime exponent up to the
+bit length (on odd operands every prime exponent pays a full root — about
+22 ms at 4096 bits). `pow_u64` raises to a machine-word exponent by binary
+exponentiation — the helper the root routines certify against. `popcount`
+counts set bits; `trailing_zeros` is the 2-adic valuation, `None` for
+zero.
+
+```rust
+let n = BigUint::from_u64(1_000_000);
+let (root, rem) = n.sqrt_rem();
+assert_eq!(root, BigUint::from_u64(1_000));
+assert!(rem.is_zero());
+assert!(n.is_square());
+assert!(!BigUint::from_u64(1_000_001).is_square());
+
+assert_eq!(BigUint::from_u64(1_000_000).nth_root_floor(3), BigUint::from_u64(100));
+assert!(BigUint::from_u64(729).is_perfect_power()); // 3^6
+assert!(!BigUint::from_u64(730).is_perfect_power());
+
+assert_eq!(BigUint::from_u64(3).pow_u64(6), BigUint::from_u64(729));
+assert_eq!(BigUint::from_u64(0b1011_0000).popcount(), 3);
+assert_eq!(BigUint::from_u64(0b1011_0000).trailing_zeros(), Some(4));
+assert_eq!(BigUint::zero().trailing_zeros(), None);
 ```
 
 ### Radix strings
@@ -478,6 +509,22 @@ let x = crt_combine(&[
 ])
 .expect("moduli are pairwise coprime");
 assert_eq!(x, BigUint::from_u64(23));
+```
+
+### Valuation
+
+`valuation(n, p)` is the exponent of `p` in `n`; `remove_factor(n, p)`
+returns the cofactor with the exponent (the shape of GMP's `mpz_remove`),
+dividing through a ladder of squared powers so large valuations cost
+logarithmically many divisions. Both panic on `n = 0` (unbounded) or
+`p < 2`.
+
+```rust
+let n = BigUint::from_u64(3_888); // 2^4 · 3^5
+assert_eq!(valuation(&n, &BigUint::from_u64(2)), 4);
+let (cofactor, exponent) = remove_factor(&n, &BigUint::from_u64(3));
+assert_eq!(exponent, 5);
+assert_eq!(cofactor, BigUint::from_u64(16));
 ```
 
 ### Rational reconstruction

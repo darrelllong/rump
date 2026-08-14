@@ -37,6 +37,15 @@ const TOOM3_THRESHOLD_LIMBS: usize = 128;
 // range stays on Toom-3. See PERFORMANCE.md.
 const TOOM4_THRESHOLD_LIMBS: usize = 3072;
 
+/// Bitset of the 44 quadratic residues modulo 256, one bit per residue
+/// across four words, derived by enumeration.
+const SQUARES_MOD_256: [u64; 4] = [
+    0x0202_0212_0203_0213,
+    0x0202_0212_0202_0213,
+    0x0202_0212_0203_0212,
+    0x0202_0212_0202_0212,
+];
+
 /// Digit alphabet for radix rendering: `0-9` then `a-z`.
 const RADIX_DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
@@ -686,41 +695,218 @@ impl BigUint {
         (self.limbs.len() - 1) * 64 + top_bits
     }
 
-    /// Integer square root: the largest `r` such that `r^2 <= self`, by
-    /// bisection on `r` (Warren, *Hacker's Delight*, 2nd ed., §11-1 "Integer
-    /// Square Root"), squaring the midpoint each step.
+    /// Integer square root: the largest `r` with `r² ≤ self` — the root
+    /// half of [`Self::sqrt_rem`], which documents the Newton iteration
+    /// both share.
     #[must_use]
     pub fn sqrt_floor(&self) -> Self {
-        if self.is_zero() {
-            return Self::zero();
-        }
-        if self.is_one() {
-            return Self::one();
-        }
+        self.sqrt_rem().0
+    }
 
-        let mut low = Self::one();
-        let mut high = Self::zero();
-        // Choose `high` so the search starts with `low^2 <= self < high^2`.
-        // Setting bit `ceil(bits(self) / 2)` makes
-        // `high = 2^ceil(bits(self)/2)`, so `high^2 >= 2^bits(self) > self`.
-        // That gives the binary search a proved upper bound from the start.
-        high.set_bit(self.bits().div_ceil(2));
+    /// Integer square root with remainder: `(r, self − r²)` for the largest
+    /// `r` with `r² ≤ self`.
+    ///
+    /// Newton's iteration on `x ↦ (x + self/x)/2` from a one-bit seed above
+    /// the root. For any `x > 0` the iterate is at least `⌊√self⌋` (AM–GM:
+    /// `(x + n/x)/2 ≥ √n`, and the floor of the average cannot drop below
+    /// the floor of the root), and from a starting point above the root the
+    /// sequence decreases strictly until it reaches it, so the first
+    /// non-decrease certifies the answer (Cohen, *A Course in Computational
+    /// Algebraic Number Theory*, Algorithm 1.7.1). Each step costs one
+    /// division at the operand's width, and convergence is quadratic — the
+    /// error's bit count roughly halves per step — so the step count is
+    /// about log₂ of the bit width: a dozen iterations at 8,192 bits,
+    /// measured. This replaced a bisection whose every probe was a
+    /// full-width square: 13.4 ms fell to 89 µs at 8,192 bits on M4, 150×
+    /// (the ignored `sqrt_newton_vs_bisection_timing` probe reproduces
+    /// both numbers against the bisection retained in the test module).
+    #[must_use]
+    pub fn sqrt_rem(&self) -> (Self, Self) {
+        if self.is_zero() || self.is_one() {
+            return (self.clone(), Self::zero());
+        }
+        // Seed: 2^⌈bits/2⌉ ≥ ⌈√self⌉, one bit above the root's width.
+        let mut current = Self::zero();
+        current.set_bit(self.bits().div_ceil(2));
+        loop {
+            // next = (current + self/current) / 2
+            let (quotient, _) = self.div_rem(&current);
+            let mut next = current.add_ref(&quotient);
+            next.shr1();
+            if next >= current {
+                let square = current.square_ref();
+                debug_assert!(square <= *self, "certified root is not above the value");
+                return (current.clone(), self.sub_ref(&square));
+            }
+            current = next;
+        }
+    }
 
-        while {
-            let next_low = low.add_ref(&Self::one());
-            next_low < high
-        } {
-            let mut middle = low.add_ref(&high);
-            middle.shr1();
-            let square = middle.square_ref();
-            if square <= *self {
-                low = middle;
-            } else {
-                high = middle;
+    /// Population count: the number of set bits.
+    #[must_use]
+    pub fn popcount(&self) -> usize {
+        self.limbs
+            .iter()
+            .map(|limb| limb.count_ones() as usize)
+            .sum()
+    }
+
+    /// The number of trailing zero bits — the 2-adic valuation — or `None`
+    /// for zero, which has no well-defined valuation.
+    #[must_use]
+    pub fn trailing_zeros(&self) -> Option<usize> {
+        self.limbs
+            .iter()
+            .position(|&limb| limb != 0)
+            .map(|index| index * 64 + self.limbs[index].trailing_zeros() as usize)
+    }
+
+    /// `self^exponent` for a machine-word exponent, by binary
+    /// exponentiation — the small-power helper the root routines need.
+    #[must_use]
+    pub fn pow_u64(&self, exponent: u64) -> Self {
+        let mut result = Self::one();
+        let mut base = self.clone();
+        let mut remaining = exponent;
+        while remaining > 0 {
+            if remaining & 1 == 1 {
+                result = result.mul_ref(&base);
+            }
+            remaining >>= 1;
+            if remaining > 0 {
+                base = base.square_ref();
             }
         }
+        result
+    }
 
-        low
+    /// Floor of the `k`-th root: the largest `r` with `r^k ≤ self`.
+    ///
+    /// Newton's iteration on `x ↦ ((k−1)·x + self/x^(k−1))/k` from a
+    /// one-bit seed above the root; as with [`Self::sqrt_rem`], every
+    /// iterate stays at or above the true floor and the sequence decreases
+    /// strictly until it certifies itself (Cohen, Algorithm 1.7.1 for the
+    /// square case; the general `k` is the same argument through the
+    /// arithmetic–geometric mean inequality on `k` terms).
+    ///
+    /// # Panics
+    ///
+    /// Panics when `k` is zero — the zeroth root does not exist.
+    #[must_use]
+    pub fn nth_root_floor(&self, k: u64) -> Self {
+        assert!(k > 0, "the zeroth root does not exist");
+        if k == 1 || self.is_zero() || self.is_one() {
+            return self.clone();
+        }
+        if u64::try_from(self.bits()).expect("bit count fits u64") <= k {
+            // 2^k > self for self < 2^k, so the root is 1.
+            return Self::one();
+        }
+        let k_value = Self::from_u64(k);
+        let k_minus_one = Self::from_u64(k - 1);
+        // Seed: 2^⌈bits/k⌉ ≥ ⌈self^(1/k)⌉.
+        let mut current = Self::zero();
+        current.set_bit(
+            self.bits()
+                .div_ceil(usize::try_from(k).expect("k fits usize")),
+        );
+        loop {
+            let (quotient, _) = self.div_rem(&current.pow_u64(k - 1));
+            let mut next = current.mul_ref(&k_minus_one);
+            next.add_assign_ref(&quotient);
+            let (next, _) = next.div_rem(&k_value);
+            if next >= current {
+                debug_assert!(
+                    current.pow_u64(k) <= *self,
+                    "certified root is not above the value"
+                );
+                return current;
+            }
+            current = next;
+        }
+    }
+
+    /// Whether the value is a perfect square, by residue filters and one
+    /// certified square root. The filters reject most non-squares without
+    /// arithmetic: squares occupy 44 of 256 residues modulo 256, and the
+    /// modulus 9·5·7·13·17 = 69 615 folds five more character tests into a
+    /// single word remainder (the classical filter set, as in GMP's
+    /// `mpz_perfect_square_p`).
+    #[must_use]
+    pub fn is_square(&self) -> bool {
+        if self.is_zero() {
+            return true;
+        }
+        let low_byte = self.limbs[0] & 0xff;
+        if SQUARES_MOD_256[(low_byte / 64) as usize] >> (low_byte % 64) & 1 == 0 {
+            return false;
+        }
+        let folded = self.rem_u64(69_615);
+        // Bit masks of the quadratic residues, derived by enumeration
+        // (k² mod m for k in 0..m) rather than transcription.
+        for &(modulus, residue_mask) in &[
+            (9u64, 0x93u64), // {0,1,4,7}
+            (5, 0x13),       // {0,1,4}
+            (7, 0x17),       // {0,1,2,4}
+            (13, 0x161b),    // {0,1,3,4,9,10,12}
+            (17, 0x1a317),   // {0,1,2,4,8,9,13,15,16}
+        ] {
+            if residue_mask >> (folded % modulus) & 1 == 0 {
+                return false;
+            }
+        }
+        let (_, remainder) = self.sqrt_rem();
+        remainder.is_zero()
+    }
+
+    /// Whether the value is `m^k` for some `m` and some `k ≥ 2`. Checks one
+    /// certified root per prime exponent up to the bit length — a composite
+    /// exponent `k = a·b` implies a perfect `a`-th power, so primes
+    /// suffice — with the 2-adic valuation as a fast filter: any `k` must
+    /// divide the valuation when it is non-zero. Zero and one are perfect
+    /// powers by convention (`0^2`, `1^2`).
+    ///
+    /// On odd operands the valuation filter is inert and every prime
+    /// exponent below the bit width pays a full root: measured on M4,
+    /// 0.9 ms at 1,024 bits and 21.9 ms at 4,096, growing roughly
+    /// cubically. Residue-based exponent filters would trim this and are
+    /// a candidate refinement.
+    #[must_use]
+    pub fn is_perfect_power(&self) -> bool {
+        if self.is_zero() || self.is_one() {
+            return true;
+        }
+        let valuation = self.trailing_zeros().expect("non-zero value");
+        if valuation == 1 {
+            // 2 divides the value exactly once; no k ≥ 2 divides 1.
+            return false;
+        }
+        let bits = self.bits();
+        let mut k = 2u64;
+        while u64::try_from(bits).expect("bit count fits u64") > k {
+            let k_is_prime = {
+                let mut prime = true;
+                let mut d = 2;
+                while d * d <= k {
+                    if k.is_multiple_of(d) {
+                        prime = false;
+                        break;
+                    }
+                    d += 1;
+                }
+                prime
+            };
+            let divides_valuation = valuation == 0
+                || valuation.is_multiple_of(usize::try_from(k).expect("k fits usize"));
+            if k_is_prime && divides_valuation {
+                let root = self.nth_root_floor(k);
+                if root.pow_u64(k) == *self {
+                    return true;
+                }
+            }
+            k += 1;
+        }
+        false
     }
 
     /// Test bit `index`.
@@ -2675,6 +2861,171 @@ mod tests {
                 Ordering::Less => BigInt::from_parts(sb, b.magnitude().sub_ref(a.magnitude())),
                 Ordering::Equal => BigInt::zero(),
             },
+        }
+    }
+
+    /// The bisection sqrt_floor this crate shipped before Newton — kept as
+    /// the independent oracle for the replacement.
+    fn sqrt_floor_bisection(n: &BigUint) -> BigUint {
+        if n.is_zero() || n.is_one() {
+            return n.clone();
+        }
+        let mut low = BigUint::one();
+        let mut high = BigUint::zero();
+        high.set_bit(n.bits().div_ceil(2));
+        while low.add_ref(&BigUint::one()) < high {
+            let mut middle = low.add_ref(&high);
+            middle.shr1();
+            if middle.square_ref() <= *n {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        low
+    }
+
+    #[test]
+    fn sqrt_rem_matches_bisection_and_certifies() {
+        let mut seed = 0x5eed_0006_0001_0001;
+        for &words in &[1usize, 2, 8, 32, 128] {
+            for _ in 0..6 {
+                let n = seeded_biguint(words, &mut seed);
+                let (root, remainder) = n.sqrt_rem();
+                assert_eq!(
+                    root,
+                    sqrt_floor_bisection(&n),
+                    "root diverged at {words} words"
+                );
+                assert_eq!(remainder, n.sub_ref(&root.square_ref()));
+                assert!(
+                    root.add_ref(&BigUint::one()).square_ref() > n,
+                    "floor certificate"
+                );
+            }
+        }
+        // Exact squares and their neighbours.
+        let mut seed2 = 0x0bad_cafe_0000_0007;
+        for &words in &[2usize, 16, 64] {
+            let r = seeded_biguint(words, &mut seed2);
+            let square = r.square_ref();
+            assert_eq!(square.sqrt_rem(), (r.clone(), BigUint::zero()));
+            let below = square.sub_ref(&BigUint::one());
+            let r_minus_one = r.sub_ref(&BigUint::one());
+            assert_eq!(
+                below.sqrt_rem().0,
+                r_minus_one,
+                "just below a square roots to r - 1"
+            );
+        }
+    }
+
+    #[test]
+    fn predicates_match_machine_arithmetic() {
+        let mut seed = 0x1234_5678_0000_0001;
+        for _ in 0..3000 {
+            let v = lcg_next(&mut seed) >> (lcg_next(&mut seed) % 40);
+            let n = BigUint::from_u64(v);
+            assert_eq!(n.popcount(), v.count_ones() as usize, "popcount at {v}");
+            if v != 0 {
+                assert_eq!(
+                    n.trailing_zeros(),
+                    Some(v.trailing_zeros() as usize),
+                    "trailing_zeros at {v}"
+                );
+                let isqrt = v.isqrt();
+                assert_eq!(n.sqrt_rem().0, BigUint::from_u64(isqrt), "sqrt at {v}");
+                assert_eq!(n.is_square(), isqrt * isqrt == v, "is_square at {v}");
+            }
+        }
+        assert_eq!(BigUint::zero().trailing_zeros(), None);
+        assert_eq!(BigUint::zero().popcount(), 0);
+        assert!(BigUint::zero().is_square());
+    }
+
+    #[test]
+    fn nth_root_and_perfect_power_brute_force() {
+        // Exhaustive over a small range: every n and k against direct search.
+        for v in 1u64..2000 {
+            let n = BigUint::from_u64(v);
+            for k in [2u64, 3, 5, 7] {
+                let mut r = 0u64;
+                while (r + 1).pow(u32::try_from(k).expect("small")) <= v {
+                    r += 1;
+                }
+                assert_eq!(n.nth_root_floor(k), BigUint::from_u64(r), "root {k} of {v}");
+            }
+            let mut is_power = v == 1; // 1 = 1^k, below the search's floor
+            for k in 2u64..64 {
+                let mut m = 2u64;
+                while let Some(p) = m.checked_pow(u32::try_from(k).expect("small")) {
+                    if p == v {
+                        is_power = true;
+                    }
+                    if p >= v {
+                        break;
+                    }
+                    m += 1;
+                }
+            }
+            assert_eq!(n.is_perfect_power(), is_power, "perfect power at {v}");
+        }
+        assert!(BigUint::zero().is_perfect_power());
+        assert!(BigUint::one().is_perfect_power());
+    }
+
+    #[test]
+    fn wide_roots_and_powers() {
+        let mut seed = 0x0f0f_0f0f_5eed_0001;
+        for &(words, k) in &[(8usize, 3u64), (16, 5), (40, 2), (24, 7)] {
+            let m = seeded_biguint(words, &mut seed);
+            let power = m.pow_u64(k);
+            assert_eq!(power.nth_root_floor(k), m, "exact {k}-th root");
+            assert!(power.is_perfect_power());
+            let bumped = power.add_ref(&BigUint::one());
+            // m^k + 1 is a perfect power only at 8, 9: Catalan's
+            // conjecture, proved by Mihăilescu (J. reine angew. Math. 572,
+            // 2004) — the only consecutive perfect powers are 8 and 9 —
+            // and these operands are far beyond that pair.
+            assert!(!bumped.is_perfect_power(), "power + 1 at {words} words");
+            assert_eq!(bumped.nth_root_floor(k), m, "root of power + 1");
+        }
+        // A square of a square: detected through either exponent route.
+        let base = seeded_biguint(6, &mut seed);
+        assert!(base.square_ref().square_ref().is_perfect_power());
+    }
+
+    #[test]
+    #[should_panic(expected = "the zeroth root does not exist")]
+    fn nth_root_rejects_zeroth_root() {
+        let _ = BigUint::from_u64(5).nth_root_floor(0);
+    }
+
+    #[test]
+    #[ignore = "timing probe for the Newton/bisection square-root comparison; run with --ignored"]
+    fn sqrt_newton_vs_bisection_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let mut seed = 0x0bad_5eed_0000_0001;
+        eprintln!("{:>8} {:>12} {:>12}", "bits", "newton_us", "bisect_us");
+        for &words in &[16usize, 64, 128, 1024] {
+            let n = seeded_biguint(words, &mut seed);
+            let time = |f: &dyn Fn()| {
+                let mut best = f64::INFINITY;
+                for _ in 0..9 {
+                    let t0 = Instant::now();
+                    f();
+                    best = best.min(t0.elapsed().as_secs_f64() * 1e6);
+                }
+                best
+            };
+            let newton = time(&|| {
+                black_box(n.sqrt_rem());
+            });
+            let bisect = time(&|| {
+                black_box(sqrt_floor_bisection(&n));
+            });
+            eprintln!("{:>8} {newton:>12.1} {bisect:>12.1}", words * 64);
         }
     }
 

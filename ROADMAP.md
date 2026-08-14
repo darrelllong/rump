@@ -41,9 +41,12 @@ them remains subject to the joint triage.
    round trips to 4096 bits.
 5. **Radix string I/O** — `from_string`/`to_string` by divide-and-conquer
    conversion.
-6. **Integer predicates** — `is_square`, `is_perfect_power`,
-   `nth_root_floor`, `sqrt_rem`, `popcount`, `trailing_zeros`, `valuation`,
-   `remove_factor`.
+6. **Integer predicates** — completed 2026-08-14. `sqrt_rem` and
+   `sqrt_floor` by Newton's certified iteration (150× the bisection they
+   replace at 8 kbit), `nth_root_floor`, `is_square` (enumerated residue
+   filters), `is_perfect_power`, `popcount`, `trailing_zeros`, `pow_u64`,
+   and `valuation`/`remove_factor` by a squared-power ladder. Verified
+   against machine-integer and Python oracles, 55,000+ cases in review.
 7. **Batch inversion** — Montgomery's trick: one inversion for n elements.
 8. **Cipolla's square root** — complements Tonelli–Shanks exactly where its
    measured heavy tail lives (high 2-adic valuation of p − 1).

@@ -29,7 +29,10 @@ enforcing a clean API.
   the strong Lucas stage exposed as `is_strong_lucas_probable_prime`);
   rational reconstruction (`rational_reconstruct`,
   `rational_reconstruct_bounded`) recovering the unique bounded fraction
-  from its residue.
+  from its residue; `valuation`/`remove_factor` by a squared-power
+  ladder. The integer layer adds `sqrt_rem`/`sqrt_floor` (certified
+  Newton), `nth_root_floor`, `is_square`, `is_perfect_power`, `popcount`,
+  and `trailing_zeros`.
 
 - **`Gf2m`** — binary extension fields GF(2^m): XOR addition, word-level
   comb multiplication (*Guide to ECC*, Algorithm 2.36) with tap-wise
