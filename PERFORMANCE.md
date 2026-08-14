@@ -498,6 +498,8 @@ Two operations produce the large spreads:
 |  | 4096 | 104 µs | 107 µs | 71.8 ms | 71.9 ms | 694.4 |
 |  | 5120 | 168 µs | 176 µs | 142 ms | 142 ms | 847.6 |
 |  | 6144 | 247 µs | 81.6 ms | 246 ms | 249 ms | 1,008 |
+|  | 7168 | 120 µs | 123 µs | 123 µs | 131 ms | 1,086 |
+|  | 8192 | 145 µs | 146 µs | 197 ms | 591 ms | 4,081 |
 
 The remaining 81 rows — every other operation and size — span **1.0–4.5×**: their cost is set by operand width, not operand value. On rows costing only a few nanoseconds (`add`/`sub` at 256 bits) the spread measures timer and scheduler granularity, not operand dependence.
 
