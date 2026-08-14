@@ -2325,11 +2325,16 @@ fn decompose_n_minus_one(n: &BigUint) -> (BigUint, usize) {
 /// misses, an event of probability `2^{-128}` for a prime modulus.
 ///
 /// The other root is `p - r`. `p = 2` and `a ≡ 0` return `a mod p` and zero
-/// respectively. Primality of `p` is the caller's contract, but the result
-/// is verified by squaring before it is returned, and the scan bound above
-/// keeps the search finite, so a composite `p` — odd perfect squares
-/// included, which admit no non-residue-by-Jacobi at all — yields `None`
-/// rather than garbage or an unbounded loop.
+/// respectively. Primality of `p` is the caller's contract, and the function
+/// does not certify it. What it does guarantee on every odd `p` is safety:
+/// the candidate is verified to square to `a mod p` before it is returned, so
+/// the return is never a value that fails its own check, and the non-residue
+/// scan is bounded, so the call always terminates — odd perfect squares
+/// included, which admit no non-residue-by-Jacobi at all. On a composite `p`
+/// the result is therefore either `None` or a genuine root modulo that
+/// composite; it is not a primality verdict. For example `sqrt_mod(1, 15)`
+/// returns `Some(1)` (a true root of 1 mod 15), while `sqrt_mod(1, 9)`
+/// returns `None` (the bounded scan finds no non-residue mod the square 9).
 ///
 /// ```
 /// use rump::{sqrt_mod, BigUint};
@@ -2382,8 +2387,9 @@ pub fn sqrt_mod(a: &BigUint, p: &BigUint) -> Option<BigUint> {
         }
     };
 
-    // The square is the contract; verifying it makes composite p yield None
-    // instead of a value that merely looks plausible.
+    // The square is the contract: a candidate that does not square back to
+    // `a` is rejected, so a composite `p` yields either None or a value that
+    // genuinely squares to `a` — never one that merely looks plausible.
     if ctx.square(&candidate) == a {
         Some(candidate)
     } else {
@@ -2559,6 +2565,14 @@ pub fn is_probable_prime(n: &BigUint) -> bool {
 }
 
 /// Miller-Rabin using explicit witness bases.
+///
+/// Each base is reduced modulo `candidate` before use; a base congruent to
+/// `0`, `1`, or `candidate − 1` is the trivial `±1` witness, testifies to
+/// nothing, and does not count as a round. When *no* supplied base yields an
+/// effective round — an empty set, or one whose every base is trivial — the
+/// result is `false`: an untested candidate is never certified prime.
+/// Callers wanting a guaranteed-nontrivial schedule should draw bases in
+/// `[2, candidate − 1)`.
 #[must_use]
 pub fn is_probable_prime_with_bases(candidate: &BigUint, bases: &[u64]) -> bool {
     mr_probable_prime(candidate, bases)
@@ -2628,20 +2642,29 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
     let n_minus_one = candidate.sub_ref(&BigUint::one());
     let (odd_factor, two_adic_exponent) = decompose_n_minus_one(candidate);
 
+    // Count the rounds that could actually testify. A base reducing to 0, 1,
+    // or n − 1 modulo the candidate is the trivial ±1 case and proves
+    // nothing; skipping it must not be mistaken for passing it.
+    let mut effective_rounds = 0usize;
     for &base in bases {
-        let witness = BigUint::from_u64(base);
-        // Bases `>= n - 1` add no information here: `n - 1` is the trivial
-        // `-1 mod n` case, and larger bases reduce to residues that a smaller
-        // representative would already cover.
-        if witness >= n_minus_one {
+        // Reduce before classifying as trivial: an unreduced u64 that is
+        // ≥ n − 1 may still reduce to a non-trivial residue that testifies,
+        // so the raw comparison the earlier code used silently dropped real
+        // witnesses (and, when every base was so dropped, returned `true`).
+        let witness = BigUint::from_u64(base).modulo(candidate);
+        if witness <= BigUint::one() || witness == n_minus_one {
             continue;
         }
+        effective_rounds += 1;
         if is_witness(&witness, &ctx, &odd_factor, two_adic_exponent) {
             return false;
         }
     }
 
-    true
+    // No effective round ran: nothing was tested, so nothing is proven. A
+    // composite whose every supplied base was trivial must not be stamped
+    // prime.
+    effective_rounds > 0
 }
 
 /// Selfridge's Method A: the discriminant for the Lucas stage, the first of
@@ -4480,6 +4503,38 @@ mod tests {
     }
 
     #[test]
+    fn sqrt_mod_terminates_on_small_odd_squares() {
+        use super::sqrt_mod;
+        // The first odd composite squares. Every odd square is ≡ 1 (mod 4),
+        // so each enters the non-residue scan rather than the ≡ 3 shortcut;
+        // the bounded scan returns None instead of looping. 169 = 13² is a
+        // p ≡ 1 (mod 4) square with a deeper structure.
+        for m in [9u64, 25, 49, 169] {
+            assert_eq!(
+                sqrt_mod(&BigUint::from_u64(1), &BigUint::from_u64(m)),
+                None,
+                "sqrt_mod(1, {m}) must terminate as None"
+            );
+        }
+    }
+
+    #[test]
+    fn sqrt_mod_on_composite_may_return_a_genuine_root() {
+        use super::sqrt_mod;
+        // The contract is verification, not primality: for a composite modulus
+        // the function returns None or a value that genuinely squares to `a`.
+        // 15 ≡ 3 (mod 4) takes the shortcut and 1 is a true root of 1 mod 15.
+        let root = sqrt_mod(&BigUint::from_u64(1), &BigUint::from_u64(15));
+        assert_eq!(root, Some(BigUint::one()));
+        let r = root.expect("a verified root");
+        assert_eq!(
+            BigUint::mod_mul(&r, &r, &BigUint::from_u64(15)),
+            BigUint::from_u64(1),
+            "the returned value squares back to a"
+        );
+    }
+
+    #[test]
     #[ignore = "timing probe for the Tonelli-Shanks/Cipolla crossover; run with --ignored"]
     fn cipolla_crossover_timing() {
         use super::{decompose_n_minus_one, sqrt_mod_cipolla, sqrt_mod_descent};
@@ -5037,6 +5092,18 @@ mod tests {
             &BigUint::from_u64(65_537),
             &[]
         ));
+    }
+
+    #[test]
+    fn miller_rabin_rejects_all_trivial_witness_sets() {
+        // 1_022_117 = 1009 × 1013 clears the trial sieve (no prime factor
+        // ≤ 997). Every base ≥ n − 1 is the trivial ±1 witness, so a set of
+        // only such bases runs zero effective rounds and must not be reported
+        // prime; a genuine base exposes the composite.
+        let n = BigUint::from_u64(1_022_117);
+        assert!(!is_probable_prime_with_bases(&n, &[u64::MAX]));
+        assert!(!is_probable_prime_with_bases(&n, &[2]));
+        assert!(!is_probable_prime(&n));
     }
 
     #[test]
