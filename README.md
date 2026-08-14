@@ -92,6 +92,10 @@ Jacobi symbol.
 Every code block in it is replicated in `tests/manual_examples.rs` and
 asserted on `cargo test`, so the manual cannot drift from the code.
 
+[CITATIONS.md](CITATIONS.md) is the primary-source reference list: every
+non-schoolbook algorithm in the crate with the paper, book, or standard it
+comes from.
+
 ## Testing
 
 Differential suites check division against a bit-serial oracle, Montgomery

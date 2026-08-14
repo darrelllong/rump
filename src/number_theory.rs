@@ -1993,8 +1993,9 @@ fn jacobi_hgcd_engine(x: BigUint, y: BigUint, state: JacobiState, tail_limbs: us
 /// divisible by a large `p` without expecting the allocation.
 ///
 /// Reference: the odd-prime lift is Hensel's lemma (Cohen, *A Course in
-/// Computational Algebraic Number Theory*, §1.6); the dyadic and
-/// valuation cases follow the standard structure of squares in `ℤ/2^eℤ`.
+/// Computational Algebraic Number Theory*, §3.5.3, "Factorization Modulo
+/// pᵉ: Hensel's Lemma"); the dyadic and valuation cases follow the
+/// standard structure of squares in `ℤ/2^eℤ`.
 ///
 /// Primality of `p` is the caller's contract and is not checked. A
 /// composite `p` returns a value satisfying no useful guarantee: the set
