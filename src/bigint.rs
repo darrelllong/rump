@@ -825,7 +825,12 @@ impl BigUint {
                 part
             }
         };
-        (piece(0, k), piece(k, 2 * k), piece(2 * k, 3 * k), piece(3 * k, n))
+        (
+            piece(0, k),
+            piece(k, 2 * k),
+            piece(2 * k, 3 * k),
+            piece(3 * k, n),
+        )
     }
 
     /// Toom–Cook four-way multiplication: split into four base-`B = 2^{64k}`
@@ -860,6 +865,7 @@ impl BigUint {
             let even2 = c0.add_ref(&four_c2); // c0 + 4c2
             let odd2 = two_c1.add_ref(&eight_c3); // 2c1 + 8c3
             let at_m2 = BigInt::from_biguint(even2).sub_ref(&BigInt::from_biguint(odd2)); // c(-2)
+
             // c(3) = c0 + 3c1 + 9c2 + 27c3, by Horner at x = 3.
             let three = BigUint::from_u64(3);
             let mut at_3 = c3.mul_ref(&three);
@@ -2012,7 +2018,10 @@ fn bigint_mul(a: &BigInt, b: &BigInt) -> BigInt {
 /// steps of Toom-3 and Toom-4 (dividing by 2, 3, 4, 5, 8, 12).
 fn bigint_div_exact(x: &BigInt, divisor: u64) -> BigInt {
     let (quotient, remainder) = BigUint::div_rem_limb(x.magnitude().limbs(), divisor);
-    debug_assert!(remainder == 0, "Toom interpolation divides evenly by {divisor}");
+    debug_assert!(
+        remainder == 0,
+        "Toom interpolation divides evenly by {divisor}"
+    );
     BigInt::from_parts(x.sign(), quotient)
 }
 
@@ -2540,7 +2549,9 @@ mod tests {
         // dispatch threshold, at sizes not divisible by three, and with heavy
         // imbalance (one operand collapsing to a single Toom part) — against
         // the schoolbook oracle it must reproduce exactly.
-        let sizes = [3usize, 4, 5, 7, 8, 9, 16, 31, 33, 48, 64, 65, 96, 127, 130, 200];
+        let sizes = [
+            3usize, 4, 5, 7, 8, 9, 16, 31, 33, 48, 64, 65, 96, 127, 130, 200,
+        ];
         for &la in &sizes {
             for &lb in &sizes {
                 for _ in 0..3 {
@@ -2615,7 +2626,12 @@ mod tests {
             // measured as the min of three runs, to shed operand- and
             // scheduler-specific noise.
             let operands: Vec<(BigUint, BigUint)> = (0..4)
-                .map(|_| (seeded_biguint(words, &mut seed), seeded_biguint(words, &mut seed)))
+                .map(|_| {
+                    (
+                        seeded_biguint(words, &mut seed),
+                        seeded_biguint(words, &mut seed),
+                    )
+                })
                 .collect();
             let time = |f: &dyn Fn(&BigUint, &BigUint) -> BigUint| {
                 let mut total = 0.0;
