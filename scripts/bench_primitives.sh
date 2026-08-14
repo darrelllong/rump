@@ -101,13 +101,21 @@ if not xs and pilot_mean is None:
 xs.sort()
 ns = [x * 1e6 for x in xs]  # ms -> ns
 q = lambda p: ns[min(len(ns) - 1, int((len(ns) - 1) * p))] if ns else float("nan")
-# Prefer pilot's mean, but fall back to the sample mean if it is missing or
-# absurd — with a single reading pilot can emit a denormal here, and the sample
-# mean (that one reading) is the correct value.
-if pilot_mean is not None and pilot_mean > 1e-12:
+# Prefer pilot's mean, but never trust it unchecked: one recorded session
+# published a readings_mean four orders below its own sample's percentiles.
+# The readings file is the whole sample, so its mean is the arbiter — when
+# pilot's figure strays beyond 2x from it (or is denormal), the sample mean
+# stands and the CI is treated as unconverged.
+sample_mean = statistics.fmean(xs) if xs else None
+if (
+    pilot_mean is not None
+    and pilot_mean > 1e-12
+    and (sample_mean is None or 0.5 < pilot_mean / sample_mean < 2.0)
+):
     mean_ms = pilot_mean
-elif xs:
-    mean_ms = statistics.fmean(xs)
+elif sample_mean is not None:
+    mean_ms = sample_mean
+    pilot_ci = None
 else:
     mean_ms = float("nan")
 lo = ns[0] if ns else float("nan")
@@ -128,6 +136,16 @@ else:
 mean_str = f"{mean_ms:.6g}"
 if ci_pct == ci_pct and ci_pct > 10.0:  # first clause: not NaN
     mean_str = "~" + mean_str
+# Order-statistics invariant: at least 1% of the sample sits at or above
+# p99, so the mean cannot be below p99/100. A violation means a corrupted
+# figure, not a heavy tail — refuse to let it pass silently.
+p99_ms = q(0.99) / 1e6
+if ns and mean_ms == mean_ms and p99_ms > 0 and mean_ms < p99_ms / 100.0:
+    print(
+        f"WARNING {op}: mean {mean_ms} ms below p99/100 "
+        f"({p99_ms / 100.0:.6g} ms) — figures are inconsistent",
+        file=sys.stderr,
+    )
 ci_str = f"{ci_pct:.2f}%" if ci_pct == ci_pct else "?"
 print(
     f"| {op} | {mean_str} | {ci_str} | {lo:.1f} | "
