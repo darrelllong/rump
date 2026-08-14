@@ -150,7 +150,9 @@ fn gcd_family_matches_classical_euclid_over_random_sweep() {
     };
     // Mix of sizes: sub-limb, around limb boundaries, and multi-limb up past
     // the point where Lehmer batching dominates.
-    let sizes = [1usize, 7, 32, 63, 64, 65, 127, 128, 200, 256, 512, 777, 1024, 2048];
+    let sizes = [
+        1usize, 7, 32, 63, 64, 65, 127, 128, 200, 256, 512, 777, 1024, 2048,
+    ];
 
     for &bits_a in &sizes {
         for &bits_b in &sizes {
@@ -168,7 +170,11 @@ fn gcd_family_matches_classical_euclid_over_random_sweep() {
                 let (gx, s, t) = gcd_extended(&a, &b);
                 let (gn, sn, tn) = gcd_extended_naive(&a, &b);
                 assert_eq!(gx, g, "gcd_extended g disagrees with gcd");
-                assert_eq!((&gx, &s, &t), (&gn, &sn, &tn), "gcd_extended triple diverged");
+                assert_eq!(
+                    (&gx, &s, &t),
+                    (&gn, &sn, &tn),
+                    "gcd_extended triple diverged"
+                );
                 assert!(bezout_holds(&a, &b, &gx, &s, &t), "Bezout fails");
             }
         }

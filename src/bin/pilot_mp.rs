@@ -141,7 +141,11 @@ impl IntPool {
             let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus");
             let a_mont = ctx.encode(&a);
             let b_mont = ctx.encode(&b);
-            MontState { ctx, a_mont, b_mont }
+            MontState {
+                ctx,
+                a_mont,
+                b_mont,
+            }
         });
         // A prime near a fresh random point, for the prime-conditioned ops.
         // The residue-class-conditioned square-root rows pin the prime's
