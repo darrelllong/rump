@@ -38,9 +38,10 @@ pub fn lll_reduce(basis: &mut [Vec<BigInt>]) {
 ///   (detected as a vanishing Gram determinant).
 pub fn lll_reduce_delta(basis: &mut [Vec<BigInt>], delta_num: u64, delta_den: u64) {
     assert!(delta_den > 0, "delta denominator must be positive");
-    // 1/4 < δ < 1.
+    // 1/4 < δ < 1. Compare in u128 so a large numerator cannot overflow the
+    // `4·delta_num` term and turn a valid δ into a false rejection.
     assert!(
-        4 * delta_num > delta_den && delta_num < delta_den,
+        4u128 * u128::from(delta_num) > u128::from(delta_den) && delta_num < delta_den,
         "LLL parameter delta must lie in (1/4, 1)"
     );
 
@@ -126,10 +127,10 @@ fn dot(u: &[BigInt], v: &[BigInt]) -> BigInt {
     acc
 }
 
-/// `BigInt` from a small unsigned value (the δ numerator/denominator).
+/// `BigInt` from a δ component, accepting the full `u64` range (converting
+/// through `BigUint` rather than `i64`, so no component is out of reach).
 fn big_u64(x: u64) -> BigInt {
-    assert!(x <= i64::MAX as u64, "delta component out of range");
-    BigInt::from_i64(x as i64)
+    BigInt::from_biguint(BigUint::from_u64(x))
 }
 
 /// Nearest integer to `a / b` for `b > 0`, ties toward `+∞`.
@@ -553,7 +554,7 @@ mod tests {
             assert_eq!(twice, basis, "not idempotent: {input:?}");
             tested += 1;
         }
-        assert!(tested > 100, "too few non-singular draws: {tested}");
+        assert!(tested > 1000, "too few non-singular draws: {tested}");
     }
 
     #[test]
@@ -570,6 +571,19 @@ mod tests {
                 assert!(is_reduced(&basis, dn, dd), "not reduced at δ={dn}/{dd}");
             }
         }
+    }
+
+    #[test]
+    fn lll_accepts_large_delta_components() {
+        // δ = 5/6 with a numerator above u64::MAX/4: the range check must not
+        // overflow, nor falsely reject a valid δ (rung-D review, objection 1).
+        let (dn, dd) = (5_000_000_000_000_000_000u64, 6_000_000_000_000_000_000u64);
+        let input = rows(&[&[201, 37], &[1648, 297]]);
+        let before = gram_det(&input);
+        let mut basis = input;
+        lll_reduce_delta(&mut basis, dn, dd);
+        assert_eq!(gram_det(&basis), before, "determinant preserved at δ=5/6");
+        assert!(is_reduced(&basis, dn, dd), "reduced for δ=5/6");
     }
 
     #[test]
