@@ -2499,10 +2499,21 @@ impl MontgomeryCtx {
     }
 
     /// Convert a Montgomery residue back to the ordinary representation.
+    ///
+    /// Accepts any representative: an operand at or above the modulus (or wider
+    /// than it) is reduced first, so the result is always the canonical value
+    /// in `[0, modulus)`. This is the domain's exit boundary, called once per
+    /// computation rather than in the inner loop, so the reduction is free in
+    /// practice and removes any way to get a non-canonical answer.
     #[must_use]
     pub fn decode(&self, value: &BigUint) -> BigUint {
+        let reduced = if value >= &self.modulus {
+            value.modulo(&self.modulus)
+        } else {
+            value.clone()
+        };
         let mut workspace = Vec::new();
-        let result = self.decode_with_workspace(value, &mut workspace);
+        let result = self.decode_with_workspace(&reduced, &mut workspace);
         crate::scrub::zeroize_slice(workspace.as_mut_slice());
         result
     }
@@ -2549,21 +2560,24 @@ impl MontgomeryCtx {
     /// curve point arithmetic) that keep whole computations in the Montgomery
     /// domain and convert only at the boundaries.
     ///
-    /// Operands must be reduced residues (below the modulus): the single
-    /// conditional subtraction in the reduction relies on it, checked in
-    /// debug builds; a release caller violating it gets a non-canonical
-    /// result without notice.
+    /// Operands must be reduced residues, below the modulus — the domain
+    /// contract shared by every in-domain operation, as produced by
+    /// [`Self::encode`] and returned by the domain operations themselves. The
+    /// single conditional subtraction in the reduction relies on it; debug
+    /// builds assert it.
     ///
     /// Unlike [`Self::mul`]/[`Self::pow`] this does **not** scrub its
-    /// workspace: it is the innermost field-multiply, called in tight loops,
-    /// so the per-call volatile wipe is omitted for speed. The omission is
-    /// measured, not assumed — adding the wipe cost ~11% at a 256-bit modulus
-    /// on M4 (63 → 70 ns/call), a real regression on the hot path, while the
-    /// product `BigUint` is wiped by its own `Drop` regardless. Callers who
-    /// need the scratch scrubbed should route through [`Self::mul`], whose
-    /// encode/decode path already wipes.
+    /// workspace: it is the innermost field-multiply, called in tight loops.
+    /// Memory scrubbing is out of scope for this variable-time crate (see the
+    /// crate-level note); the product `BigUint` is wiped by its own `Drop`
+    /// regardless, and callers who want the scratch wiped can route through
+    /// [`Self::mul`], whose encode/decode path already does.
     #[must_use]
     pub fn mul_mont(&self, lhs: &BigUint, rhs: &BigUint) -> BigUint {
+        debug_assert!(
+            lhs < &self.modulus && rhs < &self.modulus,
+            "domain operands arrive reduced"
+        );
         let mut workspace = Vec::new();
         BigUint::montgomery_mul_odd_with_workspace(
             lhs,
@@ -2577,18 +2591,18 @@ impl MontgomeryCtx {
     /// Square a residue that is already in Montgomery form, staying in
     /// Montgomery form.
     ///
-    /// Uses the dedicated squaring kernel (`mont_sqr`, each cross term
-    /// formed once) rather than `mul_mont(value, value)`: it does
-    /// `width·(width+1)/2` multiplications instead of `width²`, so at RSA
-    /// widths it is the faster kernel (~15% at 2048-bit on M4). At very small
+    /// Uses the dedicated squaring kernel (`mont_sqr`, each cross term formed
+    /// once) rather than `mul_mont(value, value)`: it does `width·(width+1)/2`
+    /// multiplications instead of `width²`, so it is the faster kernel at the
+    /// exponentiation-sized moduli where squarings dominate. At very small
     /// widths its fixed doubling and diagonal passes cost more than the saved
-    /// multiplications (~18% slower at 256-bit), a property of the
-    /// separated-squaring construction; the crossover favors `mont_sqr` for
-    /// the exponentiation-sized moduli where squarings dominate. Like
-    /// [`Self::mul_mont`] it does not scrub its workspace, for the same
-    /// hot-path reason. Operands must be reduced residues.
+    /// multiplications, a property of the separated-squaring construction; the
+    /// crossover favors `mont_sqr` where it matters. Like [`Self::mul_mont`]
+    /// it does not scrub its workspace, for the same reason. Operands must be
+    /// reduced residues (the shared domain contract; debug builds assert it).
     #[must_use]
     pub fn square_mont(&self, value: &BigUint) -> BigUint {
+        debug_assert!(value < &self.modulus, "domain operand arrives reduced");
         let mut workspace = Vec::new();
         BigUint::montgomery_sqr_odd_with_workspace(
             value,
@@ -2662,9 +2676,11 @@ impl MontgomeryCtx {
     /// Compute `base^exponent mod modulus` with `base` already in Montgomery form.
     ///
     /// This is useful when callers reuse the same base and can cache the
-    /// encoded value once.
+    /// encoded value once. `base_mont` must be a reduced residue (below the
+    /// modulus), the shared domain contract; debug builds assert it.
     #[must_use]
     pub fn pow_encoded(&self, base_mont: &BigUint, exponent: &BigUint) -> BigUint {
+        debug_assert!(base_mont < &self.modulus, "domain operand arrives reduced");
         let mut workspace = Vec::new();
         let result = self.pow_encoded_with_workspace(base_mont, exponent, &mut workspace);
         crate::scrub::zeroize_slice(workspace.as_mut_slice());

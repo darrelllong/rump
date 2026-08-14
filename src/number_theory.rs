@@ -5097,10 +5097,19 @@ mod tests {
     #[test]
     fn miller_rabin_rejects_all_trivial_witness_sets() {
         // 1_022_117 = 1009 × 1013 clears the trial sieve (no prime factor
-        // ≤ 997). Every base ≥ n − 1 is the trivial ±1 witness, so a set of
-        // only such bases runs zero effective rounds and must not be reported
-        // prime; a genuine base exposes the composite.
+        // ≤ 997). Each base is reduced modulo n before it is classified: one
+        // reducing to 0, 1, or n − 1 is the trivial ±1 case and testifies to
+        // nothing. A non-empty set of only such bases runs zero effective
+        // rounds, and the composite must not then be reported prime — that is
+        // the effective-rounds guard, which the all-trivial cases below cover
+        // (replacing `effective_rounds > 0` with `true` fails them).
         let n = BigUint::from_u64(1_022_117);
+        assert!(!is_probable_prime_with_bases(&n, &[1_022_116])); // ≡ n − 1
+        assert!(!is_probable_prime_with_bases(&n, &[1_022_117])); // ≡ 0
+        assert!(!is_probable_prime_with_bases(&n, &[1, 1_022_116])); // 1 and n − 1
+                                                                     // By contrast, a large *unreduced* base that reduces to a genuine
+                                                                     // witness (u64::MAX ≡ 807_583) must still expose the composite — the
+                                                                     // bug the reduce-first change fixed, where such bases were dropped.
         assert!(!is_probable_prime_with_bases(&n, &[u64::MAX]));
         assert!(!is_probable_prime_with_bases(&n, &[2]));
         assert!(!is_probable_prime(&n));

@@ -15,21 +15,19 @@
 //! inputs; the sampling routines (`random_below` and friends) are driven by a
 //! caller-supplied generator and choose no entropy source of their own.
 //!
-//! Two properties carried over from the parent crate:
+//! Two properties define the intended use:
 //!
-//! - **Variable-time.** Operations take data-dependent paths; do not use
-//!   them where timing must not leak secrets.
-//! - **Best-effort scrubbing, not a forensic guarantee.** Every [`BigUint`]
-//!   volatile-wipes its live limbs on drop, and the Montgomery
-//!   exponentiation ladder ([`MontgomeryCtx::pow`] / `pow_encoded`) wipes its
-//!   workspaces on exit. This shortens the window in which a value sits in
-//!   freed memory; it does not guarantee no copy survives. Spare `Vec`
-//!   capacity is not wiped, a reallocation on any growth path hands the old
-//!   buffer to the allocator with its limbs intact, and the in-domain
-//!   [`MontgomeryCtx::mul_mont`] / `square_mont` leave their scratch dirty
-//!   for speed (documented at each). Treat this as defense in depth, not a
-//!   side-channel or anti-forensic control. `BigUint` also derives `Debug`,
-//!   which prints every limb: do not log a value holding key material.
+//! - **Variable-time, for non-secret data.** Operations take data-dependent
+//!   paths; do not use them where timing must not leak secrets.
+//! - **Not a secret-scrubbing or constant-time type — and does not pretend to
+//!   be.** As cheap defense in depth every [`BigUint`] volatile-wipes its live
+//!   limbs on drop, and the Montgomery exponentiation ladder
+//!   ([`MontgomeryCtx::pow`] / `pow_encoded`) wipes its workspaces on exit.
+//!   That is the extent of it: spare capacity and buffers freed on
+//!   reallocation are not wiped, the in-domain [`MontgomeryCtx::mul_mont`] /
+//!   `square_mont` keep their scratch, and `Debug` prints every limb.
+//!   Cryptographic memory hygiene and constant-time operation are out of
+//!   scope; a consumer that handles key material adds them at that layer.
 //!
 //! Safety policy: `#![deny(unsafe_code)]` crate-wide; the audited
 //! exceptions are the volatile-write scrub helper in `scrub`, which cannot
