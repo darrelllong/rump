@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # GCD & friends at scale: one pilot-bench row per operation and size, across a
-# range far beyond the main tables' 256–4096 bits — where gcd's Half-GCD
-# dispatch and its subquadratic curve become visible against the still-O(n²)
-# gcdext / modinv / jacobi.
+# range far beyond the main tables' 256–4096 bits — where the Half-GCD
+# dispatch and its subquadratic curve become visible. All four ops ride it:
+# gcd and gcdext / modinv through their drivers, jacobi with the symbol state
+# threaded through the recursion.
 #
 # Emits the same Markdown row format as bench_primitives.sh (whose single-op
 # mode does the measuring), so perf_analysis.py renders these files with the

@@ -121,7 +121,7 @@ THEORY = {
     "gcd": "Lehmer O(n²) → Half-GCD O(M(n)·log n)",
     "gcdext": "Lehmer O(n²) → Half-GCD O(M(n)·log n)",
     "modinv": "Lehmer O(n²) → Half-GCD O(M(n)·log n)",
-    "jacobi": "binary → Lehmer-batched quotients, O(n²)",
+    "jacobi": "binary → Lehmer quotients → HGCD-threaded state, O(M(n) log n)",
     "sqrtmod": "O(n³) Tonelli–Shanks (input-dependent)",
     "isprime": "mixture on random operands (input-dependent)",
     "isprime_true": "twelve Miller–Rabin rounds: O(n·M(n))",

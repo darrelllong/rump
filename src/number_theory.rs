@@ -127,6 +127,17 @@ impl QuotientLog {
     }
 }
 
+/// Replay one committed batch through the symbol state. The batch's steps are
+/// swapping remainder steps; in fixed slots the first step reduces whichever
+/// slot held the larger value, and the reduced slot alternates thereafter.
+fn replay_batch(state: &mut JacobiState, first_reduced_is_a: bool, log: &QuotientLog) {
+    let d0 = u8::from(first_reduced_is_a);
+    for i in 0..log.len {
+        let d = if i.is_multiple_of(2) { d0 } else { 1 - d0 };
+        state.update(d, log.q_mod_4[i]);
+    }
+}
+
 /// Aligned 124-bit leading digits of `a >= b`, both non-zero: the same window
 /// (top of the larger) taken from each, ready for [`lehmer_transform`].
 fn leading_pair(a: &BigUint, b: &BigUint) -> (i128, i128) {
@@ -571,7 +582,13 @@ fn abs_diff_bits(a: &BigUint, b: &BigUint) -> usize {
 /// the recursion never saw, and every conclusion drawn after it would be
 /// unsound. So the step refuses — reduction stalls at the boundary by design,
 /// and the caller decides what happens next.
-fn sdiv_step(a: &mut BigUint, b: &mut BigUint, t: &mut Mat2, s: usize) -> bool {
+fn sdiv_step(
+    a: &mut BigUint,
+    b: &mut BigUint,
+    t: &mut Mat2,
+    s: usize,
+    state: Option<&mut JacobiState>,
+) -> bool {
     let a_is_larger = *a >= *b;
     let (hi, lo) = if a_is_larger { (a.clone(), b.clone()) } else { (b.clone(), a.clone()) };
     if lo.is_zero() {
@@ -594,6 +611,10 @@ fn sdiv_step(a: &mut BigUint, b: &mut BigUint, t: &mut Mat2, s: usize) -> bool {
         return false; // reducing even once would cross the boundary
     }
     let r = hi.sub_ref(&q.mul_ref(&lo));
+    if let Some(st) = state {
+        // The as-applied quotient, after any size-guard back-off.
+        st.update(u8::from(a_is_larger), (q.limbs()[0] & 3) as u8);
+    }
     if a_is_larger {
         *a = r;
         *t = t.reduce_top(&q);
@@ -620,7 +641,12 @@ const HGCD_BASE_LIMBS: usize = 96;
 /// `s + LEHMER_MARGIN` it physically cannot drop either to `s` bits — and
 /// everywhere above the boundary, certified quotients are Euclid's, so the
 /// batch is the same reduction the guarded steps would have taken.
-fn hgcd_base(a: &BigUint, b: &BigUint, s: usize) -> (Mat2, BigUint, BigUint) {
+fn hgcd_base(
+    a: &BigUint,
+    b: &BigUint,
+    s: usize,
+    mut state: Option<&mut JacobiState>,
+) -> (Mat2, BigUint, BigUint) {
     /// A batch moves each element by at most the 124-bit digit window; the
     /// slack above that covers the window's own imprecision at its last step.
     const LEHMER_MARGIN: usize = 130;
@@ -634,7 +660,8 @@ fn hgcd_base(a: &BigUint, b: &BigUint, s: usize) -> (Mat2, BigUint, BigUint) {
             let a_is_larger = aa >= bb;
             let (hi, lo) = if a_is_larger { (&aa, &bb) } else { (&bb, &aa) };
             let (u_hat, v_hat) = leading_pair(hi, lo);
-            let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, None);
+            let mut log = QuotientLog::new();
+            let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, Some(&mut log));
             // m01 == 0 means the digits pinned no quotient — the pair is too
             // lopsided for its leading windows to overlap — and division is
             // the only way forward.
@@ -657,23 +684,42 @@ fn hgcd_base(a: &BigUint, b: &BigUint, s: usize) -> (Mat2, BigUint, BigUint) {
                     combine_signed(m10, row_hi.0, m11, row_lo.0),
                     combine_signed(m10, row_hi.1, m11, row_lo.1),
                 );
-                if a_is_larger {
-                    (t.m00, t.m01) = new_hi_row;
-                    (t.m10, t.m11) = new_lo_row;
-                    aa = next_hi;
-                    bb = next_lo;
+                if let Some(st) = state.as_deref_mut() {
+                    replay_batch(st, a_is_larger, &log);
+                }
+                // A batch of k swapping steps leaves the slot that held the
+                // larger input holding the even-indexed member of the final
+                // remainder pair. The transform rows follow the same
+                // placement, so the matrix, the values, and the symbol
+                // state's fixed slots stay aligned.
+                let even_steps = log.len.is_multiple_of(2);
+                let (hi_slot_val, lo_slot_val) = if even_steps {
+                    (next_hi, next_lo)
                 } else {
-                    (t.m10, t.m11) = new_hi_row;
-                    (t.m00, t.m01) = new_lo_row;
-                    bb = next_hi;
-                    aa = next_lo;
+                    (next_lo, next_hi)
+                };
+                let (hi_slot_row, lo_slot_row) = if even_steps {
+                    (new_hi_row, new_lo_row)
+                } else {
+                    (new_lo_row, new_hi_row)
+                };
+                if a_is_larger {
+                    (t.m00, t.m01) = hi_slot_row;
+                    (t.m10, t.m11) = lo_slot_row;
+                    aa = hi_slot_val;
+                    bb = lo_slot_val;
+                } else {
+                    (t.m10, t.m11) = hi_slot_row;
+                    (t.m00, t.m01) = lo_slot_row;
+                    bb = hi_slot_val;
+                    aa = lo_slot_val;
                 }
                 continue;
             }
         }
         // Within a batch-width of the boundary a batch could sail past it, so
         // the last stretch goes one guarded division at a time.
-        if !sdiv_step(&mut aa, &mut bb, &mut t, s) {
+        if !sdiv_step(&mut aa, &mut bb, &mut t, s, state.as_deref_mut()) {
             break;
         }
     }
@@ -714,7 +760,11 @@ fn hgcd_base(a: &BigUint, b: &BigUint, s: usize) -> (Mat2, BigUint, BigUint) {
 /// integer gcd computation*, Math. Comp. 77 (2008), 589–607, Figure 4 — the
 /// algorithm behind GMP's `mpn_hgcd`. O(M(n)·log n) with fast multiplication
 /// carrying the matrix work.
-fn hgcd(a: &BigUint, b: &BigUint) -> (Mat2, BigUint, BigUint) {
+fn hgcd(
+    a: &BigUint,
+    b: &BigUint,
+    mut state: Option<&mut JacobiState>,
+) -> (Mat2, BigUint, BigUint) {
     let n = pair_size(a, b);
     let s = n / 2 + 1; // Möller's S = ⌊N/2⌋ + 1
     debug_assert!(
@@ -737,14 +787,14 @@ fn hgcd(a: &BigUint, b: &BigUint) -> (Mat2, BigUint, BigUint) {
     // simply reducing the pair with batched Lehmer steps, so the recursion
     // bottoms out here rather than at trivial sizes.
     if n <= HGCD_BASE_LIMBS * 64 {
-        return hgcd_base(&aa, &bb, s);
+        return hgcd_base(&aa, &bb, s, state);
     }
 
     // First recursive call (Step 2): only when the smaller element clears
     // ⌊3N/4⌋ + 2, which puts both top halves above the sub-call's boundary.
     if pair_min_size(&aa, &bb) > 3 * n / 4 + 2 {
         let p1 = n / 2;
-        let (t1, alpha, beta) = hgcd(&shr(&aa, p1), &shr(&bb, p1));
+        let (t1, alpha, beta) = hgcd(&shr(&aa, p1), &shr(&bb, p1), state.as_deref_mut());
         let (na, nb) = hgcd_adjust(&t1, &alpha, &beta, &aa, &bb, p1);
         aa = na;
         bb = nb;
@@ -755,7 +805,7 @@ fn hgcd(a: &BigUint, b: &BigUint) -> (Mat2, BigUint, BigUint) {
     // against the bits it saw, so its last step or two may be wrong for the
     // full operands. At most four full-width guarded steps make it right.
     while pair_size(&aa, &bb) > 3 * n / 4 + 1 && abs_diff_bits(&aa, &bb) > s {
-        if !sdiv_step(&mut aa, &mut bb, &mut t, s) {
+        if !sdiv_step(&mut aa, &mut bb, &mut t, s, state.as_deref_mut()) {
             break;
         }
     }
@@ -766,7 +816,7 @@ fn hgcd(a: &BigUint, b: &BigUint) -> (Mat2, BigUint, BigUint) {
     if pair_min_size(&aa, &bb) > s + 2 && abs_diff_bits(&aa, &bb) > s {
         let n2 = pair_size(&aa, &bb);
         let p2 = 2 * s + 1 - n2; // 2S − N2 + 1, positive since N2 ≤ 2S − 1
-        let (t2, alpha, beta) = hgcd(&shr(&aa, p2), &shr(&bb, p2));
+        let (t2, alpha, beta) = hgcd(&shr(&aa, p2), &shr(&bb, p2), state.as_deref_mut());
         let (na, nb) = hgcd_adjust(&t2, &alpha, &beta, &aa, &bb, p2);
         aa = na;
         bb = nb;
@@ -775,7 +825,7 @@ fn hgcd(a: &BigUint, b: &BigUint) -> (Mat2, BigUint, BigUint) {
 
     // Repair the second splice and land on the target (Step 20).
     while abs_diff_bits(&aa, &bb) > s {
-        if !sdiv_step(&mut aa, &mut bb, &mut t, s) {
+        if !sdiv_step(&mut aa, &mut bb, &mut t, s, state.as_deref_mut()) {
             break;
         }
     }
@@ -825,7 +875,7 @@ fn gcd_via_hgcd(a: &BigUint, b: &BigUint) -> BigUint {
             aa = core::mem::replace(&mut bb, r);
             continue;
         }
-        let (_t, ra, rb) = hgcd(&aa, &bb);
+        let (_t, ra, rb) = hgcd(&aa, &bb, None);
         (aa, bb) = if ra >= rb { (ra, rb) } else { (rb, ra) };
     }
 }
@@ -878,7 +928,7 @@ fn gcd_extended_via_hgcd(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) 
             aa = core::mem::replace(&mut bb, r);
             continue;
         }
-        let (round, ra, rb) = hgcd(&aa, &bb);
+        let (round, ra, rb) = hgcd(&aa, &bb, None);
         acc = round.compose(&acc);
         if ra >= rb {
             (aa, bb) = (ra, rb);
@@ -1092,6 +1142,14 @@ pub fn lcm(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 /// argument, `(a/n) = ((a - n)/n)` — the binary gcd this shadows, which is
 /// markedly faster here than a full division per step.
 ///
+/// That binary engine serves small operands. Above
+/// [`JACOBI_LEHMER_THRESHOLD_LIMBS`] the computation moves to the Euclidean
+/// quotient sequence with Lehmer batching, a state machine replaying each
+/// batch's quotients (Möller's design, after Schönhage's identities); above
+/// [`JACOBI_HGCD_THRESHOLD_LIMBS`] that state threads through the Half-GCD
+/// recursion and the symbol is subquadratic, O(M(n)·log n), matching the
+/// crate's gcd.
+///
 /// For prime `n` this is the Legendre symbol: `1` for quadratic residues,
 /// `-1` for non-residues, `0` when `n` divides `a`. `(a/1) = 1` by the
 /// empty-product convention.
@@ -1110,7 +1168,11 @@ pub fn jacobi(a: &BigUint, n: &BigUint) -> Option<i8> {
         return None;
     }
     let reduced = a.modulo(n);
-    if n.limbs().len().min(reduced.limbs().len()) >= JACOBI_LEHMER_THRESHOLD_LIMBS {
+    let inner = n.limbs().len().min(reduced.limbs().len());
+    if inner >= JACOBI_HGCD_THRESHOLD_LIMBS {
+        return Some(jacobi_hgcd(reduced, n.clone()));
+    }
+    if inner >= JACOBI_LEHMER_THRESHOLD_LIMBS {
         return Some(jacobi_lehmer(reduced, n.clone()));
     }
     jacobi_binary(reduced, n.clone())
@@ -1187,9 +1249,18 @@ fn jacobi_lehmer(x: BigUint, y: BigUint) -> i8 {
     if x.is_zero() {
         return i8::from(y.is_one());
     }
+    let state = JacobiState::new((x.limbs()[0] & 3) as u8, (y.limbs()[0] & 3) as u8);
+    jacobi_lehmer_with_state(x, y, state)
+}
+
+/// The state-carrying core of [`jacobi_lehmer`]: continue the reduction of
+/// `(x, y)` — the state's fixed `a` and `b` slots — to completion and read
+/// out the symbol. Entered fresh by [`jacobi_lehmer`] and mid-flight by the
+/// Half-GCD driver's tail.
+fn jacobi_lehmer_with_state(x: BigUint, y: BigUint, state: JacobiState) -> i8 {
     let mut x = x;
     let mut y = y;
-    let mut state = JacobiState::new((x.limbs()[0] & 3) as u8, (y.limbs()[0] & 3) as u8);
+    let mut state = state;
     loop {
         if x.is_zero() {
             return if y.is_one() { state.finish() } else { 0 };
@@ -1209,13 +1280,7 @@ fn jacobi_lehmer(x: BigUint, y: BigUint) -> i8 {
             if m01 != 0 {
                 let next_hi = combine_unsigned(m00, hi, m01, lo);
                 let next_lo = combine_unsigned(m10, hi, m11, lo);
-                // Replay the batch: the first step reduced the slot holding
-                // the larger value, and swapping steps alternate thereafter.
-                let d0 = u8::from(x_is_hi);
-                for i in 0..log.len {
-                    let d = if i % 2 == 0 { d0 } else { 1 - d0 };
-                    state.update(d, log.q_mod_4[i]);
-                }
+                replay_batch(&mut state, x_is_hi, &log);
                 // Parity places the results: the slot that held r₀ now holds
                 // the even-indexed remainder of the final pair.
                 let even_steps = log.len.is_multiple_of(2);
@@ -1241,6 +1306,82 @@ fn jacobi_lehmer(x: BigUint, y: BigUint) -> i8 {
         } else {
             y = r;
         }
+    }
+}
+
+/// Below this many limbs in the smaller operand, [`jacobi`] stays on the
+/// Lehmer-batched engine; at or above it, the symbol state threads through
+/// the Half-GCD recursion and the whole computation runs in O(M(n)·log n).
+/// Measured on M4: Lehmer ahead 10% at 1536 limbs, the recursion ahead 7% at
+/// 2048 and pulling away — 1.5× at 4096, 1.9× at 8192, 2.2× at 16384 limbs
+/// (1 Mbit) — the same crossover as plain gcd's, which is also where GMP
+/// pins its analogous `JACOBI_DC_THRESHOLD`. Correctness does not depend on
+/// the value — the suite threads the state through [`hgcd`] at sizes from
+/// 130 bits up and exercises [`jacobi_hgcd_engine`]'s recursion directly.
+const JACOBI_HGCD_THRESHOLD_LIMBS: usize = 2048;
+
+/// [`jacobi`]'s subquadratic engine: the reduction of [`gcd_via_hgcd`] with
+/// the [`JacobiState`] threaded through every applied quotient. Takes `x`
+/// already reduced modulo the odd `y`.
+///
+/// The state's slots are fixed to `x` and `y`, and [`hgcd`] preserves slot
+/// order — its base case places each Lehmer batch's results by step parity,
+/// and its guarded divisions reduce one slot in place — so each round's pair
+/// drops back into the same slots. Nothing is ever sorted; the slots are
+/// semantic, and a swap would silently misdirect every subsequent state
+/// update. Each round halves the pair, so the rounds' costs form the same
+/// geometric series as gcd's. When the pair falls below the crossover the
+/// Lehmer engine finishes mid-flight through [`jacobi_lehmer_with_state`].
+///
+/// References: the threading design is Möller's, as realized in GMP's
+/// `mpn_hgcd_jacobi` (`hgcd_jacobi.c`); the published subquadratic symbol is
+/// Brent and Zimmermann, *An O(M(n) log n) algorithm for the Jacobi symbol*,
+/// ANTS-IX, LNCS 6197 (2010), 83–95, which reaches the same complexity by
+/// the binary route.
+fn jacobi_hgcd(x: BigUint, y: BigUint) -> i8 {
+    debug_assert!(y.is_odd() && x < y);
+    if x.is_zero() {
+        return i8::from(y.is_one());
+    }
+    let state = JacobiState::new((x.limbs()[0] & 3) as u8, (y.limbs()[0] & 3) as u8);
+    jacobi_hgcd_engine(x, y, state, JACOBI_HGCD_THRESHOLD_LIMBS)
+}
+
+/// The round loop of [`jacobi_hgcd`], with the Lehmer handoff size a
+/// parameter so the crossover probe can measure the recursion at sizes the
+/// shipped threshold routes elsewhere — the same discipline as the gcd
+/// probes, which measure the code as shipped rather than a copy of it.
+fn jacobi_hgcd_engine(x: BigUint, y: BigUint, state: JacobiState, tail_limbs: usize) -> i8 {
+    let mut state = state;
+    let mut x = x;
+    let mut y = y;
+    loop {
+        if x.limbs().len().min(y.limbs().len()) < tail_limbs {
+            return jacobi_lehmer_with_state(x, y, state);
+        }
+        let s = pair_size(&x, &y) / 2 + 1;
+        // hgcd needs the smaller element above the boundary and a gap wide
+        // enough to close; otherwise one division step makes sharp progress
+        // (an unbalanced pair collapses, a close pair drops to its
+        // difference), with the state fed the as-applied quotient exactly as
+        // in the Lehmer engine's guarded path.
+        if pair_min_size(&x, &y) <= s || abs_diff_bits(&x, &y) <= s {
+            let x_is_hi = x >= y;
+            let (q, r) = if x_is_hi { x.div_rem(&y) } else { y.div_rem(&x) };
+            state.update(
+                u8::from(x_is_hi),
+                (q.limbs().first().copied().unwrap_or(0) & 3) as u8,
+            );
+            if x_is_hi {
+                x = r;
+            } else {
+                y = r;
+            }
+            continue;
+        }
+        let (_t, rx, ry) = hgcd(&x, &y, Some(&mut state));
+        x = rx;
+        y = ry;
     }
 }
 
@@ -1908,6 +2049,144 @@ mod tests {
     }
 
     #[test]
+    fn jacobi_state_through_hgcd_matches_binary() {
+        use super::{hgcd, jacobi_lehmer_with_state, JacobiState};
+        let mut rng = SplitMix64 { state: 0x7ac0_b1a5_ca55_e77e };
+        // Sizes span the batched base case (≤ 6144 bits) and the recursion
+        // above it. Each case threads the state through one hgcd call and
+        // hands the reduced pair to the Lehmer engine mid-flight — exactly
+        // the driver's composition, at sizes the dispatch threshold would
+        // never route here.
+        for &(bits, reps) in &[
+            (130usize, 60),
+            (500, 40),
+            (1500, 30),
+            (4000, 20),
+            (8000, 10),
+            (16000, 6),
+            (40000, 3),
+        ] {
+            for _ in 0..reps {
+                // Both operands full width, satisfying hgcd's precondition
+                // #min > ⌊bits/2⌋ + 1; sorted so x < y, and y made odd, which
+                // only raises it.
+                let mut x = draw_below(&mut rng, &pow2(bits));
+                let mut y = draw_below(&mut rng, &pow2(bits));
+                x.set_bit(bits - 1);
+                y.set_bit(bits - 1);
+                if x >= y {
+                    core::mem::swap(&mut x, &mut y);
+                }
+                y.set_bit(0);
+                if x >= y {
+                    continue;
+                }
+                let mut state =
+                    JacobiState::new((x.limbs()[0] & 3) as u8, (y.limbs()[0] & 3) as u8);
+                let (_t, rx, ry) = hgcd(&x, &y, Some(&mut state));
+                assert_eq!(
+                    jacobi_lehmer_with_state(rx, ry, state),
+                    jacobi_binary_oracle(&x, &y).unwrap(),
+                    "state through hgcd diverged at {bits} bits"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn jacobi_hgcd_driver_matches_lehmer() {
+        use super::{jacobi_hgcd, jacobi_lehmer, JACOBI_HGCD_THRESHOLD_LIMBS};
+        let mut rng = SplitMix64 { state: 0x5eed_7e57_0dd1_7e57 };
+        let full_width_odd = |rng: &mut SplitMix64, limbs: usize| {
+            let bits = limbs * 64;
+            let mut y = draw_below(rng, &pow2(bits));
+            y.set_bit(bits - 1);
+            y.set_bit(0);
+            y
+        };
+        // One driver round at the threshold plus a margin, two rounds at
+        // twice it (each round halves the pair). The Lehmer engine — itself
+        // pinned to the binary oracle above — is the reference.
+        for &limbs in &[
+            JACOBI_HGCD_THRESHOLD_LIMBS + 8,
+            2 * JACOBI_HGCD_THRESHOLD_LIMBS + 8,
+        ] {
+            let y = full_width_odd(&mut rng, limbs);
+            let x = draw_below(&mut rng, &y);
+            assert_eq!(
+                jacobi_hgcd(x.clone(), y.clone()),
+                jacobi_lehmer(x.clone(), y.clone()),
+                "driver diverged at {limbs} limbs"
+            );
+            assert_eq!(
+                super::jacobi(&x, &y),
+                Some(jacobi_lehmer(x, y)),
+                "public jacobi dispatch diverged at {limbs} limbs"
+            );
+        }
+        // Structured shapes that force the driver's division fallback: a pair
+        // too unbalanced for hgcd's boundary (smaller element at or below s
+        // bits), and a pair too close (difference at or below s bits).
+        let y = full_width_odd(&mut rng, 2 * JACOBI_HGCD_THRESHOLD_LIMBS + 56);
+        let mut x = draw_below(&mut rng, &pow2(JACOBI_HGCD_THRESHOLD_LIMBS * 64));
+        x.set_bit(JACOBI_HGCD_THRESHOLD_LIMBS * 64 - 1);
+        assert_eq!(
+            jacobi_hgcd(x.clone(), y.clone()),
+            jacobi_lehmer(x, y),
+            "unbalanced fallback diverged"
+        );
+        let y = full_width_odd(&mut rng, JACOBI_HGCD_THRESHOLD_LIMBS + 52);
+        let x = y.sub_ref(&BigUint::from_u64(2));
+        assert_eq!(
+            jacobi_hgcd(x.clone(), y.clone()),
+            jacobi_lehmer(x, y),
+            "close-pair fallback diverged"
+        );
+    }
+
+    #[test]
+    #[ignore = "timing probe for the Lehmer/HGCD jacobi crossover; run with --ignored"]
+    fn jacobi_hgcd_crossover_timing() {
+        use super::{
+            jacobi_hgcd_engine, jacobi_lehmer, JacobiState, JACOBI_LEHMER_THRESHOLD_LIMBS,
+        };
+        use std::hint::black_box;
+        use std::time::Instant;
+        let mut rng = SplitMix64 { state: 0xc0de_57a7_e0f0_a11e };
+        eprintln!("{:>7} {:>12} {:>12}  winner", "limbs", "lehmer_ms", "hgcd_ms");
+        for &limbs in &[256usize, 512, 1024, 1536, 2048, 3072, 4096, 8192, 16384] {
+            let bits = limbs * 64;
+            let mut y = draw_below(&mut rng, &pow2(bits));
+            y.set_bit(bits - 1);
+            y.set_bit(0);
+            let x = draw_below(&mut rng, &y);
+            let time = |f: &dyn Fn()| {
+                let mut best = f64::INFINITY;
+                for _ in 0..3 {
+                    let t0 = Instant::now();
+                    f();
+                    best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+                }
+                best
+            };
+            let lehmer = time(&|| {
+                black_box(jacobi_lehmer(x.clone(), y.clone()));
+            });
+            let state = JacobiState::new((x.limbs()[0] & 3) as u8, (y.limbs()[0] & 3) as u8);
+            let hgcd_t = time(&|| {
+                black_box(jacobi_hgcd_engine(
+                    x.clone(),
+                    y.clone(),
+                    state,
+                    JACOBI_LEHMER_THRESHOLD_LIMBS,
+                ));
+            });
+            let winner = if lehmer <= hgcd_t { "lehmer" } else { "hgcd" };
+            eprintln!("{limbs:7} {lehmer:12.3} {hgcd_t:12.3}  {winner}");
+        }
+    }
+
+    #[test]
     fn hgcd_matrix_step_algebra() {
         use super::Mat2;
         let (a, b) = (BigUint::from_u64(240), BigUint::from_u64(46));
@@ -2022,7 +2301,7 @@ mod tests {
                 b.set_bit(bits - 1);
                 let s = bits / 2 + 1;
 
-                let (t, ra, rb) = hgcd(&a, &b);
+                let (t, ra, rb) = hgcd(&a, &b, None);
                 // The transform reproduces the reduced pair from the inputs.
                 assert_eq!(
                     t.apply(&a, &b),

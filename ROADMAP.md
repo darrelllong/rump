@@ -11,11 +11,12 @@ built**.
 Items 1–9 of the priority table are approved and ordered; everything below
 them remains subject to the joint triage.
 
-1. **Half-GCD-threaded Jacobi** — thread the symbol state through the hgcd
-   recursion (every applied quotient already materializes in a Lehmer batch
-   or a guarded division); takes the symbol subquadratic and closes its
-   remaining 3.5× against this crate's own gcd. Brent–Zimmermann, ANTS-IX
-   2010; GMP's `hgcd_jacobi.c` as the structural reference.
+1. **Half-GCD-threaded Jacobi** — completed 2026-08-13. The symbol state
+   threads through the hgcd recursion (every applied quotient materializes
+   in a Lehmer batch or a guarded division); crossover measured at 2048
+   limbs, the same as gcd's. At 1 Mbit the ratio to GMP fell 41× → 11.9×
+   and the symbol now costs what this crate's gcd costs, equal to within
+   0.1% (PERFORMANCE.md, *GCD at scale*).
 2. **In-place `add`/`sub`** — remove the fresh-allocation-per-call ratios on
    the cheapest operations.
 3. **Baillie–PSW** — strong Lucas test composed with the existing
@@ -104,8 +105,8 @@ testing tools, documented as such. `reduced_residue_system` is enumeration
 
 **Efficient — all of it.** Present: Legendre, Jacobi, Kronecker (no factoring
 needed). Add: `is_quadratic_residue` / `quadratic_character` wrappers, and
-the Hilbert symbol (needs §2's `valuation`). The standing performance item
-lands here too: subquadratic Jacobi (Brent–Zimmermann, ANTS 2010).
+the Hilbert symbol (needs §2's `valuation`). The subquadratic Jacobi
+(queue item 1) landed 2026-08-13.
 
 ## 7. Modular roots
 

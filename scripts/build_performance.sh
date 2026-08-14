@@ -227,9 +227,9 @@ The comparison sorts rump's primitives into groups, and the grouping is by
   reduction step and stood 12–29× behind; on binary reciprocity it stands
   2–12×. At 256–4096 bits all four engines are O(n²) while GMP runs
   subquadratic **Half-GCD (HGCD)** under each, so the ratios rise with size on
-  the wide M4/EPYC cores. Above ~131 kbit `gcd` dispatches to its own
-  Half-GCD (see *GCD at scale* below); `gcd_extended`, `mod_inverse`, and
-  `jacobi` pay the quadratic curve at every size. (On the Pi the ratios narrow
+  the wide M4/EPYC cores. Above its crossover each of the four dispatches to
+  a Half-GCD of its own — `gcd` and `jacobi` at ~131 kbit, `gcd_extended`
+  and `mod_inverse` at ~32 kbit (see *GCD at scale* below). (On the Pi the ratios narrow
   with size instead — from ~10–12× at 256 bits to ~4× at 4096 — as rump's
   fixed per-call overhead amortizes.)
 
@@ -254,21 +254,20 @@ Completed to date: double-digit Lehmer for the Euclid family (17–89× behind
 GMP reduced to 4–13× at 256–4096 bits), the division-free binary Jacobi
 (12–29× reduced to 2–12×), Toom-3 and Toom-4 multiplication, Half-GCD behind
 `gcd` (subquadratic above ~131 kbit), Half-GCD behind `gcd_extended` and
-`mod_inverse` (above ~32 kbit), and the Lehmer-batched Jacobi carrying
-Möller's symbol state (above ~4 kbit; 181× reduced to 41× at 1 Mbit). The
-section below measures the results at scale.
+`mod_inverse` (above ~32 kbit), the Lehmer-batched Jacobi carrying
+Möller's symbol state (above ~4 kbit; 181× at 1 Mbit reduced to 41×), and
+the Half-GCD-threaded Jacobi (above ~131 kbit) — the symbol state carried
+through the recursion, whose every applied quotient materializes in a
+Lehmer batch or a guarded division, taking the symbol to O(M(n)·log n) and
+the 1 Mbit ratio from 41× to 11.9×, where the symbol costs what `gcd`
+costs (published treatment: Brent and Zimmermann, *An O(M(n) log n)
+algorithm for the Jacobi symbol*, ANTS-IX, 2010; the threading design is
+Möller's, GMP's `mpn_hgcd_jacobi`). The section below measures the results
+at scale.
 
 Remaining, in priority order:
 
-1. **Half-GCD-threaded `jacobi`.** The symbol state and the quotient logging
-   are in place; what remains is threading them through the Half-GCD
-   recursion itself, whose every applied quotient is already materialized in
-   a Lehmer batch or a guarded division. That takes the symbol subquadratic
-   and closes the remaining 3.5× between `jacobi` and rump's own `gcd`
-   (published treatment: Brent and Zimmermann, *An O(M(n) log n) algorithm
-   for the Jacobi symbol*, ANTS-IX, 2010; GMP's `mpn_jacobi` implements the
-   left-to-right variant this codebase follows).
-2. **In-place `add`/`sub`.** The 2–15× ratios on the cheapest operations are
+1. **In-place `add`/`sub`.** The 2–15× ratios on the cheapest operations are
    allocation: a fresh `Vec` per call against GMP's in-place `mpn` writes.
    The absolute difference is tens of nanoseconds per call, which bounds the
    value of the work.
@@ -276,7 +275,7 @@ Remaining, in priority order:
 ## GCD at scale
 
 The tables above stop at 4096 bits, where the whole family runs its Lehmer
-(or binary) engine. Above that, three of the four functions change algorithm.
+(or binary) engine. Above that, every one of the four changes algorithm.
 `gcd` dispatches to **Half-GCD (HGCD)** past ~131 kbit (2048 limbs): Möller,
 *On Schönhage's algorithm and subquadratic integer gcd computation*, Math.
 Comp. 77 (2008), 589–607 — the algorithm behind GMP's `mpn_hgcd` — computing
@@ -285,27 +284,31 @@ Lehmer's O(n²) with O(M(n)·log n). `gcd_extended` and `mod_inverse` ride the
 same driver with the transform accumulated, and their crossover is lower,
 ~32 kbit (512 limbs), because Lehmer's extended form carries full-width
 signed cofactors through every batch while the driver folds that work into
-one matrix accumulation per round. `jacobi` dispatches at ~4 kbit (64 limbs)
-from the binary algorithm to a Lehmer-batched quotient sequence, with
-Möller's five-bit symbol state replaying each batch's applied quotients —
-still O(n²), but advancing ~35 certified quotients per full-width pass where
-the binary loop advances a few bits. This section measures the family from
-8 kbit to 1 Mbit on the M4:
+one matrix accumulation per round. `jacobi` dispatches twice: at ~4 kbit
+(64 limbs) from the binary algorithm to a Lehmer-batched quotient sequence,
+Möller's five-bit symbol state replaying each batch's applied quotients, and
+at ~131 kbit (2048 limbs, the same crossover as `gcd`'s) the state threads
+through the Half-GCD recursion itself — every quotient the recursion applies
+materializes in a Lehmer batch or a guarded division, and the state consumes
+each one — making the symbol O(M(n)·log n) end to end. This section measures
+the family from 8 kbit to 1 Mbit on the M4:
 
-- **Three curves bend; one does not.** `gcd`, `gcd_extended`, and
-  `mod_inverse` fit visibly shallower exponents than `jacobi`'s α ≈ 2.0 (the
-  fit table below), and the fits understate the change: each curve's lower
-  range still runs Lehmer, with the subquadratic regime beginning only at
-  its dispatch size.
+- **All four curves bend.** Every fit lands well below the Lehmer engines'
+  α ≈ 2 (the fit table below), and the fits understate the change: each
+  curve's lower range still runs Lehmer, with the subquadratic regime
+  beginning only at its dispatch size. `jacobi`'s α ≈ 1.44 is the family's
+  shallowest for the same mixed-regime reason, read in the other direction:
+  its Lehmer segment is the family's most expensive, so the drop at its
+  crossover is the steepest.
 - **The ratios to GMP grow slowly for the Half-GCD functions and
   quadratically for `jacobi`.** Across the sweep, `gcd` runs 4.1× → 12×,
   `mod_inverse` 8.3× → 16×, and `gcd_extended` 7.8× → 21×; the residual
   growth comes from the multiplication ladder underneath — GMP's HGCD
   multiplies by FFT at these sizes, rump's by Toom — plus Half-GCD's own
-  constants. `jacobi` on the batched engine runs 4.6× at 8 kbit, 15.6× at
-  256 kbit, and 41× at 1 Mbit — before the batching it reached 181×, and the
-  remaining growth is the quadratic-versus-subquadratic gap that Half-GCD
-  threading closes.
+  constants. `jacobi` runs 13.4× at 8 kbit narrowing to 9.5× at 64 kbit on
+  the batched engine; where the threaded recursion engages the ratio drops
+  to 6.6× at 128 kbit and then tracks `gcd`'s own — 7.6×, 9.1×, 11.9× at
+  256 kbit, 512 kbit, 1 Mbit, against `gcd`'s 7.5×, 9.0×, 12.0×.
 - **The jacobi ratio decomposes into two measured factors.** GMP computes
   the symbol as a symbol-tracking variant of its subquadratic gcd and pays
   the same price for both: 39.49 ms against 39.02 ms for gcd at 1 Mbit.
@@ -317,13 +320,16 @@ the binary loop advances a few bits. This section measures the family from
   symbol state removes the low-bits obstruction — Schönhage's identities
   need only the quotient mod 4 — and the Lehmer-batched engine built on it
   brings 1 Mbit to 1.62 s and the ratio to 41×, leaving a factor of 3.5
-  against rump's own gcd. That remainder is quadratic versus subquadratic:
-  threading the same state through the Half-GCD recursion, whose every
-  applied quotient is already materialized, closes it — after which the
-  symbol costs what gcd costs, as GMP's equal timings demonstrate.
-- **The GMP column states the goal:** α ≈ 1.5 across the whole family,
-  achieved by running HGCD beneath every one of these operations. The
-  remaining item is `jacobi`.
+  against rump's own gcd — quadratic versus subquadratic. Threading the
+  same state through the Half-GCD recursion removes it: 470.44 ms against
+  `gcd`'s 470.12 ms at 1 Mbit, equal to within 0.1%. The symbol costs what
+  gcd costs, exactly as GMP's equal timings predicted, and the ratio stands
+  at 11.9× — the lowest in the family.
+- **The GMP column states the standard:** α ≈ 1.5 across the whole family,
+  achieved by running HGCD beneath every one of these operations — which
+  this crate now does. What separates the columns is no longer the
+  algorithm but its constants: Toom against FFT under the matrix work, and
+  GMP's assembly base cases.
 
 MD
 
