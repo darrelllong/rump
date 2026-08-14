@@ -1798,27 +1798,31 @@ pub fn miller_rabin_witness(candidate: &BigUint, witness: &BigUint) -> bool {
     is_witness(&witness, &ctx, &odd_factor, two_adic_exponent)
 }
 
-fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
-    if candidate.is_zero() {
-        return false;
+/// Trial-division screen shared by the probable-prime tests: `Some(true)`
+/// when the candidate *is* one of the sieve primes, `Some(false)` when the
+/// sieve proves it composite (or it is zero or one), `None` when it
+/// survives to the probabilistic stages.
+fn small_prime_screen(candidate: &BigUint) -> Option<bool> {
+    if candidate.is_zero() || candidate == &BigUint::one() {
+        return Some(false);
     }
-    if candidate == &BigUint::one() {
-        return false;
-    }
-
     for &prime in &SMALL_TRIAL_PRIMES {
         let prime = u64::from(prime);
-        let remainder = candidate.rem_u64(prime);
-        if remainder == 0 {
+        if candidate.rem_u64(prime) == 0 {
             // A small prime divides itself as well as its composite
             // multiples. For candidates below 2^10, the residue modulo 2^10
             // distinguishes the identity case without allocating a temporary
             // BigUint for every sieve entry.
-            if candidate.bits() <= 10 && candidate.rem_u64(1u64 << 10) == prime {
-                return true;
-            }
-            return false;
+            let is_the_prime = candidate.bits() <= 10 && candidate.rem_u64(1u64 << 10) == prime;
+            return Some(is_the_prime);
         }
+    }
+    None
+}
+
+fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
+    if let Some(verdict) = small_prime_screen(candidate) {
+        return verdict;
     }
 
     if bases.is_empty() {
@@ -1845,6 +1849,197 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
     }
 
     true
+}
+
+/// Selfridge's Method A: the discriminant for the Lucas stage, the first of
+/// `5, -7, 9, -11, 13, …` whose Jacobi symbol `(D/n)` is `-1`. Returns
+/// `None` when the search itself proves `n` composite — a zero symbol
+/// exposing a factor shared with a candidate discriminant, or `n` a perfect
+/// square, for which no discriminant has symbol `-1` and which is therefore
+/// ruled out directly once three candidates have failed (Baillie and
+/// Wagstaff, §6). A zero symbol with `n` *equal* to the candidate
+/// discriminant carries no information (n is 5, 7, 11, …) and the search
+/// continues past it.
+fn selfridge_discriminant(n: &BigUint) -> Option<i64> {
+    debug_assert!(n.is_odd() && !n.is_one());
+    let mut d_abs: u64 = 5;
+    let mut positive = true;
+    let mut attempts = 0u32;
+    loop {
+        let reduced = BigUint::from_u64(d_abs).modulo(n);
+        let residue = if positive || reduced.is_zero() {
+            reduced
+        } else {
+            n.sub_ref(&reduced)
+        };
+        match jacobi(&residue, n) {
+            Some(-1) => {
+                let magnitude =
+                    i64::try_from(d_abs).expect("discriminant search stays far below i64::MAX");
+                return Some(if positive { magnitude } else { -magnitude });
+            }
+            Some(0) if *n != BigUint::from_u64(d_abs) => return None,
+            _ => {}
+        }
+        attempts += 1;
+        if attempts == 3 {
+            let root = n.sqrt_floor();
+            if root.square_ref() == *n {
+                return None;
+            }
+        }
+        d_abs += 2;
+        positive = !positive;
+    }
+}
+
+/// The strong Lucas test proper, for an odd `n > 1` with its Selfridge
+/// discriminant already chosen: `P = 1`, `Q = (1 - D)/4`, and
+/// `n + 1 = 2^s·d` with `d` odd. Accepts when `U_d ≡ 0 (mod n)`, or
+/// `V_{d·2^r} ≡ 0 (mod n)` for some `0 ≤ r < s` — the conditions every
+/// prime satisfies (Baillie and Wagstaff, §5; Crandall and Pomerance,
+/// Algorithm 3.6.9).
+///
+/// The sequence runs left to right over `d`'s bits on the triple
+/// `(U_k, V_k, Q^k)`, all as Montgomery residues: doubling by
+/// `U_{2k} = U_k·V_k`, `V_{2k} = V_k² - 2Q^k`, `Q^{2k} = (Q^k)²`, and
+/// stepping by the `P = 1` forms `U_{k+1} = (U_k + V_k)/2`,
+/// `V_{k+1} = (D·U_k + V_k)/2`. The halving is exact modulo odd `n`
+/// (add `n` first when the residue is odd), and commutes with the
+/// Montgomery encoding because dividing by two is multiplication by the
+/// constant `2⁻¹ mod n`.
+fn strong_lucas_core(n: &BigUint, ctx: &MontgomeryCtx, discriminant: i64) -> bool {
+    let to_residue = |value: i64| -> BigUint {
+        let reduced = BigUint::from_u64(value.unsigned_abs()).modulo(n);
+        if value < 0 && !reduced.is_zero() {
+            n.sub_ref(&reduced)
+        } else {
+            reduced
+        }
+    };
+    let add_mod = |a: &BigUint, b: &BigUint| -> BigUint {
+        let sum = a.add_ref(b);
+        if sum >= *n {
+            sum.sub_ref(n)
+        } else {
+            sum
+        }
+    };
+    let sub_mod = |a: &BigUint, b: &BigUint| -> BigUint {
+        if a >= b {
+            a.sub_ref(b)
+        } else {
+            n.add_ref(a).sub_ref(b)
+        }
+    };
+    let half_mod = |value: &BigUint| -> BigUint {
+        let mut halved = if value.is_odd() {
+            value.add_ref(n)
+        } else {
+            value.clone()
+        };
+        halved.shr1();
+        halved
+    };
+
+    let d_mont = ctx.encode(&to_residue(discriminant));
+    let q_mont = ctx.encode(&to_residue((1 - discriminant) / 4));
+
+    // n + 1 = 2^s · d with d odd; s ≥ 1 since n is odd.
+    let mut d = n.add_ref(&BigUint::one());
+    let mut s = 0usize;
+    while !d.is_odd() {
+        d.shr1();
+        s += 1;
+    }
+
+    // (U₁, V₁, Q¹) = (1, P, Q) with P = 1, then one double-and-maybe-step
+    // per remaining bit of d, most significant first.
+    let mut u = ctx.encode(&BigUint::one());
+    let mut v = u.clone();
+    let mut q_pow = q_mont.clone();
+    for bit in (0..d.bits() - 1).rev() {
+        u = ctx.mul_mont(&u, &v);
+        v = sub_mod(&ctx.square(&v), &add_mod(&q_pow, &q_pow));
+        q_pow = ctx.square(&q_pow);
+        if d.bit(bit) {
+            let stepped_u = half_mod(&add_mod(&u, &v));
+            v = half_mod(&add_mod(&ctx.mul_mont(&d_mont, &u), &v));
+            u = stepped_u;
+            q_pow = ctx.mul_mont(&q_pow, &q_mont);
+        }
+    }
+
+    // A zero Montgomery residue is a zero value: gcd(R, n) = 1.
+    if u.is_zero() || v.is_zero() {
+        return true;
+    }
+    for _ in 1..s {
+        v = sub_mod(&ctx.square(&v), &add_mod(&q_pow, &q_pow));
+        q_pow = ctx.square(&q_pow);
+        if v.is_zero() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Strong Lucas probable-prime test with Selfridge's Method A parameters.
+///
+/// The Lucas-sequence analogue of the strong (Miller–Rabin) test. Every
+/// prime passes; a composite that passes is a strong Lucas pseudoprime —
+/// the first is 5459, and the list below 10⁵ is disjoint from the strong
+/// base-2 pseudoprimes, which is the observation [`is_probable_prime_bpsw`]
+/// stakes its power on.
+///
+/// Reference: Baillie and Wagstaff, *Lucas pseudoprimes*, Math. Comp. 35
+/// (1980), 1391–1417.
+#[must_use]
+pub fn is_strong_lucas_probable_prime(n: &BigUint) -> bool {
+    if n.is_zero() || n.is_one() {
+        return false;
+    }
+    if !n.is_odd() {
+        return *n == BigUint::from_u64(2);
+    }
+    let Some(discriminant) = selfridge_discriminant(n) else {
+        return false;
+    };
+    let ctx = MontgomeryCtx::new(n).expect("candidate is odd");
+    strong_lucas_core(n, &ctx, discriminant)
+}
+
+/// Baillie–PSW probable-prime test: trial division, one strong base-2
+/// Miller–Rabin round, then the strong Lucas test with Selfridge's
+/// parameters.
+///
+/// The two probabilistic stages fail on disjoint kinds of composites as far
+/// as anyone has found: no composite passing both is known, and none exists
+/// below 2⁶⁴ (the base-2 strong-pseudoprime enumeration by Feitsma and
+/// Galway, checked exhaustively against the Lucas stage), so below that
+/// bound the test is deterministic. Contrast [`is_probable_prime`]'s twelve
+/// fixed Miller–Rabin bases, which are deterministic to 3.3·10²⁴ but share
+/// a single failure mode above it; the two tests back different horses,
+/// and this one is the standard in contemporary libraries.
+///
+/// References: Baillie and Wagstaff, *Lucas pseudoprimes*, Math. Comp. 35
+/// (1980), 1391–1417; Pomerance, Selfridge and Wagstaff, *The pseudoprimes
+/// to 25·10⁹*, Math. Comp. 35 (1980), 1003–1026.
+#[must_use]
+pub fn is_probable_prime_bpsw(n: &BigUint) -> bool {
+    if let Some(verdict) = small_prime_screen(n) {
+        return verdict;
+    }
+    // The screen passed an odd n > 1 with no factor ≤ 997.
+    let ctx = MontgomeryCtx::new(n).expect("screened candidate is odd");
+    let (odd_factor, two_adic_exponent) = decompose_n_minus_one(n);
+    if is_witness(&BigUint::from_u64(2), &ctx, &odd_factor, two_adic_exponent) {
+        return false;
+    }
+    let Some(discriminant) = selfridge_discriminant(n) else {
+        return false;
+    };
+    strong_lucas_core(n, &ctx, discriminant)
 }
 
 #[cfg(test)]
@@ -2968,6 +3163,118 @@ mod tests {
             super::crt_combine(&[(BigUint::one(), BigUint::zero())]),
             None
         );
+    }
+
+    #[test]
+    fn bpsw_agrees_with_deterministic_miller_rabin_below_100k() {
+        use super::is_probable_prime_bpsw;
+        // The twelve fixed bases are deterministic for every n < 3.3·10²⁴
+        // (Sorenson & Webster), so agreement here is agreement with truth.
+        for n in 0u64..100_000 {
+            let candidate = BigUint::from_u64(n);
+            assert_eq!(
+                is_probable_prime_bpsw(&candidate),
+                is_probable_prime(&candidate),
+                "bpsw diverged at {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn strong_lucas_matches_published_pseudoprime_tables() {
+        use super::{is_probable_prime_bpsw, is_strong_lucas_probable_prime};
+        // Strong Lucas pseudoprimes with Selfridge's parameters below 10⁵
+        // (Baillie & Wagstaff; OEIS A217255), re-derived independently for
+        // this suite: composites the Lucas stage alone must pass — and the
+        // base-2 Miller–Rabin stage must kill inside the composed test.
+        const STRONG_LUCAS_PSEUDOPRIMES: [u64; 12] = [
+            5459, 5777, 10877, 16109, 18971, 22499, 24569, 25199, 40309, 58519, 75077, 97439,
+        ];
+        for &n in &STRONG_LUCAS_PSEUDOPRIMES {
+            let value = BigUint::from_u64(n);
+            assert!(!is_probable_prime(&value), "{n} is composite");
+            assert!(
+                is_strong_lucas_probable_prime(&value),
+                "{n} must pass the Lucas stage alone"
+            );
+            assert!(!is_probable_prime_bpsw(&value), "{n} must fail the composed test");
+        }
+        // Strong pseudoprimes to base 2 below 10⁵ (OEIS A001262), likewise
+        // re-derived: composites the base-2 stage alone must pass — and the
+        // Lucas stage must kill.
+        const STRONG_BASE2_PSEUDOPRIMES: [u64; 16] = [
+            2047, 3277, 4033, 4681, 8321, 15841, 29341, 42799, 49141, 52633, 65281, 74665, 80581,
+            85489, 88357, 90751,
+        ];
+        for &n in &STRONG_BASE2_PSEUDOPRIMES {
+            let value = BigUint::from_u64(n);
+            assert!(!is_probable_prime(&value), "{n} is composite");
+            assert!(
+                !miller_rabin_witness(&value, &BigUint::from_u64(2)),
+                "base 2 alone must not witness {n}"
+            );
+            assert!(
+                !is_strong_lucas_probable_prime(&value),
+                "the Lucas stage must reject {n}"
+            );
+            assert!(!is_probable_prime_bpsw(&value), "{n} must fail the composed test");
+        }
+    }
+
+    #[test]
+    fn bpsw_agrees_with_deterministic_miller_rabin_on_random_words() {
+        use super::is_probable_prime_bpsw;
+        let mut rng = SplitMix64 { state: 0xb5c0_5e1f_2ide_a55e_u64 ^ 0x0f0f_0f0f };
+        for _ in 0..4000 {
+            let candidate = BigUint::from_u64(rng.next_u64());
+            assert_eq!(
+                is_probable_prime_bpsw(&candidate),
+                is_probable_prime(&candidate),
+                "bpsw diverged on a random 64-bit value"
+            );
+        }
+    }
+
+    #[test]
+    fn bpsw_structured_cases() {
+        use super::{is_probable_prime_bpsw, is_strong_lucas_probable_prime};
+        // Perfect squares: the Selfridge search rules them out directly.
+        for square_root in [3u64, 5, 101, 1009, 65537] {
+            let root = BigUint::from_u64(square_root);
+            assert!(!is_probable_prime_bpsw(&root.square_ref()));
+            assert!(!is_strong_lucas_probable_prime(&root.square_ref()));
+        }
+        let big_root = mersenne(89); // 2^89 − 1, prime
+        assert!(!is_probable_prime_bpsw(&big_root.square_ref()));
+        // Mersenne primes and their composite neighbours at width.
+        for exponent in [61usize, 89, 107, 127] {
+            assert!(is_probable_prime_bpsw(&mersenne(exponent)), "M{exponent} is prime");
+        }
+        assert!(!is_probable_prime_bpsw(&mersenne(67)), "M67 = 193707721 · 761838257287");
+        assert!(!is_probable_prime_bpsw(&mersenne(2047)));
+        // Large random primes from the crate's own generator, and their
+        // pairwise products.
+        let mut rng = SplitMix64 { state: 0x1234_5678_9abc_def0 };
+        for bits in [256usize, 512, 1024] {
+            let mut p = draw_below(&mut rng, &pow2(bits));
+            p.set_bit(bits - 1);
+            p.set_bit(0);
+            while !is_probable_prime(&p) {
+                p = p.add_ref(&BigUint::from_u64(2));
+            }
+            assert!(is_probable_prime_bpsw(&p), "random prime at {bits} bits");
+            let mut q = draw_below(&mut rng, &pow2(bits));
+            q.set_bit(bits - 1);
+            q.set_bit(0);
+            while !is_probable_prime(&q) {
+                q = q.add_ref(&BigUint::from_u64(2));
+            }
+            assert!(
+                !is_probable_prime_bpsw(&p.mul_ref(&q)),
+                "semiprime at {} bits",
+                2 * bits
+            );
+        }
     }
 
     #[test]

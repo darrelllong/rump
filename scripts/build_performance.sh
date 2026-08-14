@@ -15,9 +15,14 @@ GMP_GCD_SCALE=bench/gmp_gcd_scaling_hardy.md
 OUT=PERFORMANCE.md
 
 # Regenerate the scaling SVGs too, so they never drift from the tables.
-for fam in arithmetic division montgomery number-theory variable-time; do
+for fam in arithmetic division montgomery number-theory; do
     $PA plot "$fam" "assets/scaling-$fam.svg" "M4=$M4" "EPYC=$EPYC" "Pi=$PI" >/dev/null
 done
+# The variable-time figure carries the extended heavy-tail record (5120-8192
+# bits) alongside the primitives sizes, so the curve runs as far as the
+# extrema table it sits under.
+$PA plot variable-time assets/scaling-variable-time.svg \
+    "M4=$M4,$M4_HEAVY_EXT" "EPYC=$EPYC" "Pi=$PI" >/dev/null
 $PA plot gcd-at-scale assets/scaling-gcd-at-scale.svg \
     "rump=$GCD_SCALE" "GMP=$GMP_GCD_SCALE" >/dev/null
 

@@ -48,11 +48,18 @@ def parse(path):
 
 
 def load(args):
-    """host=path tokens -> {host: parsed}."""
+    """host=path tokens -> {host: parsed}. A comma-separated path list
+    merges its files into one host record (later files add rows; on a
+    duplicate op/size the later file wins), which is how the extended
+    heavy-tail record joins the primitives table in the plots."""
     hosts = {}
     for a in args:
-        host, path = a.split("=", 1)
-        hosts[host] = parse(path)
+        host, paths = a.split("=", 1)
+        merged = {}
+        for path in paths.split(","):
+            for op, rows in parse(path).items():
+                merged.setdefault(op, {}).update(rows)
+        hosts[host] = merged
     return hosts
 
 

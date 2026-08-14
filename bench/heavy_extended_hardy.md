@@ -10,6 +10,11 @@ which is what made these two rows measurable). Where pilot-bench's
 subsession confidence interval did not converge within the session the
 mean carries the `~` flag and the order statistics are the record.
 
+An EPYC re-measurement corroborates the 7168-bit sqrtmod tail (spread
+2173x, 321 us to 698 ms); its 8192-bit session drew only fast-path primes
+(all readings ~0.39 ms, spread 1.05) and is recorded as inconclusive
+rather than as a bound — the M4 row carries that size.
+
 | Operation | mean ms/op | ±95% CI | min ns | p50 ns | p99 ns | max ns | max/min |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | isprime_5120 | ~5.06251 | 156.88% | 159.0 | 412.1 | 47034300.0 | 52267700.0 | 328766.96 |
