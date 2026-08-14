@@ -668,6 +668,295 @@ impl PolyModP {
         coeffs.extend(self.coeffs.iter().cloned());
         Self::new(coeffs, &self.modulus)
     }
+
+    /// The monic polynomial `x` over this modulus.
+    fn monomial_x(modulus: &BigUint) -> Self {
+        Self::new(vec![BigUint::zero(), BigUint::one()], modulus)
+    }
+
+    /// Squarefree factorization over 𝔽ₚ: the distinct squarefree factors
+    /// with their multiplicities, `(factor, e)` with `∏ factorᵉ = ` the
+    /// monic form of `self` (Cohen, *A Course in Computational Algebraic
+    /// Number Theory*, §3.4.2, Squarefree Factorization). The factors are
+    /// monic, of degree ≥ 1, and pairwise coprime; a factor with
+    /// multiplicity divisible by `p` is recovered through the `p`-th root
+    /// the characteristic forces.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self` is constant or zero (no factorization), or on a
+    /// non-invertible pivot during division. A prime modulus is required
+    /// (see the type documentation): over a composite modulus a division
+    /// may instead find every pivot a unit, and then the result is
+    /// unspecified rather than a panic.
+    #[must_use]
+    pub fn squarefree_factorization(&self) -> Vec<(Self, usize)> {
+        assert!(
+            self.degree().is_some_and(|d| d >= 1),
+            "squarefree factorization needs a non-constant polynomial"
+        );
+        let mut factors: Vec<(Self, usize)> = Vec::new();
+        self.squarefree_into(1, &mut factors);
+        factors.sort_by_key(|(_, e)| *e);
+        factors
+    }
+
+    /// The recursive worker of [`Self::squarefree_factorization`]: extract
+    /// the squarefree factors of `self` whose multiplicity is not a
+    /// multiple of `p`, then recurse on the `p`-th root of what remains,
+    /// scaling the multiplicity by `p`.
+    fn squarefree_into(&self, mult_shift: usize, out: &mut Vec<(Self, usize)>) {
+        let f = self.make_monic();
+        let derivative = f.derivative_modp();
+        // gcd(f, f') collects every factor to one less than its multiplicity;
+        // f / that is the product of the distinct factors (radical) whose
+        // multiplicity is coprime to p.
+        let mut t = f.gcd(&derivative);
+        let mut v = f.div_rem(&t).0;
+        let mut e = 1usize;
+        while v.degree().is_some_and(|d| d >= 1) {
+            let w = t.gcd(&v);
+            let factor = v.div_rem(&w).0;
+            if factor.degree().is_some_and(|d| d >= 1) {
+                out.push((factor.make_monic(), e * mult_shift));
+            }
+            v = w;
+            t = t.div_rem(&v).0;
+            e += 1;
+        }
+        // What remains in t is a p-th power: g(x)^p = g(xᵖ). Take its p-th
+        // root and recurse with the multiplicity scaled by p. Reaching here
+        // with a positive-degree t means deg t ≥ p, so p fits a machine
+        // word (deg is bounded by memory).
+        if t.degree().is_some_and(|d| d >= 1) {
+            let p = usize::try_from(
+                self.modulus
+                    .to_u64()
+                    .expect("a p-th power of positive degree bounds p by its degree"),
+            )
+            .expect("characteristic fits usize");
+            let root = t.pth_root(p);
+            root.squarefree_into(mult_shift * p, out);
+        }
+    }
+
+    /// The `p`-th root of a polynomial that is known to be a `p`-th power:
+    /// `g(xᵖ)` has `g`'s coefficients at positions that are multiples of
+    /// `p`, and in 𝔽ₚ each coefficient is its own `p`-th root (Frobenius).
+    fn pth_root(&self, p: usize) -> Self {
+        let coeffs = (0..self.coeffs.len())
+            .step_by(p)
+            .map(|i| self.coeffs[i].clone())
+            .collect();
+        Self::new(coeffs, &self.modulus)
+    }
+
+    /// The formal derivative over 𝔽ₚ.
+    fn derivative_modp(&self) -> Self {
+        if self.coeffs.len() <= 1 {
+            return Self::zero(&self.modulus);
+        }
+        let coeffs = self.coeffs[1..]
+            .iter()
+            .enumerate()
+            .map(|(i, c)| BigUint::mod_mul(c, &BigUint::from_u64(i as u64 + 1), &self.modulus))
+            .collect();
+        Self::new(coeffs, &self.modulus)
+    }
+
+    /// Distinct-degree factorization of a squarefree monic polynomial:
+    /// the pairs `(d, gₐ)` where `gₐ` is the product of all the degree-`d`
+    /// irreducible factors of `self` (Cohen, §3.4.3, Distinct Degree
+    /// Factorization). The `gₐ` are monic; a `d` with no factor of that
+    /// degree is omitted.
+    fn distinct_degree(&self) -> Vec<(usize, Self)> {
+        let mut factors = Vec::new();
+        let mut remaining = self.clone();
+        // xqi holds x^(pᵈ) mod remaining, advanced one Frobenius power per d.
+        let mut xqi = Self::monomial_x(&self.modulus);
+        let x = Self::monomial_x(&self.modulus);
+        let mut d = 0usize;
+        while remaining.degree().is_some_and(|r| r >= 2 * (d + 1)) {
+            d += 1;
+            // x^(pᵈ) = (x^(pᵈ⁻¹))ᵖ mod remaining.
+            xqi = xqi.pow_mod(&self.modulus, &remaining);
+            // The degree-d factors divide x^(pᵈ) − x.
+            let diff = xqi.sub(&x).rem(&remaining);
+            let g = remaining.gcd(&diff);
+            if g.degree().is_some_and(|dg| dg >= 1) {
+                factors.push((d, g.clone()));
+                remaining = remaining.div_rem(&g).0;
+                xqi = xqi.rem(&remaining);
+            }
+        }
+        if remaining.degree().is_some_and(|r| r >= 1) {
+            let dr = remaining.degree().expect("non-constant");
+            factors.push((dr, remaining));
+        }
+        factors
+    }
+
+    /// Split a monic product of degree-`d` irreducibles into its
+    /// irreducible factors — the equal-degree step (Cantor & Zassenhaus,
+    /// *A new algorithm for factoring polynomials over finite fields*,
+    /// Math. Comp. 36 (1981), 587–592; Cohen, §3.4.4, Final Splitting).
+    /// Draws random splitting polynomials from `rng` until each factor is
+    /// isolated; over 𝔽₂ the split uses the trace map, the standard
+    /// characteristic-2 instance.
+    fn equal_degree_split<R: crate::random::Rng + ?Sized>(
+        &self,
+        d: usize,
+        rng: &mut R,
+    ) -> Vec<Self> {
+        let total_degree = self.degree().expect("non-zero");
+        if total_degree == d {
+            return vec![self.make_monic()];
+        }
+        let target = total_degree / d;
+        let mut factors = vec![self.make_monic()];
+        let two = BigUint::from_u64(2);
+        while factors.len() < target {
+            // A random splitter of degree < deg self.
+            let a = self.random_below_degree(rng);
+            if a.is_zero() {
+                continue;
+            }
+            // g captures roughly half the factors: over 𝔽₂ by the trace map,
+            // otherwise by a^((pᵈ−1)/2) − 1.
+            let g = if self.modulus == two {
+                let mut trace = a.rem(self);
+                let mut term = trace.clone();
+                for _ in 1..d {
+                    term = term.mul(&term).rem(self);
+                    trace = trace.add(&term);
+                }
+                self.gcd(&trace)
+            } else {
+                let exponent = {
+                    let pd = self.modulus.pow_u64(u64::try_from(d).expect("d fits u64"));
+                    pd.sub_ref(&BigUint::one()).div_rem(&two).0
+                };
+                let ae = a.pow_mod(&exponent, self);
+                let ae_minus_one = ae.sub(&Self::new(vec![BigUint::one()], &self.modulus));
+                self.gcd(&ae_minus_one)
+            };
+            // Refine every current factor by g.
+            let mut refined = Vec::with_capacity(factors.len());
+            for factor in factors {
+                let piece = factor.gcd(&g);
+                if piece.degree().is_some_and(|dp| dp >= 1) && piece.degree() < factor.degree() {
+                    let other = factor.div_rem(&piece).0;
+                    refined.push(piece.make_monic());
+                    refined.push(other.make_monic());
+                } else {
+                    refined.push(factor);
+                }
+            }
+            factors = refined;
+        }
+        factors
+    }
+
+    /// A random polynomial of degree below `self`'s, over the modulus.
+    fn random_below_degree<R: crate::random::Rng + ?Sized>(&self, rng: &mut R) -> Self {
+        let deg = self.degree().expect("non-zero");
+        let coeffs = (0..deg)
+            .map(|_| crate::random::random_below(rng, &self.modulus).unwrap_or_else(BigUint::zero))
+            .collect();
+        Self::new(coeffs, &self.modulus)
+    }
+
+    /// Whether `self` is irreducible over 𝔽ₚ. A non-constant polynomial is
+    /// irreducible exactly when its distinct-degree factorization is a
+    /// single block whose degree equals its own — deterministic, no
+    /// randomness.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a non-invertible pivot during division. A prime modulus is
+    /// required (see the type documentation): over a composite modulus the
+    /// answer is unspecified and may be returned without a panic — `x² + 1`,
+    /// for one, is reported irreducible modulo 15.
+    #[must_use]
+    pub fn is_irreducible(&self) -> bool {
+        let Some(degree) = self.degree() else {
+            return false; // zero polynomial
+        };
+        if degree == 0 {
+            return false; // units and constants are not irreducible
+        }
+        let monic = self.make_monic();
+        // Squarefree is necessary; a repeated factor makes gcd(f, f') > 1.
+        if monic.gcd(&monic.derivative_modp()).degree() != Some(0) {
+            return false;
+        }
+        let dd = monic.distinct_degree();
+        dd.len() == 1 && dd[0].0 == degree
+    }
+
+    /// Complete factorization over 𝔽ₚ into monic irreducibles with
+    /// multiplicities: `(factor, e)` with `∏ factorᵉ` equal to the monic
+    /// form of `self`. Squarefree decomposition, then distinct-degree, then
+    /// the randomized equal-degree split drawn from `rng`. That split is Las
+    /// Vegas: it draws until each factor separates, so `rng` must yield
+    /// entropy — a source returning only zero bytes does not terminate.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self` is constant or zero, or on a non-invertible pivot
+    /// during division. A prime modulus is required (see the type
+    /// documentation); over a composite modulus the result is unspecified
+    /// and may be returned without a panic.
+    #[must_use]
+    pub fn factor<R: crate::random::Rng + ?Sized>(&self, rng: &mut R) -> Vec<(Self, usize)> {
+        let mut result = Vec::new();
+        for (squarefree, mult) in self.squarefree_factorization() {
+            for (degree, block) in squarefree.distinct_degree() {
+                for irreducible in block.equal_degree_split(degree, rng) {
+                    result.push((irreducible, mult));
+                }
+            }
+        }
+        result
+    }
+
+    /// The roots of `self` in 𝔽ₚ, ascending, each a residue `r` with
+    /// `self(r) ≡ 0`. Computed as the linear factors: intersect with
+    /// `xᵖ − x` (whose roots are all of 𝔽ₚ), then split into linears by the
+    /// same Las Vegas split as [`Self::factor`], so `rng` must yield entropy.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a non-invertible pivot during division. A prime modulus is
+    /// required (see the type documentation); over a composite modulus the
+    /// result is unspecified and may be returned without a panic.
+    #[must_use]
+    pub fn roots<R: crate::random::Rng + ?Sized>(&self, rng: &mut R) -> Vec<BigUint> {
+        if self.degree().is_none_or(|d| d == 0) {
+            return Vec::new();
+        }
+        let monic = self.make_monic();
+        // x^p − x mod f, then gcd with f: the product of (x − r) over roots r.
+        let x = Self::monomial_x(&self.modulus);
+        let xp = x.pow_mod(&self.modulus, &monic);
+        let linear_product = monic.gcd(&xp.sub(&x));
+        if linear_product.degree().is_none_or(|d| d == 0) {
+            return Vec::new();
+        }
+        let mut roots = Vec::new();
+        for factor in linear_product.equal_degree_split(1, rng) {
+            // factor = x − r (monic linear); the root is −(constant term).
+            let constant = factor
+                .coefficients()
+                .first()
+                .cloned()
+                .unwrap_or_else(BigUint::zero);
+            let root = BigUint::mod_sub(&BigUint::zero(), &constant, &self.modulus);
+            roots.push(root);
+        }
+        roots.sort();
+        roots
+    }
 }
 
 #[cfg(test)]
@@ -678,6 +967,18 @@ mod tests {
     struct SplitMix64 {
         state: u64,
     }
+    impl crate::random::Rng for SplitMix64 {
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            let mut i = 0;
+            while i < dest.len() {
+                let word = self.next_u64().to_le_bytes();
+                let take = (dest.len() - i).min(8);
+                dest[i..i + take].copy_from_slice(&word[..take]);
+                i += take;
+            }
+        }
+    }
+
     impl SplitMix64 {
         fn next_u64(&mut self) -> u64 {
             self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -1023,6 +1324,219 @@ mod tests {
         // Constant and zero → 0.
         assert_eq!(PolyZ::from_i64_slice(&[7]).discriminant(), BigInt::zero());
         assert_eq!(PolyZ::zero().discriminant(), BigInt::zero());
+    }
+
+    // Multiply a slice of factors-with-multiplicity back into one poly.
+    fn reassemble(factors: &[(PolyModP, usize)], p: &BigUint) -> PolyModP {
+        let mut acc = PolyModP::new(vec![BigUint::one()], p);
+        for (f, e) in factors {
+            for _ in 0..*e {
+                acc = acc.mul(f);
+            }
+        }
+        acc
+    }
+
+    #[test]
+    fn factorization_reconstructs_and_is_irreducible() {
+        let mut rng = SplitMix64 {
+            state: 0xfac0_0000_0001,
+        };
+        for &p in &[2u64, 3, 5, 7, 11, 13] {
+            let pm = BigUint::from_u64(p);
+            for _ in 0..200 {
+                // Build a random product of small factors with multiplicities.
+                let mut f = PolyModP::new(vec![BigUint::one()], &pm);
+                let parts = 1 + (rng.next_u64() % 3) as usize;
+                for _ in 0..parts {
+                    let deg = 1 + (rng.next_u64() % 3) as usize;
+                    let coeffs: Vec<BigUint> = (0..=deg)
+                        .map(|_| BigUint::from_u64(rng.next_u64() % p))
+                        .collect();
+                    let mut base = PolyModP::new(coeffs, &pm);
+                    // Ensure non-constant.
+                    if base.degree().unwrap_or(0) < 1 {
+                        base = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[0, 1]), &pm);
+                    }
+                    let mult = 1 + (rng.next_u64() % 3) as usize;
+                    for _ in 0..mult {
+                        f = f.mul(&base);
+                    }
+                }
+                if f.degree().unwrap_or(0) < 1 {
+                    continue;
+                }
+                let factors = f.factor(&mut rng);
+                // Product of factors^mult equals the monic form of f.
+                assert_eq!(
+                    reassemble(&factors, &pm),
+                    f.make_monic(),
+                    "reconstruct p={p}"
+                );
+                // Every returned factor is monic and irreducible.
+                for (fac, e) in &factors {
+                    assert!(*e >= 1);
+                    assert!(fac.leading_coefficient().is_one(), "monic factor p={p}");
+                    assert!(fac.is_irreducible(), "factor is irreducible p={p}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn irreducibility_matches_brute_force() {
+        // Over small p, check is_irreducible against exhaustive trial
+        // division by all lower-degree monics.
+        for &p in &[2u64, 3, 5] {
+            let pm = BigUint::from_u64(p);
+            // Every monic polynomial of degree 1..=3.
+            for deg in 1..=3usize {
+                let mut coeffs = vec![0u64; deg + 1];
+                coeffs[deg] = 1;
+                loop {
+                    let poly =
+                        PolyModP::new(coeffs.iter().map(|&c| BigUint::from_u64(c)).collect(), &pm);
+                    if poly.degree() == Some(deg) {
+                        let brute = brute_irreducible(&poly, p);
+                        assert_eq!(
+                            poly.is_irreducible(),
+                            brute,
+                            "is_irreducible mismatch p={p} coeffs={coeffs:?}"
+                        );
+                    }
+                    // Increment the low `deg` coefficients (leading stays 1);
+                    // when they all overflow, the enumeration is done.
+                    let mut i = 0;
+                    while i < deg {
+                        coeffs[i] += 1;
+                        if coeffs[i] < p {
+                            break;
+                        }
+                        coeffs[i] = 0;
+                        i += 1;
+                    }
+                    if i == deg {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Trial-division irreducibility oracle: divisible by no lower-degree
+    // monic of degree 1..deg.
+    fn brute_irreducible(poly: &PolyModP, p: u64) -> bool {
+        let pm = BigUint::from_u64(p);
+        let deg = poly.degree().unwrap();
+        if deg < 1 {
+            return false;
+        }
+        for d in 1..deg {
+            let mut coeffs = vec![0u64; d + 1];
+            coeffs[d] = 1;
+            loop {
+                let divisor =
+                    PolyModP::new(coeffs.iter().map(|&c| BigUint::from_u64(c)).collect(), &pm);
+                if divisor.degree() == Some(d) && poly.rem(&divisor).is_zero() {
+                    return false;
+                }
+                let mut i = 0;
+                while i < d {
+                    coeffs[i] += 1;
+                    if coeffs[i] < p {
+                        break;
+                    }
+                    coeffs[i] = 0;
+                    i += 1;
+                }
+                if i == d {
+                    break;
+                }
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn roots_match_evaluation() {
+        let mut rng = SplitMix64 {
+            state: 0x9007_0000_0001,
+        };
+        for &p in &[2u64, 3, 5, 7, 11, 13, 101] {
+            let pm = BigUint::from_u64(p);
+            for _ in 0..100 {
+                let deg = 1 + (rng.next_u64() % 5) as usize;
+                let coeffs: Vec<BigUint> = (0..=deg)
+                    .map(|_| BigUint::from_u64(rng.next_u64() % p))
+                    .collect();
+                let f = PolyModP::new(coeffs, &pm);
+                if f.degree().unwrap_or(0) < 1 {
+                    continue;
+                }
+                let roots = f.roots(&mut rng);
+                // Every returned root is a genuine root, ascending, distinct.
+                let mut previous: Option<BigUint> = None;
+                for r in &roots {
+                    assert!(f.evaluate(r).is_zero(), "claimed root at p={p}");
+                    if let Some(prev) = &previous {
+                        assert!(prev < r, "roots ascending and distinct");
+                    }
+                    previous = Some(r.clone());
+                }
+                // Brute force: every residue that is a root is returned.
+                for a in 0..p {
+                    let av = BigUint::from_u64(a);
+                    if f.evaluate(&av).is_zero() {
+                        assert!(roots.contains(&av), "missed root {a} at p={p}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn factor_of_known_polynomial() {
+        // x^2 - 1 = (x-1)(x+1) mod 7.
+        let p = BigUint::from_u64(7);
+        let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
+        let mut rng = SplitMix64 { state: 0x1234 };
+        let factors = f.factor(&mut rng);
+        assert_eq!(factors.len(), 2);
+        assert_eq!(reassemble(&factors, &p), f.make_monic());
+        // x^2 + 1 is irreducible mod 7 (no root: -1 is a non-residue mod 7).
+        let g = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &p);
+        assert!(g.is_irreducible());
+        assert!(g.roots(&mut rng).is_empty());
+    }
+
+    #[test]
+    fn factor_p2_trace_map_splits_equal_cubics() {
+        // Φ₇ = x⁶+x⁵+x⁴+x³+x²+x+1 = (x³+x+1)(x³+x²+1) over 𝔽₂: two distinct
+        // irreducible cubics, so distinct-degree yields one degree-6 block of
+        // two degree-3 factors and the equal-degree split runs at p = 2, d = 3.
+        // The p = 2 trace-map loop body executes only for d ≥ 2, so this is the
+        // case that exercises it (the odd-p exponent path is never taken here).
+        let p = BigUint::from_u64(2);
+        let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 1, 1, 1, 1, 1, 1]), &p);
+        let mut rng = SplitMix64 { state: 0xfac0_0002 };
+        let mut factors = f.factor(&mut rng);
+        assert_eq!(factors.len(), 2, "two cubic factors over F_2");
+        for (fac, e) in &factors {
+            assert_eq!(*e, 1, "each cubic is simple");
+            assert_eq!(fac.degree(), Some(3), "degree-3 factor");
+            assert!(fac.is_irreducible(), "irreducible cubic");
+        }
+        assert_eq!(
+            reassemble(&factors, &p),
+            f.make_monic(),
+            "product reconstructs"
+        );
+        // The two cubics are exactly x³+x+1 and x³+x²+1.
+        factors.sort_by(|a, b| a.0.coefficients().cmp(b.0.coefficients()));
+        let c_small = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1, 1]), &p); // x³+x²+1
+        let c_big = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 1, 0, 1]), &p); // x³+x+1
+        assert_eq!(factors[0].0, c_small);
+        assert_eq!(factors[1].0, c_big);
     }
 
     #[test]

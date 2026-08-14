@@ -784,6 +784,47 @@ assert_eq!(u.resultant(&v), BigInt::zero());
 assert_eq!(PolyZ::from_i64_slice(&[1, -2, 1]).discriminant(), BigInt::zero());
 ```
 
+Over a prime modulus, `PolyModP` factors and finds roots: `factor` returns
+monic irreducibles with multiplicities, `is_irreducible` tests a single
+polynomial, and `roots` gives the residues where it vanishes. Factoring and
+root-finding are randomized (Cantor–Zassenhaus), so they take an `Rng` (see
+Random sampling below for the trait; a minimal one is used here).
+
+```rust
+struct Lcg(u64);
+impl Rng for Lcg {
+    fn fill_bytes(&mut self, d: &mut [u8]) {
+        for b in d {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *b = (self.0 >> 33) as u8;
+        }
+    }
+}
+let p = BigUint::from_u64(7);
+let mut rng = Lcg(0x1234_5678);
+
+// x^2 - 1 = (x - 1)(x + 1) mod 7 — two roots.
+let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
+let mut roots = f.roots(&mut rng);
+roots.sort();
+assert_eq!(roots, vec![BigUint::from_u64(1), BigUint::from_u64(6)]); // 6 ≡ -1
+
+// x^2 + 1 is irreducible mod 7 (−1 is a non-residue), so no roots.
+let g = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &p);
+assert!(g.is_irreducible());
+assert!(g.roots(&mut rng).is_empty());
+
+// factor returns monic irreducibles with multiplicities:
+// x^3 + x = x · (x^2 + 1) over F_7.
+let h = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[0, 1, 0, 1]), &p);
+let mut fs = h.factor(&mut rng);
+fs.sort_by_key(|(fac, _)| fac.degree());
+assert_eq!(fs.len(), 2);
+assert_eq!(fs[0].0.degree(), Some(1)); // x
+assert_eq!(fs[1].0.degree(), Some(2)); // x^2 + 1
+assert!(fs.iter().all(|(_, e)| *e == 1));
+```
+
 ## Random sampling
 
 Implement `Rng` — one method, `fill_bytes` — and every sampler is driven by
