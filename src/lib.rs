@@ -50,6 +50,7 @@
 
 mod bigint;
 mod gf2m;
+mod lattice;
 mod number_theory;
 mod poly;
 mod random;
@@ -57,6 +58,7 @@ mod scrub;
 
 pub use bigint::{BarrettCtx, BigInt, BigUint, MontgomeryCtx, ParseBigIntError, Sign};
 pub use gf2m::Gf2m;
+pub use lattice::{lll_reduce, lll_reduce_delta};
 pub use number_theory::{
     crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
     is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
