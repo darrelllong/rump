@@ -1,0 +1,1535 @@
+% manual.tex — the rump reference manual.
+%
+% Build:  pdflatex manual.tex  (twice, for the table of contents)
+%
+% Scope: every public primitive, with the defining mathematics and a usage
+% example. The code examples are drawn from MANUAL.md, whose blocks are
+% mirrored verbatim in tests/manual_examples.rs and asserted on every
+% `cargo test`; when an example here and MANUAL.md disagree, MANUAL.md and
+% the test are the authority.
+
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1.1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black]{hyperref}
+\usepackage{microtype}
+
+% Rust listings: keywords from the 2021 edition, plus the crate's own types.
+\lstdefinelanguage{Rust}{
+  keywords={as, break, const, continue, crate, dyn, else, enum, extern, fn,
+    for, if, impl, in, let, loop, match, mod, move, mut, pub, ref, return,
+    self, Self, static, struct, trait, type, unsafe, use, where, while},
+  keywords=[2]{BigUint, BigInt, Sign, MontgomeryCtx, BarrettCtx, Gf2m, PolyZ,
+    PolyModP, Rng, Vec, Option, Some, None, Ok, Err, u8, u64, u128, usize,
+    i64, bool},
+  sensitive=true,
+  comment=[l]{//},
+  morestring=[b]",
+}
+\lstset{
+  language=Rust,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\bfseries,
+  keywordstyle=[2]\color{blue!40!black},
+  commentstyle=\color{black!55}\itshape,
+  stringstyle=\color{green!40!black},
+  showstringspaces=false,
+  columns=fullflexible,
+  keepspaces=true,
+  breaklines=true,
+  frame=leftline,
+  framerule=0.6pt,
+  rulecolor=\color{black!30},
+  xleftmargin=1em,
+  aboveskip=0.8\baselineskip,
+  belowskip=0.8\baselineskip,
+  literate={≡}{{$\equiv$}}1 {·}{{$\cdot$}}1 {−}{{$-$}}1 {≥}{{$\geq$}}1
+           {≤}{{$\leq$}}1 {²}{{$^2$}}1 {³}{{$^3$}}1 {√}{{$\surd$}}1
+           {×}{{$\times$}}1 {ᵢ}{{$_i$}}1 {ⁱ}{{$^i$}}1 {ℤ}{{$\mathbb{Z}$}}1
+           {⁻¹}{{$^{-1}$}}2 {ᵐ}{{$^m$}}1 {⁸}{{$^8$}}1 {⁴}{{$^4$}}1
+           {⁶}{{$^6$}}1 {⁷}{{$^7$}}1 {½}{{$\frac12$}}1 {∏}{{$\prod$}}1
+           {α}{{$\alpha$}}1 {β}{{$\beta$}}1 {μ}{{$\mu$}}1 {δ}{{$\delta$}}1,
+}
+
+% Long code identifiers do not hyphenate; let the paragraph builder stretch
+% interword space rather than overflow the margin.
+\emergencystretch=1.5em
+
+\newtheorem{contract}{Contract}[section]
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\F}{\mathbb{F}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\Tr}{\operatorname{Tr}}
+\newcommand{\HT}{\operatorname{HT}}
+\newcommand{\lc}{\operatorname{lc}}
+\newcommand{\Res}{\operatorname{Res}}
+\newcommand{\disc}{\operatorname{disc}}
+\newcommand{\REDC}{\operatorname{REDC}}
+\newcommand{\jac}[2]{\left(\frac{#1}{#2}\right)}
+
+\title{\textbf{rump}\\[0.4ex]\large A Reference Manual for the Multiprecision
+Arithmetic Crate\\[0.4ex]\normalsize version 0.2.2}
+\author{}
+\date{August 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+\textbf{rump} is a dependency-free Rust crate of multiprecision integer
+arithmetic implemented from the literature: Knuth's Algorithm~D for division,
+Montgomery and Barrett modular reduction, Karatsuba and Toom--Cook
+multiplication, Lehmer's gcd with subquadratic Half-GCD, the Jacobi symbol by
+quadratic reciprocity, Tonelli--Shanks and Cipolla square roots, Miller--Rabin
+and Baillie--PSW primality, binary fields $\F_{2^m}$, univariate polynomials
+over $\Z$ and $\F_p$ with factorization, and integral LLL lattice reduction.
+This manual documents every public primitive: the mathematics that defines
+it, the algorithm that computes it, and a worked example of its use. Code
+examples are pinned by the crate's test suite.
+\end{abstract}
+
+\tableofcontents
+
+\section{Preliminaries}
+
+\subsection{Scope and intended use}
+
+Two properties define the intended use of every primitive in this manual.
+
+\begin{contract}[Variable time]
+Operations take data-dependent paths and their running time may leak their
+operands. Do not use rump where timing must not leak secrets.
+\end{contract}
+
+\begin{contract}[Non-secret data]
+rump is not a secret-scrubbing or constant-time library. As inexpensive
+defense in depth, every \code{BigUint} volatile-wipes its live limbs on drop
+and the Montgomery exponentiation ladder wipes its workspaces on exit; that
+is the extent of it. Spare capacity and buffers freed on reallocation are not
+wiped, and \code{Debug} prints every limb. A consumer handling key material
+must add cryptographic memory hygiene at its own layer.
+\end{contract}
+
+The crate is supported on 64-bit targets only: the limb layout and the index
+arithmetic that sizes it assume a 64-bit \code{usize}.
+
+\subsection{Imports and naming}
+
+The crates.io package is \code{rust-mp}; the library target is \code{rump},
+so code always says \code{use rump::...}:
+
+\begin{lstlisting}
+[dependencies]
+rust-mp = "0.2"
+\end{lstlisting}
+
+\begin{lstlisting}
+use rump::{
+    crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
+    is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi,
+    kronecker, lcm, legendre, miller_rabin_witness, mod_inverse,
+    mod_inverse_batch, mod_pow, primes_below, product_tree, random_below,
+    random_coprime_below, random_nonzero_below, random_probable_prime,
+    rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
+    remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation,
+    lll_reduce, lll_reduce_delta,
+    BarrettCtx, BigInt, BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Rng, Sign,
+};
+\end{lstlisting}
+
+This manual documents the development tree that ships as version 0.2.2. Two
+behaviours described here are new at that version and absent from earlier
+releases: the samplers' stall guards (\S\ref{sec:random}) and the unbalanced
+multiplication kernel (\S\ref{sec:mul}).
+
+\subsection{Notation}
+
+Throughout, $\beta = 2^{64}$ is the limb base. A non-negative integer $a$ is
+represented as a little-endian limb vector
+\begin{equation}
+a \;=\; \sum_{i=0}^{k-1} a_i\,\beta^{\,i},
+\qquad 0 \le a_i < \beta,
+\end{equation}
+normalized so the most significant limb is non-zero (zero is the empty
+vector). $\lfloor x \rfloor$ is the floor, $\lg x = \log_2 x$, and
+$\jac{a}{n}$ is the Jacobi (or, over a prime, Legendre) symbol. Polynomial
+rings are written $\Z[x]$ and $\F_p[x]$; $\lc(f)$ is the leading coefficient
+of $f$ and $\deg f$ its degree, with $\deg 0 = -\infty$.
+
+\section{Unsigned integers: \code{BigUint}}
+
+\subsection{Construction, bytes, and radix strings}
+
+\code{zero}, \code{one}, \code{from\_u64}, and \code{from\_u128} build small
+values. \code{from\_be\_bytes} / \code{to\_be\_bytes} are the one external
+binary format --- big-endian bytes, as DER, PEM, and the RFC wire formats
+use; \code{to\_be\_bytes\_padded(w)} zero-pads on the left to a fixed width
+and panics when the value does not fit. \code{low\_u128} and
+\code{low\_bits(k)} ($= a \bmod 2^k$) read the low end directly.
+
+\code{from\_str\_radix} / \code{to\_str\_radix} convert against any radix
+$2 \le r \le 36$; \code{Display} and \code{FromStr} are the base-10 special
+case. Power-of-two radices convert by direct bit packing. The rest run
+classical word-sized conversion at small sizes and switch to
+divide-and-conquer against a ladder of squared radix powers above measured
+crossovers: to parse $n$ digits, split at the largest $r^{2^j}$ below the
+value, giving the recurrence $T(n) = 2\,T(n/2) + M(n)$, where $M$ is the
+multiplication cost --- subquadratic wherever $M$ is.
+
+\begin{lstlisting}
+let n = BigUint::from_str_radix("deadbeef", 16).expect("valid hex");
+assert_eq!(n, BigUint::from_u64(0xdead_beef));
+assert_eq!(n.to_str_radix(16), "deadbeef");
+assert_eq!(n.to_string(), "3735928559");
+assert_eq!("3735928559".parse::<BigUint>(), Ok(n));
+
+let value = BigUint::from_be_bytes(&[0x01, 0x00]);
+assert_eq!(value, BigUint::from_u64(256));
+assert_eq!(value.to_be_bytes_padded(4), vec![0x00, 0x00, 0x01, 0x00]);
+\end{lstlisting}
+
+\subsection{Comparison and predicates}
+
+\code{BigUint} implements \code{Ord}: comparison walks limbs from the top
+and stops at the first difference. \code{bits} returns the significant bit
+count, $\lfloor \lg a \rfloor + 1$ for $a > 0$ and $0$ for $a = 0$;
+\code{is\_zero}, \code{is\_one}, and \code{is\_odd} are constant-limb
+predicates; \code{popcount} is the Hamming weight; \code{trailing\_zeros}
+is the 2-adic valuation $v_2(a)$, \code{None} at zero.
+
+\subsection{Addition and subtraction}
+
+\code{add\_ref} / \code{sub\_ref} return new values; \code{add\_assign\_ref}
+/ \code{sub\_assign\_ref} work in place; \code{assign\_add} /
+\code{assign\_sub} are three-operand forms whose output buffer is reused
+across calls (the shape of GMP's \code{mpz\_add}). Both directions are the
+classical limb-wise carry and borrow chains. Subtraction panics on
+underflow: the type is unsigned, and a result that would be negative is a
+programming error --- use \code{BigInt} where signs can go negative.
+
+\begin{lstlisting}
+let a = BigUint::from_u64(1_000);
+let b = BigUint::from_u64(37);
+assert_eq!(a.add_ref(&b), BigUint::from_u64(1_037));
+assert_eq!(a.sub_ref(&b), BigUint::from_u64(963));
+
+// Three-operand form: `out`'s storage is reused across calls.
+let mut out = BigUint::zero();
+out.assign_add(&a, &b);
+assert_eq!(out, BigUint::from_u64(1_037));
+\end{lstlisting}
+
+\subsection{Multiplication}
+\label{sec:mul}
+
+\code{mul\_ref} dispatches on operand size across a ladder of kernels, each
+asymptotically cheaper but with a larger constant, so each engages only past
+its measured crossover; \code{square\_ref} delegates to \code{mul\_ref}.
+
+\paragraph{Schoolbook (Knuth, Algorithm M).}
+The base case, $O(mn)$ limb products, used below 32 limbs.
+
+\paragraph{Karatsuba (32 limbs and above).}
+Split both operands at $B = \beta^{\,s}$, $a = a_1 B + a_0$,
+$b = b_1 B + b_0$. Three half-width products replace four:
+\begin{equation}
+\begin{aligned}
+z_0 &= a_0 b_0, \qquad z_2 = a_1 b_1,\\
+z_1 &= (a_0 + a_1)(b_0 + b_1) - z_0 - z_2 \;=\; a_0 b_1 + a_1 b_0,\\
+ab  &= z_2 B^2 + z_1 B + z_0,
+\end{aligned}
+\end{equation}
+giving $T(n) = 3\,T(n/2) + O(n) = O(n^{\lg 3}) \approx O(n^{1.585})$.
+
+\paragraph{Toom--Cook 3 (128 limbs) and 4 (3072 limbs).}
+Split each operand into $k$ base-$B$ digits and read it as a polynomial of
+degree $k-1$; the product polynomial has degree $2k-2$ and is determined by
+its values at $2k-1$ points. Toom-3 evaluates at
+$\{0, 1, -1, 2, \infty\}$ --- five products of a third the size,
+$O(n^{\log_3 5}) \approx O(n^{1.465})$; Toom-4 at seven points,
+$O(n^{\log_4 7}) \approx O(n^{1.404})$. Interpolation is exact: its
+divisions by small constants leave no remainder.
+
+\paragraph{Unbalanced operands (256 limbs).}
+The balanced kernels all bound the length ratio of their operands. A
+lopsided product ($\text{long} \ge 2 \cdot \text{short}$) whose shorter
+operand is past this kernel's own measured crossover --- 256 limbs, far
+above Karatsuba's, because each block also pays dispatch and allocation
+overhead --- is computed by block decomposition: with $k$ the shorter
+length and $B = \beta^{\,k}$,
+\begin{equation}
+\text{long} \cdot \text{short}
+  \;=\; \sum_{i} d_i \cdot \text{short} \cdot B^{\,i},
+\qquad \text{long} = \sum_i d_i B^{\,i},\; 0 \le d_i < B,
+\end{equation}
+a sum of balanced $k \times k$ products, each of which re-enters the
+dispatch and lands on Karatsuba or Toom, accumulated in place at its limb
+offset (shifting each product and adding at full width would cost
+$\Theta(\text{long}^2/k)$ limb copies and lose to flat schoolbook). Below
+the crossover the lopsided shapes stay schoolbook, which measurement
+favors there.
+
+\begin{lstlisting}
+assert_eq!(a.mul_ref(&b), BigUint::from_u64(37_000));
+assert_eq!(b.square_ref(), BigUint::from_u64(1_369));
+\end{lstlisting}
+
+\subsection{Division and remainder}
+
+\code{div\_rem} returns $(q, r)$ with $a = qd + r$, $0 \le r < d$, by
+Knuth's Algorithm~D: normalize so the divisor's top limb is at least
+$\beta/2$, then estimate each quotient limb from the top two limbs of the
+running remainder against the top limb of the divisor,
+\begin{equation}
+\hat q \;=\;
+\min\!\left(\left\lfloor \frac{r_{j+n}\,\beta + r_{j+n-1}}{d_{n-1}} \right\rfloor,\;
+\beta - 1\right),
+\end{equation}
+which after the standard two-limb refinement is off by at most one, and the
+multiply-subtract step's borrow corrects that final case. \code{modulo}
+keeps only the remainder; \code{div\_rem\_u64} and \code{rem\_u64} divide by
+a machine word with no heap-allocated divisor; \code{mod\_mul} is one-shot
+modular multiplication. All panic on a zero divisor or modulus.
+
+\begin{lstlisting}
+let n = BigUint::from_u64(1_000);
+let d = BigUint::from_u64(7);
+let (q, r) = n.div_rem(&d);
+assert_eq!(q, BigUint::from_u64(142));
+assert_eq!(r, BigUint::from_u64(6));
+assert_eq!(n.rem_u64(7), 6);
+\end{lstlisting}
+
+\subsection{Shifts and bit access}
+
+\code{shl\_bits} / \code{shr\_bits} shift by any count ($a \cdot 2^n$ and
+$\lfloor a / 2^n \rfloor$); \code{shl1} / \code{shr1} are the single-bit
+forms the division kernel uses in its hot loop. \code{bit(i)} tests bit
+$i$, \code{set\_bit(i)} sets it, and \code{bitxor\_assign} is bitwise XOR
+--- field addition in $\F_{2^m}$ (\S\ref{sec:gf2m}).
+
+\subsection{Integer roots}
+\label{sec:roots}
+
+\code{sqrt\_rem} returns $(r, a - r^2)$ for $r = \lfloor \sqrt{a} \rfloor$;
+\code{sqrt\_floor} is the root alone and skips the final squaring that
+produces the remainder. Both run Newton's iteration on integer division,
+\begin{equation}
+x_{k+1} \;=\; \left\lfloor \frac{x_k + \lfloor a / x_k \rfloor}{2} \right\rfloor,
+\qquad x_0 = 2^{\lceil b/2 \rceil} \ge \lceil\sqrt{a}\,\rceil,
+\quad b = \lfloor \lg a \rfloor + 1 .
+\end{equation}
+By the AM--GM inequality $\tfrac12 (x + a/x) \ge \sqrt{a}$ for every
+$x > 0$, so every iterate stays at or above $\lfloor\sqrt{a}\rfloor$; from a
+seed above the root the sequence decreases strictly until it reaches it,
+and the first non-decrease certifies the answer (Cohen, Algorithm~1.7.1).
+Convergence is quadratic: about $\lg \lg a$ iterations, each one division.
+
+\code{nth\_root\_floor(k)} generalizes with the same certificate:
+\begin{equation}
+x_{j+1} \;=\; \left\lfloor
+\frac{(k-1)\,x_j + \lfloor a / x_j^{\,k-1} \rfloor}{k}
+\right\rfloor .
+\end{equation}
+
+\code{is\_square} answers by residue filters --- squares occupy 44 of the
+256 residues modulo 256, and the single word modulus
+$9 \cdot 5 \cdot 7 \cdot 13 \cdot 17 = 69\,615$ folds five more character
+tests into one remainder --- then one certified root for survivors.
+\code{is\_perfect\_power} tests $a = b^p$ for each prime $p \le \lg a$ with
+one certified $p$-th root per exponent. \code{pow\_u64} raises to a
+machine-word exponent by binary exponentiation.
+
+\begin{lstlisting}
+let n = BigUint::from_u64(1_000_000);
+let (root, rem) = n.sqrt_rem();
+assert_eq!(root, BigUint::from_u64(1_000));
+assert!(rem.is_zero());
+assert!(n.is_square());
+assert_eq!(n.nth_root_floor(3), BigUint::from_u64(100));
+assert!(BigUint::from_u64(729).is_perfect_power()); // 3^6
+\end{lstlisting}
+
+\subsection{Size estimates}
+
+\code{to\_u64} narrows to a word when the value fits (\code{None}
+otherwise); \code{to\_f64\_lossy} saturates to infinity above the
+\code{f64} range; \code{ln\_approx} computes $\ln a$ from the top bits and
+the bit length, staying finite far past the \code{f64} range --- for
+size-driven parameter heuristics, not for arithmetic.
+
+\section{Signed integers: \code{BigInt} and \code{Sign}}
+
+A \code{BigInt} is a \code{Sign} (\code{Negative}, \code{Zero},
+\code{Positive}) joined to a \code{BigUint} magnitude, with zero normalized
+to \code{Sign::Zero}. Construct with \code{from\_biguint} (non-negative),
+\code{from\_parts}, or \code{from\_i64}; read back with \code{sign()} and
+\code{magnitude()}; \code{negated} flips the sign. \code{add\_ref} /
+\code{sub\_ref} are signed with in-place forms; \code{mul\_ref} is the full
+signed product and \code{mul\_biguint\_ref} scales by an unsigned factor;
+\code{abs} returns the magnitude as a \code{BigUint}. \code{Ord} is
+sign-aware: negatives below zero below positives, magnitudes compared
+within a sign.
+
+\code{div\_rem} divides with remainder, \emph{truncated toward zero} ---
+the convention of C and of Rust's primitive \code{/} and \code{\%}:
+\begin{equation}
+a \;=\; q\,d + r,
+\qquad |r| < |d|,
+\qquad \operatorname{sign}(r) \in \{\operatorname{sign}(a), 0\},
+\end{equation}
+so $(-7).\code{div\_rem}(2) = (-3, -1)$ where floored division would give
+$(-4, 1)$. It panics on a zero divisor. \code{modulo\_positive} is the
+floored counterpart against an unsigned modulus, mapping into the
+canonical range $[0, n)$:
+\begin{equation}
+a \bmod^{+} n \;=\; a - n \left\lfloor \frac{a}{n} \right\rfloor \in [0, n),
+\end{equation}
+which extended Euclid and every modular routine here need (a negative
+representative would poison a Montgomery encoding).
+
+\begin{lstlisting}
+let ten = BigInt::from_biguint(BigUint::from_u64(10));
+let minus_three = BigInt::from_parts(Sign::Negative, BigUint::from_u64(3));
+assert_eq!(ten.add_ref(&minus_three), BigInt::from_biguint(BigUint::from_u64(7)));
+
+// The signed ring: full product, truncated division, absolute value.
+assert_eq!(
+    minus_three.mul_ref(&ten),
+    BigInt::from_parts(Sign::Negative, BigUint::from_u64(30))
+);
+let minus_seven = BigInt::from_parts(Sign::Negative, BigUint::from_u64(7));
+let two = BigInt::from_biguint(BigUint::from_u64(2));
+let (q, r) = minus_seven.div_rem(&two);
+assert_eq!(q, BigInt::from_parts(Sign::Negative, BigUint::from_u64(3)));
+assert_eq!(r, BigInt::from_parts(Sign::Negative, BigUint::one()));
+assert_eq!(minus_seven.abs(), BigUint::from_u64(7));
+
+// -3 = 8 (mod 11), in canonical range.
+assert_eq!(minus_three.modulo_positive(&BigUint::from_u64(11)), BigUint::from_u64(8));
+\end{lstlisting}
+\section{Barrett reduction: \code{BarrettCtx}}
+\label{sec:barrett}
+
+\code{BarrettCtx} is the fixed-modulus reduction context for a modulus of
+\emph{either parity} --- the complement to \code{MontgomeryCtx}, which
+requires an odd one. \code{BarrettCtx::new(n)} returns \code{None} for
+$n < 2$; otherwise it pays one division to precompute, for a $k$-limb
+modulus,
+\begin{equation}
+\mu \;=\; \left\lfloor \frac{\beta^{2k}}{n} \right\rfloor .
+\end{equation}
+
+\code{reduce(x)}, for $0 \le x < \beta^{2k}$, estimates the quotient with
+two multiplications and no division (Handbook of Applied Cryptography,
+Algorithm~14.42):
+\begin{equation}
+\hat q \;=\; \left\lfloor
+\frac{\left\lfloor x / \beta^{\,k-1} \right\rfloor \cdot \mu}{\beta^{\,k+1}}
+\right\rfloor,
+\qquad
+q - 2 \;\le\; \hat q \;\le\; q \;=\; \left\lfloor \frac{x}{n} \right\rfloor,
+\end{equation}
+so $x - \hat q\,n$ lies in $[0, 3n)$ and at most two conditional
+subtractions finish the reduction.
+
+\code{mul\_mod}, \code{square\_mod}, and \code{pow\_mod} are built on
+\code{reduce}. \code{pow\_mod} is left-to-right binary exponentiation
+(Knuth, \S4.6.3) with the accumulator seeded from the exponent's top set
+bit --- one squaring per remaining exponent bit and one multiplication per
+remaining set bit, each followed by a reduction. $0^0 = 1$ by the usual
+convention.
+
+\begin{lstlisting}
+let even = BigUint::from_u64(1_000);
+let ctx = BarrettCtx::new(&even).expect("modulus is at least 2");
+assert_eq!(
+    ctx.mul_mod(&BigUint::from_u64(123), &BigUint::from_u64(456)),
+    BigUint::from_u64(88) // 56 088 mod 1000
+);
+\end{lstlisting}
+
+\section{The Montgomery domain: \code{MontgomeryCtx}}
+\label{sec:montgomery}
+
+Montgomery multiplication (Montgomery 1985) replaces division by a modulus
+$n$ with division by a power of the limb base, which is a shift. Fix an odd
+modulus $n$ of $k$ limbs and let $R = \beta^{\,k}$, so $\gcd(R, n) = 1$.
+The \emph{Montgomery representative} of $x$ is
+\begin{equation}
+\bar{x} \;=\; xR \bmod n .
+\end{equation}
+
+\code{MontgomeryCtx::new(n)} returns \code{None} for even or zero $n$;
+otherwise it precomputes $R^2 \bmod n$ (for encoding) and the word-level
+constant (Duss\'e and Kaliski, EUROCRYPT~'90)
+\begin{equation}
+n_0' \;=\; -\,n_0^{-1} \bmod \beta ,
+\end{equation}
+where $n_0$ is the low limb of $n$.
+
+\paragraph{REDC.} The core operation: given $0 \le T < nR$,
+\begin{equation}
+\begin{aligned}
+m &\;=\; \bigl( (T \bmod R)\, n' \bigr) \bmod R,
+&\quad n' &\equiv -n^{-1} \pmod{R},\\
+t &\;=\; \frac{T + m\,n}{R},
+&\quad t &\;\equiv\; T R^{-1} \pmod{n},\; 0 \le t < 2n,
+\end{aligned}
+\end{equation}
+followed by one conditional subtraction. The division by $R$ is exact by
+the choice of $m$ ($T + mn \equiv 0 \bmod R$), and word-level interleaving
+needs only $n_0'$, never the full $n'$. Products in the domain multiply as
+\begin{equation}
+\operatorname{mul\_mont}(\bar x, \bar y) \;=\; \REDC(\bar x\, \bar y)
+\;=\; \overline{x y},
+\end{equation}
+so a long computation encodes once ($\bar x = \REDC(x \cdot R^2)$), stays in
+the domain with \code{mul\_mont} / \code{square\_mont} / \code{add\_mont} /
+\code{sub\_mont} --- the encoding is linear, so domain addition and
+subtraction are one compare-and-correct each --- and decodes once at the
+boundary ($x = \REDC(\bar x)$). \code{one\_mont()} is $\bar 1 = R \bmod n$.
+
+\code{mul}, \code{square}, and \code{pow} are one-shot forms that convert
+internally; \code{pow\_encoded} reuses an already encoded base across
+exponents. The exponentiation ladder has two engines, chosen by exponent
+width: above 64 bits, left-to-right $k$-ary with a fixed 4-bit window table
+held in the domain (HAC Algorithm~14.82), seeded from the top window; at 64
+bits or fewer (e.g.\ the F4 public exponent 65\,537), right-to-left binary
+square-and-multiply, which skips the window-table setup that would dominate
+so short a ladder. Both wipe their workspaces on exit.
+
+\begin{contract}[In-domain operands are reduced]
+\code{mul\_mont}, \code{square\_mont}, and \code{pow\_encoded} require
+operands already reduced below the modulus. An operand \emph{wider} than
+the modulus panics in every build (it does not fit the kernel's
+modulus-width windows); an unreduced operand of the modulus's width trips
+a debug assertion only, and in release yields a non-canonical result. The
+boundary operations \code{encode} / \code{decode} instead accept any
+representative and reduce.
+\end{contract}
+
+\begin{lstlisting}
+let p = BigUint::from_u64(97);
+let ctx = MontgomeryCtx::new(&p).expect("97 is odd");
+let a = BigUint::from_u64(5);
+let b = BigUint::from_u64(6);
+
+// One-shot operations convert in and out internally.
+assert_eq!(ctx.mul(&a, &b), BigUint::from_u64(30));
+assert_eq!(ctx.pow(&a, &BigUint::from_u64(3)), BigUint::from_u64(28)); // 125 mod 97
+
+// Staying in the domain: encode once, multiply cheaply, decode once.
+let a_mont = ctx.encode(&a);
+let b_mont = ctx.encode(&b);
+let product_mont = ctx.mul_mont(&a_mont, &b_mont);
+assert_eq!(ctx.decode(&product_mont), BigUint::from_u64(30));
+assert_eq!(ctx.decode(&ctx.sub_mont(&a_mont, &b_mont)), BigUint::from_u64(96));
+\end{lstlisting}
+
+\section{Binary fields: \code{Gf2m}}
+\label{sec:gf2m}
+
+A \code{Gf2m} is the field $\F_{2^m} = \F_2[x]/(f)$ for an irreducible
+$f \in \F_2[x]$ of degree $m$. Field elements and the defining polynomial
+are \code{BigUint} bit patterns: bit $i$ is the coefficient of $x^i$.
+\code{Gf2m::new(f)} derives $m = \deg f$ and returns \code{None} for
+constants; \emph{irreducibility is the caller's contract} ---
+\code{Gf2m::is\_irreducible} (below) guards it for untrusted polynomials.
+On a reducible modulus the ring $\F_2[x]/(f)$ is not a field: \code{inverse}
+and \code{div} report non-units as \code{None} and \code{solve\_quadratic}
+verifies its root, but \code{sqrt} silently returns a wrong value there,
+because squaring is a bijection only in a field.
+
+\subsection{Arithmetic}
+
+Addition is coefficient-wise XOR --- \code{Gf2m::add} is an associated
+function, since it needs no modulus. Multiplication is the word-level comb
+with reduction (Guide to Elliptic Curve Cryptography, Algorithm~2.36);
+reduction folds one excess word at a time through the \emph{tap identity}:
+writing $f = x^m + \sum_{t \in T} x^t$ with $T$ the lower exponents,
+\begin{equation}
+x^m \;\equiv\; \sum_{t \in T} x^{\,t} \pmod{f},
+\end{equation}
+which is $\F_2$-linear and therefore applies to 64 coefficients at once ---
+one shifted XOR per tap per word, four or fewer for the trinomial and
+pentanomial moduli every standard uses. Squaring is linear in
+characteristic 2,
+\begin{equation}
+\Bigl(\sum c_i x^i\Bigr)^{\!2} \;=\; \sum c_i\, x^{2i},
+\end{equation}
+implemented by interleaving a zero bit after every coefficient bit through
+a spread table, then reducing. \code{inverse} is the extended Euclidean
+algorithm over $\F_2[x]$ (Guide to ECC, Algorithm~2.48), maintaining
+$u = b \cdot a + s \cdot f$ with only the cofactor of $a$ tracked;
+\code{div(a, b)} is $a \cdot b^{-1}$, \code{None} for a non-unit divisor.
+\code{pow} is binary exponentiation over the field.
+
+\begin{lstlisting}
+// GF(2^3) with x^3 + x + 1.
+let field = Gf2m::new(BigUint::from_u64(0b1011)).expect("degree 3");
+assert_eq!(field.degree(), 3);
+
+// (x + 1)(x^2 + 1) = x^3 + x^2 + x + 1 = x^2 (mod f).
+let x_plus_1 = BigUint::from_u64(0b011);
+let x2_plus_1 = BigUint::from_u64(0b101);
+assert_eq!(field.mul(&x_plus_1, &x2_plus_1), BigUint::from_u64(0b100));
+
+// x * (x^2 + 1) = x^3 + x = 1, so they are inverses.
+let x = BigUint::from_u64(0b010);
+assert_eq!(field.inverse(&x), Some(x2_plus_1));
+assert_eq!(field.inverse(&BigUint::zero()), None);
+\end{lstlisting}
+
+\subsection{Trace, half-trace, square roots, and quadratics}
+
+The \emph{absolute trace} is the $\F_2$-linear map
+\begin{equation}
+\Tr(c) \;=\; \sum_{i=0}^{m-1} c^{\,2^i} \;\in\; \F_2 ,
+\end{equation}
+computed by $m - 1$ squarings and XORs (\code{trace}). Because squaring is
+a field automorphism (Frobenius), every element has a unique square root,
+\begin{equation}
+\sqrt{c} \;=\; c^{\,2^{m-1}},
+\end{equation}
+computed by $m - 1$ squarings (\code{sqrt}).
+
+The quadratic $z^2 + z = c$ is solvable exactly when $\Tr(c) = 0$ (the map
+$z \mapsto z^2 + z$ is 2-to-1 onto the trace-zero hyperplane), and its two
+roots differ by 1. For odd $m$ the \emph{half-trace}
+\begin{equation}
+\HT(c) \;=\; \sum_{i=0}^{(m-1)/2} c^{\,2^{2i}}
+\qquad\text{satisfies}\qquad
+\HT(c)^2 + \HT(c) \;=\; c + \Tr(c),
+\end{equation}
+so \code{half\_trace} solves the quadratic directly when $\Tr(c) = 0$; it
+panics at even degree, where the identity collapses (every FIPS binary
+curve degree --- 163, 233, 283, 409, 571 --- is odd).
+\code{solve\_quadratic} is the total form: it tests the trace, works at
+every degree (even degree via IEEE Std 1363-2000, Annex A.4.7), and
+verifies its root. Over an irreducible modulus it returns \code{None}
+exactly when $\Tr(c) = 1$; over a reducible one, also whenever the trace
+computation, the auxiliary trace-one element, or the final verification
+fails --- the root-verifying design is what keeps a non-field from
+producing a silently wrong answer here.
+
+\begin{lstlisting}
+// Tr(x) = 0 in GF(2^3), so the half-trace solves z^2 + z = x.
+let z = field.half_trace(&x);
+assert_eq!(Gf2m::add(&field.square(&z), &z), x);
+
+// Squaring is a bijection; sqrt inverts it.
+assert_eq!(field.sqrt(&BigUint::from_u64(0b100)), x);
+
+// solve_quadratic is total across degrees - here in the AES byte field
+// GF(2^8), where the degree is even and the half-trace does not apply.
+let aes = Gf2m::new(BigUint::from_u64(0x11B)).expect("the AES byte field");
+let a = BigUint::from_u64(0x53);
+let c = Gf2m::add(&aes.square(&a), &a);
+let z = aes.solve_quadratic(&c).expect("solvable by construction");
+assert_eq!(Gf2m::add(&aes.square(&z), &z), c);
+\end{lstlisting}
+
+\subsection{Irreducibility: Rabin's test}
+
+\code{Gf2m::is\_irreducible(f)} decides irreducibility deterministically
+(Rabin 1980, the $\F_2$ form). The criterion rests on the identity that
+$x^{2^k} - x$ is the product of all monic irreducibles over $\F_2$ of
+degree dividing $k$: a polynomial $f$ of degree $m$ is irreducible if and
+only if
+\begin{equation}
+x^{2^m} \equiv x \pmod{f}
+\qquad\text{and}\qquad
+\gcd\bigl(x^{2^{m/q}} - x,\; f\bigr) = 1
+\;\;\text{for every prime } q \mid m .
+\end{equation}
+The first condition confines every irreducible factor's degree to a divisor
+of $m$; the gcd conditions exclude the proper divisors (every proper
+divisor of $m$ divides some $m/q$). Mechanically $x^{2^i} \bmod f$ is $i$
+applications of \code{square} to $x$, so one forward pass of $m$ squarings
+visits the checkpoints $m/q$ in ascending order and finishes at
+$x^{2^m}$ --- $m$ squarings plus one polynomial gcd per distinct prime
+divisor of $m$.
+
+\begin{lstlisting}
+assert!(Gf2m::is_irreducible(&BigUint::from_u64(0b1011)));  // x^3 + x + 1
+assert!(!Gf2m::is_irreducible(&BigUint::from_u64(0b1001))); // x^3 + 1
+assert!(Gf2m::is_irreducible(&BigUint::from_u64(0x11B)));   // AES
+\end{lstlisting}
+\section{Number theory}
+
+\subsection{Greatest common divisors}
+
+\code{gcd(a, b)} computes $\gcd(a, b)$ with $\gcd(a, 0) = a$;
+\code{lcm(a, b)} $= ab / \gcd(a, b)$, with $\operatorname{lcm}(a, 0) = 0$.
+\code{gcd\_extended} returns the B\'ezout triple $(g, s, t)$ of signed
+cofactors with
+\begin{equation}
+g \;=\; \gcd(a, b) \;=\; a s + b t .
+\end{equation}
+
+Three engines back these, chosen by size. Small operands run Euclid with
+word-level steps. Above that, Lehmer's algorithm (Knuth, \S4.5.2,
+Algorithm~L) simulates a whole run of Euclidean quotients on the leading
+words: each quotient extends a $2 \times 2$ integer transform
+\begin{equation}
+M \;=\; \begin{pmatrix} q & 1 \\ 1 & 0 \end{pmatrix}_{\!k}
+\cdots
+\begin{pmatrix} q & 1 \\ 1 & 0 \end{pmatrix}_{\!1},
+\end{equation}
+and the batch is certified against both endpoints of the leading-word
+interval before being replayed once, at full width, as a single
+$2 \times 2$ matrix--vector application (four scalar-by-bignum products)
+--- roughly 35 quotients per 124-bit window. At very large sizes ($\sim$131\,kbit, measured) \code{gcd}
+switches to the subquadratic Half-GCD (M\"oller 2008): recursively compute
+the transform that reduces the top halves, splice it onto the full
+operands, and recurse, for
+$T(n) = O\!\left(M(n) \log n\right)$ where $M$ is the multiplication cost.
+
+\begin{lstlisting}
+let a = BigUint::from_u64(240);
+let b = BigUint::from_u64(46);
+assert_eq!(gcd(&a, &b), BigUint::from_u64(2));
+assert_eq!(
+    lcm(&BigUint::from_u64(4), &BigUint::from_u64(6)),
+    BigUint::from_u64(12)
+);
+
+let (g, s, t) = gcd_extended(&a, &b);
+let bezout = s.mul_biguint_ref(&a).add_ref(&t.mul_biguint_ref(&b));
+assert_eq!(bezout, BigInt::from_biguint(g));
+\end{lstlisting}
+
+\subsection{Quadratic-residue symbols}
+
+For an odd prime $p$ the Legendre symbol is
+\begin{equation}
+\jac{a}{p} \;=\;
+\begin{cases}
+0 & p \mid a,\\
++1 & a \text{ is a non-zero square mod } p,\\
+-1 & \text{otherwise},
+\end{cases}
+\qquad
+\jac{a}{p} \equiv a^{(p-1)/2} \pmod{p},
+\end{equation}
+the congruence being Euler's criterion. The Jacobi symbol extends it
+multiplicatively to odd $n = \prod p_i^{e_i}$ as
+$\jac{a}{n} = \prod \jac{a}{p_i}^{e_i}$; \code{jacobi(a, n)} computes it
+without factoring $n$, by quadratic reciprocity (HAC Algorithm~2.149):
+for odd coprime $a, n$,
+\begin{equation}
+\jac{a}{n}\jac{n}{a} = (-1)^{\frac{a-1}{2}\cdot\frac{n-1}{2}},
+\qquad
+\jac{2}{n} = (-1)^{\frac{n^2-1}{8}},
+\end{equation}
+alternating reductions $a \bmod n$ with extractions of 2 until the
+arguments collapse. (The arguments are unsigned, so the reduction never
+produces a negative top argument and the $\jac{-1}{n}$ supplement is never
+needed.) It returns \code{None} for even $n$, where the symbol
+is undefined; \code{legendre} is the same computation under its
+prime-modulus name; \code{kronecker} extends to every modulus through
+$\jac{a}{2} = 0$ for even $a$ and $(-1)^{(a^2-1)/8}$ for odd, with
+$\jac{a}{0} = 1$ exactly when $a = 1$.
+
+Note $\jac{a}{n} = +1$ does not certify that $a$ is a residue for
+composite $n$ --- the two factors' symbols can both be $-1$. Only
+$\jac{a}{n} = -1$ certifies non-residuosity.
+
+\begin{lstlisting}
+// (2/9) = 1 because 9 = 1 (mod 8); (3/9) = 0 by the shared factor.
+assert_eq!(jacobi(&BigUint::from_u64(2), &BigUint::from_u64(9)), Some(1));
+assert_eq!(jacobi(&BigUint::from_u64(3), &BigUint::from_u64(9)), Some(0));
+// 2 is a residue mod 7 (3^2 = 9 = 2).
+assert_eq!(legendre(&BigUint::from_u64(2), &BigUint::from_u64(7)), Some(1));
+// Kronecker handles even moduli: (5/8) = (5/2)^3 = -1.
+assert_eq!(kronecker(&BigUint::from_u64(5), &BigUint::from_u64(8)), -1);
+\end{lstlisting}
+
+\subsection{Modular exponentiation and inverses}
+
+\code{mod\_pow(b, e, n)} computes $b^e \bmod n$ for any $n \ge 1$: through
+the Montgomery ladder when $n$ is odd, and by binary exponentiation with
+direct reductions when $n$ is even (where Montgomery cannot operate ---
+callers with a fixed even modulus should hold a \code{BarrettCtx}).
+
+\code{mod\_inverse(a, n)} returns $a^{-1} \bmod n$ from the extended
+Euclidean identity: when $\gcd(a, n) = 1$, the cofactor $s$ in
+$as + nt = 1$ reduces to the inverse; when the gcd exceeds one there is no
+inverse and the result is \code{None}.
+
+\code{mod\_inverse\_batch} inverts a whole slice at the cost of one
+inversion and $3(k-1)$ multiplications --- Montgomery's trick. With prefix
+products $P_i = x_1 x_2 \cdots x_i$,
+\begin{equation}
+P_k^{-1} \text{ (one inversion)}, \qquad
+x_i^{-1} = P_{i-1} \cdot P_i^{-1}, \qquad
+P_{i-1}^{-1} = x_i \cdot P_i^{-1},
+\end{equation}
+walking the products back from the top. \code{None} when any element
+shares a factor with the modulus (which element is not identified --- that
+would cost the inversions the trick avoids).
+
+\begin{lstlisting}
+assert_eq!(
+    mod_pow(&BigUint::from_u64(3), &BigUint::from_u64(4), &BigUint::from_u64(5)),
+    BigUint::one() // 81 = 1 (mod 5)
+);
+assert_eq!(
+    mod_inverse(&BigUint::from_u64(3), &BigUint::from_u64(7)),
+    Some(BigUint::from_u64(5)) // 3 * 5 = 15 = 1 (mod 7)
+);
+assert_eq!(mod_inverse(&BigUint::from_u64(2), &BigUint::from_u64(4)), None);
+
+let m = BigUint::from_u64(97);
+let values = [BigUint::from_u64(3), BigUint::from_u64(10), BigUint::from_u64(96)];
+let inverses = mod_inverse_batch(&values, &m).expect("all coprime to 97");
+for (inv, v) in inverses.iter().zip(&values) {
+    assert!(BigUint::mod_mul(inv, v, &m).is_one());
+}
+\end{lstlisting}
+
+\subsection{Square roots modulo a prime}
+\label{sec:sqrtmod}
+
+\code{sqrt\_mod(a, p)} returns a square root of $a$ modulo an odd prime
+$p$, or \code{None} for a non-residue. Write $p - 1 = 2^s q$ with $q$ odd.
+Three engines serve the call, chosen by the 2-adic depth $s$.
+
+\paragraph{The $p \equiv 3 \pmod 4$ shortcut.} When $s = 1$ --- half of
+all primes, so the branch that runs most often --- the root is a single
+exponentiation: for a residue $a$,
+\begin{equation}
+r \;=\; a^{(p+1)/4} \pmod p,
+\qquad
+r^2 \;=\; a^{(p+1)/2} \;=\; a \cdot a^{(p-1)/2} \;=\; a,
+\end{equation}
+the last step by Euler's criterion.
+
+\paragraph{Tonelli--Shanks.} For deeper $s$, initialize with a
+non-residue $z$ (found by testing $\jac{z}{p} = -1$; $(p-1)/2$ of the
+non-zero residues qualify):
+\begin{equation}
+M = s,\quad c = z^q,\quad t = a^q,\quad r = a^{(q+1)/2} \pmod{p}.
+\end{equation}
+The invariants $r^2 = a\,t$ and $\operatorname{ord}(t) \mid 2^{M-1}$ hold
+throughout; while $t \ne 1$, find the least $i$ with $t^{2^i} = 1$, set
+$b = c^{2^{M-i-1}}$, and update
+\begin{equation}
+M \leftarrow i, \qquad c \leftarrow b^2, \qquad t \leftarrow t b^2, \qquad
+r \leftarrow r b .
+\end{equation}
+Each pass strictly reduces $M$, so at most $s$ passes run; when $t = 1$,
+$r^2 = a$.
+
+\paragraph{Cipolla.} When the 2-adic depth $s$ is large the descent's
+$O(s^2)$ multiplications dominate, and the implementation dispatches to
+Cipolla's algorithm: find $t$ with $\jac{t^2 - a}{p} = -1$, work in
+$\F_{p^2} = \F_p(\omega)$ with $\omega^2 = t^2 - a$, and compute
+\begin{equation}
+r \;=\; (t + \omega)^{(p+1)/2},
+\end{equation}
+which lands in $\F_p$ and squares to $a$. Every path verifies its result
+by squaring before returning it, so on a composite modulus --- for which
+the internal reasoning is unsound --- the answer is either \code{None} or
+a genuine square root modulo that composite, never a silently wrong value.
+\code{None} is \emph{not} a compositeness certificate, and \code{Some} is
+not a primality one: $\code{sqrt\_mod}(1, 15)$ returns \code{Some(1)}.
+
+\begin{lstlisting}
+let p = BigUint::from_u64(41);
+let root = sqrt_mod(&BigUint::from_u64(2), &p).expect("2 is a residue mod 41");
+assert_eq!(BigUint::mod_mul(&root, &root, &p), BigUint::from_u64(2));
+assert_eq!(sqrt_mod(&BigUint::from_u64(3), &p), None); // non-residue
+\end{lstlisting}
+
+\subsection{Square roots modulo a prime power}
+
+\code{sqrt\_mod\_prime\_power(a, p, e)} returns \emph{every} square root of
+$a$ modulo $p^e$, ascending, empty for a non-residue. For odd $p$ and
+$p \nmid a$, a root mod $p$ lifts uniquely along Hensel's construction:
+given $r_k^2 \equiv a \pmod{p^k}$,
+\begin{equation}
+r_{k+1} \;=\; r_k + t\,p^k,
+\qquad
+t \;=\; \frac{a - r_k^2}{p^k} \cdot (2 r_k)^{-1} \bmod p,
+\end{equation}
+and the two roots mod $p$ give the two mod $p^e$. For $p = 2$ the
+structure is governed by the residue of $a$ modulo 8 (one root mod 2, two
+mod 4, and four mod $2^e$ for $e \ge 3$ when $a \equiv 1 \bmod 8$). For
+$p \mid a$, factor out the largest even power $p^{2j}$ dividing $a$ and
+recurse on the cofactor, multiplying the roots back by $p^j$ and expanding
+the residual multiplicity. Panics when $e = 0$ or $p < 2$.
+
+\begin{lstlisting}
+// 9 has four square roots mod 16: 3, 5, 11, 13.
+let roots = sqrt_mod_prime_power(&BigUint::from_u64(9), &BigUint::from_u64(2), 4);
+assert_eq!(roots, vec![
+    BigUint::from_u64(3), BigUint::from_u64(5),
+    BigUint::from_u64(11), BigUint::from_u64(13),
+]);
+\end{lstlisting}
+
+\subsection{The Chinese Remainder Theorem}
+
+\code{crt\_combine} solves the simultaneous congruences
+$x \equiv a_i \pmod{m_i}$ for pairwise coprime moduli: the unique
+$x \bmod M$, $M = \prod m_i$, assembled by folding pairs,
+\begin{equation}
+x_{12} \;=\; a_1 + m_1\Bigl( (a_2 - a_1)\, m_1^{-1} \bmod m_2 \Bigr)
+\;\equiv\; a_i \pmod{m_i},\; i = 1, 2 .
+\end{equation}
+\code{None} when the moduli are not pairwise coprime (detected by the
+failing inversion).
+
+\begin{lstlisting}
+// Sunzi's classic: 2 mod 3, 3 mod 5, 2 mod 7.
+let x = crt_combine(&[
+    (BigUint::from_u64(2), BigUint::from_u64(3)),
+    (BigUint::from_u64(3), BigUint::from_u64(5)),
+    (BigUint::from_u64(2), BigUint::from_u64(7)),
+])
+.expect("moduli are pairwise coprime");
+assert_eq!(x, BigUint::from_u64(23));
+\end{lstlisting}
+
+\subsection{Valuation}
+
+\code{valuation(n, p)} is the $p$-adic valuation $v_p(n)$, the exponent of
+$p$ in $n$; \code{remove\_factor(n, p)} returns $(n / p^{v_p(n)},\,
+v_p(n))$, dividing through a ladder of squared powers
+$p, p^2, p^4, \ldots$ so a valuation of $v$ costs $O(\lg v)$ divisions
+(the shape of GMP's \code{mpz\_remove}). Both panic on $n = 0$ (the
+valuation is unbounded) or $p < 2$.
+
+\begin{lstlisting}
+let n = BigUint::from_u64(3_888); // 2^4 * 3^5
+assert_eq!(valuation(&n, &BigUint::from_u64(2)), 4);
+let (cofactor, exponent) = remove_factor(&n, &BigUint::from_u64(3));
+assert_eq!(exponent, 5);
+assert_eq!(cofactor, BigUint::from_u64(16));
+\end{lstlisting}
+
+\subsection{Rational reconstruction}
+
+Modular and $p$-adic computation ends by reading a rational answer back
+from its residue. Given $x$ and $m$, \code{rational\_reconstruct\_bounded}
+finds the unique fraction $p/q$ with
+\begin{equation}
+p \;\equiv\; q\,x \pmod{m},
+\qquad |p| \le N,\quad 0 < q \le D,\quad \gcd(p, q) = 1,
+\end{equation}
+under the caller's contract $2ND < m$, which is precisely what makes the
+answer unique (the difference of two candidate fractions would be a
+non-zero multiple of $m$ over a denominator smaller than $m$). The
+contract is enforced: a call with $2ND \ge m$ \emph{panics}, since any
+answer it produced could be one of several. The
+candidate comes from the extended Euclidean remainder sequence of
+$(m, x)$, stopped at the first remainder $r \le N$: writing
+$r \equiv t\,x \pmod m$ for that row's cofactor $t$, the only possible
+answer is $p = \pm r$, $q = |t|$ (Wang 1981; von zur Gathen and Gerhard,
+\S5.10). The final checks $q \le D$ and $\gcd(r, t) = 1$ decide existence.
+
+\code{rational\_reconstruct} is the symmetric special case
+$N = D = \bigl\lfloor \sqrt{(m-1)/2} \bigr\rfloor$. When reconstructing
+many values under one modulus, compute that bound once and call the
+bounded form --- the wrapper's square root costs more than the
+reconstruction itself at large sizes.
+
+\begin{lstlisting}
+// 22/7 survives reduction mod 1009 and comes back intact.
+let m = BigUint::from_u64(1_009);
+let seven_inv = mod_inverse(&BigUint::from_u64(7), &m).expect("7 is invertible");
+let x = BigUint::mod_mul(&BigUint::from_u64(22), &seven_inv, &m);
+let (p, q) = rational_reconstruct(&x, &m).expect("22/7 is within the bounds");
+assert_eq!(p, BigInt::from_biguint(BigUint::from_u64(22)));
+assert_eq!(q, BigUint::from_u64(7));
+
+// The bounded form makes the contract explicit (here N = 22, D = 7).
+assert_eq!(
+    rational_reconstruct_bounded(&x, &m, &BigUint::from_u64(22), &BigUint::from_u64(7)),
+    Some((BigInt::from_biguint(BigUint::from_u64(22)), BigUint::from_u64(7)))
+);
+\end{lstlisting}
+
+\subsection{Product trees, remainder trees, and batch smoothness}
+
+\code{product\_tree(values)} builds the pairwise-product tree over its
+leaves --- level 0 the values, each parent the product of its two children,
+the root $\prod_i x_i$. \code{remainder\_tree(tree, z)} reduces $z$ down
+the tree, $z \bmod$ each node, reaching $z \bmod x_i$ at every leaf for one
+tree descent instead of $k$ full-width divisions; it panics on a zero leaf,
+which it would divide by.
+
+\code{smooth\_parts(values, primes)} is Bernstein's batched smoothness
+test. With $z = \prod_{p \in P} p$ (itself built by a product tree) and
+$r_i = z \bmod x_i$ from the remainder tree, square repeatedly,
+\begin{equation}
+s_i \;=\; r_i^{\,2^{e_i}} \bmod x_i,
+\qquad e_i = \lfloor \lg b_i \rfloor + 1
+\text{ squarings for } b_i = \lfloor \lg x_i \rfloor + 1,
+\text{ so } 2^{e_i} > b_i \ge \lg x_i,
+\end{equation}
+which pushes every smooth prime's multiplicity in $s_i$ past its
+multiplicity in $x_i$ (no prime can divide $x_i$ more than $\lg x_i$
+times). Then
+\begin{equation}
+\gcd(x_i, s_i) \;=\; \text{the largest divisor of } x_i
+\text{ composed of primes in } P,
+\end{equation}
+the \emph{smooth part}, with full multiplicity. A value is fully smooth
+exactly when its smooth part equals itself; $0 \mapsto 0$ and
+$1 \mapsto 1$ pass through without joining the tree.
+
+\begin{lstlisting}
+let primes = primes_below(10); // 2, 3, 5, 7
+let values = [
+    BigUint::from_u64(360),    // 2^3 * 3^2 * 5 - fully smooth
+    BigUint::from_u64(2 * 11), // 11 is not in the base
+];
+let parts = smooth_parts(&values, &primes);
+assert_eq!(parts[0], BigUint::from_u64(360));
+assert_eq!(parts[1], BigUint::from_u64(2));
+
+// The trees are public on their own: the root is the product, and one
+// descent reduces a modulus against every leaf.
+let leaves = [BigUint::from_u64(7), BigUint::from_u64(11), BigUint::from_u64(13)];
+let tree = product_tree(&leaves);
+assert_eq!(tree.last().unwrap()[0], BigUint::from_u64(7 * 11 * 13)); // 1001
+let residues = remainder_tree(&tree, &BigUint::from_u64(100));
+assert_eq!(residues, vec![
+    BigUint::from_u64(100 % 7),
+    BigUint::from_u64(100 % 11),
+    BigUint::from_u64(100 % 13),
+]);
+\end{lstlisting}
+
+\code{primes\_below(bound)} sieves every prime below the bound into a
+\code{Vec<u64>} --- the bulk companion to the probabilistic tests below.
+
+\subsection{Primality}
+\label{sec:primality}
+
+\paragraph{Miller--Rabin.} For odd $n > 2$ write $n - 1 = 2^s d$ with $d$
+odd. A base $a \not\equiv 0, \pm 1 \pmod n$ is a \emph{witness} to
+compositeness unless
+\begin{equation}
+a^d \equiv 1 \pmod{n}
+\qquad\text{or}\qquad
+a^{2^r d} \equiv -1 \pmod{n} \text{ for some } 0 \le r < s .
+\end{equation}
+Every prime satisfies one of the two for every base; for a composite, at
+least three quarters of the bases are witnesses, so $k$ random rounds err
+with probability at most $4^{-k}$. \code{miller\_rabin\_witness(n, a)} is the
+single-round primitive: \code{true} means $a$ proves $n$ composite.
+
+\code{is\_probable\_prime} runs trial division by small primes, then
+Miller--Rabin over twelve fixed small-prime bases (2 through 37) --- a
+deterministic proof below $\psi_{12} \approx 3.19 \times 10^{23}$
+(exactly $318\,665\,857\,834\,031\,151\,167\,461$: Sorenson and Webster
+2017; the often-quoted $3.317 \times 10^{24}$ is $\psi_{13}$ and requires
+a thirteenth base) and a strong probable-prime test above.
+\code{is\_probable\_prime\_with\_bases} takes an
+explicit base set after the same unconditional sieve; each base is reduced
+modulo the candidate, trivial residues $\{0, 1, n-1\}$ are discarded, and
+a set with no effective round proves nothing and reports composite. Fixed
+bases are for candidates you generated yourself: an adversary can
+construct pseudoprimes against any fixed base set, so untrusted input
+needs candidate-derived witnesses added on top.
+
+\paragraph{The strong Lucas test and Baillie--PSW.} Selfridge's Method A
+picks the discriminant $D$ as the first of $5, -7, 9, -11, 13, \ldots$
+(the integers $\equiv 1 \bmod 4$ with $|D| \ge 5$, ordered by absolute
+value) with $\jac{D}{n} = -1$, then sets $P = 1$, $Q = (1 - D)/4$. The
+search itself can prove $n$ composite and stop: a zero symbol whose gcd
+with $n$ is proper exposes a factor, and a perfect square --- for which no
+$D$ has symbol $-1$ and the search would never end --- is detected by one
+integer square root after the third failed candidate and likewise reported
+composite (Baillie and Wagstaff, \S6). The Lucas sequences
+\begin{equation}
+U_0 = 0,\; U_1 = 1,\; V_0 = 2,\; V_1 = P,
+\qquad
+U_{k+1} = P\,U_k - Q\,U_{k-1},
+\quad
+V_{k+1} = P\,V_k - Q\,V_{k-1},
+\end{equation}
+are computed modulo $n$ by the doubling and stepping identities
+\begin{equation}
+U_{2k} = U_k V_k,
+\quad
+V_{2k} = V_k^2 - 2Q^k,
+\quad
+U_{k+1} = \tfrac{P U_k + V_k}{2},
+\quad
+V_{k+1} = \tfrac{D U_k + P V_k}{2},
+\end{equation}
+the halvings exact modulo odd $n$. Writing $n + 1 = 2^s d$ with $d$ odd,
+$n$ is a \emph{strong Lucas probable prime} when
+\begin{equation}
+U_d \equiv 0 \pmod{n}
+\qquad\text{or}\qquad
+V_{2^r d} \equiv 0 \pmod{n} \text{ for some } 0 \le r < s,
+\end{equation}
+conditions every prime with $\jac{D}{n} = -1$ satisfies (Baillie and
+Wagstaff 1980). This stage alone is exposed as
+\code{is\_strong\_lucas\_probable\_prime}.
+
+\code{is\_probable\_prime\_bpsw} is the Baillie--PSW composite of the two:
+trial division, one strong base-2 Miller--Rabin round, then the strong
+Lucas test. The two stages fail on disjoint kinds of composites as far as
+anyone has found: no composite passing both is known, and none exists
+below $2^{64}$, where the test is therefore deterministic.
+
+\begin{lstlisting}
+assert!(is_probable_prime(&BigUint::from_u64(65_537)));
+assert!(!is_probable_prime(&BigUint::from_u64(561))); // Carmichael
+
+// 2047 = 23 * 89 is the smallest strong pseudoprime to base 2.
+let n = BigUint::from_u64(2_047);
+assert!(!miller_rabin_witness(&n, &BigUint::from_u64(2))); // 2 is fooled
+assert!(miller_rabin_witness(&n, &BigUint::from_u64(3)));  // 3 is a witness
+
+// with_bases reduces each base modulo n and discards {0, 1, n-1}; a set
+// of only trivial bases runs no effective round and is not reported prime.
+let composite = BigUint::from_u64(1_022_117); // 1009 x 1013, survives the sieve
+assert!(!is_probable_prime_with_bases(&composite, &[1])); // 1 never testifies
+assert!(!is_probable_prime_with_bases(&composite, &[2])); // 2 exposes it
+
+// BPSW: the stages reject disjoint composites.
+assert!(!is_probable_prime_bpsw(&BigUint::from_u64(2_047))); // Lucas rejects
+assert!(is_strong_lucas_probable_prime(&BigUint::from_u64(5_459)));
+assert!(!is_probable_prime_bpsw(&BigUint::from_u64(5_459))); // base 2 rejects
+\end{lstlisting}
+\section{Polynomials: \code{PolyZ} and \code{PolyModP}}
+
+Both types are dense univariate polynomials, coefficients stored low to
+high and normalized to drop trailing zeros, so the zero polynomial is the
+empty coefficient list and \code{degree()} is \code{None} for it.
+\code{PolyZ} works over $\Z$; \code{PolyModP} over $\Z/m\Z$ with every
+coefficient held as its least non-negative residue and the modulus carried
+by the value --- mixing two moduli in one operation is a hard panic in
+every build. The division-based operations of \code{PolyModP} require a
+\emph{prime} modulus (they invert leading coefficients); a composite
+modulus panics on the first non-invertible pivot.
+
+\subsection{Arithmetic over $\Z$}
+
+\code{add}/\code{sub}/\code{mul} (schoolbook convolution),
+\code{evaluate} (Horner: fold $\mathit{acc} \gets \mathit{acc} \cdot x +
+c_i$ from the top --- one multiplication and addition per coefficient),
+\code{derivative} (the formal rule $\sum i\,c_i x^{i-1}$),
+\code{negated}, and \code{scale}. \code{content} is the gcd of the
+coefficients; \code{primitive\_part} divides it out, by Gauss's lemma the
+canonical split $f = \operatorname{cont}(f) \cdot \operatorname{pp}(f)$.
+
+\subsection{Division over $\Z$}
+
+$\Z$ is not a field, so two divisions exist.
+
+\paragraph{Exact division.} \code{div\_rem} returns
+$\bigl(q, r\bigr)$ with $f = q\,g + r$, $\deg r < \deg g$, when an integer
+quotient exists, and \code{None} otherwise: each long-division step must
+divide the running remainder's leading coefficient exactly by $\lc(g)$
+(always possible for monic $g$). The quotient is unique when it exists,
+so a single failing step is conclusive.
+
+\paragraph{Pseudo-division.} \code{pseudo\_div\_rem} premultiplies instead
+of dividing (Knuth, Algorithm~R), staying in $\Z$ unconditionally:
+\begin{equation}
+\ell\, f \;=\; q\,g + r,
+\qquad
+\deg r < \deg g,
+\qquad
+\ell = \lc(g)^{\deg f - \deg g + 1}
+\end{equation}
+(and $\ell = 1$ when $\deg f < \deg g$, where the result is $(0, f)$).
+
+\begin{lstlisting}
+// (x + 1)(x + 2) = x^2 + 3x + 2, over Z.
+let a = PolyZ::from_i64_slice(&[1, 1]); // x + 1
+let b = PolyZ::from_i64_slice(&[2, 1]); // x + 2
+assert_eq!(a.mul(&b), PolyZ::from_i64_slice(&[2, 3, 1]));
+
+// Exact division: (x^2 + 3x + 2) / (x + 1) = x + 2, no remainder.
+let (q, r) = a.mul(&b).div_rem(&a).expect("x + 1 divides");
+assert_eq!(q, b);
+assert!(r.is_zero());
+\end{lstlisting}
+
+\subsection{Resultants and discriminants}
+
+The resultant of $f, g \in \Z[x]$ with roots $\alpha_i, \beta_j$ (over
+$\overline{\mathbb{Q}}$) is
+\begin{equation}
+\Res(f, g)
+\;=\; \lc(f)^{\deg g}\, \lc(g)^{\deg f} \prod_{i, j} (\alpha_i - \beta_j)
+\;=\; \det S(f, g),
+\end{equation}
+the determinant of the Sylvester matrix --- zero exactly when $f$ and $g$
+share a non-constant factor. \code{resultant} computes it by Bareiss
+fraction-free elimination, which keeps every intermediate entry an integer
+minor determinant, so no rational arithmetic appears. In the number field
+sieve, $\Res$ \emph{is} the algebraic norm.
+
+The discriminant is
+\begin{equation}
+\disc(f) \;=\; \frac{(-1)^{d(d-1)/2}}{\lc(f)} \Res(f, f'),
+\qquad d = \deg f,
+\end{equation}
+zero exactly when $f$ has a repeated factor; the division by $\lc(f)$ is
+exact over $\Z$.
+
+\begin{lstlisting}
+// disc(x^2 + 5x + 6) = 25 - 24 = 1.
+assert_eq!(PolyZ::from_i64_slice(&[6, 5, 1]).discriminant(), BigInt::from_i64(1));
+// (x-1)(x-2) and (x-1)(x-3) share (x-1): resultant zero.
+let u = PolyZ::from_i64_slice(&[2, -3, 1]);
+let v = PolyZ::from_i64_slice(&[3, -4, 1]);
+assert_eq!(u.resultant(&v), BigInt::zero());
+\end{lstlisting}
+
+\subsection{Arithmetic over $\F_p$}
+
+\code{PolyModP} adds the field-division layer: \code{div\_rem} and
+\code{rem} (schoolbook long division with the one leading-coefficient
+inverse hoisted out of the loop --- and skipped entirely for a monic
+divisor; \code{rem} runs the same loop without quotient bookkeeping, the
+form the gcd descent wants), \code{gcd} (Euclid on remainders, result
+returned monic --- over a field the gcd is unique only up to a unit),
+\code{make\_monic}, and \code{pow\_mod} (binary exponentiation with a
+polynomial reduction after every step, the primitive behind the Frobenius
+computations below).
+
+\begin{lstlisting}
+// Over Z/7Z: (x - 1)(x - 2) and (x - 2)(x - 3) share x - 2.
+let p = BigUint::from_u64(7);
+let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[2, -3, 1]), &p);
+let g = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[6, -5, 1]), &p);
+let shared = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-2, 1]), &p);
+assert_eq!(f.gcd(&g), shared);
+\end{lstlisting}
+
+\subsection{Factorization over $\F_p$}
+\label{sec:factor}
+
+\code{factor} returns the monic irreducible factors with multiplicities;
+it composes three classical stages.
+
+\paragraph{Squarefree factorization.} Write $f = \prod a_i^{\,i}$ with the
+$a_i$ squarefree and pairwise coprime. Because
+$\frac{d}{dx} a^i = i\,a^{i-1} a'$ vanishes exactly when $p \mid i$,
+\begin{equation}
+\gcd(f, f') \;=\;
+\prod_{p \,\nmid\, i} a_i^{\,i-1} \cdot \prod_{p \,\mid\, i} a_i^{\,i},
+\end{equation}
+so $f / \gcd(f, f')$ is the product of the distinct factors of
+multiplicity prime to $p$, and a gcd cascade peels them off one
+multiplicity at a time. What remains is a $p$-th power, and in $\F_p[x]$,
+\begin{equation}
+g(x)^p \;=\; g(x^p),
+\end{equation}
+so its $p$-th root is read off by taking every $p$-th coefficient
+(Frobenius fixes $\F_p$), and the recursion continues with multiplicities
+scaled by $p$. \code{squarefree\_factorization} exposes this stage.
+
+\paragraph{Distinct-degree factorization.} The key identity: over $\F_p$,
+\begin{equation}
+x^{p^d} - x \;=\; \prod_{\substack{h \text{ monic irreducible}\\ \deg h \,\mid\, d}} h(x),
+\end{equation}
+so $\gcd\bigl(f,\; x^{p^d} - x\bigr)$ extracts from a squarefree $f$ the
+product of its irreducible factors of degree dividing $d$. Computing
+$x^{p^d} \bmod f$ is $d$ Frobenius steps by \code{pow\_mod}; sweeping
+$d = 1, 2, \ldots$ splits $f$ into blocks of equal-degree factors.
+
+\paragraph{Equal-degree splitting (Cantor--Zassenhaus).} A block $f$ of
+$k > 1$ irreducible factors, all of degree $d$, splits probabilistically:
+for a uniform random $h$ with $\deg h < \deg f$ and odd $p$,
+\begin{equation}
+\gcd\!\left(h^{(p^d - 1)/2} - 1,\; f\right)
+\end{equation}
+is a proper factor with probability at least $\tfrac12$ per pair of
+factors, because modulo each irreducible factor $h$ lands in
+$\F_{p^d}^{\times}$ and $h^{(p^d-1)/2} = \pm 1$ independently, each sign
+with probability near $\tfrac12$. For $p = 2$, where $(p^d-1)/2$ is not an
+integer, the splitter is the trace map
+$T(h) = h + h^2 + h^4 + \cdots + h^{2^{d-1}}$ instead, which takes each
+factor to $\F_2$ with the same independent coin-flip behaviour. The
+routine is Las Vegas --- retries never return a wrong split --- and caps
+consecutive fruitless draws so a broken generator fails loudly rather
+than spinning.
+
+\code{is\_irreducible} runs the distinct-degree sieve as a test;
+\code{roots(rng)} extracts the linear factors of
+$\gcd\bigl(f, x^p - x\bigr)$ and returns the residues where $f$ vanishes.
+Factoring and root-finding take an \code{Rng} (\S\ref{sec:random}).
+
+\begin{lstlisting}
+struct Lcg(u64);
+impl Rng for Lcg {
+    fn fill_bytes(&mut self, d: &mut [u8]) {
+        for b in d {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *b = (self.0 >> 33) as u8;
+        }
+    }
+}
+let p = BigUint::from_u64(7);
+let mut rng = Lcg(0x1234_5678);
+
+// x^2 - 1 = (x - 1)(x + 1) mod 7 - two roots.
+let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
+let mut roots = f.roots(&mut rng);
+roots.sort();
+assert_eq!(roots, vec![BigUint::from_u64(1), BigUint::from_u64(6)]);
+
+// x^2 + 1 is irreducible mod 7 (-1 is a non-residue), so no roots.
+let g = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &p);
+assert!(g.is_irreducible());
+assert!(g.roots(&mut rng).is_empty());
+
+// factor returns monic irreducibles with multiplicities:
+// x^3 + x = x * (x^2 + 1) over F_7.
+let h = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[0, 1, 0, 1]), &p);
+let mut fs = h.factor(&mut rng);
+fs.sort_by_key(|(fac, _)| fac.degree());
+assert_eq!(fs.len(), 2);
+\end{lstlisting}
+
+\section{Lattice reduction: \code{lll\_reduce}}
+\label{sec:lll}
+
+\code{lll\_reduce(basis)} applies the Lenstra--Lenstra--Lov\'asz algorithm
+to an ordered lattice basis --- the rows $b_1, \ldots, b_n$ of a
+\code{\&mut [Vec<BigInt>]} --- replacing it in place with a short, nearly
+orthogonal basis of the same lattice. The rows must be linearly
+independent.
+
+With Gram--Schmidt vectors and coefficients
+\begin{equation}
+b_i^{*} \;=\; b_i - \sum_{j < i} \mu_{ij}\, b_j^{*},
+\qquad
+\mu_{ij} \;=\; \frac{\langle b_i, b_j^{*} \rangle}
+                    {\langle b_j^{*}, b_j^{*} \rangle},
+\end{equation}
+a basis is \emph{LLL-reduced} with parameter $\delta$ when
+\begin{equation}
+|\mu_{ij}| \le \tfrac12 \;\; (j < i)
+\qquad\text{and}\qquad
+\bigl(\delta - \mu_{i,i-1}^2\bigr) \lVert b_{i-1}^{*} \rVert^2
+\;\le\; \lVert b_i^{*} \rVert^2
+\quad\text{(Lov\'asz condition)}.
+\end{equation}
+For $\delta = \tfrac34$ (the default; \code{lll\_reduce\_delta} takes any
+fraction in $(\tfrac14, 1)$) the first vector of a reduced basis satisfies
+\begin{equation}
+\lVert b_1 \rVert \;\le\; 2^{(n-1)/4} \bigl(\det L\bigr)^{1/n},
+\qquad
+\lVert b_1 \rVert \;\le\; 2^{(n-1)/2}\, \lambda_1(L),
+\end{equation}
+where $\lambda_1(L)$ is the length of a shortest non-zero lattice vector.
+The implementation is the \emph{integral} variant (Cohen,
+Algorithm~2.6.3): it carries the Gram--Schmidt data as exact integers
+$d_j = \prod_{i \le j} \lVert b_i^* \rVert^2$ and
+$\lambda_{ij} = d_j\,\mu_{ij}$, so no rational or floating-point
+arithmetic appears and the output is exact. An independent rational-LLL
+oracle in the test suite pins its behavior.
+
+\begin{lstlisting}
+let row = |xs: &[i64]| xs.iter().map(|&x| BigInt::from_i64(x)).collect::<Vec<_>>();
+// A badly skewed basis for a 2-D lattice.
+let mut basis = vec![row(&[201, 37]), row(&[1648, 297])];
+lll_reduce(&mut basis);
+// Reduction returns short vectors spanning the same lattice.
+assert_eq!(basis, vec![row(&[1, 32]), row(&[40, 1])]);
+
+// An explicit Lovasz parameter, as the fraction 99/100.
+let mut basis = vec![row(&[201, 37]), row(&[1648, 297])];
+lll_reduce_delta(&mut basis, 99, 100);
+assert_eq!(basis, vec![row(&[1, 32]), row(&[40, 1])]);
+\end{lstlisting}
+
+\section{Random sampling}
+\label{sec:random}
+
+rump chooses no entropy source. Every sampler is driven by a
+caller-supplied generator implementing the one-method trait
+\begin{lstlisting}
+pub trait Rng {
+    fn fill_bytes(&mut self, dest: &mut [u8]);
+}
+\end{lstlisting}
+and the output is exactly as good as that source --- cryptographic callers
+must supply a CSPRNG.
+
+Every sampler is a \emph{rejection} sampler, which buys exact uniformity:
+reducing a wide draw modulo the bound would over-represent the low
+residues whenever the bound is not a power of two. \code{random\_below}
+draws uniformly from the enclosing power-of-two range $[0, 2^{\,b})$, $b$
+the bound's bit length, and rejects draws at or above the bound; since the
+bound is at least $2^{\,b-1}$, each draw is accepted with probability at
+least $\tfrac12$ and the expected number of draws is at most 2.
+\code{random\_nonzero\_below} additionally rejects zero;
+\code{random\_coprime\_below(rng, n, m)} keeps the first draw coprime to
+$m$ --- pass $n$ as both bound and modulus to draw a uniform unit of
+$(\Z/n\Z)^{\times}$. \code{random\_probable\_prime(rng, bits)} draws odd
+candidates of exactly the requested width (top and low bits forced) and
+screens them with \code{is\_probable\_prime}; by the prime number theorem
+the expected number of rounds is about $0.35 \cdot \mathrm{bits}$.
+
+Degenerate \emph{arguments} return \code{None} (an empty range, a zero
+coprimality modulus, a width below 2). For a degenerate \emph{generator},
+each sampler carries a stall guard that panics rather than loop forever on
+the sources it can soundly detect, every guard sized so a working
+generator trips it with probability at most $e^{-111} \approx 2^{-160}$,
+the loosest of the individual bounds (each bullet gives its own). Their
+coverage differs, and the one gap is stated rather than papered over:
+
+\begin{itemize}
+\item \code{random\_below} and \code{random\_nonzero\_below} accept each
+  draw with probability at least $\tfrac12$ regardless of arguments, so
+  they bound consecutive \emph{rejections} at 256 (survival probability
+  at most $2^{-256}$) and catch every degenerate source.
+\item \code{random\_probable\_prime}'s acceptance density is a function
+  of the width alone, so its rejection bound scales with the width:
+  $64 \cdot \mathrm{bits}$ fruitless rounds, which a working generator
+  survives with probability
+  $(1 - \tfrac{2}{\mathrm{bits} \cdot \ln 2})^{64 \cdot \mathrm{bits}}
+  \approx e^{-185}$ by the asymptotic prime density, and below
+  $e^{-111}$ unconditionally at every width: for $\mathrm{bits} \ge 6$
+  from the lower bound $\pi(2x) - \pi(x) > \tfrac35\, x/\ln x$
+  (Rosser--Schoenfeld 1962), and for the four smaller widths by
+  exhaustive enumeration (widths 2 and 3 contain no composite; the worst
+  case is width 4, density $\tfrac12$ over 256 rounds, survival
+  $2^{-256}$) --- so it, too, catches every degenerate source. A \emph{constant} generator additionally
+  fails fast: a candidate equal to the previous rejected one is known
+  composite, skips the Miller--Rabin re-screen, and trips a 256-repeat
+  assertion --- one screen and 256 comparisons, not hours of full-width
+  exponentiation at large widths.
+\item \code{random\_coprime\_below} is the one sampler where no
+  \emph{usable} rejection count exists. A primorial modulus legitimately
+  leaves $1$ as the only unit below the bound, so acceptance can be as
+  thin as $1/(\mathit{upper}-1)$; the only sound count therefore scales
+  with the bound itself ($\Theta(\mathit{upper})$ draws), unreachable for
+  a multiprecision bound. Its guard instead detects a \emph{pinned}
+  generator (the same rejected candidate 256 times running, probability
+  at most $2^{-256}$ for a working source). A degenerate source that
+  cycles among several rejected values is statistically
+  indistinguishable from an unlucky legitimate run against a sparse unit
+  set, does not trip the guard, and remains the caller's to avoid.
+\end{itemize}
+
+\begin{lstlisting}
+/// xorshift64: deterministic and compact. Fine for a manual; NOT a CSPRNG.
+struct XorShift64(u64);
+
+impl Rng for XorShift64 {
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for chunk in dest.chunks_mut(8) {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            let word = self.0.to_le_bytes();
+            chunk.copy_from_slice(&word[..chunk.len()]);
+        }
+    }
+}
+
+let mut rng = XorShift64(0x1234_5678_9abc_def0);
+let bound = BigUint::from_u64(1_000_003);
+
+let draw = random_below(&mut rng, &bound).expect("bound is non-zero");
+assert!(draw < bound);
+
+let nonzero = random_nonzero_below(&mut rng, &bound).expect("bound exceeds one");
+assert!(!nonzero.is_zero() && nonzero < bound);
+
+let unit = random_coprime_below(&mut rng, &bound, &BigUint::from_u64(30_030))
+    .expect("units exist below the bound");
+assert_eq!(gcd(&unit, &BigUint::from_u64(30_030)), BigUint::one());
+
+let prime = random_probable_prime(&mut rng, 64).expect("width of at least 2");
+assert_eq!(prime.bits(), 64);
+assert!(is_probable_prime(&prime));
+\end{lstlisting}
+
+\section{Panics}
+
+The unsigned types treat impossible requests as programming errors, not
+recoverable conditions. Fallible \emph{mathematics} --- a missing inverse,
+a non-residue, an even Montgomery modulus, non-coprime CRT moduli ---
+returns \code{Option} instead.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.42\textwidth}>{\raggedright\arraybackslash}p{0.52\textwidth}@{}}
+\toprule
+\textbf{Call} & \textbf{Panics when} \\
+\midrule
+\code{sub\_ref} / \code{sub\_assign\_ref} & the result would be negative \\
+\code{div\_rem} / \code{div\_rem\_u64} / \code{modulo} / \code{rem\_u64} & the divisor or modulus is zero \\
+\code{mod\_mul} / \code{mod\_pow} / \code{mod\_add} / \code{mod\_sub} & the modulus is zero \\
+\code{ln\_approx} & the value is zero \\
+\code{nth\_root\_floor} & $k = 0$ \\
+\code{sqrt\_mod\_prime\_power} & $e = 0$ or $p < 2$ \\
+\code{valuation} / \code{remove\_factor} & $n = 0$ or $p < 2$ \\
+\code{remainder\_tree} & a leaf is zero \\
+\code{rational\_reconstruct\_bounded} & $2ND \ge m$ (the uniqueness contract) \\
+\code{to\_be\_bytes\_padded} & the value exceeds the requested width \\
+\code{from\_str\_radix} / \code{to\_str\_radix} & the radix is outside $[2, 36]$ \\
+\code{mul\_mont} / \code{square\_mont} / \code{pow\_encoded} & an operand \emph{wider} than the modulus, in every build; an unreduced operand of the modulus's width trips a debug assert only (\S\ref{sec:montgomery}) \\
+\code{Gf2m::half\_trace} & the field degree is even \\
+\code{PolyZ} / \code{PolyModP} division & the divisor is the zero polynomial \\
+\code{PolyModP::new} / \code{zero} / \code{from\_poly\_z} & the modulus is below 2 \\
+\code{PolyModP} (mixed moduli) & the two operands carry different moduli \\
+\code{PolyModP} division / \code{gcd} / \code{factor} & a non-invertible pivot (composite modulus) \\
+\code{squarefree\_factorization} / \code{factor} & the polynomial is constant or zero \\
+\code{factor} / \code{roots} & the supplied \code{Rng} makes no progress (the equal-degree splitter's stall guard) \\
+\code{lll\_reduce} / \code{lll\_reduce\_delta} & dependent rows, ragged or zero-length rows; the \code{\_delta} form also on $\delta \notin (\tfrac14, 1)$ or a zero denominator \\
+samplers (\S\ref{sec:random}) & the generator trips a stall guard (see \S\ref{sec:random} for what each guard can and cannot detect) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section*{References}
+
+\begin{itemize}
+\item D.~E. Knuth, \emph{The Art of Computer Programming}, vol.~2:
+  \emph{Seminumerical Algorithms}, 3rd ed. --- Algorithms M, D, L;
+  \S4.3.3 (Karatsuba, Toom--Cook); \S4.6.3 (exponentiation).
+\item P.~L. Montgomery, \emph{Modular multiplication without trial
+  division}, Math.\ Comp.\ 44 (1985).
+\item S.~R. Duss\'e and B.~S. Kaliski, \emph{A cryptographic library for
+  the Motorola DSP56000}, EUROCRYPT '90 --- the word-level $n_0'$.
+\item A.~J. Menezes, P.~C. van Oorschot, S.~A. Vanstone, \emph{Handbook of
+  Applied Cryptography} --- Algorithms 2.149, 4.44, 14.42, 14.82.
+\item N.~M\"oller, \emph{On Sch\"onhage's algorithm and subquadratic
+  integer GCD computation}, Math.\ Comp.\ 77 (2008).
+\item H. Cohen, \emph{A Course in Computational Algebraic Number Theory}
+  --- Algorithms 1.7.1, 2.6.3; \S3.3--3.4.
+\item R. Baillie and S.~S. Wagstaff, \emph{Lucas pseudoprimes},
+  Math.\ Comp.\ 35 (1980).
+\item M.~O. Rabin, \emph{Probabilistic algorithms in finite fields},
+  SIAM J.\ Comput.\ 9 (1980).
+\item D. Hankerson, A. Menezes, S. Vanstone, \emph{Guide to Elliptic Curve
+  Cryptography} --- Algorithms 2.36, 2.48; \S2.3.5.
+\item D.~J. Bernstein, \emph{How to find smooth parts of integers}, 2004.
+\item A.~K. Lenstra, H.~W. Lenstra, L. Lov\'asz, \emph{Factoring
+  polynomials with rational coefficients}, Math.\ Ann.\ 261 (1982).
+\item J. von zur Gathen and J. Gerhard, \emph{Modern Computer Algebra},
+  3rd ed. --- \S5.10, \S14 (Cantor--Zassenhaus).
+\end{itemize}
+
+The crate's own \code{CITATIONS.md} maps each routine to its primary
+source at finer grain.
+
+\end{document}
