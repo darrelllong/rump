@@ -172,9 +172,23 @@ PALETTE = ["#A64E28", "#3D648A", "#2E7D4F", "#A97416", "#6D4C91", "#8A8378"]
 # so entries here never duplicate table rows.
 PLOT_FAMILIES = {"gcd-at-scale": ["gcd", "gcdext", "modinv", "jacobi"]}
 
+# Per-family override of the operations a *scaling line plot* should draw,
+# where that differs from the table's family. The raw `sqrtmod` and `isprime`
+# are heavy-tail mixtures whose MEAN does not scale: a rare slow population
+# (the 2-adic descent; composites that survive the sieve) dominates the mean,
+# and undersampling that tail makes it sawtooth from size to size — e.g. the
+# 7168-bit sqrtmod mean is 22 ms while its own p50 and p99 are both ~0.12 ms.
+# A scaling line through such a mean is meaningless. The plot therefore draws
+# the conditioned single-population series, which are genuine scaling curves;
+# the raw mixture's spread lives in the extrema table (min/p50/p99/max), not
+# as a line.
+SCALING_PLOT_OPS = {
+    "variable-time": ["sqrtmod_blum", "sqrtmod_descent", "isprime_true"],
+}
+
 
 def scaling_svg(family, out, hosts):
-    ops = INT_FAMILIES.get(family) or PLOT_FAMILIES[family]
+    ops = SCALING_PLOT_OPS.get(family) or INT_FAMILIES.get(family) or PLOT_FAMILIES[family]
     # Collect (op, host) series over the integer sizes present.
     series = []
     all_x, all_y = [], []
@@ -223,7 +237,10 @@ def scaling_svg(family, out, hosts):
         s.append(f'<text x="{ML-8}" y="{y+4:.1f}" font-size="11" fill="#6F675C" '
                  f'text-anchor="end">{lbl}</text>')
     # series.
-    dash = {0: "", 1: "5,3", 2: "1,3"}  # per host
+    # Per host: solid, dashed, dotted, dash-dot. Four distinct patterns for the
+    # four hosts — a three-pattern map silently gave the fourth host (A18) a
+    # solid stroke identical to the first (M4), making the two indistinguishable.
+    dash = {0: "", 1: "5,3", 2: "1,3", 3: "5,3,1,3"}  # per host
     for oi, op in enumerate(ops):
         col = PALETTE[oi % len(PALETTE)]
         for (o, host, hi, pts) in series:

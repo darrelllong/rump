@@ -123,9 +123,11 @@ The Euclid family now reads α≈1.0–1.1 — **Lehmer batching** cuts both the
 constant and the observed growth against classical Euclid's ≈1.4. `mul`/`sqr`
 read α≈1.8 because at these sizes they are mostly schoolbook with a single
 Karatsuba split, still below the Toom crossover (~8192 bits). `sqrtmod` and
-`isprime` are heavy-tailed: their means are monotone in size but tail-set,
-so their fitted exponents move with the sample's composition — read their
-extrema (see above).
+`isprime` are heavy-tailed: the mean is set by a rare expensive population (the
+Tonelli descent; sieve-surviving composites), so a finite sample estimates it
+only loosely and the fitted exponent is unreliable — read their extrema (see
+above). The mean reported is the whole-sample mean, so it is always consistent
+with those extrema.
 
 | Method | Complexity | M4 α | EPYC α | Pi α | A18 α |
 |---|---|---|---|---|---|
