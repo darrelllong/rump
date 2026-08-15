@@ -213,6 +213,20 @@ fn manual_bigint_signed() {
         BigInt::from_parts(Sign::Negative, BigUint::from_u64(12))
     );
 
+    // The signed ring: full product, truncated division, absolute value.
+    assert_eq!(
+        minus_three.mul_ref(&ten),
+        BigInt::from_parts(Sign::Negative, BigUint::from_u64(30))
+    );
+    // div_rem truncates toward zero; the remainder takes the dividend's sign:
+    // -7 = -3·2 - 1 (floored division would say -7 = -4·2 + 1 instead).
+    let minus_seven = BigInt::from_parts(Sign::Negative, BigUint::from_u64(7));
+    let two = BigInt::from_biguint(BigUint::from_u64(2));
+    let (q, r) = minus_seven.div_rem(&two);
+    assert_eq!(q, BigInt::from_parts(Sign::Negative, BigUint::from_u64(3)));
+    assert_eq!(r, BigInt::from_parts(Sign::Negative, BigUint::one()));
+    assert_eq!(minus_seven.abs(), BigUint::from_u64(7));
+
     // −3 ≡ 8 (mod 11), in canonical range.
     assert_eq!(
         minus_three.modulo_positive(&BigUint::from_u64(11)),

@@ -12,7 +12,7 @@
 //! stay normalized: no trailing zero coefficient, so the zero polynomial is
 //! the empty coefficient list and the degree is the last index.
 
-use crate::bigint::{BigInt, BigUint};
+use crate::bigint::{BigInt, BigUint, Sign};
 use crate::number_theory;
 
 /// A univariate polynomial over ℤ, coefficients low-to-high, normalized to
@@ -153,11 +153,23 @@ impl PolyZ {
         Self::new(coeffs)
     }
 
-    /// `self · c` for a scalar.
+    /// `self · c` for a scalar. The units ±1 short-circuit to a clone or a
+    /// coefficient-wise negation: the division loops scale by a leading
+    /// coefficient that is very often ±1 (every monic divisor), and a
+    /// multiplication by a unit across the whole coefficient list would be
+    /// pure waste.
     #[must_use]
     pub fn scale(&self, c: &BigInt) -> Self {
         if c.is_zero() {
             return Self::zero();
+        }
+        if c.is_one() {
+            return self.clone();
+        }
+        // −1 is detected from the parts rather than via `negated()`, which
+        // would clone the magnitude on every call that is *not* −1.
+        if c.sign() == Sign::Negative && c.magnitude().is_one() {
+            return self.negated();
         }
         Self::new(self.coeffs.iter().map(|a| a.mul_ref(c)).collect())
     }
@@ -249,44 +261,73 @@ impl PolyZ {
         }
         let self_degree = self.degree().expect("degree checked above");
         let lc = divisor.leading_coefficient();
-        let mut remainder = self.clone();
+        let lc_is_one = lc.is_one();
+        let mut rem = self.coeffs.clone();
         let mut quotient = vec![BigInt::zero(); self_degree - divisor_degree + 1];
         // Repeatedly cancel the remainder's leading term; each step scales
         // the whole working state by lc so the coefficients stay integral.
         // The invariant after t steps is lc^t·self = quotient·divisor +
         // remainder, and each step strictly lowers deg remainder (the two
         // leading terms are both rem_lc·lc·x^rem_degree and cancel), so the
-        // loop runs at most deg self − deg divisor + 1 times.
+        // loop runs at most deg self − deg divisor + 1 times. `top` tracks
+        // the remainder's degree by hand so the subtraction runs in place
+        // over the window it touches, `[shift, top]`, instead of
+        // materializing a shifted, scaled copy of the divisor at full
+        // remainder length.
         let mut steps = 0usize;
-        while let Some(rem_degree) = remainder.degree() {
-            if rem_degree < divisor_degree {
-                break;
+        let mut top = self_degree;
+        loop {
+            let shift = top - divisor_degree;
+            let rem_lc = rem[top].clone();
+            // remainder ← lc·remainder − rem_lc·xˢʰⁱᶠᵗ·divisor. A monic
+            // divisor skips the scaling outright — it would multiply every
+            // live coefficient of both remainder and quotient by unity.
+            if !lc_is_one {
+                for c in rem.iter_mut() {
+                    if !c.is_zero() {
+                        *c = c.mul_ref(&lc);
+                    }
+                }
+                for q in quotient.iter_mut() {
+                    if !q.is_zero() {
+                        *q = q.mul_ref(&lc);
+                    }
+                }
             }
-            let shift = rem_degree - divisor_degree;
-            let rem_lc = remainder.leading_coefficient();
-            // remainder ← lc·remainder − rem_lc·xˢʰⁱᶠᵗ·divisor
-            remainder = remainder.scale(&lc);
-            let subtrahend = divisor.shift_up(shift).scale(&rem_lc);
-            remainder = remainder.sub(&subtrahend);
+            for (k, d) in divisor.coeffs.iter().enumerate() {
+                if !d.is_zero() {
+                    rem[shift + k] = rem[shift + k].sub_ref(&rem_lc.mul_ref(d));
+                }
+            }
+            debug_assert!(rem[top].is_zero(), "leading terms cancel by construction");
             // quotient accumulates rem_lc at the shift position, itself
-            // scaled by lc for the steps still to come.
-            for q in quotient.iter_mut() {
-                *q = q.mul_ref(&lc);
-            }
+            // scaled by lc (above) for the steps still to come.
             quotient[shift] = quotient[shift].add_ref(&rem_lc);
             steps += 1;
+            // Step down to the next non-zero coefficient — the new degree —
+            // and stop once it falls below the divisor's or the remainder
+            // vanishes.
+            while top > 0 && rem[top].is_zero() {
+                top -= 1;
+            }
+            if rem[top].is_zero() || top < divisor_degree {
+                break;
+            }
         }
         // The identity carries lc^(steps) on the left; the required
         // exponent is deg self − deg divisor + 1, and steps ≤ that (fewer
         // when the remainder degree falls by more than one, or reaches zero
         // early). Scale quotient and remainder up to the full exponent so
-        // the documented ℓ holds regardless.
+        // the documented ℓ holds regardless. For ℓ = 1 the scaling is the
+        // identity and is skipped.
         let required = self_degree - divisor_degree + 1;
         let mut quotient = Self::new(quotient);
-        let mut remainder = remainder;
-        for _ in steps..required {
-            quotient = quotient.scale(&lc);
-            remainder = remainder.scale(&lc);
+        let mut remainder = Self::new(rem);
+        if !lc_is_one {
+            for _ in steps..required {
+                quotient = quotient.scale(&lc);
+                remainder = remainder.scale(&lc);
+            }
         }
         (quotient, remainder)
     }
@@ -330,40 +371,41 @@ impl PolyZ {
         }
         let self_degree = self.degree().expect("degree checked above");
         let lc = divisor.leading_coefficient();
-        let mut remainder = self.clone();
+        let mut rem = self.coeffs.clone();
         let mut quotient = vec![BigInt::zero(); self_degree - divisor_degree + 1];
         // Cancel the remainder's leading term each step, dividing exactly by
         // the divisor's leading coefficient; a step that does not divide has
-        // no integer quotient, so the whole division fails.
-        while let Some(rem_degree) = remainder.degree() {
-            if rem_degree < divisor_degree {
-                break;
-            }
-            let rem_lc = remainder.leading_coefficient();
+        // no integer quotient, so the whole division fails. `top` tracks the
+        // remainder's degree by hand so each step subtracts in place over
+        // the window it touches, `[shift, top]`, instead of materializing a
+        // shifted, scaled copy of the divisor at full remainder length.
+        let mut top = self_degree;
+        loop {
             // One division decides and delivers: an indivisible leading
             // coefficient means no integer quotient exists, and otherwise the
             // same Algorithm D call yields the coefficient.
-            let q_coeff = rem_lc.div_exact_checked(&lc)?;
-            let shift = rem_degree - divisor_degree;
-            // remainder ← remainder − q_coeff·xˢʰⁱᶠᵗ·divisor
-            let subtrahend = divisor.shift_up(shift).scale(&q_coeff);
-            remainder = remainder.sub(&subtrahend);
+            let q_coeff = rem[top].div_exact_checked(&lc)?;
+            let shift = top - divisor_degree;
+            // rem ← rem − q_coeff·xˢʰⁱᶠᵗ·divisor; the leading terms cancel
+            // exactly because the division above was exact.
+            for (k, d) in divisor.coeffs.iter().enumerate() {
+                if !d.is_zero() {
+                    rem[shift + k] = rem[shift + k].sub_ref(&q_coeff.mul_ref(d));
+                }
+            }
+            debug_assert!(rem[top].is_zero(), "leading term cancels by construction");
             quotient[shift] = q_coeff;
+            // Step down to the next non-zero coefficient — the new degree —
+            // and stop once it falls below the divisor's or the remainder
+            // vanishes.
+            while top > 0 && rem[top].is_zero() {
+                top -= 1;
+            }
+            if rem[top].is_zero() || top < divisor_degree {
+                break;
+            }
         }
-        Some((Self::new(quotient), remainder))
-    }
-
-    /// `self · x^shift` — prepend `shift` zero coefficients. Constructed
-    /// directly rather than through [`Self::new`]: prepending low-order
-    /// zeros cannot create a trailing zero, so the normalized form is
-    /// preserved and the renormalization pass would be wasted.
-    fn shift_up(&self, shift: usize) -> Self {
-        if self.is_zero() || shift == 0 {
-            return self.clone();
-        }
-        let mut coeffs = vec![BigInt::zero(); shift];
-        coeffs.extend(self.coeffs.iter().cloned());
-        Self { coeffs }
+        Some((Self::new(quotient), Self::new(rem)))
     }
 
     /// The resultant `res(self, other)` — the determinant of the two
@@ -597,6 +639,22 @@ impl PolyModP {
         Self::new(coeffs, modulus)
     }
 
+    /// Build from coefficients the caller guarantees are already reduced
+    /// modulo `modulus`, skipping the per-coefficient reduction that
+    /// [`Self::new`] pays. The trailing-zero invariant is still
+    /// re-established here; the reduced-coefficient invariant is the
+    /// caller's to uphold, which is why this is private — every internal
+    /// caller works exclusively with residues produced by `mod_add`,
+    /// `mod_sub` and `mod_mul`, which are reduced by construction.
+    fn from_reduced(coeffs: Vec<BigUint>, modulus: &BigUint) -> Self {
+        let mut poly = Self {
+            coeffs,
+            modulus: modulus.clone(),
+        };
+        poly.normalize();
+        poly
+    }
+
     /// Restore the trailing-zero invariant by popping high-order zeros.
     /// A coefficient becomes zero here through reduction as well as through
     /// cancellation, so this runs after every construction.
@@ -721,9 +779,16 @@ impl PolyModP {
 
     /// `self · c` for a scalar (mod m). `c` is a bare [`BigUint`] carrying no
     /// modulus of its own, so there is nothing to cross-check; it need not
-    /// arrive reduced, since `BigUint::mod_mul` reduces it.
+    /// arrive reduced, since `BigUint::mod_mul` reduces it. The literal
+    /// value 1 short-circuits to a clone — the coefficients are already
+    /// reduced, so multiplying by unity cannot change them. (A `c` that is
+    /// merely congruent to 1 takes the general path; recognizing it would
+    /// cost the reduction the fast path exists to avoid.)
     #[must_use]
     pub fn scale(&self, c: &BigUint) -> Self {
+        if c.is_one() {
+            return self.clone();
+        }
         let coeffs = self
             .coeffs
             .iter()
@@ -787,48 +852,112 @@ impl PolyModP {
     /// `lc(remainder)·lc(divisor)⁻¹`. Over the field ℤ/pℤ that inverse
     /// always exists for a non-zero divisor, so no step can fail and no
     /// `Option` is needed. The inverse is computed once, before the loop,
-    /// and reused at every step; each step lowers `deg remainder` by at
-    /// least one, which is what terminates the loop.
+    /// and reused at every step — and not computed at all for a monic
+    /// divisor; each step lowers `deg remainder` by at least one, which is
+    /// what terminates the loop.
     ///
     /// # Panics
     ///
     /// Panics if the two moduli differ (see the type documentation), if
     /// `divisor` is zero, or if the divisor's leading coefficient is not
-    /// invertible modulo `m` — which for composite `m` is a reachable
-    /// panic, not an internal invariant.
+    /// invertible modulo `m` *and there is anything to divide* — a dividend
+    /// of lower degree returns `(0, self)` without touching the
+    /// coefficient. For composite `m` the invertibility panic is reachable,
+    /// not an internal invariant.
     #[must_use]
     pub fn div_rem(&self, divisor: &Self) -> (Self, Self) {
-        self.check_modulus(divisor);
-        assert!(!divisor.is_zero(), "division by the zero polynomial");
-        let divisor_degree = divisor.degree().expect("non-zero divisor");
-        let lc_inv = number_theory::mod_inverse(&divisor.leading_coefficient(), &self.modulus)
-            .expect("divisor's leading coefficient is invertible");
-        let mut remainder = self.clone();
-        let mut quotient = vec![BigUint::zero(); self.degree().map_or(0, |d| d + 1)];
-        while let Some(rem_degree) = remainder.degree() {
-            if rem_degree < divisor_degree {
-                break;
-            }
-            let shift = rem_degree - divisor_degree;
-            let factor = BigUint::mod_mul(&remainder.leading_coefficient(), &lc_inv, &self.modulus);
-            quotient[shift] = factor.clone();
-            // remainder ← remainder − factor·xˢʰⁱᶠᵗ·divisor
-            let subtrahend = divisor.shift_up(shift).scale(&factor);
-            remainder = remainder.sub(&subtrahend);
-        }
-        (Self::new(quotient, &self.modulus), remainder)
+        let (quotient, remainder) = self.divide(divisor, true);
+        (quotient.expect("quotient was requested"), remainder)
     }
 
-    /// `self mod divisor` — the remainder of [`Self::div_rem`], with the
-    /// quotient discarded.
+    /// `self mod divisor` — the remainder alone. This runs the same
+    /// long-division loop as [`Self::div_rem`] but skips the quotient
+    /// bookkeeping entirely, which matters because remainders are the hot
+    /// operation here: [`Self::gcd`] — and through it the whole
+    /// factorization pipeline — discards every quotient it would have paid
+    /// to build.
     ///
     /// # Panics
     ///
     /// Panics exactly as [`Self::div_rem`] does: differing moduli, a zero
-    /// divisor, or a leading coefficient not invertible modulo `m`.
+    /// divisor, or a leading coefficient not invertible modulo `m` when
+    /// there is anything to divide (a dividend of lower degree comes back
+    /// unchanged without touching the coefficient).
     #[must_use]
     pub fn rem(&self, divisor: &Self) -> Self {
-        self.div_rem(divisor).1
+        self.divide(divisor, false).1
+    }
+
+    /// The schoolbook long-division core behind [`Self::div_rem`] and
+    /// [`Self::rem`]: quotient accumulation is optional so the
+    /// remainder-only callers do not pay for coefficients they discard.
+    ///
+    /// Two deliberate economies, both on the pipeline's hottest path
+    /// (`gcd` → `squarefree_factorization` / `distinct_degree`):
+    ///
+    /// - A monic divisor — which is every divisor the factorization
+    ///   routines produce — skips the leading-coefficient inversion
+    ///   outright, since [`number_theory::mod_inverse`] has no shortcut for
+    ///   an argument of 1 and would run a full Euclid loop to invert it.
+    /// - The remainder's degree is tracked by hand (`top`) so each step
+    ///   subtracts `factor·xˢʰⁱᶠᵗ·divisor` in place over the window it
+    ///   touches, `[shift, top]`, instead of materializing a shifted,
+    ///   scaled copy of the divisor at full remainder length.
+    fn divide(&self, divisor: &Self, want_quotient: bool) -> (Option<Self>, Self) {
+        self.check_modulus(divisor);
+        assert!(!divisor.is_zero(), "division by the zero polynomial");
+        let divisor_degree = divisor.degree().expect("non-zero divisor");
+        if self.degree().is_none_or(|d| d < divisor_degree) {
+            // Nothing to divide: self = 0·divisor + self.
+            let quotient = want_quotient.then(|| Self::zero(&self.modulus));
+            return (quotient, self.clone());
+        }
+        let self_degree = self.degree().expect("degree checked above");
+        let lc = divisor.leading_coefficient();
+        let lc_inv = if lc.is_one() {
+            None
+        } else {
+            Some(
+                number_theory::mod_inverse(&lc, &self.modulus)
+                    .expect("divisor's leading coefficient is invertible"),
+            )
+        };
+        let mut rem = self.coeffs.clone();
+        let mut quotient =
+            want_quotient.then(|| vec![BigUint::zero(); self_degree - divisor_degree + 1]);
+        let mut top = self_degree;
+        loop {
+            let shift = top - divisor_degree;
+            let factor = match &lc_inv {
+                Some(inv) => BigUint::mod_mul(&rem[top], inv, &self.modulus),
+                None => rem[top].clone(),
+            };
+            // rem ← rem − factor·xˢʰⁱᶠᵗ·divisor over the window; the leading
+            // terms cancel by the choice of factor.
+            for (k, d) in divisor.coeffs.iter().enumerate() {
+                if !d.is_zero() {
+                    let term = BigUint::mod_mul(&factor, d, &self.modulus);
+                    rem[shift + k] = BigUint::mod_sub(&rem[shift + k], &term, &self.modulus);
+                }
+            }
+            debug_assert!(rem[top].is_zero(), "leading term cancels by construction");
+            if let Some(q) = quotient.as_mut() {
+                q[shift] = factor;
+            }
+            // Step down to the next non-zero coefficient — the new degree —
+            // and stop once it falls below the divisor's or the remainder
+            // vanishes.
+            while top > 0 && rem[top].is_zero() {
+                top -= 1;
+            }
+            if rem[top].is_zero() || top < divisor_degree {
+                break;
+            }
+        }
+        // Every working coefficient came out of mod_mul/mod_sub, so the
+        // reduced-coefficient invariant holds without another pass.
+        let quotient = quotient.map(|q| Self::from_reduced(q, &self.modulus));
+        (quotient, Self::from_reduced(rem, &self.modulus))
     }
 
     /// The monic greatest common divisor, by the Euclidean algorithm:
@@ -893,18 +1022,6 @@ impl PolyModP {
             }
         }
         result
-    }
-
-    /// `self · x^shift` — prepend `shift` zero coefficients. The prepended
-    /// zeros are already reduced and cannot create a trailing zero, so the
-    /// reduce-and-normalize pass in [`Self::new`] has nothing to do here.
-    fn shift_up(&self, shift: usize) -> Self {
-        if self.is_zero() || shift == 0 {
-            return self.clone();
-        }
-        let mut coeffs = vec![BigUint::zero(); shift];
-        coeffs.extend(self.coeffs.iter().cloned());
-        Self::new(coeffs, &self.modulus)
     }
 
     /// The monic polynomial `x` over this modulus — the argument of the
@@ -983,16 +1100,21 @@ impl PolyModP {
             e += 1;
         }
         // What remains in t is a p-th power: g(x)^p = g(xᵖ). Take its p-th
-        // root and recurse with the multiplicity scaled by p. Reaching here
-        // with a positive-degree t means deg t ≥ p, so p fits a machine
-        // word (deg is bounded by memory).
+        // root and recurse with the multiplicity scaled by p. Under the
+        // type's prime-modulus precondition, reaching here with a
+        // positive-degree t means deg t ≥ p, so p fits a machine word (deg
+        // is bounded by memory) and the first `expect` is unreachable; a
+        // *composite* modulus above 2^64 can reach it, because t then need
+        // not be a p-th power at all. The second conversion is infallible
+        // on the crate's supported 64-bit hosts, where usize and u64 have
+        // the same width.
         if t.degree().is_some_and(|d| d >= 1) {
             let p = usize::try_from(
                 self.modulus
                     .to_u64()
-                    .expect("a p-th power of positive degree bounds p by its degree"),
+                    .expect("unreachable under a prime modulus: the modulus was composite"),
             )
-            .expect("characteristic fits usize");
+            .expect("u64 fits usize on the supported 64-bit hosts");
             let root = t.pth_root(p);
             root.squarefree_into(mult_shift * p, out);
         }
@@ -1218,7 +1340,10 @@ impl PolyModP {
     /// legitimate elements of the residue ring and the caller treats a zero
     /// draw as a stalled round. A `random_below` failure — reachable only
     /// for a zero bound, which `m ≥ 2` excludes — is folded to zero for the
-    /// same reason.
+    /// same reason. `random_below` itself panics on a generator whose
+    /// output is confined to `[m, 2^bits)` (its own stall guard), which is
+    /// the one way a broken `Rng` aborts here instead of reaching the
+    /// stall assertion in `equal_degree_split`.
     fn random_below_degree<R: crate::random::Rng + ?Sized>(&self, rng: &mut R) -> Self {
         let deg = self.degree().expect("non-zero");
         let coeffs = (0..deg)
@@ -1590,6 +1715,26 @@ mod tests {
                 assert!(b.rem(&g).is_zero(), "gcd divides b");
             }
         }
+    }
+
+    #[test]
+    fn composite_modulus_verdicts_are_unspecified_not_proofs() {
+        // The type requires a prime modulus; over a composite one the
+        // division-based results are unspecified and need not panic. This
+        // test pins the *current* unspecified behaviour on the canonical
+        // example so a later change cannot quietly promote it to a
+        // correctness claim: x² + 1 factors as (x+2)(x+3) modulo 5, so no
+        // sound irreducibility test over ℤ/15ℤ could call it irreducible —
+        // yet the Frobenius argument this routine leans on assumes a field,
+        // and modulo 15 it reports `true` without noticing. If this
+        // assertion ever fails, the behaviour changed: re-document it,
+        // do not "fix" the test.
+        let m = BigUint::from_u64(15);
+        let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &m);
+        assert!(
+            f.is_irreducible(),
+            "unspecified composite-modulus verdict drifted; update the contract notes"
+        );
     }
 
     #[test]

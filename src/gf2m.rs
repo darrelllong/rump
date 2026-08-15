@@ -549,6 +549,10 @@ impl Gf2m {
                 frobenius = ring.square(&frobenius);
                 steps += 1;
             }
+            // The clone is inherent: Euclid consumes a mutable working copy
+            // of the modulus, one per gcd — ω(m) clones in all, exactly one
+            // for the prime degrees every FIPS curve uses, a handful for
+            // any composite m, against the m squarings above.
             if !gf2_poly_gcd(Self::add(&frobenius, &x), poly.clone()).is_one() {
                 return false;
             }
@@ -619,22 +623,20 @@ impl Gf2m {
 
             // Bit lengths, one more than the degrees; their difference is the
             // difference of the degrees either way, which is all that is used.
-            let deg_u = u.bits(); // deg(u) + 1
-            let deg_v = v.bits(); // deg(v) + 1
+            let mut deg_u = u.bits(); // deg(u) + 1
+            let mut deg_v = v.bits(); // deg(v) + 1
 
             // Ensure deg(u) >= deg(v) by swapping if necessary. The cofactors
             // travel with their polynomials so the invariants hold across the
-            // swap. These two lengths decide only the swap; `j` below re-reads
-            // them, since the swap may have exchanged which is which.
+            // swap, and the lengths travel with both so neither is recomputed.
             if deg_u < deg_v {
                 core::mem::swap(&mut u, &mut v);
                 core::mem::swap(&mut b, &mut c);
+                core::mem::swap(&mut deg_u, &mut deg_v);
             }
 
-            // j = deg(u) - deg(v), non-negative after the potential swap, so
-            // the saturating_sub never saturates; it states the invariant
-            // rather than guarding a reachable underflow.
-            let j = u.bits().saturating_sub(v.bits());
+            // j = deg(u) - deg(v), non-negative after the swap above.
+            let j = deg_u - deg_v;
 
             // u = u XOR (v * x^j);  b = b XOR (c * x^j).
             let mut sv = v.clone();
@@ -719,7 +721,9 @@ impl Gf2m {
         if a.bits() <= self.degree {
             return a;
         }
-        let mut limbs = a.limbs().to_vec();
+        // `a` is owned, so the fold mutates its own limb buffer in place
+        // rather than working on a copy.
+        let mut limbs = a.into_limbs();
         self.reduce_limbs(&mut limbs);
         BigUint::from_limbs(limbs)
     }

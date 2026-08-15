@@ -62,7 +62,7 @@ about it.
 
 | Algorithm | Location | Reference |
 |---|---|---|
-| Miller–Rabin | `miller_rabin_witness`, `is_probable_prime` | *Handbook of Applied Cryptography*, Algorithm 4.24. Twelve-base determinism to 3.317×10²⁴: Sorenson & Webster, *Strong Pseudoprimes to Twelve Prime Bases*, Math. Comp. 86 (2017), 985–1003 (arXiv:1509.00864). |
+| Miller–Rabin | `miller_rabin_witness`, `is_probable_prime` | *Handbook of Applied Cryptography*, Algorithm 4.24. Twelve-base determinism to ψ₁₂ = 318665857834031151167461 ≈ 3.19×10²³ (the 3.317×10²⁴ figure is ψ₁₃, thirteen bases): Sorenson & Webster, *Strong Pseudoprimes to Twelve Prime Bases*, Math. Comp. 86 (2017), 985–1003 (arXiv:1509.00864). |
 | Strong Lucas (Selfridge Method A) | `is_strong_lucas_probable_prime` | Baillie and Wagstaff, *Lucas pseudoprimes*, Math. Comp. 35 (1980), 1391–1417; Crandall and Pomerance, *Prime Numbers*, Algorithm 3.6.9. |
 | Baillie–PSW | `is_probable_prime_bpsw` | Baillie and Wagstaff, Math. Comp. 35 (1980), 1391–1417; Pomerance, Selfridge and Wagstaff, *The pseudoprimes to 25·10⁹*, Math. Comp. 35 (1980), 1003–1026. Determinism below 2⁶⁴: Feitsma's base-2 Fermat-pseudoprime enumeration (verified by Galway). |
 | Sieve of Eratosthenes | `primes_below` | classical (odd-only sieve). |

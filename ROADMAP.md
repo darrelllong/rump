@@ -39,8 +39,10 @@ them remains subject to the joint triage.
    `rational_reconstruct_bounded` (explicit bounds, 2·N·D < m enforced).
    Verified against a naive uniqueness search exhaustively and by planted
    round trips to 4096 bits.
-5. **Radix string I/O** — `from_string`/`to_string` by divide-and-conquer
-   conversion.
+5. **Radix string I/O** — largely done: `from_str_radix`/`to_str_radix`
+   exist with divide-and-conquer conversion above measured crossovers. What
+   remains of this item is tuning at very large sizes, not the existence of
+   radix I/O.
 6. **Integer predicates** — completed 2026-08-14. `sqrt_rem` and
    `sqrt_floor` by Newton's certified iteration (150× the bisection they
    replace at 8 kbit), `nth_root_floor`, `is_square` (enumerated residue

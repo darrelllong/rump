@@ -2,7 +2,7 @@
 //!
 //! The representation uses little-endian `u64` limbs because the algorithms
 //! are naturally word-oriented. The kernels come straight from the literature
-//! so they are easy to audit against their sources: schoolbook (Knuth's
+//! so they are auditable against their sources: schoolbook (Knuth's
 //! Algorithm M), Karatsuba, and Toom–Cook three- and four-way multiplication,
 //! and Knuth's Algorithm D for division — all fully in Rust with no external
 //! arithmetic backend.
@@ -36,6 +36,17 @@ const TOOM3_THRESHOLD_LIMBS: usize = 128;
 // measured near ~3000 limbs (~190 kbit). Set there as headroom; the practical
 // range stays on Toom-3. See PERFORMANCE.md.
 const TOOM4_THRESHOLD_LIMBS: usize = 3072;
+// Block-decomposition crossover for lopsided products (long ≥ 2·short): the
+// shorter length above which cutting the longer operand into short-sized
+// digits and multiplying each pair through the balanced kernels beats one
+// flat schoolbook pass. This is deliberately far above the Karatsuba
+// crossover: at 32-limb digits each block is only marginally sub-quadratic
+// while the per-block dispatch, allocation, and scrub overhead is paid in
+// full. Measured on M4 (`unbalanced_crossover_timing`): the decomposition
+// loses 2x at 32-limb digits, breaks even near 128, still trails slightly
+// at 192, and wins 25-35% at 256 rising toward 2x at 512. Set at the first
+// size that wins across every measured ratio.
+const UNBALANCED_THRESHOLD_LIMBS: usize = 256;
 
 /// Bitset of the 44 quadratic residues modulo 256, one bit per residue
 /// across four words, derived by enumeration.
@@ -336,6 +347,19 @@ impl BigUint {
     /// work word-level).
     pub(crate) fn limbs(&self) -> &[u64] {
         &self.limbs
+    }
+
+    /// Take the little-endian limb buffer by value (crate-internal: lets a
+    /// consumer that already owns the [`BigUint`] mutate the buffer in place
+    /// rather than copying it, as [`Gf2m::reduce`](crate::gf2m::Gf2m) does).
+    ///
+    /// The buffer is extracted with `mem::take` because [`BigUint`]
+    /// implements [`Drop`] (the scrub) and a plain field move is forbidden;
+    /// the drop that follows scrubs the empty vector. The live buffer's
+    /// scrub-on-drop guarantee travels with the caller, who is expected to
+    /// hand the buffer back to [`Self::from_limbs`].
+    pub(crate) fn into_limbs(mut self) -> Vec<u64> {
+        core::mem::take(&mut self.limbs)
     }
 
     /// Build from little-endian limbs, normalizing leading zeros
@@ -839,10 +863,14 @@ impl BigUint {
 
     /// Integer square root: the largest `r` with `r² ≤ self` — the root
     /// half of [`Self::sqrt_rem`], which documents the Newton iteration
-    /// both share.
+    /// both share. Callers that do not need the remainder use this and skip
+    /// the full-width squaring and subtraction that produce it.
     #[must_use]
     pub fn sqrt_floor(&self) -> Self {
-        self.sqrt_rem().0
+        if self.is_zero() || self.is_one() {
+            return self.clone();
+        }
+        self.sqrt_newton()
     }
 
     /// Integer square root with remainder: `(r, self − r²)` for the largest
@@ -867,6 +895,18 @@ impl BigUint {
         if self.is_zero() || self.is_one() {
             return (self.clone(), Self::zero());
         }
+        let root = self.sqrt_newton();
+        let square = root.square_ref();
+        (root, self.sub_ref(&square))
+    }
+
+    /// The Newton core shared by [`Self::sqrt_floor`] and
+    /// [`Self::sqrt_rem`] (the latter documents the iteration and its
+    /// certificate). Requires `self ≥ 2`, which both callers establish; the
+    /// returned root is certified by the first non-decrease, so no squaring
+    /// happens here — the remainder is the caller's business.
+    fn sqrt_newton(&self) -> Self {
+        debug_assert!(!self.is_zero() && !self.is_one(), "callers handle 0 and 1");
         // Seed: 2^⌈bits/2⌉ ≥ ⌈√self⌉, one bit above the root's width.
         let mut current = Self::zero();
         current.set_bit(self.bits().div_ceil(2));
@@ -876,9 +916,11 @@ impl BigUint {
             let mut next = current.add_ref(&quotient);
             next.shr1();
             if next >= current {
-                let square = current.square_ref();
-                debug_assert!(square <= *self, "certified root is not above the value");
-                return (current.clone(), self.sub_ref(&square));
+                debug_assert!(
+                    current.square_ref() <= *self,
+                    "certified root is not above the value"
+                );
+                return current;
             }
             current = next;
         }
@@ -1304,8 +1346,13 @@ impl BigUint {
     /// above 3072 (`KARATSUBA_/TOOM3_/TOOM4_THRESHOLD_LIMBS`). Each successive
     /// kernel is asymptotically cheaper but splits the operands more, so its
     /// overhead only pays off past the crossover — small products stay
-    /// schoolbook. The module header cites each algorithm. A zero operand
-    /// short-circuits to zero.
+    /// schoolbook. A lopsided pair (`long ≥ 2·short`) whose shorter operand
+    /// is past `UNBALANCED_THRESHOLD_LIMBS` — 256, this fourth kernel's own
+    /// measured crossover, well above Karatsuba's — takes
+    /// `mul_unbalanced_ref`, block decomposition into balanced products;
+    /// lopsided pairs below that threshold stay schoolbook, which
+    /// measurement favors there. The module header cites each algorithm. A
+    /// zero operand short-circuits to zero.
     ///
     /// # Panics
     ///
@@ -1328,6 +1375,10 @@ impl BigUint {
 
         if Self::should_use_karatsuba(self, other) {
             return self.mul_karatsuba_ref(other);
+        }
+
+        if Self::should_use_unbalanced(self, other) {
+            return self.mul_unbalanced_ref(other);
         }
 
         Self::mul_schoolbook_ref(self, other)
@@ -1368,15 +1419,93 @@ impl BigUint {
     }
 
     /// Both operands past the crossover, and within `KARATSUBA_MAX_IMBALANCE`
-    /// of each other in length. The ratio bound is a tuning constant with a
-    /// structural floor underneath it: the split below is taken at half the
-    /// *longer* operand, so once the shorter operand fits entirely below that
-    /// split its high half is empty and the kernel falls back to schoolbook
-    /// regardless.
+    /// of each other in length. The ratio bound is strict because it is also
+    /// the kernel's structural floor: the split below is taken at half the
+    /// *longer* operand, so at `long = 2·short` exactly the shorter operand
+    /// fits entirely below the split, its high half is empty, and the kernel
+    /// would reject the pair back to schoolbook. That shape goes to
+    /// `mul_unbalanced_ref` above its threshold and to schoolbook below it.
     fn should_use_karatsuba(lhs: &Self, rhs: &Self) -> bool {
         let short = lhs.limbs.len().min(rhs.limbs.len());
         let long = lhs.limbs.len().max(rhs.limbs.len());
-        short >= KARATSUBA_THRESHOLD_LIMBS && long <= short * KARATSUBA_MAX_IMBALANCE
+        short >= KARATSUBA_THRESHOLD_LIMBS && long < short * KARATSUBA_MAX_IMBALANCE
+    }
+
+    /// Unbalanced admission: the shorter operand alone is past
+    /// `UNBALANCED_THRESHOLD_LIMBS`, but the pair is too lopsided for any
+    /// balanced kernel (`long ≥ 2·short`). The threshold is this kernel's
+    /// own measured crossover, not Karatsuba's: below it the block
+    /// decomposition's per-block overhead loses to one flat schoolbook
+    /// pass, even though each block is nominally past the Karatsuba
+    /// crossover.
+    fn should_use_unbalanced(lhs: &Self, rhs: &Self) -> bool {
+        let short = lhs.limbs.len().min(rhs.limbs.len());
+        let long = lhs.limbs.len().max(rhs.limbs.len());
+        short >= UNBALANCED_THRESHOLD_LIMBS && long >= short * KARATSUBA_MAX_IMBALANCE
+    }
+
+    /// Unbalanced multiplication by block decomposition: cut the longer
+    /// operand into base-`B = 2^{64k}` digits of the shorter one's length
+    /// `k`, so that `long · short = Σᵢ digitᵢ·short·Bⁱ` — a sum of balanced
+    /// `k × k` products, each accumulated into the output at its limb
+    /// offset. Each digit product re-enters [`Self::mul_ref`] and lands on
+    /// a balanced sub-quadratic kernel; a long × short product previously
+    /// failed every balanced ratio test and ran schoolbook at full width.
+    ///
+    /// The accumulation is in place — `add_into_at` adds each product into
+    /// the preallocated output window `[i·k, i·k + len)` with carries
+    /// rippling upward — because the obvious recomposition (shift each
+    /// product by `i·k` limbs, then add full-width) copies
+    /// `Σᵢ i·k ≈ long²/(2k)` limbs and is quadratic in the *long* length,
+    /// which measurement showed losing to flat schoolbook at every shape.
+    /// An all-zero digit (a run of zero limbs in the longer operand)
+    /// contributes nothing and is skipped.
+    fn mul_unbalanced_ref(&self, other: &Self) -> Self {
+        let (long, short) = if self.limbs.len() >= other.limbs.len() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        let k = short.limbs.len();
+        let mut out = vec![0u64; long.limbs.len() + k];
+        for (i, digit_limbs) in long.limbs.chunks(k).enumerate() {
+            let mut digit = Self {
+                limbs: digit_limbs.to_vec(),
+            };
+            digit.normalize();
+            if digit.is_zero() {
+                continue;
+            }
+            let part = digit.mul_ref(short);
+            // The window fits: this digit spans limbs [i·k, i·k + d) of
+            // `long` with d = digit_limbs.len(), so the product has at most
+            // d + k limbs and i·k + d + k ≤ long.len() + k = out.len().
+            Self::add_into_at(&mut out, part.limbs(), i * k);
+        }
+        Self::from_limbs(out)
+    }
+
+    /// `acc += addend · β^offset`, in place over a raw limb buffer: the
+    /// recomposition primitive of [`Self::mul_unbalanced_ref`]. The addend
+    /// is added limb-wise into `acc[offset..]` and the final carry ripples
+    /// upward; the caller guarantees the true sum fits in `acc`, which is
+    /// what bounds the ripple (the running total never reaches
+    /// `β^acc.len()`, so the carry dies before the buffer ends).
+    fn add_into_at(acc: &mut [u64], addend: &[u64], offset: usize) {
+        let mut carry = 0u64;
+        for (j, &limb) in addend.iter().enumerate() {
+            let (sum, c1) = acc[offset + j].overflowing_add(limb);
+            let (sum, c2) = sum.overflowing_add(carry);
+            acc[offset + j] = sum;
+            carry = u64::from(c1) + u64::from(c2);
+        }
+        let mut index = offset + addend.len();
+        while carry > 0 {
+            let (sum, c) = acc[index].overflowing_add(carry);
+            acc[index] = sum;
+            carry = u64::from(c);
+            index += 1;
+        }
     }
 
     /// Karatsuba multiplication (Karatsuba & Ofman 1963; Knuth, *TAOCP*
@@ -1768,7 +1897,13 @@ impl BigUint {
         }
         let limb_shifts = n / 64;
         let bit_shifts = n % 64;
-        // Full-limb shift: prepend zeros at the low (index 0) end.
+        // Full-limb shift: prepend zeros at the low (index 0) end. The
+        // displaced buffer is dropped unscrubbed, deliberately: this sits on
+        // the recomposition path of every Karatsuba and Toom multiplication,
+        // and scrubbing it here was measured at 3-5% on large balanced
+        // products (an extra full write pass per shift). That keeps it
+        // within the crate's stated scope — buffers freed on reallocation
+        // are not wiped.
         if limb_shifts > 0 {
             let mut new_limbs = vec![0u64; limb_shifts];
             new_limbs.extend_from_slice(&self.limbs);
@@ -2941,10 +3076,15 @@ impl MontgomeryCtx {
 
     /// Compute `base^exponent mod modulus` inside the context.
     ///
-    /// Encodes `base` once, then runs a fixed 4-bit-window exponentiation
-    /// entirely in the Montgomery domain — where each squaring and product is
-    /// one REDC rather than a division — and decodes the result. Keeping the
-    /// whole ladder in-domain is the point of the context: the per-step cost is
+    /// Encodes `base` once, runs the exponentiation entirely in the
+    /// Montgomery domain — where each squaring and product is one REDC
+    /// rather than a division — and decodes the result. Exponents above 64
+    /// bits take a fixed 4-bit-window left-to-right ladder (the k-ary
+    /// method, HAC Algorithm 14.82), seeded from the top window; exponents
+    /// of 64 bits or fewer (e.g. the F4 public exponent) take right-to-left
+    /// binary square-and-multiply instead, which skips the window-table
+    /// setup that would dominate so short a ladder. Keeping the whole
+    /// ladder in-domain is the point of the context: the per-step cost is
     /// a Montgomery multiply, not a modular reduction. The workspace holding
     /// the (possibly secret) intermediates is wiped before it is freed.
     ///
@@ -3151,20 +3291,26 @@ impl BarrettCtx {
     /// `base^exponent mod n` by left-to-right binary exponentiation (Knuth,
     /// *TAOCP* vol. 2, §4.6.3) with one [`Self::reduce`] after each step —
     /// the exponentiation route for even moduli, where Montgomery cannot
-    /// operate. One squaring per exponent bit and one multiplication per set
-    /// bit; there is no window table here, unlike [`MontgomeryCtx::pow`].
-    /// `0^0 = 1` by the usual convention.
+    /// operate. The accumulator is seeded from the exponent's top set bit
+    /// (as the Montgomery ladder in this file does), so the cost is one
+    /// squaring per remaining exponent bit and one multiplication per
+    /// remaining set bit; there is no window table here, unlike
+    /// [`MontgomeryCtx::pow`]. `0^0 = 1` by the usual convention.
     ///
     /// Variable-time, like the rest of the crate: a clear exponent bit skips
     /// its multiplication.
     #[must_use]
     pub fn pow_mod(&self, base: &BigUint, exponent: &BigUint) -> BigUint {
-        let base = self.reduce(base);
-        let mut result = self.reduce(&BigUint::one());
         if exponent.is_zero() {
-            return result;
+            return self.reduce(&BigUint::one());
         }
-        for bit in (0..exponent.bits()).rev() {
+        let base = self.reduce(base);
+        // The top bit of a non-zero exponent is set by definition, so the
+        // ladder starts at `base` and scans the bits below it. Seeding from
+        // 1 would spend a squaring, a multiplication and two reductions
+        // arriving at the same state.
+        let mut result = base.clone();
+        for bit in (0..exponent.bits() - 1).rev() {
             result = self.reduce(&result.square_ref());
             if exponent.bit(bit) {
                 result = self.reduce(&result.mul_ref(&base));
@@ -3595,16 +3741,60 @@ impl BigInt {
         }
     }
 
-    /// Signed product `self * other` (the Half-GCD matrix arithmetic composes
-    /// 2×2 matrices of full-size signed entries).
+    /// Signed product `self · other`: the magnitudes multiply through the
+    /// full [`BigUint::mul_ref`] kernel ladder and the sign follows the
+    /// usual rule (like signs positive, unlike negative, zero absorbing).
+    /// Inside the crate this is the Half-GCD matrix arithmetic and the
+    /// `PolyZ` coefficient ring; outside it, one third of the signed ring
+    /// the number field sieve's balanced base-`m` expansion works in,
+    /// together with [`Self::div_rem`] and [`Self::abs`].
     #[must_use]
-    pub(crate) fn mul_ref(&self, other: &Self) -> Self {
+    pub fn mul_ref(&self, other: &Self) -> Self {
         let sign = match (self.sign, other.sign) {
             (Sign::Zero, _) | (_, Sign::Zero) => Sign::Zero,
             (lhs, rhs) if lhs == rhs => Sign::Positive,
             _ => Sign::Negative,
         };
         Self::from_parts(sign, self.magnitude.mul_ref(&other.magnitude))
+    }
+
+    /// Signed division with remainder, **truncated toward zero** — the
+    /// convention of C and of Rust's primitive `/` and `%`, not Python's
+    /// floored one: the quotient is `self / divisor` rounded toward zero,
+    /// and the remainder takes the dividend's sign (or is zero), so that
+    ///
+    /// ```text
+    /// self = quotient·divisor + remainder,    |remainder| < |divisor|.
+    /// ```
+    ///
+    /// Concretely, `(-7).div_rem(2) = (-3, -1)` where the floored
+    /// convention would give `(-4, 1)`. A caller who wants the least
+    /// non-negative residue instead uses [`Self::modulo_positive`], which
+    /// is the floored remainder against an unsigned modulus.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `divisor` is zero, matching [`BigUint::div_rem`].
+    #[must_use]
+    pub fn div_rem(&self, divisor: &Self) -> (Self, Self) {
+        let (quotient, remainder) = self.magnitude.div_rem(&divisor.magnitude);
+        // Truncation is what magnitude division already does; only the
+        // signs need assigning. `from_parts` canonicalizes a zero quotient
+        // or remainder to `Sign::Zero`.
+        (
+            Self::from_parts(Self::quotient_sign(self.sign, divisor.sign), quotient),
+            Self::from_parts(self.sign, remainder),
+        )
+    }
+
+    /// The absolute value as an owned [`BigUint`] — a clone of what
+    /// [`Self::magnitude`] lends. Reach for `magnitude()` whenever a borrow
+    /// suffices (comparisons against a bound, feeding an unsigned kernel);
+    /// this owned form exists for the callers that go on to consume or
+    /// store `|self|` independently of `self`.
+    #[must_use]
+    pub fn abs(&self) -> BigUint {
+        self.magnitude.clone()
     }
 
     /// Construct one: positive sign over a single-limb magnitude.
@@ -3637,9 +3827,9 @@ impl BigInt {
     /// inexact.
     #[must_use]
     pub(crate) fn div_exact(&self, divisor: &Self) -> Self {
-        let (quotient, remainder) = self.magnitude.div_rem(&divisor.magnitude);
+        let (quotient, remainder) = self.div_rem(divisor);
         debug_assert!(remainder.is_zero(), "div_exact requires an exact division");
-        Self::from_parts(Self::quotient_sign(self.sign, divisor.sign), quotient)
+        quotient
     }
 
     /// Exact division when it divides, `None` when it does not — the checked
@@ -3653,10 +3843,8 @@ impl BigInt {
     /// disappears.
     #[must_use]
     pub(crate) fn div_exact_checked(&self, divisor: &Self) -> Option<Self> {
-        let (quotient, remainder) = self.magnitude.div_rem(&divisor.magnitude);
-        remainder
-            .is_zero()
-            .then(|| Self::from_parts(Self::quotient_sign(self.sign, divisor.sign), quotient))
+        let (quotient, remainder) = self.div_rem(divisor);
+        remainder.is_zero().then_some(quotient)
     }
 
     /// The sign of a quotient: zero numerator gives zero, like signs give a
@@ -3730,7 +3918,7 @@ impl BigInt {
 
 #[cfg(test)]
 mod tests {
-    use super::{BigInt, BigUint, MontgomeryCtx, Sign};
+    use super::{BigInt, BigUint, MontgomeryCtx, Sign, UNBALANCED_THRESHOLD_LIMBS};
 
     fn lcg_next(state: &mut u64) -> u64 {
         *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -4709,6 +4897,60 @@ mod tests {
     }
 
     #[test]
+    fn signed_ring_matches_i128() {
+        // The public signed ring (mul_ref, div_rem, abs) against i128, with
+        // the division convention pinned: truncated toward zero, remainder
+        // taking the dividend's sign — i128's own convention, so the oracle
+        // is the primitive operators.
+        let mut seed = 0x517e_d00d_0000_0001;
+        let to_bigint = |v: i64| {
+            let sign = if v > 0 {
+                Sign::Positive
+            } else if v < 0 {
+                Sign::Negative
+            } else {
+                Sign::Zero
+            };
+            BigInt::from_parts(sign, BigUint::from_u64(v.unsigned_abs()))
+        };
+        let to_i128 = |v: &BigInt| -> i128 {
+            let mag = v.magnitude().limbs.first().copied().unwrap_or(0);
+            match v.sign() {
+                Sign::Negative => -i128::from(mag),
+                _ => i128::from(mag),
+            }
+        };
+        for _ in 0..4000 {
+            let a = lcg_next(&mut seed) as i64 >> 34;
+            let b = lcg_next(&mut seed) as i64 >> 34;
+            let (ba, bb) = (to_bigint(a), to_bigint(b));
+            assert_eq!(
+                to_i128(&ba.mul_ref(&bb)),
+                i128::from(a) * i128::from(b),
+                "mul {a} * {b}"
+            );
+            assert_eq!(ba.abs(), BigUint::from_u64(a.unsigned_abs()), "abs {a}");
+            if b != 0 {
+                let (q, r) = ba.div_rem(&bb);
+                assert_eq!(to_i128(&q), i128::from(a / b), "quotient {a} / {b}");
+                assert_eq!(to_i128(&r), i128::from(a % b), "remainder {a} % {b}");
+            }
+        }
+        // The named corner from the documentation: truncated, not floored.
+        let minus_seven = to_bigint(-7);
+        let two = to_bigint(2);
+        let (q, r) = minus_seven.div_rem(&two);
+        assert_eq!(to_i128(&q), -3);
+        assert_eq!(to_i128(&r), -1);
+    }
+
+    #[test]
+    #[should_panic(expected = "division by zero")]
+    fn signed_div_rem_panics_on_zero_divisor() {
+        let _ = BigInt::one().div_rem(&BigInt::zero());
+    }
+
+    #[test]
     fn square_ref_matches_mul_ref() {
         let mut seed = 0x9e37_79b9_7f4a_7c15;
         for words in [1usize, 2, 8, 32, 48] {
@@ -4795,6 +5037,118 @@ mod tests {
                 let b = seeded_biguint(words, &mut seed);
                 assert_eq!(a.mul_ref(&b), BigUint::mul_schoolbook_ref(&a, &b));
                 assert_eq!(a.square_ref(), BigUint::mul_schoolbook_ref(&a, &a));
+            }
+        }
+    }
+
+    #[test]
+    fn unbalanced_matches_schoolbook_across_shapes() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15;
+        // The block-decomposition kernel directly, below and above its
+        // dispatch threshold. 64×32 is the exact boundary the balanced
+        // admission excludes; 100×32 leaves a short final digit; 129×32 a
+        // one-limb one; the larger shapes recurse through several balanced
+        // kernels.
+        for &(la, lb) in &[
+            (64usize, 32usize),
+            (100, 32),
+            (129, 32),
+            (320, 40),
+            (96, 48),
+            (256, 128),
+            (300, 130),
+        ] {
+            for _ in 0..3 {
+                let a = seeded_biguint(la, &mut seed);
+                let b = seeded_biguint(lb, &mut seed);
+                assert_eq!(
+                    a.mul_unbalanced_ref(&b),
+                    BigUint::mul_schoolbook_ref(&a, &b),
+                    "unbalanced != schoolbook for {la}x{lb} words"
+                );
+                // Commutativity of the dispatch: the same pair in either order.
+                assert_eq!(b.mul_ref(&a), BigUint::mul_schoolbook_ref(&a, &b));
+            }
+        }
+        // The dispatch boundary, table-driven around the threshold: the
+        // exact 2:1 ratio must go to the block decomposition (Karatsuba's
+        // admission is strict, and its kernel would find an empty high half
+        // there), one limb under 2:1 must go to Karatsuba, and one limb
+        // under the threshold must fall back to schoolbook — checked by the
+        // predicates AND by value, so admission cannot silently regress.
+        let t = UNBALANCED_THRESHOLD_LIMBS;
+        for (long_len, short_len, unbal, kara) in [
+            (2 * t, t, true, false),      // exact 2:1 at the threshold
+            (2 * t - 1, t, false, true),  // one limb under 2:1
+            (2 * t, t - 1, false, false), // one limb under the threshold
+            (2 * (t - 1), t - 1, false, false),
+        ] {
+            let a = seeded_biguint(long_len, &mut seed);
+            let b = seeded_biguint(short_len, &mut seed);
+            assert_eq!(
+                BigUint::should_use_unbalanced(&a, &b),
+                unbal,
+                "unbalanced admission at {long_len}x{short_len}"
+            );
+            assert_eq!(
+                BigUint::should_use_karatsuba(&a, &b),
+                kara,
+                "karatsuba admission at {long_len}x{short_len}"
+            );
+            assert_eq!(a.mul_ref(&b), BigUint::mul_schoolbook_ref(&a, &b));
+        }
+        // A longer operand containing an all-zero digit block, which the
+        // kernel skips: build it by clearing the middle limbs.
+        let a = seeded_biguint(96, &mut seed);
+        let b = seeded_biguint(32, &mut seed);
+        let mut limbs = a.limbs().to_vec();
+        for limb in &mut limbs[32..64] {
+            *limb = 0;
+        }
+        let a = BigUint::from_limbs(limbs);
+        assert_eq!(
+            a.mul_unbalanced_ref(&b),
+            BigUint::mul_schoolbook_ref(&a, &b)
+        );
+    }
+
+    #[test]
+    #[ignore = "timing probe for tuning UNBALANCED_THRESHOLD_LIMBS; run with --ignored"]
+    fn unbalanced_crossover_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let mut seed = 0x5eed_5eed_5eed_5eed;
+        eprintln!(
+            "{:>6} {:>6} {:>12} {:>12}  best",
+            "long", "short", "school", "unbal"
+        );
+        for &short in &[32usize, 48, 64, 96, 128, 192, 256, 384, 512] {
+            for &ratio in &[2usize, 4, 16] {
+                let long = short * ratio;
+                let a = seeded_biguint(long, &mut seed);
+                let b = seeded_biguint(short, &mut seed);
+                let reps = (200_000 / (long * short / 64)).max(3);
+                let time = |f: &dyn Fn() -> BigUint| {
+                    let mut best = f64::INFINITY;
+                    for _ in 0..5 {
+                        let t = Instant::now();
+                        for _ in 0..reps {
+                            black_box(f());
+                        }
+                        best = best.min(t.elapsed().as_secs_f64() / reps as f64);
+                    }
+                    best
+                };
+                let school = time(&|| BigUint::mul_schoolbook_ref(&a, &b));
+                let unbal = time(&|| a.mul_unbalanced_ref(&b));
+                eprintln!(
+                    "{:>6} {:>6} {:>10.3}us {:>10.3}us  {}",
+                    long,
+                    short,
+                    school * 1e6,
+                    unbal * 1e6,
+                    if unbal < school { "unbal" } else { "school" }
+                );
             }
         }
     }

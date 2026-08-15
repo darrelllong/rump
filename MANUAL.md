@@ -240,8 +240,15 @@ A `BigInt` is a `Sign` joined to a `BigUint` magnitude. Construct with
 `magnitude()`; `negated` flips the sign. `add_ref` / `sub_ref` are signed,
 and `add_assign_ref` / `sub_assign_ref` are their in-place forms, reusing
 the magnitude's buffer in every sign combination (nothing panics — the
-sign follows the result); `mul_biguint_ref` scales by an unsigned factor.
-`modulo_positive` maps into the canonical range `[0, n)` — the piece extended Euclid needs.
+sign follows the result); `mul_ref` is the full signed product, and
+`mul_biguint_ref` scales by an unsigned factor. `div_rem` divides with
+remainder, **truncated toward zero** — the C and Rust `/` convention, the
+remainder taking the dividend's sign — and panics on a zero divisor;
+`abs` returns the magnitude as an owned `BigUint` (prefer `magnitude()`
+when a borrow suffices — it lends the same value without the copy).
+`modulo_positive` maps into the
+canonical range `[0, n)` — the floored remainder, and the piece extended
+Euclid needs.
 
 ```rust
 let ten = BigInt::from_biguint(BigUint::from_u64(10));
@@ -260,6 +267,20 @@ assert_eq!(
     minus_three.mul_biguint_ref(&BigUint::from_u64(4)),
     BigInt::from_parts(Sign::Negative, BigUint::from_u64(12))
 );
+
+// The signed ring: full product, truncated division, absolute value.
+assert_eq!(
+    minus_three.mul_ref(&ten),
+    BigInt::from_parts(Sign::Negative, BigUint::from_u64(30))
+);
+// div_rem truncates toward zero; the remainder takes the dividend's sign:
+// -7 = -3·2 - 1 (floored division would say -7 = -4·2 + 1 instead).
+let minus_seven = BigInt::from_parts(Sign::Negative, BigUint::from_u64(7));
+let two = BigInt::from_biguint(BigUint::from_u64(2));
+let (q, r) = minus_seven.div_rem(&two);
+assert_eq!(q, BigInt::from_parts(Sign::Negative, BigUint::from_u64(3)));
+assert_eq!(r, BigInt::from_parts(Sign::Negative, BigUint::one()));
+assert_eq!(minus_seven.abs(), BigUint::from_u64(7));
 
 // −3 ≡ 8 (mod 11), in canonical range.
 assert_eq!(
@@ -881,6 +902,21 @@ draws uniformly in `[0, upper)` by rejection, `random_nonzero_below` in
 `random_probable_prime` searches for a prime of exactly the requested bit
 length.
 
+Each sampler carries a stall guard that **panics** on the degenerate
+generators it can soundly detect, rather than looping forever; every guard
+is sized so a working generator trips it with probability at most
+`e⁻¹¹¹ ≈ 2⁻¹⁶⁰` (each function's rustdoc gives its own, tighter bound).
+`random_below` and `random_nonzero_below` bound consecutive rejections
+(acceptance is at least 1/2 per draw regardless of arguments);
+`random_probable_prime` bounds fruitless rounds at `64·bits` (the cap
+scales with the width, so it is sound at every width) and additionally
+fails fast on a *pinned* generator by skipping the re-screen of a repeated
+candidate. `random_coprime_below` is the one sampler where no usable
+rejection count exists — legitimate arguments can make units arbitrarily
+sparse — so its guard detects only a pinned generator; a degenerate source
+cycling among several rejected values hangs it and remains the caller's to
+avoid.
+
 ```rust
 /// xorshift64: deterministic and compact. Fine for a manual; NOT a CSPRNG.
 struct XorShift64(u64);
@@ -935,6 +971,7 @@ recoverable conditions:
 | `remainder_tree` / `smooth_parts` | a value (leaf) is zero — but `smooth_parts` maps a zero value to zero rather than reducing it |
 | `to_be_bytes_padded` | the value needs more than the requested byte length |
 | `MontgomeryCtx::mul_mont` / `square_mont` / `pow_encoded` | given an operand not reduced below the modulus — the shared in-domain contract, asserted in debug builds; in release a grossly over-width operand trips the internal bounds check. `encode` and `decode` instead reduce any representative and never panic on width |
+| `random_below` / `random_nonzero_below` / `random_coprime_below` / `random_probable_prime` | the generator trips a stall guard — see Random sampling above for what each guard can and cannot detect |
 
 Fallible mathematics — a missing inverse, a non-residue, an even Montgomery
 modulus, non-coprime CRT moduli — returns `Option` instead.

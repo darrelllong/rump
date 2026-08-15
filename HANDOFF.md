@@ -6,7 +6,7 @@ the repository unless marked otherwise.
 
 ```sh
 git clone git@github.com:darrelllong/rump.git && cd rump
-cargo test && cargo test --release      # 170 lib tests, all green
+cargo test && cargo test --release      # 170 lib tests green + 9 ignored timing probes
 cargo clippy --release --all-targets    # warning-clean
 cargo fmt --check                       # clean
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --lib   # clean
@@ -41,7 +41,10 @@ docs. Zero dependencies.
 Tier 3 for the factoring consumer is complete and delivered: `PolyZ` and
 `PolyModP` (arithmetic, exact and pseudo-division, resultant, discriminant,
 squarefree/distinct-degree/Cantor–Zassenhaus factorisation, roots) and integral
-LLL. `REQUESTS.md` records the list as cleared.
+LLL. The last Tier 1 item — the public `BigInt` signed ring (`mul_ref`,
+truncated `div_rem`, `abs`), the external reviewer's standing #1 — landed
+2026-08-15, differentially tested against `i128` and documented in MANUAL.md
+and the LaTeX manual. `REQUESTS.md` records the whole list as cleared.
 
 The external reviewer's ship blockers are closed and re-verified on the real
 tree. Since `v0.2.1` the tree has also had a full documentation pass and a
@@ -139,74 +142,80 @@ operand generation dominates. If a cell cannot clear it, leave it marked
    commit, tag `v0.2.2`, push. **Do not publish to crates.io** — the owner
    holds that release explicitly; `v0.2.1` was git-only for the same reason.
 
-## Deferred defects, found and verified but not fixed
+## Deferred defects: resolved 2026-08-15
 
-These came out of a line-by-line documentation pass over every file. None is a
-correctness bug in current use; each is real. Roughly in value order.
+The list that used to live here (found in the documentation pass, deferred)
+was worked through, with every fix adversarially reviewed and the review's
+own findings folded back in. Summary of dispositions:
 
-**Performance**
+**Fixed as described** — `sdiv_step` (reference ordering, `rem + 2^s`
+identity); the three polynomial division loops (in-place window subtraction,
+degree tracked by hand, `rem` without quotient bookkeeping, correct quotient
+sizing, monic `mod_inverse` skip, `scale` unit fast paths, dead `shift_up`
+helpers deleted); `BarrettCtx::pow_mod` top-bit seeding; `sqrt_floor` /
+`sqrt_rem` sharing a private `sqrt_newton`; `gf2m::inverse` bit lengths
+travelling across the swap; `gf2m::reduce` via a new `pub(crate)`
+`BigUint::into_limbs`; `squarefree_into` expect messages.
 
-- `number_theory.rs` `sdiv_step`: recomputes a remainder that `div_rem` already
-  returned. Since `hi − 2^s = q·lo + rem`, the value it rebuilds with a
-  full-width multiply and subtract is just `rem + 2^s`. This is the most
-  executed multiplication in the guarded-division path (every splice repair in
-  `hgcd`, every near-boundary step in `hgcd_base`). It also clones both
-  operands per call, only to order them.
-- `poly.rs` `PolyModP::div_rem`: inverts the leading coefficient
-  unconditionally. Every divisor in the factorisation pipeline is monic, and
-  `number_theory::mod_inverse` has no `a == 1` shortcut, so each call pays a
-  full Euclid loop. `make_monic` already short-circuits on `lc.is_one()`.
-- `poly.rs` `PolyModP::rem` builds and discards the whole quotient;
-  `div_rem` sizes the quotient `deg self + 1` instead of
-  `deg self − deg divisor + 1` (the ℤ paths size it correctly). Both are on the
-  hottest path in the file (`gcd` → `squarefree`/`distinct_degree`).
-- `poly.rs`: all three division loops build the subtrahend at full remainder
-  length (`shift_up` then `scale` then `sub`, three allocations per step) where
-  an in-place subtract over the affected window would do; and `scale` /
-  `pseudo_div_rem` have no `c = ±1` fast path, so a monic divisor multiplies by
-  unity across the whole quotient every step.
-- `bigint.rs` `BarrettCtx::pow_mod` does not seed the accumulator from the top
-  set bit, so every call wastes a squaring, a multiply and two reductions. The
-  Montgomery ladder in the same file deliberately does the opposite.
-- `bigint.rs` `sqrt_floor` calls `sqrt_rem` and discards the remainder, paying a
-  full-width squaring and subtraction to produce it; `sqrt_rem` also clones a
-  full-width value that is dead afterwards.
-- `bigint.rs`: no unbalanced-operand multiplication path, so a long × short
-  product falls all the way to schoolbook. Related: at exactly
-  `long == 2·short` the Karatsuba admission test accepts a case the kernel then
-  rejects back to schoolbook.
-- `gf2m.rs`: `inverse` recomputes `bits()` twice per iteration where the values
-  are already in hand; `reduce` takes its argument by value and then copies the
-  limb buffer (wants an `into_limbs` on `BigUint`); `is_irreducible` clones the
-  modulus per checkpoint.
+**Fixed differently than proposed, after measurement or a counterexample:**
 
-**Contract and robustness**
+- *Unbalanced multiplication.* The naive block decomposition (shift each
+  product, add full-width) measured 2.3–11.5× **slower** than schoolbook —
+  the recombination is `Θ(long²/k)` limb copies. The landed kernel
+  accumulates in place (`add_into_at`) and dispatches only above its own
+  measured crossover, `UNBALANCED_THRESHOLD_LIMBS = 256`
+  (`unbalanced_crossover_timing` is the probe; numbers sit on the constant).
+  Below it, lopsided shapes stay schoolbook, which wins there. The
+  `long == 2·short` Karatsuba admission edge is fixed (strict `<`) with a
+  table-driven boundary test.
+- *Sampler stall caps.* A rejection-count cap is sound for `random_below` /
+  `random_nonzero_below` (acceptance ≥ 1/2 always; capped at 256). It is
+  **unsound** for `random_coprime_below` and `random_probable_prime` — a
+  primorial `coprime_to` legitimately leaves 1 as the only unit below the
+  bound, and a count cap fired at coin-flip odds on a working generator.
+  Those two instead cap consecutive draws of the *same rejected candidate*
+  (256), the one signature a working generator cannot produce; the prime
+  search also skips the Miller–Rabin re-screen on a repeat. `should_panic`
+  tests cover all four.
+- *`shl_bits` scrub.* The "would be free" claim was wrong: measured 3–5% on
+  every large balanced multiplication (the shift sits on Karatsuba/Toom
+  recomposition). Not scrubbed; the decision and the number are in the
+  comment.
+- *`selfridge_discriminant`.* No cap added — a cap misclassifies or panics
+  on legitimate input. Termination is now documented as a theorem
+  (candidates `D ≡ 1 (mod 4)`, `|D| ≥ 5`, meet every class mod `n`; the
+  character is non-principal after the square exclusion), with the `i64`
+  conversion named plainly as the de facto cap whose unreachability is
+  empirical.
 
-- `gf2m.rs` `Gf2m::sqrt` returns a wrong value, silently, on a reducible
-  modulus — squaring is a bijection only in a field. It is the one public
-  routine here that neither panics nor returns `None` in that case; documented,
-  not fixed, because the signature cannot carry it.
-- `number_theory.rs` `selfridge_discriminant` is the last unbounded loop in the
-  crate. Termination rests on the perfect-square exclusion and the character
-  argument; every other search in the file is capped. Reachable from
-  `is_probable_prime_bpsw`.
-- `random.rs`: three rejection-sampling loops whose termination is a property of
-  the generator, not the code — a zero-filled `Rng` hangs `random_below`,
-  `random_nonzero_below` and `random_probable_prime`. Inherent to rejection
-  sampling and now documented at module level; a retry cap would match the
-  posture taken elsewhere (`equal_degree_split` caps at 256 stalled draws).
-  Also `random_probable_prime` can never return 2, since it forces the low bit.
-- `poly.rs` `squarefree_into` carries an `expect` whose message asserts a bound
-  that only holds under the prime-modulus precondition.
-- `bigint.rs` `shl_bits` abandons the old limb buffer unscrubbed where every
-  sibling path scrubs first. Consistent with the crate's stated scope (freed
-  buffers are not wiped), but it is the one place the scrub would be free.
-- `gf2m.rs` `xor_shifted_word` writes to `buf[index + 1]`, in bounds only
-  because `high` is provably zero at the boundary. Correct today, documented,
-  and fragile against any change to tap collection or buffer sizing.
+**Still open, deliberately** — `Gf2m::sqrt` wrong-value-on-reducible-modulus
+(documented; the signature cannot carry it); `xor_shifted_word` boundary
+fragility (documented); `is_irreducible`'s per-checkpoint modulus clone
+(inherent — Euclid consumes its working copy; now said at the call site).
+`random_probable_prime` still cannot return 2 (documented; HAC 4.44 samples
+odd candidates).
+
+**Found by the adversarial review, beyond the original list** — the
+twelve-base Miller–Rabin determinism bound was stated as ψ₁₃ = 3.317×10²⁴
+everywhere; the true twelve-base bound is ψ₁₂ ≈ 3.19×10²³, and there is an
+explicit composite between them that the crate certifies prime. Corrected in
+`number_theory.rs`, `random.rs`, `CITATIONS.md`, and the manual — the *code*
+was never wrong, the claim was. Also: `MontgomeryCtx::pow`'s rustdoc now
+names both ladder engines (right-to-left binary at ≤ 64-bit exponents, 4-bit
+window above); `PolyModP::div_rem`'s panic contract notes the
+degenerate-degree early return; a pin test
+(`composite_modulus_verdicts_are_unspecified_not_proofs`) nails the
+`x² + 1 mod 15` unspecified verdict so it cannot later be sold as a proof.
 
 **Citations to check against the physical sources** (added by others, left
-verbatim rather than guessed at): Rabin 1980's venue for `is_irreducible`;
+verbatim rather than guessed at): Rosser & Schoenfeld, *Approximate formulas
+for some functions of prime numbers*, Illinois J. Math. 6 (1962) — whether
+"Corollary 3" is the right label for `π(2x) − π(x) > (3/5)·x/ln x` with
+hypothesis `x ≥ 20½`, cited in `random.rs`'s prime-search stall guard and
+the manual's §10 (the *inequality* is verified numerically to 10⁷; the
+*label, constant, and threshold* were supplied by a reviewing agent from
+memory, the exact provenance this list exists to catch); Rabin 1980's venue
+for `is_irreducible`;
 *Guide to ECC* §2.3.5 and Algorithms 2.41–2.45 for tap-wise reduction; Knuth
 §3.4.1 for `random_below`; IEEE Std 1363-2000 Annex A.4.7 for the even-degree
 quadratic solver; whether Bodrato's optimised sequence really describes the
@@ -262,9 +271,10 @@ is correct. Check before you correct.
 | `scripts/perf_analysis.py` | tables and SVGs |
 | `scripts/lll_oracle.py` | independent rational LLL, the oracle `src/lattice.rs` tests against |
 | `MANUAL.md` / `tests/manual_examples.rs` | documented API, mirrored as tests |
+| `manual.tex` / `manual.pdf` | the LaTeX reference manual, with the defining equations per primitive; every listing is extracted and executed against the crate before a rebuild (`pdflatex manual.tex`, twice) |
 | `CITATIONS.md` | primary sources |
 | `REQUESTS.md` | the consumer's list, cleared |
 | `ROADMAP.md` | proposed scope, pending triage |
 
-Note that `PERFORMANCE.md` is **generated**. Edit
+`PERFORMANCE.md` is **generated**. Edit
 `scripts/build_performance.sh` and regenerate; edits to the document are lost.

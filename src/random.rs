@@ -12,13 +12,65 @@
 //! buys exact uniformity — no modular folding, so no bias toward the low end
 //! of the range — at the cost of a draw count that is a random variable
 //! rather than a bound. Termination is therefore a probabilistic property of
-//! the supplied generator, not a guarantee of the code: a generator whose
-//! output is constant, or confined to the rejected region, makes these
-//! functions loop indefinitely. Only degenerate *arguments* are reported as
-//! `None`; a degenerate *generator* is the caller's to avoid.
+//! the supplied generator, not a guarantee of the code. Each sampler carries
+//! a stall guard that panics rather than looping forever on the degenerate
+//! sources it can soundly detect — the posture
+//! `PolyModP::equal_degree_split` takes — and every guard is sized so a
+//! working generator trips it with probability at most `e⁻¹¹¹ ≈ 2⁻¹⁶⁰`
+//! (the loosest of the individual bounds; each function documents its
+//! own), so the panic is a diagnosis, never a sampling accident. What
+//! each guard can detect differs, and the one gap is stated below rather
+//! than papered over:
+//!
+//! - [`random_below`] and [`random_nonzero_below`] accept every draw with
+//!   probability at least one half regardless of arguments, so they bound
+//!   consecutive *rejections* and catch every degenerate source.
+//! - [`random_probable_prime`]'s acceptance density is a function of the
+//!   width alone, so its rejection bound scales with the width (`64·bits`)
+//!   and likewise catches every degenerate source; a *constant* generator
+//!   additionally fails fast, via a repeat detector that skips the
+//!   Miller–Rabin re-screen.
+//! - [`random_coprime_below`] is the one sampler where no *usable*
+//!   rejection count exists. A primorial modulus legitimately leaves 1 as
+//!   the only unit below the bound, so acceptance can be as thin as
+//!   `1/(upper − 1)`; the only sound count therefore scales with the
+//!   bound itself (Θ(upper) draws), which is unreachable for a
+//!   multiprecision bound. Its guard instead detects a *pinned* generator
+//!   (the same rejected candidate over and over); a degenerate source
+//!   that cycles among several rejected values is statistically
+//!   indistinguishable from a legitimately unlucky run against a sparse
+//!   unit set, does not trip the guard, and remains the caller's to
+//!   avoid.
+//!
+//! Degenerate *arguments* are still reported as `None`.
 
 use crate::bigint::BigUint;
 use crate::number_theory::{gcd, is_probable_prime};
+
+/// Consecutive fruitless draws after which [`random_below`] and
+/// [`random_nonzero_below`] conclude the generator is broken. Both loops
+/// accept each draw with probability at least one half, so a working
+/// generator survives this bound with probability at most `2⁻²⁵⁶` —
+/// the same constant, and the same reasoning, as
+/// `PolyModP::equal_degree_split`'s stall guard.
+const MAX_REJECTED_DRAWS: usize = 256;
+
+/// Consecutive draws of the *same rejected candidate* after which a
+/// sampler declares the generator pinned — the signature no working
+/// generator produces. Whenever a rejection is possible at all the
+/// candidate space holds at least two values, so independent uniform
+/// draws repeat the previous one with probability at most one half, and
+/// 256 consecutive repeats has probability at most `2⁻²⁵⁶` — the same
+/// constant, and the same reasoning, as the stall guard in
+/// `PolyModP::equal_degree_split`.
+///
+/// Two samplers use it, in different roles. For [`random_coprime_below`]
+/// it is the *only* guard, because no usable rejection count exists there
+/// (see the module note). For [`random_probable_prime`] it is the fast
+/// *inner* guard beneath the width-scaled rejection count: it exists so a
+/// constant generator fails after one Miller–Rabin screen rather than
+/// after `64·bits` of them.
+const MAX_IDENTICAL_REJECTIONS: usize = 256;
 
 /// A source of random bytes.
 ///
@@ -55,6 +107,13 @@ pub trait Rng {
 /// acceptance probability is at least one half and the expected number of
 /// draws is at most two, with equality exactly when the bound is a power of
 /// two. The buffer is scrubbed after each candidate is decoded.
+///
+/// # Panics
+///
+/// Panics after 256 consecutive rejections (`MAX_REJECTED_DRAWS`). Each draw is
+/// accepted with probability at least one half, so for a working generator
+/// this has probability at most `2⁻²⁵⁶`; it fires only on a generator whose
+/// output is confined to the rejected region (see the module note).
 #[must_use]
 pub fn random_below<R: Rng + ?Sized>(rng: &mut R, upper_exclusive: &BigUint) -> Option<BigUint> {
     if upper_exclusive.is_zero() {
@@ -66,7 +125,7 @@ pub fn random_below<R: Rng + ?Sized>(rng: &mut R, upper_exclusive: &BigUint) -> 
     let excess_bits = bytes.len() * 8 - bits;
     let top_mask = 0xff_u8 >> excess_bits;
 
-    loop {
+    for _ in 0..MAX_REJECTED_DRAWS {
         rng.fill_bytes(&mut bytes);
         // Rejection sampling from the enclosing power-of-two range. The
         // buffer is big-endian, so masking byte 0 constrains only the most
@@ -81,6 +140,11 @@ pub fn random_below<R: Rng + ?Sized>(rng: &mut R, upper_exclusive: &BigUint) -> 
             return Some(candidate);
         }
     }
+    panic!(
+        "random_below rejected {MAX_REJECTED_DRAWS} consecutive draws \
+         (each is accepted with probability at least 1/2): \
+         the supplied Rng yields no usable entropy"
+    );
 }
 
 /// Draw a random integer in `[1, upper_exclusive)`, uniformly, or `None` when
@@ -92,6 +156,13 @@ pub fn random_below<R: Rng + ?Sized>(rng: &mut R, upper_exclusive: &BigUint) -> 
 /// so the result is uniform on `[1, upper_exclusive)`; the rejected mass is
 /// one value out of at least two, so the expected number of draws is at most
 /// two.
+///
+/// # Panics
+///
+/// Panics after 256 consecutive zero draws (`MAX_REJECTED_DRAWS`; probability
+/// at most `2⁻²⁵⁶` for a working generator, since zero is at most one
+/// candidate in two), or as [`random_below`] does if the generator stalls
+/// below it.
 #[must_use]
 pub fn random_nonzero_below<R: Rng + ?Sized>(
     rng: &mut R,
@@ -101,12 +172,17 @@ pub fn random_nonzero_below<R: Rng + ?Sized>(
         return None;
     }
 
-    loop {
+    for _ in 0..MAX_REJECTED_DRAWS {
         let candidate = random_below(rng, upper_exclusive)?;
         if !candidate.is_zero() {
             return Some(candidate);
         }
     }
+    panic!(
+        "random_nonzero_below drew zero {MAX_REJECTED_DRAWS} times in a row \
+         (zero is at most one candidate in two): \
+         the supplied Rng yields no usable entropy"
+    );
 }
 
 /// Draw a random integer in `[1, upper_exclusive)` that is coprime to
@@ -134,6 +210,18 @@ pub fn random_nonzero_below<R: Rng + ?Sized>(
 /// Whenever `upper_exclusive >= 2` and `coprime_to != 0` a solution exists —
 /// 1 is in range and coprime to everything — so the loop terminates almost
 /// surely under any generator that can reach it.
+///
+/// # Panics
+///
+/// Panics when the same rejected candidate is drawn 256 times in a row
+/// (`MAX_IDENTICAL_REJECTIONS` — see that constant for why only a pinned
+/// generator can do this; a mere run of distinct non-coprime draws never
+/// trips it, however long, because the acceptance density is the
+/// arguments' business), or as [`random_below`] does if the generator
+/// stalls below it. This guard covers only the pinned case: a degenerate
+/// generator cycling among several non-coprime values hangs this function,
+/// as the module note explains — no argument-independent bound can
+/// distinguish it from an unlucky legitimate run.
 #[must_use]
 pub fn random_coprime_below<R: Rng + ?Sized>(
     rng: &mut R,
@@ -147,10 +235,27 @@ pub fn random_coprime_below<R: Rng + ?Sized>(
     if coprime_to.is_zero() {
         return None;
     }
+    // Stall detection watches for a *pinned* generator (the previous
+    // rejected candidate drawn again), not for a long run of rejections —
+    // the latter can be legitimate when the arguments make units scarce.
+    let mut last_rejected: Option<BigUint> = None;
+    let mut stalled = 0usize;
     loop {
         let candidate = random_nonzero_below(rng, upper_exclusive)?;
         if gcd(&candidate, coprime_to) == BigUint::one() {
             return Some(candidate);
+        }
+        if last_rejected.as_ref() == Some(&candidate) {
+            stalled += 1;
+            assert!(
+                stalled < MAX_IDENTICAL_REJECTIONS,
+                "random_coprime_below drew the same rejected candidate \
+                 {MAX_IDENTICAL_REJECTIONS} times in a row: \
+                 the supplied Rng yields no usable entropy"
+            );
+        } else {
+            stalled = 0;
+            last_rejected = Some(candidate);
         }
     }
 }
@@ -171,17 +276,46 @@ pub fn random_coprime_below<R: Rng + ?Sized>(
 /// is 2 itself, so `bits == 2` always yields 3.
 ///
 /// The screen is [`crate::is_probable_prime`], Miller-Rabin against the fixed
-/// twelve-prime base set: a proof of primality below `3.317 × 10^24` and a
+/// twelve-prime base set: a proof of primality below `ψ₁₂ ≈ 3.19 × 10^23` and a
 /// strong probable-prime test above it. A fixed base set is the right choice
 /// precisely here, where the candidate is drawn by this function rather than
 /// supplied by an adversary who could target the bases; the name is exact, and
 /// a caller wanting more assurance at large widths adds witnesses of its own
 /// through [`crate::miller_rabin_witness`].
 ///
-/// Termination is probabilistic, as the module note explains: the density of
-/// primes makes the expected number of rounds finite under a generator with
-/// full-range output, but a generator that returns the same bytes every call
-/// will retry a fixed composite forever.
+/// Termination under a working generator is probabilistic, and the stall
+/// guard is two-layered because the failure modes differ in cost. By the
+/// prime number theorem the density of primes among the odd `bits`-bit
+/// candidates is about `2/(bits·ln 2)`, so the expected number of rounds
+/// is about `0.35·bits` under a generator with full-range output. The
+/// outer guard bounds fruitless rounds at `64·bits` — the cap scales with
+/// the width, so a working generator survives it with probability about
+/// `(1 − 2/(bits·ln 2))^(64·bits) ≈ e⁻¹⁸⁵` by the asymptotic density, and
+/// below `e⁻¹¹¹` unconditionally at every width in range — and catches
+/// every degenerate source, including one cycling among several
+/// composites. The unconditional bound splits by width: for `bits ≥ 6`,
+/// `π(2x) − π(x) > (3/5)·x/ln x` (Rosser and Schoenfeld 1962; on the
+/// citation-check list, the inequality itself verified numerically to
+/// `10⁷`) bounds the density below by `1.2/((bits−1)·ln 2)`, giving
+/// survival under `e⁻¹¹¹`; the four smaller widths check exhaustively —
+/// 2 and 3 contain no composite at all, and the worst case is `bits = 4`
+/// (density 1/2 over 256 rounds, survival `2⁻²⁵⁶ = e⁻¹⁷⁷`). The inner guard makes the common
+/// broken source fail fast: a candidate equal to the previous rejected
+/// one is already known composite, so it skips the Miller–Rabin re-screen
+/// and trips its own 256-repeat assertion — one screen and 256
+/// comparisons for a constant generator, not hours of full-width
+/// exponentiation at large widths. (At `bits ≤ 4` the outer cap of
+/// `64·bits ≤ 256` rounds expires first, so a pinned generator there
+/// panics with the round-count message instead; the cost is the same.)
+///
+/// # Panics
+///
+/// Panics when the same rejected candidate is drawn 256 times in a row
+/// (`MAX_IDENTICAL_REJECTIONS`; a working generator repeats the previous
+/// draw with probability at most 1/4 per round whenever any composite is
+/// in range, so this has probability at most `4⁻²⁵⁵`), or after `64·bits`
+/// fruitless rounds in total (probability below `e⁻¹¹¹` for a working
+/// generator at every width, by the split argument above).
 #[must_use]
 pub fn random_probable_prime<R: Rng + ?Sized>(rng: &mut R, bits: usize) -> Option<BigUint> {
     if bits < 2 {
@@ -192,7 +326,9 @@ pub fn random_probable_prime<R: Rng + ?Sized>(rng: &mut R, bits: usize) -> Optio
     let top_bit = (bits - 1) % 8;
     let excess_bits = bytes.len() * 8 - bits;
     let top_mask = 0xff_u8 >> excess_bits;
-    loop {
+    let mut last_rejected: Option<BigUint> = None;
+    let mut stalled = 0usize;
+    for _ in 0..64 * bits {
         rng.fill_bytes(&mut bytes);
         bytes[0] &= top_mask;
         // Force the requested bit length by setting the top significant bit,
@@ -203,10 +339,30 @@ pub fn random_probable_prime<R: Rng + ?Sized>(rng: &mut R, bits: usize) -> Optio
 
         let candidate = BigUint::from_be_bytes(&bytes);
         crate::scrub::zeroize_slice(bytes.as_mut_slice());
+        if last_rejected.as_ref() == Some(&candidate) {
+            // Known composite from the previous round: count the stall and
+            // skip the screen it already failed.
+            stalled += 1;
+            assert!(
+                stalled < MAX_IDENTICAL_REJECTIONS,
+                "random_probable_prime drew the same composite \
+                 {MAX_IDENTICAL_REJECTIONS} times in a row at {bits} bits: \
+                 the supplied Rng yields no usable entropy"
+            );
+            continue;
+        }
         if is_probable_prime(&candidate) {
             return Some(candidate);
         }
+        stalled = 0;
+        last_rejected = Some(candidate);
     }
+    panic!(
+        "random_probable_prime found no prime in {} rounds at {bits} bits \
+         (about 185 times the expected search length): \
+         the supplied Rng yields no usable entropy",
+        64 * bits
+    );
 }
 
 #[cfg(test)]
@@ -309,5 +465,80 @@ mod tests {
             random_below(&mut rng, &BigUint::from_u64(5)),
             Some(BigUint::zero())
         );
+    }
+
+    /// A generator pinned to one byte value — the degenerate source the
+    /// stall guards exist to diagnose.
+    struct ConstRng(u8);
+
+    impl Rng for ConstRng {
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            dest.fill(self.0);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "the supplied Rng yields no usable entropy")]
+    fn stalled_generator_fails_loudly_in_random_below() {
+        // Bound 5 has bit length 3, so the masked draw is always 0x07 = 7,
+        // which is rejected forever: the guard must fire, not spin.
+        let mut rng = ConstRng(0xff);
+        let _ = random_below(&mut rng, &BigUint::from_u64(5));
+    }
+
+    #[test]
+    #[should_panic(expected = "the supplied Rng yields no usable entropy")]
+    fn stalled_generator_fails_loudly_in_random_nonzero_below() {
+        // Every draw is zero — always in range, never non-zero.
+        let mut rng = ZeroRng;
+        let _ = random_nonzero_below(&mut rng, &BigUint::from_u64(5));
+    }
+
+    #[test]
+    #[should_panic(expected = "the supplied Rng yields no usable entropy")]
+    fn stalled_generator_fails_loudly_in_random_coprime_below() {
+        // Every draw is 2 — in range, non-zero, and never coprime to 6.
+        let mut rng = ConstRng(0x02);
+        let _ = random_coprime_below(&mut rng, &BigUint::from_u64(3), &BigUint::from_u64(6));
+    }
+
+    #[test]
+    #[should_panic(expected = "the supplied Rng yields no usable entropy")]
+    fn stalled_generator_fails_loudly_in_random_probable_prime() {
+        // Forcing the top and low bits of an all-zero draw pins the
+        // candidate at 2^7 + 1 = 129 = 3·43, composite forever. This trips
+        // the fast inner guard (repeat detection) after 256 comparisons.
+        let mut rng = ZeroRng;
+        let _ = random_probable_prime(&mut rng, 8);
+    }
+
+    /// A generator cycling between two byte values — degenerate but not
+    /// pinned, so only the outer fruitless-round bound can catch it.
+    struct TwoCycleRng {
+        first: u8,
+        second: u8,
+        flip: bool,
+    }
+
+    impl Rng for TwoCycleRng {
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            dest.fill(if self.flip { self.second } else { self.first });
+            self.flip = !self.flip;
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "the supplied Rng yields no usable entropy")]
+    fn cycling_generator_fails_loudly_in_random_probable_prime() {
+        // Bytes 0x00 and 0x04 force the 8-bit candidates 129 = 3·43 and
+        // 133 = 7·19, alternating: never the same as the previous draw, so
+        // the repeat detector stays quiet and the 64·bits fruitless-round
+        // bound must fire instead.
+        let mut rng = TwoCycleRng {
+            first: 0x00,
+            second: 0x04,
+            flip: false,
+        };
+        let _ = random_probable_prime(&mut rng, 8);
     }
 }

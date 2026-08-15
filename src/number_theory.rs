@@ -640,11 +640,7 @@ fn sdiv_step(
     state: Option<&mut JacobiState>,
 ) -> bool {
     let a_is_larger = *a >= *b;
-    let (hi, lo) = if a_is_larger {
-        (a.clone(), b.clone())
-    } else {
-        (b.clone(), a.clone())
-    };
+    let (hi, lo) = if a_is_larger { (&*a, &*b) } else { (&*b, &*a) };
     if lo.is_zero() {
         return false;
     }
@@ -657,14 +653,17 @@ fn sdiv_step(
         t.set_bit(s);
         t
     };
-    if hi < threshold {
+    if *hi < threshold {
         return false; // hi already sits at or below the boundary
     }
-    let q = hi.sub_ref(&threshold).div_rem(&lo).0;
+    let (q, rem) = hi.sub_ref(&threshold).div_rem(lo);
     if q.is_zero() {
         return false; // reducing even once would cross the boundary
     }
-    let r = hi.sub_ref(&q.mul_ref(&lo));
+    // Since `hi − 2^s = q·lo + rem`, the guarded remainder `hi − q·lo` is just
+    // `rem + 2^s` — no multiplication needed to rebuild it.
+    let mut r = rem;
+    r.add_assign_ref(&threshold);
     if let Some(st) = state {
         // The as-applied quotient, after any size-guard back-off.
         st.update(u8::from(a_is_larger), (q.limbs()[0] & 3) as u8);
@@ -834,7 +833,7 @@ fn hgcd(a: &BigUint, b: &BigUint, mut state: Option<&mut JacobiState>) -> (Mat2,
     }
 
     // Below this size the recursion's matrix multiplications cost more than
-    // simply reducing the pair with batched Lehmer steps, so the recursion
+    // reducing the pair directly with batched Lehmer steps, so the recursion
     // bottoms out here rather than at trivial sizes.
     if n <= HGCD_BASE_LIMBS * 64 {
         return hgcd_base(&aa, &bb, s, state);
@@ -1848,7 +1847,7 @@ const JACOBI_LEHMER_THRESHOLD_LIMBS: usize = 64;
 /// `value mod 2^k`, where `mask` is `2^k − 1` and `k ≤ 64`.
 ///
 /// Base 2⁶⁴ puts a factor of 2⁶⁴ on every limb above the first, so each of them
-/// is divisible by any power of two up to that, and the residue is simply a
+/// is divisible by any power of two up to that, and the residue is a
 /// mask of the low limb. The alternative spelling, `rem_u64(2^k)`, runs a
 /// Horner division pass across every limb to compute a value that is already
 /// sitting in the first one — waste anywhere, and asymptotically significant in
@@ -2584,8 +2583,10 @@ pub fn crt_combine(congruences: &[(BigUint, BigUint)]) -> Option<BigUint> {
 ///
 /// Notes on determinism:
 /// - The first twelve prime bases make Miller-Rabin deterministic for every
-///   `n < 3.317 × 10^24` (Sorenson & Webster, *Strong Pseudoprimes to Twelve
-///   Prime Bases*, Math. Comp. 86 (2017), 985–1003; arXiv:1509.00864), which
+///   `n < ψ₁₂ = 318 665 857 834 031 151 167 461 ≈ 3.19 × 10^23` (Sorenson &
+///   Webster, *Strong Pseudoprimes to Twelve Prime Bases*, Math. Comp. 86
+///   (2017), 985–1003; arXiv:1509.00864 — ψ₁₂ is their headline result; the
+///   nearby `3.317 × 10^24` is ψ₁₃ and needs a thirteenth base), which
 ///   covers the whole `n < 2^64 ≈ 1.8 × 10^19` range.
 /// - For larger `BigUint` candidates this remains a strong fixed-basis
 ///   probable-prime test, but not a proof of primality.
@@ -2715,12 +2716,12 @@ pub fn primes_below(bound: u64) -> Vec<u64> {
 /// The sieve stage runs first and can decide alone — it returns `true` for the
 /// sieve primes themselves and `false` for anything else they divide — so the
 /// witness schedule is only reached by candidates with no factor below 1000.
-/// Those twelve bases make the verdict a *proof* for every `n < 3.317 × 10^24`
-/// (Sorenson and Webster, *Strong Pseudoprimes to Twelve Prime Bases*,
-/// Math. Comp. 86 (2017), 985–1003), which covers the whole `u64` range and
-/// more; above that bound the result is a strong probable-prime verdict, which
-/// a composite survives only by being a strong pseudoprime to all twelve
-/// simultaneously.
+/// Those twelve bases make the verdict a *proof* for every
+/// `n < ψ₁₂ ≈ 3.19 × 10^23` (Sorenson and Webster, *Strong Pseudoprimes to
+/// Twelve Prime Bases*, Math. Comp. 86 (2017), 985–1003; see `MR_BASES` for
+/// the exact bound), which covers the whole `u64` range and more; above that
+/// bound the result is a strong probable-prime verdict, which a composite
+/// survives only by being a strong pseudoprime to all twelve simultaneously.
 ///
 /// That distinction is what bounds the appropriate use. For the caller's own
 /// randomly generated candidates a fixed base set is ample, since no adversary
@@ -2914,11 +2915,20 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
 /// Wagstaff, §6). A zero symbol whose gcd with `n` is `n` itself carries no
 /// information (n is 5, 7, 11, …) and the search continues past it.
 ///
-/// The search terminates for every valid input: once squares are excluded,
-/// the map `D ↦ (D/n)` is a non-principal character, `-1` on half the
-/// residues, so a qualifying discriminant exists and arrives quickly — the
-/// maximum |D| over all odd `n < 2·10⁶` is 59, far below the `i64` bound
-/// the conversion below asserts.
+/// This is the one deliberately uncapped search in the crate, and its
+/// termination is a theorem: the candidates are the integers
+/// `D ≡ 1 (mod 4)` with `|D| ≥ 5`, ordered by `|D|`, and for odd `n` those
+/// meet every residue class modulo `n` (`D = 1 + 4k` with `k` sweeping a
+/// full residue system; dropping `1` and `-3` removes nothing from the
+/// coverage). Once the perfect-square exclusion has run, `D ↦ (D/n)` is a
+/// non-principal character on `(ℤ/nℤ)*`, `-1` on half the coprime classes,
+/// so a class with symbol `-1` exists and the sequence reaches one within
+/// `|D| ≤ 4n + 1` in the worst case. That worst case exceeds `i64` for
+/// cryptographic `n`, so the `i64` conversions below are the search's de
+/// facto cap — a panic, never a misclassification — and the claim that
+/// they are unreachable is empirical, not part of the theorem: the maximum
+/// |D| over all odd `n < 2·10⁶` is 59, and heuristically `(D/n)` behaves
+/// like a fair coin per candidate.
 fn selfridge_discriminant(n: &BigUint) -> Option<i64> {
     debug_assert!(n.is_odd() && !n.is_one());
     let mut d_abs: u64 = 5;
