@@ -17,64 +17,40 @@ starting the number field sieve.
 
 ---
 
-## Tier 1 — hand-rolled downstream today
+## Tier 1
 
-These already exist in the consumer as private helpers. Each is small, each is
-plainly rump's kind of thing, and each is a place where two crates can now
-disagree about the same arithmetic.
+**`BigInt::to_i64` (and `to_i128`), the signed counterpart of
+`BigUint::to_u64`.** Returning `None` on overflow, exactly as the unsigned one
+does.
 
-### 0. `BigInt` signed arithmetic: `mul_ref`, `div_rem`, `abs`
-
-**Blocking for GNFS.** `BigInt` is a `Sign` joined to a `BigUint`, and the
-public surface can add, subtract, negate, compare, and scale by an *unsigned*
-factor — but it cannot multiply two signed values, divide, or take an absolute
-value:
+`BigUint::to_u64` exists and `BigInt` has none, so every place the consumer
+needs a signed `BigInt` back as a machine integer goes through the magnitude
+and reattaches the sign by hand:
 
 ```rust
-let a = BigInt::from_i64(-6);
-let b = BigInt::from_i64(7);
-a.mul_ref(&b);   // error[E0624]: method `mul_ref` is private
-a.div_rem(&b);   // error[E0599]: no method named `div_rem`
-a.abs();         // error[E0599]: no method named `abs`
+fn to_i64(value: &BigInt) -> Option<i64> {
+    let magnitude = value.magnitude().to_u64()?;
+    let signed = i64::try_from(magnitude).ok()?;
+    Some(if value.sign() == rump::Sign::Negative { -signed } else { signed })
+}
 ```
 
-`mul_ref` already exists and is already correct — `PolyZ::mul` and
-`PolyZ::scale` call it — it is simply not `pub`. Making it public costs
-nothing and removes the largest of the three duplications.
+Wanted for the lattice sieve, which solves `i·P + j·Q = 0` over `BigInt` to
+find where the rational form crosses zero on a row, and then needs that `i`
+as an index. Written 2026-08-15.
 
-`div_rem` and `abs` are the other two. The number field sieve needs them
-constantly and in places where getting the sign convention wrong is a silent
-wrong answer rather than a crash:
+Note the asymmetry the hand-rolled version has to get right and which a
+library version should decide deliberately: `i64::MIN` has magnitude `2^63`,
+which `i64::try_from` rejects, so the snippet above returns `None` for a value
+that does fit. The consumer does not care — its `i` are small — but a
+primitive should not inherit that.
 
-- **Balanced base-`m` expansion.** Polynomial selection writes `n` in base `m`
-  with coefficients reduced into `(−m/2, m/2]`, which is a signed division per
-  coefficient. Balanced rather than least-non-negative coefficients are the
-  whole point: they roughly halve the size of the norms the sieve then has to
-  find smooth.
-- **Symmetric lifting.** The algebraic square root recovers a result modulo
-  `q^k` and must map it back to the symmetric range `(−q^k/2, q^k/2]`. Same
-  operation, and the step where an off-by-one in the sign convention produces
-  a plausible wrong `β` rather than an error.
-- **Coefficient bounds.** Deciding how far to Hensel-lift means comparing
-  `|coefficient|` against a bound, which wants `abs` and the `Ord` that
-  `BigInt` already has.
+---
 
-Suggested shapes, matching the `BigUint` originals:
+## Cleared
 
-```rust
-pub fn mul_ref(&self, other: &Self) -> Self;          // just make the existing one pub
-pub fn div_rem(&self, divisor: &Self) -> (Self, Self); // truncated, remainder takes the dividend's sign
-pub fn abs(&self) -> BigUint;                          // or -> Self; either is usable
-```
-
-For `div_rem`, please document which convention it takes — truncated toward
-zero (C, Rust `/`) or floored (Python). Either is fine; the consumer needs to
-know which, because `modulo_positive` already exists and implies the floored
-one is available somewhere.
-
-Until these land the consumer carries `src/gnfs/arith.rs`, which reimplements
-all three from `sign()` and `magnitude()` — the exact duplication this file
-exists to retire.
+The `BigInt` signed ring was delivered after 0.2.1 (see below);
+`src/gnfs/arith.rs` in the consumer can now be retired.
 
 ---
 
@@ -90,13 +66,36 @@ For the record, so the boundary stays where it is:
   curve arithmetic it needs is Montgomery-form `x`-only ladders chosen for
   factoring's failure mode — a curve operation that *fails* is the factor —
   not general-purpose EC. That belongs downstream too.
+- GPU cofactorization. One constraint worth stating before it is ever asked
+  for: rump is *scalar multiprecision* — limb vectors of dynamic length,
+  branching algorithms, allocation. GPU cofactorization wants *fixed-width*
+  arithmetic (64/128-bit Montgomery in registers, no allocation, no
+  divergence), which is a different kernel entirely. If the consumer ever
+  wants it, that is a new request with its own design, not a port of what is
+  here. (Flagged 2026-08-15.)
 
 ---
 
 ## Delivered
 
-rump 0.2.1 closed every other entry this file has ever carried. Kept as a
-record, so the boundary that worked stays visible.
+Every entry this file has ever carried is closed. Kept as a record, so the
+boundary that worked stays visible.
+
+**Post-0.2.1 — `BigInt` signed arithmetic (was Tier 1 #0, blocking for
+GNFS).**
+
+- `BigInt::mul_ref` is now `pub` — the existing crate-private product, made
+  public unchanged.
+- `BigInt::div_rem`, truncated toward zero (the C and Rust `/` convention;
+  the remainder takes the dividend's sign), documented in the rustdoc with
+  the `(-7)/2 = (-3, -1)` corner named, and differentially tested against
+  `i128`. `modulo_positive` remains the floored remainder against an
+  unsigned modulus.
+- `BigInt::abs -> BigUint`.
+
+This retires the consumer's `src/gnfs/arith.rs`: balanced base-`m`
+expansion, symmetric lifting, and coefficient-bound comparisons all run on
+rump's ring now.
 
 **0.2.1 — the whole outstanding list.**
 
