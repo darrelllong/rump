@@ -216,7 +216,8 @@ impl BigUint {
     ///
     /// # Panics
     ///
-    /// Panics only if the internal limb split invariants fail unexpectedly.
+    /// Does not panic in normal use; an internal `expect` guards the limb-split
+    /// invariant and would trip only on a corrupt value.
     #[must_use]
     pub fn from_u128(value: u128) -> Self {
         if value == 0 {
@@ -279,8 +280,8 @@ impl BigUint {
     ///
     /// # Panics
     ///
-    /// Panics only if the internal representation is corrupt and a non-zero
-    /// value contains no non-zero bytes.
+    /// Does not panic in normal use; the internal `expect` would trip only on a
+    /// corrupt representation (a non-zero value with no non-zero bytes).
     #[must_use]
     pub fn to_be_bytes(&self) -> Vec<u8> {
         if self.is_zero() {
@@ -736,8 +737,8 @@ impl BigUint {
     ///
     /// # Panics
     ///
-    /// Panics only if the internal representation is corrupt and a non-zero
-    /// value contains no limbs.
+    /// Does not panic in normal use; the internal `expect` would trip only on a
+    /// corrupt representation (a non-zero value with no limbs).
     #[must_use]
     pub fn bits(&self) -> usize {
         if self.is_zero() {
@@ -992,8 +993,9 @@ impl BigUint {
     ///
     /// # Panics
     ///
-    /// Panics only if the internal `u128` accumulator cannot be split back
-    /// into `u64` limbs, which would indicate a logic error.
+    /// Does not panic in normal use; an internal `expect` guards the
+    /// limb-packing invariant (a `u128` accumulator splitting back into `u64`
+    /// limbs) and would trip only on a logic error.
     pub fn add_assign_ref(&mut self, other: &Self) {
         if other.is_zero() {
             return;
@@ -1041,8 +1043,9 @@ impl BigUint {
     ///
     /// # Panics
     ///
-    /// Panics only if the internal `u128` accumulator cannot be split back
-    /// into `u64` limbs, which would indicate a logic error.
+    /// Does not panic in normal use; an internal `expect` guards the
+    /// limb-packing invariant (a `u128` accumulator splitting back into `u64`
+    /// limbs) and would trip only on a logic error.
     pub fn assign_add(&mut self, lhs: &Self, rhs: &Self) {
         debug_assert!(
             lhs.limbs.last() != Some(&0) && rhs.limbs.last() != Some(&0),
@@ -1181,12 +1184,20 @@ impl BigUint {
         out
     }
 
-    /// Multiply two big integers.
+    /// Multiply two big integers, choosing the multiplication kernel by
+    /// operand size: schoolbook (Knuth's Algorithm M) by default, Karatsuba
+    /// above 32 limbs, three-way Toom–Cook above 128, and four-way Toom–Cook
+    /// above 3072 (`KARATSUBA_/TOOM3_/TOOM4_THRESHOLD_LIMBS`). Each successive
+    /// kernel is asymptotically cheaper but splits the operands more, so its
+    /// overhead only pays off past the crossover — small products stay
+    /// schoolbook. The module header cites each algorithm. A zero operand
+    /// short-circuits to zero.
     ///
     /// # Panics
     ///
-    /// Panics only if the internal `u128` accumulators cannot be split back
-    /// into `u64` limbs, which would indicate a logic error.
+    /// Does not panic in normal use: an internal `expect` guards a limb-packing
+    /// invariant (`u128` accumulators splitting back into `u64` limbs) and can
+    /// trip only on a logic error in a kernel.
     #[must_use]
     pub fn mul_ref(&self, other: &Self) -> Self {
         if self.is_zero() || other.is_zero() {
@@ -1208,7 +1219,14 @@ impl BigUint {
         Self::mul_schoolbook_ref(self, other)
     }
 
-    /// Multiply a value by itself.
+    /// Square a value.
+    ///
+    /// There is no dedicated integer squaring kernel: this delegates to
+    /// [`Self::mul_ref`], so it costs a full multiply rather than exploiting
+    /// the symmetry that lets a squaring form each cross term once. That
+    /// symmetry is worth a separate kernel only where squarings dominate a hot
+    /// loop, which for this crate is the modular exponentiation ladder — see
+    /// [`MontgomeryCtx::square_mont`], which does have one.
     #[must_use]
     pub fn square_ref(&self) -> Self {
         self.mul_ref(self)
@@ -1795,7 +1813,15 @@ impl BigUint {
         }
     }
 
-    /// Return `(quotient, remainder)` for Euclidean division. Panics on zero divisor.
+    /// Return `(quotient, remainder)` for Euclidean division, with the
+    /// remainder in `[0, divisor)`.
+    ///
+    /// Dispatches on the divisor's width: a single-limb divisor takes a
+    /// base-2⁶⁴ Horner division (one pass, no quotient estimation needed),
+    /// while a multi-limb divisor uses Knuth's Algorithm D (*TAOCP* vol. 2,
+    /// §4.3.1) — operand normalization, the two-limb quotient estimate, and the
+    /// occasional add-back correction. A dividend smaller than the divisor
+    /// returns `(0, self)` without either path.
     ///
     /// # Panics
     ///
@@ -2447,7 +2473,16 @@ impl MontgomeryCtx {
         result
     }
 
-    /// Build a Montgomery context for a non-zero odd modulus.
+    /// Build a Montgomery context for a modulus, or `None` if the modulus is
+    /// zero or even.
+    ///
+    /// Montgomery reduction works in the residue system of `R = 2^(64·limbs)`,
+    /// and REDC requires `R` and the modulus to be coprime; since `R` is a
+    /// power of two, that holds exactly when the modulus is odd. An even (or
+    /// zero) modulus has no Montgomery form, hence the `None` — reach for
+    /// [`BarrettCtx`], which reduces modulo either parity. Construction also
+    /// precomputes the inverse `−n⁻¹ mod 2⁶⁴` (Hensel lifting) and `R² mod n`
+    /// once, so later encode/multiply steps do not repeat that work.
     #[must_use]
     pub fn new(modulus: &BigUint) -> Option<Self> {
         if modulus.is_zero() || !modulus.is_odd() {
@@ -2489,7 +2524,13 @@ impl MontgomeryCtx {
         &self.modulus
     }
 
-    /// Convert an ordinary residue into Montgomery form.
+    /// Convert an ordinary residue into Montgomery form (the inverse of
+    /// [`Self::decode`]).
+    ///
+    /// Encoding is multiplication by `R = 2^(64·limbs)` modulo `n`, done as one
+    /// Montgomery multiplication by the precomputed `R² mod n`: REDC of
+    /// `value · R²` returns `value · R mod n`. The argument is reduced modulo
+    /// `n` first, so any representative is accepted.
     #[must_use]
     pub fn encode(&self, value: &BigUint) -> BigUint {
         let mut workspace = Vec::new();
@@ -2518,7 +2559,13 @@ impl MontgomeryCtx {
         result
     }
 
-    /// Multiply two ordinary residues modulo the context modulus.
+    /// Multiply two ordinary residues modulo the context modulus — the
+    /// one-shot encode → multiply → decode round trip.
+    ///
+    /// Convenient for a single product. Callers doing many operations should
+    /// encode once and stay in the domain with [`Self::mul_mont`] /
+    /// [`Self::square_mont`], decoding only at the end, rather than re-paying
+    /// the encode and decode conversions on every step.
     #[must_use]
     pub fn mul(&self, lhs: &BigUint, rhs: &BigUint) -> BigUint {
         let mut workspace = Vec::new();
@@ -2536,7 +2583,13 @@ impl MontgomeryCtx {
         result
     }
 
-    /// Square one ordinary residue modulo the context modulus.
+    /// Square one ordinary residue modulo the context modulus — the one-shot
+    /// encode → square → decode round trip.
+    ///
+    /// Unlike [`Self::mul`] the in-domain step is the dedicated squaring kernel
+    /// (`mont_sqr`), which forms each cross term once instead of the full
+    /// `width²` products. The same encode-once, stay-in-domain advice as
+    /// [`Self::mul`] applies to repeated work.
     #[must_use]
     pub fn square(&self, value: &BigUint) -> BigUint {
         let mut workspace = Vec::new();
@@ -2659,6 +2712,13 @@ impl MontgomeryCtx {
     }
 
     /// Compute `base^exponent mod modulus` inside the context.
+    ///
+    /// Encodes `base` once, then runs a fixed 4-bit-window exponentiation
+    /// entirely in the Montgomery domain — where each squaring and product is
+    /// one REDC rather than a division — and decodes the result. Keeping the
+    /// whole ladder in-domain is the point of the context: the per-step cost is
+    /// a Montgomery multiply, not a modular reduction. The workspace holding
+    /// the (possibly secret) intermediates is wiped before it is freed.
     ///
     /// `base` may be unreduced (encoding reduces it); `exponent == 0` yields
     /// one, and a modulus of one yields zero.
@@ -3005,7 +3065,15 @@ impl BigInt {
         }
     }
 
-    /// Construct from an explicit sign and magnitude.
+    /// Construct from an explicit sign and magnitude, canonicalizing the pair.
+    ///
+    /// The representation admits exactly one zero, so an inconsistent argument
+    /// is normalized rather than stored: any sign with a zero magnitude becomes
+    /// canonical zero (`Sign::Zero`), and `Sign::Zero` with a non-zero
+    /// magnitude becomes `Positive`. This keeps `Eq`/`Ord` total and
+    /// well-defined, at the cost of silently accepting a contradictory `(sign,
+    /// magnitude)` pair — callers constructing from untrusted parts should not
+    /// rely on the sign surviving unchanged.
     #[must_use]
     pub fn from_parts(sign: Sign, magnitude: BigUint) -> Self {
         if magnitude.is_zero() {

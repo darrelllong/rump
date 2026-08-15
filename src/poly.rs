@@ -82,7 +82,7 @@ impl PolyZ {
         self.coeffs.last().cloned().unwrap_or_else(BigInt::zero)
     }
 
-    /// `self + other`.
+    /// `self + other`, added coefficient-wise (shorter operand zero-extended).
     #[must_use]
     pub fn add(&self, other: &Self) -> Self {
         let n = self.coeffs.len().max(other.coeffs.len());
@@ -95,7 +95,9 @@ impl PolyZ {
         Self::new(coeffs)
     }
 
-    /// `self − other`.
+    /// `self − other`, subtracted coefficient-wise. Equal leading terms
+    /// cancel, so the result is renormalized to drop any trailing zeros and
+    /// keep the degree honest.
     #[must_use]
     pub fn sub(&self, other: &Self) -> Self {
         let n = self.coeffs.len().max(other.coeffs.len());

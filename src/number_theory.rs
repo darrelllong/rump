@@ -1724,10 +1724,10 @@ pub fn lcm(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 /// markedly faster here than a full division per step.
 ///
 /// That binary engine serves small operands. Above
-/// [`JACOBI_LEHMER_THRESHOLD_LIMBS`] the computation moves to the Euclidean
+/// `JACOBI_LEHMER_THRESHOLD_LIMBS` the computation moves to the Euclidean
 /// quotient sequence with Lehmer batching, a state machine replaying each
 /// batch's quotients (Möller's design, after Schönhage's identities); above
-/// [`JACOBI_HGCD_THRESHOLD_LIMBS`] that state threads through the Half-GCD
+/// `JACOBI_HGCD_THRESHOLD_LIMBS` that state threads through the Half-GCD
 /// recursion and the symbol is subquadratic, O(M(n)·log n), matching the
 /// crate's gcd.
 ///
@@ -2213,7 +2213,14 @@ pub fn kronecker(a: &BigUint, n: &BigUint) -> i8 {
 
 // ─── Modular arithmetic ────────────────────────────────────────────────────────
 
-/// `base^exponent mod modulus` by repeated squaring.
+/// `base^exponent mod modulus` by square-and-multiply.
+///
+/// Dispatches on the modulus parity, because the fast reduction only exists
+/// for odd moduli: an odd modulus runs the exponentiation in a
+/// [`MontgomeryCtx`] (each step a REDC, no division), while an even modulus —
+/// which has no Montgomery form — falls back to a binary square-and-multiply
+/// that reduces with [`BigUint::mod_mul`] at every step. Both yield the same
+/// value; the split is purely which reduction is available.
 ///
 /// # Panics
 ///

@@ -2,7 +2,8 @@
 //!
 //! Extracted from [darrelllong/cryptography](https://github.com/darrelllong/cryptography)
 //! so the arithmetic can serve non-cryptographic consumers and the crate
-//! boundary keeps the API honest. The kernels are auditable against their
+//! boundary keeps the API free of cryptography-specific coupling. The kernels
+//! are auditable against their
 //! sources: Knuth's Algorithm D for division (*TAOCP* vol. 2, §4.3.1),
 //! Montgomery multiplication with an explicit public Montgomery domain
 //! (Montgomery 1985; Koç, Acar & Kaliski 1996), schoolbook, Karatsuba, and
