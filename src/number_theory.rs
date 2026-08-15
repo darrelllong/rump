@@ -5116,6 +5116,28 @@ mod tests {
     }
 
     #[test]
+    fn miller_rabin_wrapper_agrees_with_single_round_on_trivial_bases() {
+        // Second-pass §2.3: the batch wrapper and the single-round primitive
+        // share one trivial-base rule — reduce modulo n, discard {0, 1, n−1}.
+        let prime = BigUint::from_u64(1_000_000_007); // large, reaches MR
+        let composite = BigUint::from_u64(1_022_117); // 1009 × 1013, sieve-surviving
+
+        // 0 and 1 are trivial: the single round proves nothing with them.
+        assert!(!miller_rabin_witness(&prime, &BigUint::from_u64(0)));
+        assert!(!miller_rabin_witness(&prime, &BigUint::from_u64(1)));
+        // A leading 0 must not stamp a prime composite (the old bug), and a
+        // valid base alongside it still decides.
+        assert!(!is_probable_prime_with_bases(&prime, &[0])); // 0 effective rounds
+        assert!(is_probable_prime_with_bases(&prime, &[0, 2])); // 0 discarded, 2 decides
+        assert!(is_probable_prime_with_bases(&prime, &[2]));
+        // 1 never testifies: it must not stamp a composite prime.
+        assert!(!is_probable_prime_with_bases(&composite, &[1]));
+        // Genuine bases decide correctly on both sides.
+        assert!(miller_rabin_witness(&composite, &BigUint::from_u64(2))); // 2 exposes it
+        assert!(!is_probable_prime_with_bases(&composite, &[2]));
+    }
+
+    #[test]
     fn modular_inverse_small_values() {
         assert_eq!(
             mod_inverse(&BigUint::from_u64(11), &BigUint::from_u64(16)),

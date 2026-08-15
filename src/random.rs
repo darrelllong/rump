@@ -80,6 +80,12 @@ pub fn random_coprime_below<R: Rng + ?Sized>(
     upper_exclusive: &BigUint,
     coprime_to: &BigUint,
 ) -> Option<BigUint> {
+    // The only integer coprime to 0 is 1 (`gcd(a, 0) = a`), so there is no
+    // meaningful random coprime draw and rejection sampling would run
+    // unbounded; report the degenerate input as no result.
+    if coprime_to.is_zero() {
+        return None;
+    }
     loop {
         let candidate = random_nonzero_below(rng, upper_exclusive)?;
         if gcd(&candidate, coprime_to) == BigUint::one() {
@@ -184,6 +190,12 @@ mod tests {
             assert_eq!(gcd(&coprime, &modulus), BigUint::one());
         }
         assert_eq!(random_nonzero_below(&mut rng, &BigUint::one()), None);
+        // Coprime-to-0 is degenerate (only 1 qualifies): None, not an
+        // unbounded rejection loop (review §4.10).
+        assert_eq!(
+            random_coprime_below(&mut rng, &bound, &BigUint::zero()),
+            None
+        );
     }
 
     #[test]

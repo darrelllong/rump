@@ -463,13 +463,18 @@ fn manual_number_theory_primality() {
     assert!(is_probable_prime(&BigUint::from_u64(65_537)));
     assert!(!is_probable_prime(&BigUint::from_u64(561))); // Carmichael
 
-    // 2047 = 23 · 89 is the smallest strong pseudoprime to base 2 alone:
-    // the single witness is fooled, the fixed base set is not.
+    // 2047 = 23 · 89 is the smallest strong pseudoprime to base 2: the base-2
+    // Miller-Rabin round is fooled (2 is not a witness), but base 3 exposes it.
     let n = BigUint::from_u64(2_047);
-    assert!(!miller_rabin_witness(&n, &BigUint::from_u64(2)));
-    assert!(!is_probable_prime_with_bases(&n, &[2]));
-    assert!(!is_probable_prime(&n));
-    assert!(miller_rabin_witness(&n, &BigUint::from_u64(3)));
+    assert!(!miller_rabin_witness(&n, &BigUint::from_u64(2))); // 2 is not a witness
+    assert!(miller_rabin_witness(&n, &BigUint::from_u64(3))); // 3 is
+    assert!(!is_probable_prime(&n)); // the full test rejects it
+
+    // with_bases reduces each base modulo n and discards {0, 1, n-1}; a set of
+    // only trivial bases runs no effective round and is not reported prime.
+    let composite = BigUint::from_u64(1_022_117); // 1009 × 1013, survives the sieve
+    assert!(!is_probable_prime_with_bases(&composite, &[1])); // 1 never testifies
+    assert!(!is_probable_prime_with_bases(&composite, &[2])); // 2 exposes it
 }
 
 #[test]

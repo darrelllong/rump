@@ -6,6 +6,8 @@
 name = "rust-mp"
 version = "0.2.0"
 edition = "2021"
+# `u64`/`usize::is_multiple_of` (used throughout) stabilized in 1.87.
+rust-version = "1.87"
 license = "BSD-2-Clause"
 authors = ["Darrell Long"]
 description = "Multiprecision integer arithmetic implemented from the literature: Knuth Algorithm D division, Montgomery multiplication with a public Montgomery domain, Karatsuba, and deterministic number theory."

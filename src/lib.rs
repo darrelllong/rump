@@ -36,6 +36,12 @@
 //! to a doc comment, and `MANUAL.md` carries a worked, test-pinned example
 //! for each.
 //!
+//! Targets: the limb layout and the index arithmetic that sizes it — `bits`,
+//! and the `R²`/Karatsuba bit shifts that scale a limb count by 128 — assume a
+//! 64-bit `usize`. rump is developed and tested on 64-bit hosts and is not
+//! supported on 32-bit targets, where a multi-hundred-megabyte operand could
+//! overflow a `usize` index and land a shift in the wrong place.
+//!
 //! ```
 //! use rump::{is_probable_prime, jacobi, mod_pow, BigUint};
 //!

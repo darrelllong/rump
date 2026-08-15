@@ -219,19 +219,36 @@ impl Gf2m {
     #[must_use]
     pub fn solve_quadratic(&self, c: &BigUint) -> Option<BigUint> {
         let c = self.reduce(c.clone());
-        if self.trace(&c) == 1 {
+        // A solution to z² + z = c exists iff Tr(c) = 0. `trace_bit` is `None`
+        // when the modulus is reducible (no well-defined trace) — an unfit
+        // ring, so no root — and `Some(1)` when the equation is unsolvable.
+        if self.trace_bit(&c)? != 0 {
             return None;
         }
         if self.degree % 2 == 1 {
-            return Some(self.half_trace(&c));
+            let z = self.half_trace(&c);
+            // Verify rather than trust: a reducible odd-degree modulus can
+            // violate the identity, and a wrong root must be `None`.
+            return (Self::add(&self.square(&z), &z) == c).then_some(z);
         }
 
-        // Any trace-one element drives the construction; half of the field
-        // qualifies, so a scan from small constants ends fast.
-        let mut delta = BigUint::one();
-        while self.trace(&delta) == 0 {
-            delta = delta.add_ref(&BigUint::one());
+        // Even degree needs a trace-one element δ to drive the construction.
+        // The trace is a nonzero GF(2)-linear functional, so in a genuine field
+        // at least one basis element xⁱ (bit pattern 2ⁱ) has trace one;
+        // scanning the m basis elements bounds the search and returns `None`
+        // for a ring (a reducible modulus) that has no trace-one element,
+        // rather than looping forever. `trace_bit` also keeps a reducible
+        // ring's escaped trace from tripping the `trace` assertion.
+        let mut delta = None;
+        let mut basis = BigUint::one();
+        for _ in 0..self.degree {
+            if self.trace_bit(&basis) == Some(1) {
+                delta = Some(basis);
+                break;
+            }
+            basis = basis.add_ref(&basis); // ×2: the next basis element
         }
+        let delta = delta?;
 
         let mut suffix = c.clone(); // s_0 = Tr(c) + c = c
         let mut c_power = c.clone(); // c^{2^i}
@@ -244,11 +261,9 @@ impl Gf2m {
             delta_power = self.square(&delta_power);
         }
 
-        debug_assert!(
-            Self::add(&self.square(&z), &z) == c,
-            "the construction must satisfy its own equation"
-        );
-        Some(z)
+        // Verify before returning: a reducible modulus that slipped past the
+        // trace checks yields no valid root, which must be `None`.
+        (Self::add(&self.square(&z), &z) == c).then_some(z)
     }
 
     /// The absolute trace `Tr(c) = Σ_{i=0}^{m−1} c^{2^i}`, always 0 or 1
@@ -259,17 +274,40 @@ impl Gf2m {
     /// now checkable through the public API.
     #[must_use]
     pub fn trace(&self, c: &BigUint) -> u8 {
+        // In a genuine field the trace always lands in {0, 1}; assert that in
+        // debug, and fall back to 0 for the escaped bit pattern a reducible
+        // modulus can produce (callers that must distinguish use `trace_bit`).
+        let bit = self.trace_bit(c);
+        debug_assert!(bit.is_some(), "the trace lands in the prime subfield");
+        bit.unwrap_or(0)
+    }
+
+    /// The trace as a prime-subfield bit, or `None` when the Frobenius sum is
+    /// neither 0 nor 1.
+    ///
+    /// Why it can be `None`: `Tr(c) = Σ c^{2^i}` is guaranteed to lie in the
+    /// prime subfield GF(2) only when the modulus is irreducible, i.e. when the
+    /// ring is actually a field. [`Gf2m::new`] does not check irreducibility,
+    /// so a caller can hand us a reducible modulus; there the sum can be any
+    /// bit pattern, and reporting it as a bare 0 (as [`Self::trace`] does)
+    /// would let a routine like [`Self::solve_quadratic`] proceed on a ring
+    /// that has no well-defined trace. Returning `None` lets such a routine
+    /// recognise the unfit ring and bail rather than loop or fabricate an
+    /// answer.
+    fn trace_bit(&self, c: &BigUint) -> Option<u8> {
         let mut power = self.reduce(c.clone());
         let mut acc = power.clone();
         for _ in 1..self.degree {
             power = self.square(&power);
             acc.bitxor_assign(&power);
         }
-        debug_assert!(
-            acc.is_zero() || acc.is_one(),
-            "the trace lands in the prime subfield"
-        );
-        u8::from(acc.is_one())
+        if acc.is_zero() {
+            Some(0)
+        } else if acc.is_one() {
+            Some(1)
+        } else {
+            None
+        }
     }
 
     /// Test whether a GF(2) polynomial is irreducible (Rabin's test).
@@ -939,6 +977,29 @@ mod tests {
                 witness = witness.add_ref(&BigUint::one());
             }
             assert_eq!(field.solve_quadratic(&witness), None);
+        }
+    }
+
+    #[test]
+    fn solve_quadratic_terminates_on_reducible_rings() {
+        // Reducible moduli have no well-defined trace-one element; the even-
+        // degree branch must return None rather than loop forever (review §2.4).
+        // x^2 (0b100) — the smallest reducible even-degree modulus.
+        let ring = Gf2m::new(BigUint::from_u64(0b100)).expect("ring");
+        assert_eq!(ring.solve_quadratic(&BigUint::zero()), None);
+        assert_eq!(ring.solve_quadratic(&BigUint::one()), None);
+        // (x^2 + x + 1)^2 = x^4 + x^2 + 1 (0b1_0101) — even degree, reducible.
+        let ring = Gf2m::new(BigUint::from_u64(0b1_0101)).expect("ring");
+        for c in 0..16u64 {
+            // Each call returns (the test finishing proves no hang); any Some
+            // is a genuinely verified root, never a fabricated one.
+            if let Some(z) = ring.solve_quadratic(&BigUint::from_u64(c)) {
+                assert_eq!(
+                    Gf2m::add(&ring.square(&z), &z),
+                    ring.reduce(BigUint::from_u64(c)),
+                    "a returned root must satisfy z^2 + z = c"
+                );
+            }
         }
     }
 

@@ -257,11 +257,18 @@ impl PolyZ {
 
     /// Exact division over ℤ: `Some((quotient, remainder))` satisfying
     /// `self = quotient·divisor + remainder` with `deg remainder <
-    /// deg divisor`, returned when the division stays in ℤ — in particular
-    /// always for a monic divisor (leading coefficient `±1`). Returns `None`
-    /// when a leading coefficient does not divide evenly, so no such quotient
-    /// exists over ℤ; use [`Self::pseudo_div_rem`] for the always-defined
-    /// ℤ-preserving form `ℓ·self = quotient·divisor + remainder`.
+    /// deg divisor`.
+    ///
+    /// Why it is fallible: ℤ is not a field, so unlike division over `𝔽_p` a
+    /// quotient with integer coefficients need not exist. Schoolbook long
+    /// division cancels the remainder's leading term each step by dividing its
+    /// coefficient by the divisor's leading coefficient; that division is
+    /// exact only when the latter divides the former. It always does for a
+    /// monic divisor (leading coefficient `±1`), so those never fail. When a
+    /// step does not divide evenly there is no integer quotient and this
+    /// returns `None` — reach for [`Self::pseudo_div_rem`], which sidesteps the
+    /// obstruction by premultiplying (`ℓ·self = quotient·divisor + remainder`)
+    /// and so is always defined; it is what the resultant path uses.
     ///
     /// # Panics
     ///

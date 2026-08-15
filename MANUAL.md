@@ -699,23 +699,33 @@ assert_eq!(residues, vec![
 
 `is_probable_prime` runs trial division plus Miller-Rabin over the twelve
 fixed small-prime bases; `is_probable_prime_with_bases` takes an explicit
-base set; `miller_rabin_witness` is the single-round primitive for callers
-with their own witness schedule. The fixed bases are for candidates you
-generated yourself — an adversary can construct pseudoprimes against any
-fixed base set, so untrusted input needs extra candidate-derived witnesses
-(as the parent cryptography crate's `is_probable_prime_untrusted` adds).
+base set (after the same unconditional small-prime sieve, so it is a
+probable-prime predicate, not a way to run Miller-Rabin with exactly those
+bases and nothing else); `miller_rabin_witness` is the single-round
+primitive for callers with their own witness schedule. Each base it takes
+is reduced modulo the candidate and the trivial residues `{0, 1, n−1}` are
+discarded; a set with no effective round proves nothing and is not prime.
+The fixed bases are for candidates you generated yourself — an adversary
+can construct pseudoprimes against any fixed base set, so untrusted input
+needs extra candidate-derived witnesses (as the parent cryptography crate's
+`is_probable_prime_untrusted` adds).
 
 ```rust
 assert!(is_probable_prime(&BigUint::from_u64(65_537)));
 assert!(!is_probable_prime(&BigUint::from_u64(561))); // Carmichael
 
-// 2047 = 23 · 89 is the smallest strong pseudoprime to base 2 alone:
-// the single witness is fooled, the fixed base set is not.
+// 2047 = 23 · 89 is the smallest strong pseudoprime to base 2: the base-2
+// Miller-Rabin round is fooled (2 is not a witness), but base 3 exposes it.
 let n = BigUint::from_u64(2_047);
-assert!(!miller_rabin_witness(&n, &BigUint::from_u64(2)));
-assert!(!is_probable_prime_with_bases(&n, &[2]));
-assert!(!is_probable_prime(&n));
-assert!(miller_rabin_witness(&n, &BigUint::from_u64(3)));
+assert!(!miller_rabin_witness(&n, &BigUint::from_u64(2))); // 2 is not a witness
+assert!(miller_rabin_witness(&n, &BigUint::from_u64(3))); // 3 is
+assert!(!is_probable_prime(&n)); // the full test rejects it
+
+// with_bases reduces each base modulo n and discards {0, 1, n-1}; a set of
+// only trivial bases runs no effective round and is not reported prime.
+let composite = BigUint::from_u64(1_022_117); // 1009 × 1013, survives the sieve
+assert!(!is_probable_prime_with_bases(&composite, &[1])); // 1 never testifies
+assert!(!is_probable_prime_with_bases(&composite, &[2])); // 2 exposes it
 ```
 
 `is_probable_prime_bpsw` is the Baillie–PSW test: trial division, one
