@@ -2342,6 +2342,11 @@ fn decompose_n_minus_one(n: &BigUint) -> (BigUint, usize) {
 /// composite; it is not a primality verdict. For example `sqrt_mod(1, 15)`
 /// returns `Some(1)` (a true root of 1 mod 15), while `sqrt_mod(1, 9)`
 /// returns `None` (the bounded scan finds no non-residue mod the square 9).
+/// A residue that genuinely is a square can still return `None` this way:
+/// `sqrt_mod(4, 9)` is `None` even though `4 = 2² (mod 9)`, because the
+/// descent needs a non-residue that a square modulus does not have. For roots
+/// modulo a prime power, use [`sqrt_mod_prime_power`], which lifts by Hensel
+/// instead of searching for a non-residue.
 ///
 /// ```
 /// use rump::{sqrt_mod, BigUint};
@@ -4523,6 +4528,25 @@ mod tests {
                 "sqrt_mod(1, {m}) must terminate as None"
             );
         }
+        // Sharpened: an *actual* square residue hangs the unbounded scan too —
+        // 4 ≡ 2² ≡ 7² (mod 9), jacobi(4, 9) = 1. Tonelli needs a non-residue,
+        // which an odd square modulus does not have, so the bounded scan
+        // returns None (no root over a non-prime modulus) rather than looping.
+        // Use sqrt_mod_prime_power for roots modulo a prime power.
+        assert_eq!(
+            sqrt_mod(&BigUint::from_u64(4), &BigUint::from_u64(9)),
+            None,
+            "sqrt_mod(4, 9) must terminate"
+        );
+        // a ≡ 0 exits before the scan and is the one residue that resolves.
+        assert_eq!(
+            sqrt_mod(&BigUint::from_u64(0), &BigUint::from_u64(9)),
+            Some(BigUint::zero())
+        );
+        // Even non-prime moduli: the even branch declines before any scan, so
+        // these terminate as None even though 0 and 1 are squares mod 4.
+        assert_eq!(sqrt_mod(&BigUint::from_u64(0), &BigUint::from_u64(4)), None);
+        assert_eq!(sqrt_mod(&BigUint::from_u64(1), &BigUint::from_u64(4)), None);
     }
 
     #[test]
