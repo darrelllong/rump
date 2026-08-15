@@ -323,7 +323,12 @@ impl Gf2m {
     }
 
     /// Invert a field element via the extended Euclidean algorithm over
-    /// `GF(2)[x]`, or `None` for zero (which has no inverse).
+    /// `GF(2)[x]`, or `None` when the element is not a unit.
+    ///
+    /// Non-units are zero, any non-canonical representative of zero (the field
+    /// polynomial itself reduces to zero), and — when the modulus is reducible
+    /// rather than irreducible — the zero-divisors that share a factor with
+    /// it. Each returns `None` rather than looping.
     ///
     /// Algorithm 2.48 from Hankerson, Menezes, Vanstone — *Guide to ECC*: each
     /// step cancels the leading term of the higher-degree remainder by adding a
@@ -331,20 +336,35 @@ impl Gf2m {
     /// single cofactor of `a` alongside.
     /// Invariant during the loop: `b ≡ u · a (mod poly)` in the sense that
     /// `b` and `u` are updated in lockstep so that `b = u · a XOR s · poly`
-    /// for some polynomial `s` we do not track.
+    /// for some polynomial `s` we do not track. `gcd(u, v)` is likewise
+    /// invariant and equal to `gcd(a, poly)`; a non-unit drives `u` to zero
+    /// with that gcd left in `v`, which is the terminating `None`.
     #[must_use]
     pub fn inverse(&self, a: &BigUint) -> Option<BigUint> {
+        // Reduce first: `is_zero()` is a limb-vector test, not a field test,
+        // so a representative of zero that is not the canonical
+        // `BigUint::zero()` — the field polynomial, or any multiple of it —
+        // must be reduced before the zero check can recognize it.
+        let a = self.reduce(a.clone());
         if a.is_zero() {
             return None;
         }
 
-        let mut u = a.clone();
+        let mut u = a;
         let mut v = self.poly.clone();
         let mut b = BigUint::one();
         let mut c = BigUint::zero();
 
         // Loop until u = 1 (degree 0 polynomial over GF(2)).
         while !u.is_one() {
+            // A remainder of zero means gcd(a, poly) = v ≠ 1: `a` is not a
+            // unit (a reducible modulus, or a zero-divisor under one). The
+            // XOR-shift below cannot reduce a zero `u`, so bail here instead
+            // of spinning on a remainder that never reaches 1.
+            if u.is_zero() {
+                return None;
+            }
+
             // How many bits separate the leading terms of u and v?
             let deg_u = u.bits(); // deg(u) + 1
             let deg_v = v.bits(); // deg(v) + 1
@@ -379,15 +399,27 @@ impl Gf2m {
     /// For any `c` with absolute trace Tr(c) = 0, `z = HT(c)` solves
     /// `z² + z = c` — the quadratic behind compressed-point decompression on
     /// binary curves. The field degree must be odd (all FIPS 186-4 binary
-    /// curve degrees are); [`Self::solve_quadratic`] is the total form that
-    /// handles every degree and checks the trace itself.
+    /// curve degrees are); on an even degree the half-trace is not a solver of
+    /// `z² + z = c`, so this asserts odd degree in debug builds.
+    /// [`Self::solve_quadratic`] is the total form that handles every degree
+    /// and checks the trace itself.
+    ///
+    /// The input is reduced modulo the field polynomial first, as
+    /// [`Self::trace`], [`Self::sqrt`], and [`Self::solve_quadratic`] do, so a
+    /// non-canonical representative of a field element yields the same
+    /// half-trace as its reduced form.
     #[must_use]
     pub fn half_trace(&self, c: &BigUint) -> BigUint {
+        debug_assert!(
+            self.degree % 2 == 1,
+            "half_trace is defined for odd field degree; use solve_quadratic for even degrees"
+        );
         // HT(c) = c^{2^0} + c^{2^2} + c^{2^4} + ... + c^{2^{degree-1}}
         // Starting from power = c, square twice per iteration to advance by
         // 2 exponent steps: c → c^4 → c^{16} → ...
+        let c = self.reduce(c.clone());
         let mut t = c.clone(); // accumulator starts at c^{2^0}
-        let mut power = c.clone(); // current term
+        let mut power = c; // current term
 
         for _ in 0..(self.degree - 1) / 2 {
             // Advance power from c^{2^{2i}} to c^{2^{2(i+1)}} = c^{2^{2i+2}}.
@@ -621,6 +653,24 @@ mod tests {
     }
 
     #[test]
+    fn inverse_returns_none_for_non_units() {
+        // Each of these once livelocked; reducing first and bailing on a
+        // zero remainder turns them into None. GF(2^4), x^4 + x + 1.
+        let field = gf4();
+
+        // The field polynomial is 0 in the field: a non-canonical zero.
+        assert_eq!(field.inverse(field.modulus()), None);
+        assert_eq!(field.div(&BigUint::one(), field.modulus()), None);
+
+        // poly · x = x^5 + x^2 + x is also ≡ 0: an unreduced zero.
+        assert_eq!(field.inverse(&BigUint::from_u64(0b10_0110)), None);
+
+        // A reducible modulus x^2 has the zero-divisor x, no inverse.
+        let reducible = Gf2m::new(BigUint::from_u64(0b100)).expect("degree 2");
+        assert_eq!(reducible.inverse(&BigUint::from_u64(0b10)), None);
+    }
+
+    #[test]
     fn half_trace_solves_the_quadratic() {
         // c = x has Tr(x) = 0 in GF(2^163) (a fact about this field), so
         // z = HT(c) must satisfy z² + z = c exactly.
@@ -629,6 +679,23 @@ mod tests {
         let z = field.half_trace(&c);
         let check = Gf2m::add(&field.square(&z), &z);
         assert_eq!(check, c, "HT(c)² + HT(c) must equal c");
+    }
+
+    #[test]
+    fn half_trace_reduces_its_input() {
+        // A non-canonical representative of a field element must give the
+        // same half-trace as its reduced form. c XOR poly ≡ c, since the
+        // field polynomial is 0, and carries the degree-163 leading term, so
+        // before the reduce the accumulator kept that stray bit.
+        let field = gf163();
+        let c = BigUint::from_u64(0b10); // x, already reduced
+        let unreduced = Gf2m::add(&c, field.modulus()); // x XOR poly ≡ x
+        assert_ne!(unreduced, c, "the representative differs bit-for-bit");
+        assert!(
+            unreduced.bits() > field.degree(),
+            "the representative is genuinely unreduced"
+        );
+        assert_eq!(field.half_trace(&unreduced), field.half_trace(&c));
     }
 
     fn splitmix(state: &mut u64) -> u64 {

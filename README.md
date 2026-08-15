@@ -57,10 +57,16 @@ inputs. Adversarially hardened primality testing lives with its consumer
 
 - `#![deny(unsafe_code)]`; the sole audited exception is a six-line
   volatile-write scrub helper.
-- Every `BigUint` wipes its limbs on drop, and the exponentiation ladder
-  wipes its workspaces on exit — values do not linger in freed heap memory.
-- **Variable-time.** Operations take data-dependent paths. Do not use this
-  crate where timing must not leak secrets.
+- **Variable-time, for non-secret data.** Operations take data-dependent
+  paths. Do not use this crate where timing must not leak secrets.
+- **Not a secret-scrubbing or constant-time type, and does not pretend to be.**
+  As cheap defense in depth every `BigUint` volatile-wipes its live limbs on
+  drop and the exponentiation ladder wipes its workspaces on exit. That is the
+  extent of it: spare capacity and buffers freed on reallocation are not wiped,
+  the in-domain `mul_mont` / `square_mont` keep their scratch, and `Debug`
+  prints every limb. Cryptographic memory hygiene and constant-time operation
+  are out of scope; a consumer that handles key material adds them at that
+  layer.
 
 ## Benchmarks
 

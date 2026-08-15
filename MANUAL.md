@@ -27,9 +27,15 @@ use rump::{
 };
 ```
 
-Two properties hold everywhere: operations are **variable-time** (do not use
-them where timing must not leak secrets), and every `BigUint` **wipes its
-limbs on drop**, with exponentiation workspaces wiped on exit.
+Two properties define the intended use. Operations are **variable-time** (do
+not use them where timing must not leak secrets), and rump is **for non-secret
+data — not a secret-scrubbing or constant-time type**. As cheap defense in
+depth every `BigUint` volatile-wipes its live limbs on drop and the
+exponentiation ladder wipes its workspaces on exit; that is the extent of it
+(spare capacity and buffers freed on reallocation are not wiped, the in-domain
+`mul_mont` / `square_mont` keep their scratch, and `Debug` prints every limb).
+Cryptographic memory hygiene and constant-time operation are out of scope,
+left to a consumer that handles key material.
 
 ## BigUint
 
@@ -278,8 +284,8 @@ zero below positives), so `<`, `.max()`, and `slice::sort` all apply.
 Arithmetic never does: rump does not overload `+` or `*`, so every
 multiprecision operation is an explicit method call (`add_ref`, `mul_ref`,
 `negated`, …) and therefore visible in the code that pays for it. Values move
-without copying; `Clone` duplicates the limbs; every value scrubs its limbs
-on drop.
+without copying; `Clone` duplicates the limbs; every value volatile-wipes its
+live limbs on drop as defense in depth (see the scope note above).
 
 A complete example — a bubble sort of signed integers, written exactly as it
 would be for any ordered type:
@@ -906,6 +912,8 @@ recoverable conditions:
 | `ln_approx` | the value is zero |
 | `sqrt_mod_prime_power` | `e == 0` or `p < 2` |
 | `remainder_tree` / `smooth_parts` | a value (leaf) is zero — but `smooth_parts` maps a zero value to zero rather than reducing it |
+| `to_be_bytes_padded` | the value needs more than the requested byte length |
+| `MontgomeryCtx::mul_mont` / `square_mont` / `pow_encoded` | given an operand not reduced below the modulus — the shared in-domain contract, asserted in debug builds; in release a grossly over-width operand trips the internal bounds check. `encode` and `decode` instead reduce any representative and never panic on width |
 
 Fallible mathematics — a missing inverse, a non-residue, an even Montgomery
 modulus, non-coprime CRT moduli — returns `Option` instead.
