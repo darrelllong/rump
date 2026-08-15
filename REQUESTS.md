@@ -17,33 +17,21 @@ starting the number field sieve.
 
 ---
 
-## Tier 1
+## Tier 1 — cleared
 
-**`BigInt::to_i64` (and `to_i128`), the signed counterpart of
-`BigUint::to_u64`.** Returning `None` on overflow, exactly as the unsigned one
-does.
+Nothing outstanding.
 
-`BigUint::to_u64` exists and `BigInt` has none, so every place the consumer
-needs a signed `BigInt` back as a machine integer goes through the magnitude
-and reattaches the sign by hand:
+**Withdrawn 2026-08-15, same day it was raised: `BigInt::to_i64`.** Asked for
+on behalf of the lattice sieve, which solved `i·P + j·Q = 0` over `BigInt` to
+find where the rational form crosses zero on a row and needed that `i` as an
+index. The caller is gone: `a − bm` is *linear* in `i`, so the row is a V about
+that zero and the bar is `log₂|P| + log₂|i − i₀|` — one logarithm of `|P|` and
+one ratio, both fixed per lattice, and no `BigInt` per position at all. The
+exact solve was doing arithmetic to answer a question that had a closed form.
 
-```rust
-fn to_i64(value: &BigInt) -> Option<i64> {
-    let magnitude = value.magnitude().to_u64()?;
-    let signed = i64::try_from(magnitude).ok()?;
-    Some(if value.sign() == rump::Sign::Negative { -signed } else { signed })
-}
-```
-
-Wanted for the lattice sieve, which solves `i·P + j·Q = 0` over `BigInt` to
-find where the rational form crosses zero on a row, and then needs that `i`
-as an index. Written 2026-08-15.
-
-Note the asymmetry the hand-rolled version has to get right and which a
-library version should decide deliberately: `i64::MIN` has magnitude `2^63`,
-which `i64::try_from` rejects, so the snippet above returns `None` for a value
-that does fit. The consumer does not care — its `i` are small — but a
-primitive should not inherit that.
+Recorded rather than deleted because the shape recurs: a request for a
+narrowing conversion is often a sign the caller is computing something exactly
+that it only needs to within a bit.
 
 ---
 
