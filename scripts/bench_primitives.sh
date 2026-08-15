@@ -50,10 +50,12 @@ trap 'rm -rf "$WORK"' EXIT
 
 # Print one Markdown row
 #   `| op | mean_ms | ±95% CI | min | p50 | p99 | max | ratio |`
-# by driving pilot-bench and reducing its output. The CI column is
-# pilot-bench's own converged 95% confidence interval on the mean (its
-# subsession CI, which accounts for autocorrelation between readings), read
-# straight from pi_results.csv rather than recomputed.
+# by driving pilot-bench for collection and reducing its raw `readings.csv`.
+# pilot-bench only runs the program repeatedly until its own convergence or the
+# session limit; every reported figure — mean, CI, and the order statistics —
+# is computed here from the full readings sample, not read from pilot's
+# analytics (whose changepoint-based mean is wrong for a heavy-tailed workload;
+# see the reduction below).
 measure() {
     local op=$1
     local out="$WORK/$op"
@@ -66,9 +68,9 @@ measure() {
     # written, so it is not an error here.
     "$BENCH" run_program --preset "$PILOT_PRESET" -s "$session" -o "$out" \
         --pi "${op},ms/op,0,1,1" -- "$MP" "$op" >/dev/null 2>&1 || true
-    python3 - "$op" "$out/readings.csv" "$out/pi_results.csv" <<'PY'
+    python3 - "$op" "$out/readings.csv" <<'PY'
 import sys, statistics
-op, readings_path, pi_path = sys.argv[1], sys.argv[2], sys.argv[3]
+op, readings_path = sys.argv[1], sys.argv[2]
 
 # Order statistics come from the raw readings sample.
 xs = []
@@ -82,60 +84,38 @@ try:
 except FileNotFoundError:
     pass
 
-# pilot-bench's own mean and 95% subsession CI (accounts for autocorrelation
-# between consecutive readings — the interval it converges against).
-pilot_mean = pilot_ci = None
-try:
-    with open(pi_path) as f:
-        header = next(f).rstrip("\n").split(",")
-        rec = dict(zip(header, next(f).rstrip("\n").split(",")))
-        pilot_mean = float(rec["readings_mean"])
-        pilot_ci = float(rec["readings_subsession_ci"])
-except (FileNotFoundError, StopIteration, KeyError, ValueError):
-    pass
-
-if not xs and pilot_mean is None:
+if not xs:
     print(f"| {op} | ? | ? | ? | ? | ? | ? | ? |")
     sys.exit()
 
 xs.sort()
 ns = [x * 1e6 for x in xs]  # ms -> ns
 q = lambda p: ns[min(len(ns) - 1, int((len(ns) - 1) * p))] if ns else float("nan")
-# Prefer pilot's mean, but never trust it unchecked. pilot's readings_mean
-# is not the sample mean: it is the mean of the "dominant segment" after
-# changepoint-based warmup elimination (workload.cc, refresh_analytical_
-# result), a heuristic built for warmup-then-steady-state processes. Our
-# heavy-tailed ops are i.i.d. mixtures — runs of microsecond rejections
-# punctured by rare enormous readings — which that detector misreads as
-# regime changes, repeatedly (measured: 150 firings in one 120 s session),
-# so the recorded figure is the mean of an arbitrary final suffix. It
-# usually lands near the truth; when the final cut falls after the last
-# slow reading it is wrong by orders of magnitude, which is how one
-# session recorded 2.15 us against its own 194 ms p99. The readings file
-# is the whole sample, so its mean is the arbiter — when pilot's figure
-# strays beyond 2x from it (or is denormal), the sample mean stands and
-# the CI is treated as unconverged.
-sample_mean = statistics.fmean(xs) if xs else None
-if (
-    pilot_mean is not None
-    and pilot_mean > 1e-12
-    and (sample_mean is None or 0.5 < pilot_mean / sample_mean < 2.0)
-):
-    mean_ms = pilot_mean
-elif sample_mean is not None:
-    mean_ms = sample_mean
-    pilot_ci = None
-else:
-    mean_ms = float("nan")
+# The reported mean is the sample mean of the full readings — the unbiased
+# estimator of the average cost over random inputs, and by construction a value
+# in [min, max], consistent with the quantiles below. pilot-bench's
+# readings_mean is deliberately NOT used: it is a changepoint-based "dominant
+# segment" mean (workload.cc, refresh_analytical_result) built to strip warmup
+# from a warmup-then-steady-state process. Our heavy-tailed ops are i.i.d.
+# mixtures — runs of microsecond rejections punctured by rare enormous readings
+# — which that detector misreads as regime changes and drops, producing a
+# figure that need not even lie within the sample's own range (one session
+# reported 21.9 ms against its 0.12 ms p99 and 130 ms max; another 2.15 us
+# against a 194 ms p99). There is no warmup to eliminate here — every reading
+# is a fresh random operand — so the whole-sample mean is the correct and only
+# estimator.
+mean_ms = statistics.fmean(xs)
 lo = ns[0] if ns else float("nan")
 hi = ns[-1] if ns else float("nan")
 ratio = hi / lo if ns and lo > 0 else float("inf")
 
-# 95% CI half-width as a percent of the mean: pilot's converged value when
-# present, else a naive IID estimate from the sample.
-if pilot_ci is not None and mean_ms > 0:
-    ci_pct = 100.0 * pilot_ci / mean_ms
-elif len(xs) > 2:
+# 95% CI half-width as a percent of the mean, normal (IID) approximation:
+# each reading is a fresh independent operand, so there is no autocorrelation
+# for pilot's subsession CI to correct — the plain standard error is right. A
+# heavy tail makes this wide, which is the honest statement that a finite
+# sample pins the mean of a heavy-tailed cost only loosely (and is what flags
+# such a cell approximate below).
+if len(xs) > 2 and mean_ms > 0:
     ci_pct = 100.0 * (1.96 * statistics.stdev(xs) / len(xs) ** 0.5) / mean_ms
 else:
     ci_pct = float("nan")
