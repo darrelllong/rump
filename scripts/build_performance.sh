@@ -17,6 +17,11 @@ GCD_SCALE=bench/gcd_scaling_hardy.md
 GMP_GCD_SCALE=bench/gmp_gcd_scaling_hardy.md
 OUT=PERFORMANCE.md
 
+# Refuse to build the document on data that contradicts itself: a reported mean
+# must lie inside the range its own order statistics allow. This catches the
+# class of defect that produced the superseded variable-time figures.
+python3 scripts/check_bench_consistency.py bench/*.md
+
 # Regenerate the scaling SVGs too, so they never drift from the tables.
 for fam in arithmetic division montgomery number-theory; do
     $PA plot "$fam" "assets/scaling-$fam.svg" "M4=$M4" "EPYC=$EPYC" "Pi=$PI" "A18=$A18" >/dev/null
@@ -64,10 +69,19 @@ division; most odd composites fall to the 168-prime sieve within
 microseconds; the ≈ 8 % that survive it (Mertens: ∏(1 − 1/p) over p ≤ 997 is
 ≈ 0.081) pay at least one full Miller–Rabin exponentiation — 2.8 ms at 2048
 bits, 24 ms at 4096 — and a prime, at probability 1/ln 2ⁿ, pays all twelve
-rounds. The mean is real and increases monotonically with size, but the tail
-sets it, so a faithful estimate requires a sample of several hundred trials;
-these two operations therefore receive a 120 s collection session where the
-others receive 30 s. (An earlier revision of this table showed `isprime`
+rounds. The mean is real, but the tail sets it, so a faithful
+estimate requires a sample of several hundred trials; these two operations
+therefore receive a 120 s collection session where the others receive 30 s.
+Every row publishes the reading count `n` behind its figures, because at the
+widest sizes that budget is not enough: a reading costs a fresh random operand,
+and generating a multi-kilobit random prime takes far longer than the operation
+being timed, so a 180 s session at 7168 bits collected four readings. The mean
+of four draws from a bimodal cost is not a measurement — it is one coin flip
+between the fast Jacobi exit and the full descent — so the reduction refuses to
+report a mean below a thirty-reading floor and marks the cell
+`insufficient-sample` instead. `scripts/check_bench_consistency.py` enforces the
+matching arithmetic invariant: a reported mean must lie inside the range its own
+order statistics allow. (An earlier revision of this table showed `isprime`
 means *decreasing* past 2048 bits. That was a harness defect, not arithmetic:
 the operand pool then generated a random prime at the operand size for every
 operation, so each 4096-bit trial cost seconds of setup and the session
