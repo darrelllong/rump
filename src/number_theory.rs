@@ -1,10 +1,20 @@
 //! Deterministic number theory over [`BigUint`].
 //!
-//! Everything here is a pure function of its inputs: gcd and lcm by Euclid,
-//! the Jacobi symbol by binary reciprocity, modular exponentiation and
-//! inversion, and fixed-base Miller-Rabin. Randomized prime *generation* and
-//! adversarially hardened primality testing live with their consumers (the
-//! parent cryptography crate), where the entropy source and hash live.
+//! Everything here is a pure function of its inputs, and every size-dependent
+//! branch is a dispatch between engines that compute the same value. Greatest
+//! common divisor, its extended form, and modular inversion run on Lehmer's
+//! algorithm below a measured crossover and on Möller's Half-GCD recursion
+//! above it; the Jacobi symbol runs on binary reciprocity, on the Lehmer
+//! quotient sequence, or through that same recursion; modular square roots
+//! take the `p ≡ 3 (mod 4)` shortcut, the Tonelli–Shanks descent, or
+//! Cipolla's algorithm; primality is trial division followed by fixed-base
+//! Miller-Rabin or by Baillie–PSW. Around those sit Garner's CRT, rational
+//! reconstruction, Bernstein's product and remainder trees, and the p-adic
+//! valuation.
+//!
+//! Randomized prime *generation* and adversarially hardened primality testing
+//! live with their consumers (the parent cryptography crate), where the
+//! entropy source and hash live.
 
 use crate::bigint::{BigInt, BigUint, MontgomeryCtx, Sign};
 
@@ -14,13 +24,15 @@ use crate::bigint::{BigInt, BigUint, MontgomeryCtx, Sign};
 //
 // Classical Euclid does a full multiprecision division per step, and there are
 // O(bits) of them. Lehmer's refinement runs Euclid on just the aligned leading
-// 64-bit digits, accumulating the 2×2 transform of every step whose quotient
-// the leading digits pin down *exactly*, then applies that one transform to the
+// digits — here a 124-bit window of each operand, not the single limb Knuth
+// describes — accumulating the 2×2 transform of every step whose quotient the
+// leading digits pin down *exactly*, then applies that one transform to the
 // full operands with a handful of multiplications. The quotient test — accept
 // `q` only when the low and high leading-digit estimates agree — certifies each
 // batched quotient equals the true one, so the outcome is bit-for-bit classical
-// Euclid, with an order of magnitude fewer big-integer divisions. `gcd`,
-// `gcd_extended`, and `mod_inverse` all share this engine.
+// Euclid, with one matrix application in place of the whole run of divisions
+// the batch replaces. `gcd`, `gcd_extended`, and `mod_inverse` all share this
+// engine.
 
 /// Single-word Euclid, the base case once both operands fit in one limb.
 fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
@@ -113,9 +125,10 @@ fn lehmer_transform(
 
 /// The applied-quotient log of one Lehmer batch: each entry a quotient's low
 /// two bits, in application order — what the Jacobi state replays when the
-/// batch commits. Sized for the longest possible batch: all-ones quotients
-/// advance the leading digits along the Fibonacci sequence, and F₁₈₀ already
-/// exceeds 2¹²⁴, so 184 entries cannot be filled by a 124-bit window.
+/// batch commits. Sized for the longest possible batch by Lamé's bound: a run
+/// of `k` Euclidean steps forces the leading digit up the Fibonacci sequence
+/// to at least `F_{k+2}`, and `F₁₈₁ > 2¹²⁴ > F₁₈₀`, so a 124-bit window admits
+/// at most 178 steps and can never fill 184 entries.
 struct QuotientLog {
     q_mod_4: [u8; 184],
     len: usize,
@@ -1010,9 +1023,20 @@ fn canonicalize_bezout(a: &BigUint, b: &BigUint, g: &BigUint, s: &BigInt) -> (Bi
 }
 
 /// Greatest common divisor by Lehmer's algorithm: classical Euclid with each
-/// run of steps whose quotient the leading 64-bit digits fix batched into one
-/// 2×2 transform of the full operands. Same result as plain Euclid, an order of
-/// magnitude fewer multiprecision divisions.
+/// run of steps whose quotient the aligned leading 124-bit digits fix batched
+/// into one 2×2 transform of the full operands. Same remainder sequence as
+/// plain Euclid, with one matrix application in place of each batched run of
+/// divisions.
+///
+/// Two guards keep the leading digits worth reading. A single-limb smaller
+/// operand hands off to [`gcd_u64`], below the width at which a 124-bit window
+/// says anything. Operands of unequal limb length take one ordinary division
+/// first: [`leading_pair`] windows both at the *larger* operand's top, so a
+/// length gap costs the smaller operand at least 64 bits of its window and
+/// leaves the transform certifying little or nothing, where one division
+/// collapses the pair to equal width outright. A batch that certifies nothing
+/// (`m01 == 0`) falls back to the same single division, so the loop always
+/// makes progress.
 fn gcd_lehmer(lhs: &BigUint, rhs: &BigUint) -> BigUint {
     let (mut a, mut b) = if lhs >= rhs {
         (lhs.clone(), rhs.clone())
@@ -1076,9 +1100,18 @@ pub fn gcd(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 /// Applied Cryptography*, Algorithm 2.107; Knuth, *TAOCP* vol. 2, §4.5.2,
 /// Algorithm X).
 ///
-/// Tracks both Bézout coefficient pairs, carrying them through the same
-/// leading-digit Lehmer transform [`gcd`] uses, so the result is identical to
-/// the classical step-by-step recurrence but with the reductions batched.
+/// Returns the classical triple — the one step-by-step extended Euclid would
+/// return, `s` the representative of least absolute value modulo `b/g` — by
+/// whichever of two engines is cheaper at the operands' size. Below the
+/// crossover, Lehmer: both cofactor pairs ride the same leading-digit
+/// transform the remainder pair does, so the batching changes the cost and not
+/// the answer. Above it, the Half-GCD driver, whose size-guarded quotients can
+/// step off the true continued-fraction path near each boundary; the pair it
+/// returns satisfies the Bézout identity but may differ from the classical one
+/// by a multiple of `(b/g, −a/g)`, so a canonicalization step selects the
+/// least representative of `s` modulo `b/g` and recovers `t` exactly from
+/// `t = (g − s·a)/b` before returning. Zero operands stay on the Lehmer path,
+/// which handles them directly.
 /// [`mod_inverse`] is the lean variant that keeps only one coefficient.
 ///
 /// ```
@@ -1386,12 +1419,12 @@ pub fn rational_reconstruct_bounded(
 /// unknown, as in recovering a fraction from its image modulo a large
 /// modulus (CRT-lifted linear algebra, p-adic lifting).
 ///
-/// The bound costs about what the walk costs — with Newton's iteration
-/// under `sqrt_floor`, 0.3× the walk at 2048 bits and parity at 8192
-/// (measured on M4 with generic operands; the 87× that stood here before
-/// item 6 replaced the bisection is gone). Callers reconstructing many
-/// values under one modulus should still compute the bound once and call
-/// [`rational_reconstruct_bounded`]: at scale that halves the total.
+/// The bound is `⌊√((m−1)/2)⌋` taken by `sqrt_floor`'s Newton iteration,
+/// and computing it is not free relative to the walk it precedes: measured
+/// on M4 with generic operands, 0.3× the walk at 2048 bits and parity with
+/// it at 8192. Callers reconstructing many values under one modulus should
+/// compute the bound once and call [`rational_reconstruct_bounded`], which
+/// removes that term from every call after the first.
 ///
 /// See [`rational_reconstruct_bounded`] for the contract and references.
 #[must_use]
@@ -1417,9 +1450,36 @@ pub fn rational_reconstruct(x: &BigUint, m: &BigUint) -> Option<(BigInt, BigUint
 const CIPOLLA_THRESHOLD_FACTOR: usize = 4;
 
 /// The Tonelli–Shanks descent for `p − 1 = q·2^s`, `a` a residue already
-/// reduced modulo the odd prime `p` (Cohen, Algorithm 1.5.1). `None` when
-/// the bounded non-residue scan exhausts or the descent finds no order to
-/// reduce — both composite-modulus signatures.
+/// reduced modulo the odd prime `p` (Cohen, *A Course in Computational
+/// Algebraic Number Theory*, Algorithm 1.5.1). `q` and `s` are the caller's
+/// 2-adic split of `p − 1`, and `ctx` its Montgomery context.
+///
+/// The root is built in the cyclic 2-Sylow subgroup of `(ℤ/pℤ)*`, of order
+/// `2^s`. Seed `r = a^((q+1)/2)`, so `r² = a·a^q = a·t` with `t = a^q` in
+/// that subgroup; the invariant `r² = a·t` is maintained while `t` is driven
+/// to one, at which point `r` is the root. Each round finds the least `i`
+/// with `t^(2^i) = 1` — the order of `t` is `2^i`, and `i` strictly decreases
+/// because a residue's `t` starts with order dividing `2^(s−1)` — then
+/// multiplies `t` by the square of a generator power `b` of matching order,
+/// halving that order, and multiplies `r` by `b` to preserve the invariant.
+/// `z`, a quadratic non-residue, is the generator the subgroup is driven by:
+/// `z^q` has full order `2^s`, which is what makes an element of every needed
+/// order available.
+///
+/// The whole squaring chain runs inside the Montgomery domain: the three
+/// seeds are encoded once and every round is a `square_mont`/`mul_mont`, with
+/// a single `decode` on the returned root. [`MontgomeryCtx::pow`] returns an
+/// *ordinary* residue, not an encoded one, which is why each of `c`, `t`, and
+/// `r` is re-encoded after its exponentiation. Montgomery form is canonical
+/// — `x·R mod p` in `[0, p)` — so the `!= one_mont` tests compare encoded
+/// values directly rather than decoding to compare.
+///
+/// `None` in two composite-modulus cases: the bounded non-residue scan
+/// exhausts (an odd perfect square has no Jacobi non-residue at all, so the
+/// scan is what keeps this from looping forever), or the order search reaches
+/// `i == m`, meaning `t` has no order below the current bound and there is
+/// nothing left to descend. For a prime `p` neither occurs; [`sqrt_mod`]
+/// verifies the result by squaring regardless.
 fn sqrt_mod_descent(
     a: &BigUint,
     p: &BigUint,
@@ -1441,11 +1501,9 @@ fn sqrt_mod_descent(
         }
     }
 
-    // Run the descent in the Montgomery domain: use square_mont / mul_mont
-    // throughout — no encode/decode per round — and decode only the final root.
-    // Montgomery form is canonical, so the `!= 1` tests compare encoded values
-    // directly. `pow` returns an ordinary residue, so encode the three seeds
-    // (c, t, r) once to enter the domain.
+    // Enter the Montgomery domain once and stay there: `pow` hands back an
+    // ordinary residue, so each of the three seeds is encoded after its
+    // exponentiation, and only the final root is decoded.
     let one_mont = ctx.encode(&one);
 
     let mut m = s;
@@ -1496,8 +1554,9 @@ const NON_RESIDUE_SCAN_BOUND: u32 = 128;
 /// Choose `t` with `w = t² − a` a non-residue (each try succeeds with
 /// probability ~1/2; consecutive small `t` serve, the character being
 /// equidistributed). In `F_p² = F_p[x]/(x² − w)`, the element `t + x` has
-/// norm `(t + x)(t + x)^p = (t + x)(t − x) = t² − w = a`, and `(t + x)^((p+1)/2)` is an
-/// element of the base field whose square is `a`. The ladder runs
+/// norm `(t + x)(t + x)^p = (t + x)(t − x) = t² − w = a`, and
+/// `(t + x)^((p+1)/2)` is therefore an element of the base field whose
+/// square is that norm, namely `a`. The ladder runs
 /// left-to-right over `(p+1)/2` as Montgomery-domain pairs `(u, v)`
 /// standing for `u + v·x`: squaring is `(u² + w·v², 2uv)` and the
 /// multiply by the fixed base `t + x` is `(u·t + w·v, u + v·t)`. Cost is
@@ -1699,12 +1758,20 @@ pub fn remove_factor(n: &BigUint, p: &BigUint) -> (BigUint, usize) {
     (cofactor, exponent)
 }
 
-/// Least common multiple.
+/// Least common multiple; `lcm(0, x) = 0`, zero being the only common multiple
+/// of zero and anything.
 ///
-/// This is the Carmichael-function building block used by the RSA code: the
-/// Python reference chooses `lambda = lcm(p - 1, q - 1)` rather than Euler's
-/// totient because the private exponent only needs to invert modulo the
-/// exponent cycle length.
+/// Computed as `(lhs/g)·rhs` for `g = gcd(lhs, rhs)`, not as `lhs·rhs/g`: the
+/// division by `g` is exact and comes first, so no intermediate exceeds the
+/// answer, where forming the product first would build a value `g` times the
+/// answer and then divide it back down. The cost is one [`gcd`], one exact
+/// division, and one multiplication.
+///
+/// RSA-specific note: this is the Carmichael-function building block the
+/// parent cryptography crate's key generation uses, `λ(n) = lcm(p−1, q−1)`
+/// rather than Euler's `φ(n) = (p−1)(q−1)`, because the private exponent need
+/// only invert the public exponent modulo the exponent group's cycle length,
+/// and `λ` is that length.
 #[must_use]
 pub fn lcm(lhs: &BigUint, rhs: &BigUint) -> BigUint {
     if lhs.is_zero() || rhs.is_zero() {
@@ -1778,6 +1845,19 @@ const JACOBI_LEHMER_THRESHOLD_LIMBS: usize = 64;
 
 /// [`jacobi`]'s below-crossover engine: binary quadratic reciprocity, taking
 /// `a` already reduced modulo the odd `n`.
+/// `value mod 2^k`, where `mask` is `2^k − 1` and `k ≤ 64`.
+///
+/// Base 2⁶⁴ puts a factor of 2⁶⁴ on every limb above the first, so each of them
+/// is divisible by any power of two up to that, and the residue is simply a
+/// mask of the low limb. The alternative spelling, `rem_u64(2^k)`, runs a
+/// Horner division pass across every limb to compute a value that is already
+/// sitting in the first one — waste anywhere, and asymptotically significant in
+/// the reciprocity loops below, which ask on every iteration and would
+/// otherwise spend O(limbs) hardware divisions per bit of reduction.
+fn low_bits_mod_pow2(value: &BigUint, mask: u64) -> u64 {
+    value.limbs().first().copied().unwrap_or(0) & mask
+}
+
 fn jacobi_binary(reduced: BigUint, n: BigUint) -> Option<i8> {
     let mut a = reduced;
     let mut n = n;
@@ -1790,7 +1870,7 @@ fn jacobi_binary(reduced: BigUint, n: BigUint) -> Option<i8> {
         while !a.bit(twos) {
             twos += 1;
         }
-        if twos % 2 == 1 && matches!(n.rem_u64(8), 3 | 5) {
+        if twos % 2 == 1 && matches!(low_bits_mod_pow2(&n, 7), 3 | 5) {
             sign = -sign;
         }
         a.shr_bits(twos);
@@ -1798,7 +1878,7 @@ fn jacobi_binary(reduced: BigUint, n: BigUint) -> Option<i8> {
         // Order the (now both odd) arguments so a >= n. The swap is the
         // reciprocity step, paying its sign flip when both are ≡ 3 (mod 4).
         if a < n {
-            if a.rem_u64(4) == 3 && n.rem_u64(4) == 3 {
+            if low_bits_mod_pow2(&a, 3) == 3 && low_bits_mod_pow2(&n, 3) == 3 {
                 sign = -sign;
             }
             core::mem::swap(&mut a, &mut n);
@@ -2207,7 +2287,7 @@ pub fn kronecker(a: &BigUint, n: &BigUint) -> i8 {
         if !a.is_odd() {
             return 0;
         }
-        if twos % 2 == 1 && matches!(a.rem_u64(8), 3 | 5) {
+        if twos % 2 == 1 && matches!(low_bits_mod_pow2(a, 7), 3 | 5) {
             sign = -sign;
         }
     }
@@ -2254,13 +2334,27 @@ pub fn mod_pow(base: &BigUint, exponent: &BigUint, modulus: &BigUint) -> BigUint
 }
 
 /// Multiplicative inverse `a^{-1} mod n`, if it exists (*Handbook of Applied
-/// Cryptography*, Algorithm 2.142).
+/// Cryptography*, Algorithm 2.142), reduced into `[0, n)`.
 ///
-/// Extended Euclid — over the shared leading-digit Lehmer engine — tracking
-/// only the coefficient of `a`, half the signed bookkeeping of
-/// [`gcd_extended`], which measurably matters to callers doing single-shot
-/// inversion chains (Lagrange interpolation is one inversion per share). Use
-/// [`gcd_extended`] when the full Bézout triple is wanted.
+/// Extended Euclid on `(n, a mod n)` carrying one cofactor sequence instead of
+/// two: modulo `n` the modulus term contributes nothing, so the invariant
+/// `r0 ≡ u0·(a mod n) (mod n)` holds throughout and `u0` is the inverse the
+/// moment `r0` reaches `1`. Dropping the second sequence halves the signed
+/// bookkeeping [`gcd_extended`] pays — worth having where inversion is the
+/// inner loop rather than the result, as in Lagrange interpolation's one
+/// inversion per share. Use [`gcd_extended`] when the full Bézout triple is
+/// wanted.
+///
+/// The same crossover as [`gcd_extended`] governs the engine: below it, the
+/// leading-digit Lehmer loop written out here; at or above it, the Half-GCD
+/// driver, whose Bézout pair for `(n, a mod n)` need not be the classical one
+/// but whose cofactor of `a mod n` is still an inverse. No canonicalization is
+/// needed on that path — reduction into `[0, n)` already picks the unique
+/// representative, so both engines return the same value.
+///
+/// `None` exactly when the inverse does not exist: `n = 0` (no ring), or
+/// `gcd(a, n) > 1`. `n = 1` is the trivial ring, where every element inverts
+/// to `0`.
 #[must_use]
 pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
     if n.is_zero() {
@@ -2328,15 +2422,18 @@ fn decompose_n_minus_one(n: &BigUint) -> (BigUint, usize) {
 /// Modular square root: some `r` with `r^2 ≡ a (mod p)` for an odd prime
 /// `p`, or `None` when `a` is a non-residue.
 ///
-/// Three engines serve by the prime's shape. `p ≡ 3 (mod 4)` takes the
-/// `a^((p+1)/4)` shortcut (*Handbook of Applied Cryptography*, §3.5.1).
-/// Otherwise, writing `p − 1 = q·2^s`, a shallow 2-adic structure runs the
-/// Tonelli–Shanks descent (Cohen, Algorithm 1.5.1), whose cost grows with
-/// `s²`; past a measured depth (`s² > 4·bits`) the dispatch switches to
-/// Cipolla's algorithm (Cipolla 1903), whose cost is flat in `s`. The non-residue each engine needs is found
-/// by a bounded deterministic scan — expected to end within a couple of
-/// draws, since half of all residues qualify, and abandoned after 128
-/// misses, an event of probability `2^{-128}` for a prime modulus.
+/// Three engines serve by the prime's shape, all after a Jacobi symbol has
+/// ruled out the non-residues. `p ≡ 3 (mod 4)` takes the `a^((p+1)/4)`
+/// shortcut (*Handbook of Applied Cryptography*, §3.5.1), where Euler's
+/// criterion makes the single exponentiation the whole answer. Otherwise,
+/// writing `p − 1 = q·2^s`, a shallow 2-adic structure runs the Tonelli–Shanks
+/// descent (Cohen, Algorithm 1.5.1), whose cost grows with `s²`; past a
+/// measured depth (`s² > 4·bits`) the dispatch switches to Cipolla's algorithm
+/// (Cipolla 1903), whose cost is flat in `s`. Both of those two need a
+/// quadratic non-residue, and each finds one by a bounded deterministic scan
+/// — expected to end within a couple of draws, since half of all residues
+/// qualify, and abandoned after 128 misses, an event of probability `2^{-128}`
+/// for a prime modulus.
 ///
 /// The other root is `p - r`. `p = 2` and `a ≡ 0` return `a mod p` and zero
 /// respectively. Primality of `p` is the caller's contract, and the function
@@ -2388,7 +2485,7 @@ pub fn sqrt_mod(a: &BigUint, p: &BigUint) -> Option<BigUint> {
     let one = BigUint::one();
     let ctx = MontgomeryCtx::new(p).expect("p is odd and non-zero");
 
-    let candidate = if p.rem_u64(4) == 3 {
+    let candidate = if low_bits_mod_pow2(p, 3) == 3 {
         // a^((p+1)/4): squaring it gives a^((p+1)/2) = a · a^((p-1)/2) = a
         // by Euler's criterion.
         let mut exponent = p.add_ref(&one);
@@ -2421,8 +2518,20 @@ pub fn sqrt_mod(a: &BigUint, p: &BigUint) -> Option<BigUint> {
 /// pairwise coprime (or the input is empty or contains a zero modulus).
 ///
 /// Incremental Garner recombination (*Handbook of Applied Cryptography*,
-/// Algorithm 14.71): fold each congruence into the solution-so-far by
-/// solving `x + M·k ≡ rᵢ (mod mᵢ)` for `k`. Residues may be unreduced.
+/// Algorithm 14.71): hold a solution `x` modulo the running product `M` of the
+/// moduli folded so far, and absorb the next congruence by solving
+/// `x + M·k ≡ rᵢ (mod mᵢ)` for `k`, then setting `x ← x + M·k`. The correction
+/// is a multiple of `M`, so every earlier congruence survives it untouched,
+/// and `k` is found by one inversion modulo `mᵢ` alone — the arithmetic stays
+/// at the width of a single modulus rather than the full product, which is
+/// what distinguishes Garner's form from the classical `Σ rᵢ·Mᵢ·(Mᵢ⁻¹ mod mᵢ)`
+/// sum.
+///
+/// That inversion is also the coprimality test: `M⁻¹ mod mᵢ` exists exactly
+/// when `mᵢ` is coprime to every modulus already folded in, so running it at
+/// each step tests all pairs, and a `None` from it is returned as the `None`
+/// here. Residues may be unreduced; the result is reduced into
+/// `[0, ∏ mᵢ)` by construction, each step keeping `x < M`.
 ///
 /// Sunzi's classic: what leaves 2 mod 3, 3 mod 5, and 2 mod 7?
 ///
@@ -2453,7 +2562,7 @@ pub fn crt_combine(congruences: &[(BigUint, BigUint)]) -> Option<BigUint> {
         }
         // k = (residue - solution) · product⁻¹ (mod modulus); a missing
         // inverse is exactly the non-coprime case.
-        let inverse = mod_inverse(&product.modulo(modulus), modulus)?;
+        let inverse = mod_inverse(&product, modulus)?;
         let residue = residue.modulo(modulus);
         // The bias by `modulus` keeps the subtraction in range; mod_mul
         // reduces the product, so no further reduction is needed here.
@@ -2482,10 +2591,16 @@ pub fn crt_combine(congruences: &[(BigUint, BigUint)]) -> Option<BigUint> {
 ///   probable-prime test, but not a proof of primality.
 const MR_BASES: [u64; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
 
-/// Trial-division sieve primes checked before the Miller-Rabin stage.
+/// Trial-division sieve primes checked before any probabilistic stage: every
+/// prime below 1000, all 168 of them.
 ///
-/// Cheap remainders here discard most composites before the code pays for any
-/// modular exponentiation.
+/// One `rem_u64` apiece is a single linear pass over the candidate's limbs,
+/// against a Miller-Rabin round's `O(bits)` modular squarings at that same
+/// width — so a composite caught here is caught for a small fraction of what
+/// testing it would cost. Most are: only `∏_{3 ≤ p ≤ 997}(1 − 1/p) ≈ 0.162` of
+/// odd integers survive the screen, so roughly five in six reach no
+/// exponentiation at all. Extending the list has diminishing returns, the
+/// survival fraction falling only as `1/ln y` (Mertens).
 const SMALL_TRIAL_PRIMES: [u16; 168] = [
     2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
     101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193,
@@ -2498,28 +2613,44 @@ const SMALL_TRIAL_PRIMES: [u16; 168] = [
     937, 941, 947, 953, 967, 971, 977, 983, 991, 997,
 ];
 
+/// One Miller-Rabin round: does `base` prove `ctx`'s modulus `n` composite?
+///
+/// `odd_factor` and `two_adic_exponent` are the caller's split
+/// `n − 1 = d·2^s`, computed once and shared across a whole witness schedule.
+/// The caller owns the preconditions: `n` odd and greater than one (so `s ≥ 1`
+/// and the context exists), and `base` a non-trivial residue — a `base`
+/// congruent to `0`, `1`, or `n − 1` cannot testify, and this function does
+/// not screen for that.
+///
+/// The mechanism is the standard one (*Handbook of Applied Cryptography*,
+/// Algorithm 4.24) read in the contrapositive. Walk the chain
+/// `a^d, a^(2d), a^(4d), …, a^(n−1)`. If some squaring lands on `1` from a
+/// value that is neither `1` nor `n − 1`, that value is a non-trivial square
+/// root of unity, which a prime modulus cannot have — `x² ≡ 1 (mod p)` means
+/// `p | (x − 1)(x + 1)`, so `x ≡ ±1` — and `n` is composite. If the chain
+/// instead ends anywhere but `1`, Fermat's little theorem is violated and `n`
+/// is composite for that reason. Surviving both is what "strong probable prime
+/// to this base" means, and is not a proof of primality.
+///
+/// The chain runs entirely inside the Montgomery domain: `value` is held
+/// encoded, so each round is one `square_mont` where `ctx.square` would pay an
+/// encode and a decode per round. [`MontgomeryCtx::pow`] returns an *ordinary*
+/// residue rather than an encoded one, so its result is re-encoded once to
+/// enter the domain. Montgomery form is canonical — `x·R mod n` in `[0, n)` —
+/// so the two comparison constants are encoded once and equality of encoded
+/// values is equality of the residues they stand for.
 fn is_witness(
     base: &BigUint,
     ctx: &MontgomeryCtx,
     odd_factor: &BigUint,
     two_adic_exponent: usize,
 ) -> bool {
-    let one = BigUint::one();
-    let n_minus_one = ctx.modulus().sub_ref(&one);
-    // Do the squaring chain in the Montgomery domain: encode the comparison
-    // constants once, and hold `value` in encoded form so each step is a single
-    // `square_mont` rather than the encode/REDC/decode round trip `ctx.square`
-    // would pay per round. Montgomery form is canonical (`x·R mod n` in
-    // `[0, n)`), so equality of encoded values is equality of the residues.
-    // `pow` returns an ordinary residue, so encode its result once to enter the
-    // domain.
-    let one_mont = ctx.encode(&one);
-    let n_minus_one_mont = ctx.encode(&n_minus_one);
+    // R mod n is precomputed in the context, and (n−1)·R ≡ −R ≡ n − (R mod n),
+    // so both domain constants come out without a Montgomery multiplication.
+    let one_mont = ctx.one_mont().clone();
+    let n_minus_one_mont = ctx.modulus().sub_ref(&one_mont);
     let mut value = ctx.encode(&ctx.pow(base, odd_factor));
 
-    // Miller-Rabin witness test (HAC Algorithm 4.24): a non-trivial square
-    // root of 1 proves compositeness, and failing to end at 1 is the usual
-    // Fermat backstop.
     for _ in 0..two_adic_exponent {
         let next = ctx.square_mont(&value);
         if next == one_mont && value != one_mont && value != n_minus_one_mont {
@@ -2578,27 +2709,51 @@ pub fn primes_below(bound: u64) -> Vec<u64> {
     primes
 }
 
-/// Miller-Rabin probable-prime test with a fixed witness set.
+/// Trial division against every prime below 1000, then Miller-Rabin over the
+/// first twelve prime bases, `2` through `37`.
 ///
-/// Appropriate for the caller's own randomly generated candidates, where a
-/// fixed base set already rejects composites with overwhelming probability.
-/// For values that arrive from an untrusted source (parsed keys,
-/// peer-supplied domain parameters) a fixed base set can be defeated by a
-/// purpose-built strong pseudoprime; harden with additional
-/// candidate-derived witnesses via [`miller_rabin_witness`], as the parent
-/// cryptography crate's `is_probable_prime_untrusted` does.
+/// The sieve stage runs first and can decide alone — it returns `true` for the
+/// sieve primes themselves and `false` for anything else they divide — so the
+/// witness schedule is only reached by candidates with no factor below 1000.
+/// Those twelve bases make the verdict a *proof* for every `n < 3.317 × 10^24`
+/// (Sorenson and Webster, *Strong Pseudoprimes to Twelve Prime Bases*,
+/// Math. Comp. 86 (2017), 985–1003), which covers the whole `u64` range and
+/// more; above that bound the result is a strong probable-prime verdict, which
+/// a composite survives only by being a strong pseudoprime to all twelve
+/// simultaneously.
+///
+/// That distinction is what bounds the appropriate use. For the caller's own
+/// randomly generated candidates a fixed base set is ample, since no adversary
+/// chose the number. For values arriving from an untrusted source (parsed
+/// keys, peer-supplied domain parameters) a *published* base set is the wrong
+/// defense: a strong pseudoprime to exactly these twelve bases can be
+/// constructed in advance, and this function will accept it. Harden with
+/// additional candidate-derived witnesses via [`miller_rabin_witness`], as the
+/// parent cryptography crate's `is_probable_prime_untrusted` does.
 #[must_use]
 pub fn is_probable_prime(n: &BigUint) -> bool {
     mr_probable_prime(n, &MR_BASES)
 }
 
-/// Miller-Rabin using explicit witness bases.
+/// Trial division against every prime below 1000, then Miller-Rabin over
+/// `bases`.
 ///
-/// Each base is reduced modulo `candidate` before use; a base congruent to
-/// `0`, `1`, or `candidate − 1` is the trivial `±1` witness, testifies to
-/// nothing, and does not count as a round. When *no* supplied base yields an
-/// effective round — an empty set, or one whose every base is trivial — the
-/// result is `false`: an untested candidate is never certified prime.
+/// The sieve stage is not optional and not conditioned on `bases`: it runs
+/// first and can return on its own, so a sieve prime is reported prime and a
+/// sieve multiple composite whatever `bases` holds — including an empty
+/// `bases`. This is therefore "trial division, then Miller-Rabin with these
+/// bases", not "Miller-Rabin with exactly these bases"; callers measuring the
+/// strength of a witness schedule should account for the screen deciding the
+/// small cases before any base is consulted.
+///
+/// Each base is reduced modulo `candidate` before use, since an unreduced
+/// `u64` can be larger than `candidate` and still reduce to a residue that
+/// testifies. A base whose residue is `0`, `1`, or `candidate − 1` is the
+/// trivial `±1` case: it satisfies the strong test for every modulus, proves
+/// nothing, and is discarded rather than counted. When *no* supplied base
+/// yields an effective round — an empty set, or one whose every base is
+/// trivial — a candidate that reached this stage returns `false`, because
+/// nothing was tested and an untested candidate is never certified prime.
 /// Callers wanting a guaranteed-nontrivial schedule should draw bases in
 /// `[2, candidate − 1)`.
 #[must_use]
@@ -2608,16 +2763,33 @@ pub fn is_probable_prime_with_bases(candidate: &BigUint, bases: &[u64]) -> bool 
 
 /// Run one Miller-Rabin round: does `witness` prove `candidate` composite?
 ///
-/// The reusable primitive behind the probable-prime tests, public so callers
-/// can bring their own witness schedule (for example, witnesses derived by
-/// hashing an untrusted candidate). Returns `false` — no compositeness
-/// proven — for witnesses congruent to `0`, `±1 (mod candidate)`, which can
-/// never testify, and treats even or trivial candidates as composite.
+/// The reusable primitive behind the probable-prime tests, exposed so callers
+/// can bring their own witness schedule — in particular witnesses derived from
+/// the candidate itself, by hashing it, which is the defense a *published*
+/// fixed base set cannot offer against a purpose-built pseudoprime. One round
+/// is the whole contract: `true` means proven composite, `false` means this
+/// witness proved nothing, never that the candidate is prime.
+///
+/// The witness is reduced modulo `candidate` first, since an unreduced value
+/// may still reduce to one that testifies. A residue of `0`, `1`, or
+/// `candidate − 1` satisfies the strong test for every modulus and so yields
+/// `false`.
+///
+/// Note what happens on candidates the round cannot run against: zero, one,
+/// and *every* even value return `true`, `2` included. This is a
+/// compositeness-proof primitive rather than a primality test, and it has no
+/// special case for the one even prime; the probable-prime wrappers reach `2`
+/// through their trial-division screen, which decides the small primes before
+/// any witness is consulted, and direct callers must screen likewise.
 #[must_use]
 pub fn miller_rabin_witness(candidate: &BigUint, witness: &BigUint) -> bool {
     let Some(ctx) = MontgomeryCtx::new(candidate) else {
-        // Even or zero candidates: composite (or degenerate) by inspection.
-        return true;
+        // No Montgomery context exists for an even or zero modulus, so no
+        // round can run. Parity decides these outright, and the answer this
+        // function owes is whether the candidate is *proven composite*: two is
+        // the one even prime and no witness proves it composite, while every
+        // other even value, and zero, is composite by inspection.
+        return *candidate != BigUint::from_u64(2);
     };
     if candidate.is_one() {
         return true;
@@ -2637,6 +2809,21 @@ pub fn miller_rabin_witness(candidate: &BigUint, witness: &BigUint) -> bool {
 /// when the candidate *is* one of the sieve primes, `Some(false)` when the
 /// sieve proves it composite (or it is zero or one), `None` when it
 /// survives to the probabilistic stages.
+///
+/// A `Some` is a final answer, not a hint, and both tests return it directly.
+/// That is what makes the small cases work at all. `2` is even, so it has no
+/// Montgomery context and no Miller-Rabin round to run; `3` reduces all twelve
+/// fixed bases to `{0, 1, n − 1}`, leaving zero effective rounds, which the
+/// witness loop must treat as "not certified"; and the strong Lucas stage
+/// assumes an odd `n > 1` throughout. The screen retires every such case
+/// before any of that machinery is asked to run.
+///
+/// The divisibility test cannot distinguish a sieve prime from its multiples
+/// on its own, so a hit is disambiguated by size: only a candidate below
+/// `2^10` can equal a member of the table (the largest is 997), and for such a
+/// candidate the residue modulo `2^10` is the candidate itself, so comparing
+/// that residue to the divisor decides identity without building a `BigUint`
+/// per table entry.
 fn small_prime_screen(candidate: &BigUint) -> Option<bool> {
     if candidate.is_zero() || candidate == &BigUint::one() {
         return Some(false);
@@ -2655,6 +2842,26 @@ fn small_prime_screen(candidate: &BigUint) -> Option<bool> {
     None
 }
 
+/// The shared body of [`is_probable_prime`] and
+/// [`is_probable_prime_with_bases`]: trial division, then one Miller-Rabin
+/// round per effective base.
+///
+/// The two stages are sequential and independent. [`small_prime_screen`] runs
+/// unconditionally and its verdict is returned as-is, so `bases` never sees a
+/// candidate with a factor below 1000 — and an empty `bases` is not the same
+/// as "no test ran", because the screen may already have decided.
+///
+/// Past the screen the candidate is odd and greater than `997`, so the
+/// Montgomery context exists and the `n − 1 = d·2^s` split is shared across
+/// every round. Each base is reduced *before* it is classified as trivial: an
+/// unreduced `u64` at or above `candidate − 1` can still reduce to a
+/// non-trivial residue that testifies, and comparing the raw value instead
+/// would silently discard real witnesses — and, when every base was discarded
+/// that way, report a composite as prime. Trivial residues (`0`, `1`,
+/// `candidate − 1`) satisfy the strong test for every modulus, so they are
+/// skipped without counting; if that leaves no round run at all, the return is
+/// `false`, since nothing was tested and skipping a round must never be
+/// mistaken for passing it.
 fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
     if let Some(verdict) = small_prime_screen(candidate) {
         return verdict;
@@ -2664,6 +2871,9 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
         return false;
     }
 
+    // The screen leaves an odd candidate above 997, so the context always
+    // builds; the `else` is a guard against a future screen that admits an
+    // even value, not a case reachable from here.
     let Some(ctx) = MontgomeryCtx::new(candidate) else {
         return false;
     };
@@ -2675,10 +2885,10 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
     // nothing; skipping it must not be mistaken for passing it.
     let mut effective_rounds = 0usize;
     for &base in bases {
-        // Reduce before classifying as trivial: an unreduced u64 that is
-        // ≥ n − 1 may still reduce to a non-trivial residue that testifies,
-        // so the raw comparison the earlier code used silently dropped real
-        // witnesses (and, when every base was so dropped, returned `true`).
+        // Reduce before classifying as trivial: an unreduced u64 at or above
+        // n − 1 may still reduce to a non-trivial residue that testifies, so
+        // classifying the raw value would drop real witnesses — and, with
+        // every base dropped that way, would report a composite as prime.
         let witness = BigUint::from_u64(base).modulo(candidate);
         if witness <= BigUint::one() || witness == n_minus_one {
             continue;

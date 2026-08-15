@@ -1,6 +1,8 @@
 //! Lattice reduction over the integers.
 //!
-//! [`lll_reduce`] applies the Lenstra–Lenstra–Lovász algorithm to an ordered
+//! [`lll_reduce`] applies the Lenstra–Lenstra–Lovász algorithm (A. K. Lenstra,
+//! H. W. Lenstra Jr. & L. Lovász, *Factoring polynomials with rational
+//! coefficients*, Math. Ann. 261 (1982), 515–534) to an ordered
 //! basis of a lattice in `ℤ^m`, replacing it in place with an LLL-reduced basis
 //! of the same lattice. The implementation is the integral variant of Cohen,
 //! *A Course in Computational Algebraic Number Theory*, Algorithm 2.6.3: the
@@ -15,7 +17,11 @@
 
 use crate::bigint::{BigInt, BigUint, Sign};
 
-/// Reduce `basis` in place with the standard Lovász parameter `δ = 3/4`.
+/// Reduce `basis` in place with the Lovász parameter `δ = 3/4` of the
+/// original Lenstra–Lenstra–Lovász paper, the value for which the reduced
+/// basis satisfies the classical bounds `‖b_1‖ ≤ 2^((n−1)/4)·det(L)^(1/n)`
+/// and `‖b_1‖ ≤ 2^((n−1)/2)·λ_1(L)`, with `λ_1(L)` the length of a shortest
+/// non-zero vector of the lattice.
 ///
 /// See [`lll_reduce_delta`] for the panics and preconditions.
 pub fn lll_reduce(basis: &mut [Vec<BigInt>]) {
@@ -25,17 +31,42 @@ pub fn lll_reduce(basis: &mut [Vec<BigInt>]) {
 /// Reduce `basis` in place with Lovász parameter `δ = delta_num / delta_den`.
 ///
 /// The vectors are the rows; each spans `ℤ^m` for a common `m`. On return the
-/// rows are an LLL-reduced basis of the same lattice, in nondecreasing
-/// Gram–Schmidt order. A larger `δ` (nearer 1) reduces more aggressively; the
-/// classical choice is `3/4`.
+/// rows are an LLL-reduced basis of the same lattice: size-reduced, and
+/// satisfying the Lovász condition at every index. A larger `δ` (nearer 1)
+/// makes that condition harder to satisfy, so it tightens the guarantee on
+/// the output — the bound `‖b_1‖ ≤ (4/(4δ − 1))^((n−1)/4)·det(L)^(1/n)`
+/// improves as `δ → 1` — while admitting more swaps, since the decrease each
+/// swap forces on `∏ d_i` shrinks with `δ`. The classical choice is `3/4`.
+///
+/// The Gram–Schmidt norms `‖b*_i‖²` are *not* nondecreasing on return. The
+/// Lovász condition bounds their decay from below —
+/// `‖b*_k‖² ≥ (δ − 1/4)‖b*_{k−1}‖²`, a factor of `1/2` at `δ = 3/4` — but it
+/// permits a decrease. The basis `[1, 3], [3, 0]` is reduced at `δ = 3/4`
+/// and is returned unchanged, with `‖b*_1‖² = 10` and `‖b*_2‖² = 81/10`.
+///
+/// The mechanism is Cohen's Algorithm 2.6.3, driven by an index `k` that
+/// walks up the basis. Reaching a row for the first time extends the exact
+/// integer Gram–Schmidt data — the determinants `d_i` and the
+/// `λ_{i,j} = d_j·μ_{i,j}` — to that row; each row is then size-reduced
+/// against its predecessor and tested against the Lovász condition, a swap
+/// sending `k` back down and a pass sending it up after size-reducing
+/// against the rest. Every division in the recurrences is exact, so nothing
+/// leaves ℤ. Termination is the standard argument: each swap strictly
+/// decreases the positive integer `∏ d_i`.
 ///
 /// # Panics
 ///
-/// - if `δ ∉ (1/4, 1)` — the range in which Cohen's Algorithm 2.6.3 both
-///   terminates and yields a reduced basis;
+/// - if `delta_den` is zero, or `δ ∉ (1/4, 1)` — the range in which Cohen's
+///   Algorithm 2.6.3 both terminates and yields a reduced basis. The
+///   comparison is carried out in `u128` so that a numerator above
+///   `u64::MAX / 4` cannot overflow the `4·delta_num` term and reject a
+///   valid `δ`;
 /// - if the rows do not all have the same, nonzero length;
-/// - if the rows are linearly dependent, i.e. do not form a lattice basis
-///   (detected as a vanishing Gram determinant).
+/// - if the rows are linearly dependent, i.e. do not form a lattice basis.
+///   Dependence is detected as a vanishing Gram determinant `d_k`, and every
+///   `d_k` for `k = 1..=n` is computed, so no dependent input escapes.
+///
+/// An empty basis is reduced vacuously and returns without panicking.
 pub fn lll_reduce_delta(basis: &mut [Vec<BigInt>], delta_num: u64, delta_den: u64) {
     assert!(delta_den > 0, "delta denominator must be positive");
     // 1/4 < δ < 1. Compare in u128 so a large numerator cannot overflow the
@@ -72,7 +103,10 @@ pub fn lll_reduce_delta(basis: &mut [Vec<BigInt>], delta_num: u64, delta_den: u6
     let mut k_max = 1usize;
     while k <= n {
         // Incremental Gram–Schmidt: extend the d_i and λ_{k,j} to row k the
-        // first time it is reached (Cohen 2.6.3, step 2).
+        // first time it is reached (Cohen 2.6.3, step 2). Rows revisited
+        // after a swap skip this, their data having been repaired in place.
+        // k advances one at a time, so every k in 2..=n passes through here
+        // once and every d_k is therefore computed and checked.
         if k > k_max {
             k_max = k;
             for j in 1..=k {
@@ -85,6 +119,9 @@ pub fn lll_reduce_delta(basis: &mut [Vec<BigInt>], delta_num: u64, delta_den: u6
                 if j < k {
                     lam[k][j] = u;
                 } else {
+                    // u is now the Gram determinant of b_1..b_k, which
+                    // vanishes exactly when those rows are dependent. The
+                    // divisions above were by d_1..d_{k-1}, already checked.
                     assert!(!u.is_zero(), "linearly dependent basis");
                     d[k] = u;
                 }
@@ -93,10 +130,15 @@ pub fn lll_reduce_delta(basis: &mut [Vec<BigInt>], delta_num: u64, delta_den: u6
 
         // Test the Lovász condition at k, size-reducing against b_{k-1} first
         // (Cohen 2.6.3, step 3). A swap lowers k and repeats; otherwise b_k is
-        // fully size-reduced and k advances.
+        // fully size-reduced and k advances. Control returns to step 3 rather
+        // than step 2 after a swap: the Gram–Schmidt data for rows up to k_max
+        // are kept current by SWAP itself, so no row is recomputed.
         loop {
             red(basis, &mut lam, &d, k, k - 1);
 
+            // The Lovász condition ‖b*_k‖² ≥ (δ − μ_{k,k-1}²)‖b*_{k-1}‖², in
+            // integers: substitute ‖b*_i‖² = d_i/d_{i-1} and μ = λ/d_{k-1},
+            // then clear the positive denominators d_{k-1}·d_{k-2} and q.
             // Swap iff q·d_k·d_{k-2} < p·d_{k-1}² − q·λ_{k,k-1}²  (δ = p/q).
             let lhs = q.mul_ref(&d[k].mul_ref(&d[k - 2]));
             let lam_sq = lam[k][k - 1].mul_ref(&lam[k][k - 1]);
@@ -105,9 +147,15 @@ pub fn lll_reduce_delta(basis: &mut [Vec<BigInt>], delta_num: u64, delta_den: u6
                 .sub_ref(&q.mul_ref(&lam_sq));
 
             if lhs < rhs {
+                // The swap replaces d_{k-1} by a strictly smaller positive
+                // integer, so the product of the d_i strictly decreases and
+                // only finitely many swaps can occur.
                 swap_step(basis, &mut lam, &mut d, k, k_max);
                 k = core::cmp::max(2, k - 1);
             } else {
+                // Size-reduce b_k against the remaining rows, descending so
+                // that each RED(k, l) sees the λ_{k,i}, i < l, that later
+                // steps will consume. Empty when k = 2.
                 for l in (1..=k - 2).rev() {
                     red(basis, &mut lam, &d, k, l);
                 }
@@ -119,6 +167,10 @@ pub fn lll_reduce_delta(basis: &mut [Vec<BigInt>], delta_num: u64, delta_den: u6
 }
 
 /// Inner product `⟨u, v⟩` over `ℤ`.
+///
+/// The zip stops at the shorter operand rather than panicking on a length
+/// mismatch; the caller has already asserted that all rows share one length,
+/// so a truncation here would be a silently wrong Gram entry.
 fn dot(u: &[BigInt], v: &[BigInt]) -> BigInt {
     let mut acc = BigInt::zero();
     for (a, b) in u.iter().zip(v.iter()) {
@@ -136,7 +188,11 @@ fn big_u64(x: u64) -> BigInt {
 /// Nearest integer to `a / b` for `b > 0`, ties toward `+∞`.
 ///
 /// Equal to `⌊(2a + b) / (2b)⌋` (floor toward `−∞`), which realises Cohen's
-/// `⌊x + 1/2⌋` rounding used by the size-reduction step.
+/// `⌊x + 1/2⌋` rounding used by the size-reduction step. Formed from the two
+/// integers rather than from a quotient, so no rational or floating-point
+/// value appears; `b > 0` is a precondition of [`floor_div`] and holds here
+/// because `b` is always a Gram determinant `d_l`, which is positive for an
+/// independent basis.
 fn nearest_int(a: &BigInt, b: &BigInt) -> BigInt {
     let two_a_plus_b = a.add_ref(a).add_ref(b);
     let two_b = b.add_ref(b);
@@ -146,7 +202,14 @@ fn nearest_int(a: &BigInt, b: &BigInt) -> BigInt {
 /// `⌊num / den⌋` (floor toward `−∞`) for `den > 0`.
 ///
 /// `BigInt` exposes no signed division, so the quotient is formed from the
-/// unsigned magnitudes and corrected for a negative dividend.
+/// unsigned magnitudes and corrected for a negative dividend: truncating
+/// division rounds toward zero, which for a negative dividend is one too
+/// large unless the division was exact.
+///
+/// `den > 0` is unchecked, and the sign of `den` is not consulted — a
+/// negative denominator would yield `⌊num / |den|⌋` with the wrong sign.
+/// Every call arrives through [`nearest_int`] with a positive Gram
+/// determinant.
 fn floor_div(num: &BigInt, den: &BigInt) -> BigInt {
     let (quotient, remainder) = num.magnitude().div_rem(den.magnitude());
     if num.sign() != Sign::Negative {
@@ -161,8 +224,16 @@ fn floor_div(num: &BigInt, den: &BigInt) -> BigInt {
 /// `RED(k, l)` for `l < k`: subtract the nearest integer multiple of row `l`
 /// from row `k` so that `|μ_{k,l}| ≤ 1/2`, and carry the change through the
 /// λ bookkeeping (Cohen 2.6.3, sub-algorithm RED).
+///
+/// Subtracting an integer multiple of `b_l` from `b_k` is a unimodular
+/// column operation, so the lattice is unchanged; and since `l < k` it does
+/// not disturb `b*_k` or any `d_i`, only the `λ_{k,i}` for `i ≤ l`. Those are
+/// updated in the same pass: `λ_{k,l}` loses `q·d_l` and each `λ_{k,i}`,
+/// `i < l`, loses `q·λ_{l,i}` — the integral image of `μ_{k,·} ← μ_{k,·} −
+/// q·μ_{l,·}`.
 fn red(basis: &mut [Vec<BigInt>], lam: &mut [Vec<BigInt>], d: &[BigInt], k: usize, l: usize) {
-    // Nothing to do when |2·λ_{k,l}| ≤ d_l, i.e. |μ_{k,l}| ≤ 1/2.
+    // Nothing to do when |2·λ_{k,l}| ≤ d_l, i.e. |μ_{k,l}| ≤ 1/2: d_l > 0, so
+    // the magnitude comparison is the comparison of the values.
     let two_lam = lam[k][l].add_ref(&lam[k][l]);
     if *two_lam.magnitude() <= *d[l].magnitude() {
         return;
@@ -191,6 +262,22 @@ fn red(basis: &mut [Vec<BigInt>], lam: &mut [Vec<BigInt>], d: &[BigInt], k: usiz
 /// `SWAP(k)`: exchange rows `k` and `k-1` and restore the integral
 /// Gram–Schmidt data (Cohen 2.6.3, sub-algorithm SWAP). Every division is
 /// exact.
+///
+/// Two quantities are deliberately left alone, and the correctness of the
+/// routine depends on it:
+///
+/// - `d_k` is the Gram determinant of `b_1, …, b_k`, which is invariant
+///   under a permutation of those very vectors, so exchanging rows `k` and
+///   `k−1` cannot change it. Only `d_{k−1}` moves, to `B`.
+/// - `λ_{k,k−1}` is likewise invariant. Writing the new `b*_{k−1}` as
+///   `b*_k + μ_{k,k−1}·b*_{k−1}` and using `⟨b_{k−1}, b*_k⟩ = 0`, the new
+///   `λ_{k,k−1} = d_{k−2}·⟨b_{k−1}, b*_k + μ_{k,k−1} b*_{k−1}⟩` collapses to
+///   `d_{k−1}·μ_{k,k−1}`, the old value. Hence `lam[k][k-1]` is read as
+///   `lambda` and never written.
+///
+/// The rows above `k` do move: for each `i` in `k+1 ..= k_max` the pair
+/// `(λ_{i,k−1}, λ_{i,k})` is rewritten, and the second assignment uses the
+/// `λ_{i,k}` produced by the first, not the saved `t`.
 fn swap_step(
     basis: &mut [Vec<BigInt>],
     lam: &mut [Vec<BigInt>],
@@ -209,7 +296,10 @@ fn swap_step(
     }
 
     let lambda = lam[k][k - 1].clone();
-    // B = (d_{k-2}·d_k + λ²) / d_{k-1}, the new d_{k-1}.
+    // B = (d_{k-2}·d_k + λ²) / d_{k-1}, the new d_{k-1}. The swap condition
+    // that brought us here is exactly d_{k-2}·d_k + λ² < δ·d_{k-1}², so
+    // B < δ·d_{k-1} < d_{k-1}: the strict decrease that bounds the number of
+    // swaps. B > 0 because d_{k-2} and d_k are.
     let b_new = d[k - 2]
         .mul_ref(&d[k])
         .add_ref(&lambda.mul_ref(&lambda))

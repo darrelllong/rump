@@ -17,6 +17,12 @@ use crate::number_theory;
 
 /// A univariate polynomial over ℤ, coefficients low-to-high, normalized to
 /// drop trailing zeros.
+///
+/// Normalization is a type invariant, re-established by every constructor
+/// and every operation that can cancel a leading term. It is what makes
+/// [`Self::degree`] the last index and the derived [`PartialEq`] a decision
+/// procedure for polynomial equality: without it `[1, 0]` and `[1]` would be
+/// the same polynomial held in two unequal representations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolyZ {
     coeffs: Vec<BigInt>,
@@ -51,6 +57,9 @@ impl PolyZ {
         Self::new(coeffs.iter().map(|&c| BigInt::from_i64(c)).collect())
     }
 
+    /// Restore the trailing-zero invariant by popping high-order zeros. The
+    /// loop runs from the top, so it stops at the first non-zero coefficient
+    /// and interior zeros are untouched.
     fn normalize(&mut self) {
         while self.coeffs.last().is_some_and(BigInt::is_zero) {
             self.coeffs.pop();
@@ -95,9 +104,9 @@ impl PolyZ {
         Self::new(coeffs)
     }
 
-    /// `self − other`, subtracted coefficient-wise. Equal leading terms
-    /// cancel, so the result is renormalized to drop any trailing zeros and
-    /// keep the degree honest.
+    /// `self − other`, subtracted coefficient-wise (shorter operand
+    /// zero-extended). Equal leading terms cancel, so the result is
+    /// renormalized and the degree drops accordingly.
     #[must_use]
     pub fn sub(&self, other: &Self) -> Self {
         let n = self.coeffs.len().max(other.coeffs.len());
@@ -110,7 +119,9 @@ impl PolyZ {
         Self::new(coeffs)
     }
 
-    /// `−self`.
+    /// `−self`, negated coefficient-wise. Negation cannot create a trailing
+    /// zero, so the normalized form carries over and no renormalization pass
+    /// is needed.
     #[must_use]
     pub fn negated(&self) -> Self {
         Self {
@@ -118,7 +129,12 @@ impl PolyZ {
         }
     }
 
-    /// `self · other`, schoolbook.
+    /// `self · other` by the schoolbook coefficient convolution: each
+    /// `coeffs[i + j]` accumulates `aᵢ·bⱼ`. The result buffer is sized
+    /// `deg self + deg other + 1` because ℤ is an integral domain — the
+    /// leading coefficients cannot cancel — so the product of two non-zero
+    /// polynomials has exactly that degree. Zero coefficients of `self` skip
+    /// their inner pass.
     #[must_use]
     pub fn mul(&self, other: &Self) -> Self {
         if self.is_zero() || other.is_zero() {
@@ -146,7 +162,10 @@ impl PolyZ {
         Self::new(self.coeffs.iter().map(|a| a.mul_ref(c)).collect())
     }
 
-    /// Evaluate at `x` by Horner's method.
+    /// Evaluate at `x` by Horner's method: fold `acc ← acc·x + cᵢ` from the
+    /// leading coefficient down. No power of `x` is ever materialized, so
+    /// the evaluation is one multiplication and one addition per
+    /// coefficient.
     #[must_use]
     pub fn evaluate(&self, x: &BigInt) -> BigInt {
         let mut acc = BigInt::zero();
@@ -156,7 +175,11 @@ impl PolyZ {
         acc
     }
 
-    /// The formal derivative.
+    /// The formal derivative `∑ i·cᵢ·xⁱ⁻¹` — formal in that it is defined by
+    /// the coefficient rule rather than by a limit, so it exists over any
+    /// coefficient ring and obeys the product rule algebraically. Computed
+    /// by dropping the constant term and scaling each remaining coefficient
+    /// by its old index; a constant differentiates to zero.
     #[must_use]
     pub fn derivative(&self) -> Self {
         if self.coeffs.len() <= 1 {
@@ -171,7 +194,8 @@ impl PolyZ {
     }
 
     /// The content: the gcd of the coefficients, non-negative, zero for the
-    /// zero polynomial.
+    /// zero polynomial. Accumulated by folding `BigInt::gcd` over the
+    /// coefficients from a seed of zero, which is the identity for gcd.
     #[must_use]
     pub fn content(&self) -> BigInt {
         let mut g = BigInt::zero();
@@ -181,10 +205,14 @@ impl PolyZ {
         g
     }
 
-    /// The primitive part: `self` divided by its content (the content's
-    /// sign left on the content, so the primitive part's leading
-    /// coefficient keeps `self`'s sign). The zero polynomial is its own
-    /// primitive part.
+    /// The primitive part: `self` with its content divided out, so the
+    /// coefficients have gcd 1. Every coefficient is divisible by the
+    /// content by definition, so the per-coefficient division is exact and
+    /// the result stays in ℤ. [`Self::content`] is non-negative, so the sign
+    /// stays with the primitive part and its leading coefficient keeps
+    /// `self`'s sign — the convention here, not the one that forces a
+    /// positive leading coefficient. The zero polynomial has content zero
+    /// and is its own primitive part.
     #[must_use]
     pub fn primitive_part(&self) -> Self {
         if self.is_zero() {
@@ -214,9 +242,9 @@ impl PolyZ {
             unreachable!("non-zero divisor has a degree")
         };
         if self.degree().is_none_or(|d| d < divisor_degree) {
-            // Nothing to divide: lc^1·self = 0·divisor + lc^1·self, but the
-            // exponent is deg self − deg divisor + 1 which is ≤ 0 here, so
-            // the identity holds with exponent 0 and remainder self.
+            // Nothing to divide. The exponent deg self − deg divisor + 1 is
+            // non-positive here (and undefined for the zero polynomial), so
+            // the identity is taken at ℓ = 1: self = 0·divisor + self.
             return (Self::zero(), self.clone());
         }
         let self_degree = self.degree().expect("degree checked above");
@@ -225,6 +253,10 @@ impl PolyZ {
         let mut quotient = vec![BigInt::zero(); self_degree - divisor_degree + 1];
         // Repeatedly cancel the remainder's leading term; each step scales
         // the whole working state by lc so the coefficients stay integral.
+        // The invariant after t steps is lc^t·self = quotient·divisor +
+        // remainder, and each step strictly lowers deg remainder (the two
+        // leading terms are both rem_lc·lc·x^rem_degree and cancel), so the
+        // loop runs at most deg self − deg divisor + 1 times.
         let mut steps = 0usize;
         while let Some(rem_degree) = remainder.degree() {
             if rem_degree < divisor_degree {
@@ -245,8 +277,10 @@ impl PolyZ {
             steps += 1;
         }
         // The identity carries lc^(steps) on the left; the required
-        // exponent is deg self − deg divisor + 1, and steps ≤ that. Scale
-        // quotient and remainder up to the full exponent.
+        // exponent is deg self − deg divisor + 1, and steps ≤ that (fewer
+        // when the remainder degree falls by more than one, or reaches zero
+        // early). Scale quotient and remainder up to the full exponent so
+        // the documented ℓ holds regardless.
         let required = self_degree - divisor_degree + 1;
         let mut quotient = Self::new(quotient);
         let mut remainder = remainder;
@@ -272,6 +306,17 @@ impl PolyZ {
     /// obstruction by premultiplying (`ℓ·self = quotient·divisor + remainder`)
     /// and so is always defined; it is what the resultant path uses.
     ///
+    /// Deciding and dividing are one operation, not two: each step calls
+    /// `BigInt::div_exact_checked`, a single Knuth Algorithm D division
+    /// (*TAOCP* vol. 2, §4.3.1) that yields the quotient only when the
+    /// remainder vanishes. Testing divisibility and then taking the quotient
+    /// separately would run Algorithm D twice per step.
+    ///
+    /// The quotient is unique when one exists — the leading coefficient of a
+    /// non-zero divisor is not a zero divisor in ℤ, so the coefficients are
+    /// forced in order from the top — which is why a single failing step is
+    /// conclusive rather than an artefact of this particular schedule.
+    ///
     /// # Panics
     ///
     /// Panics if `divisor` is the zero polynomial.
@@ -295,12 +340,10 @@ impl PolyZ {
                 break;
             }
             let rem_lc = remainder.leading_coefficient();
-            // rem_lc must be an exact multiple of lc (divisibility is a
-            // magnitude property; sign is carried by div_exact).
-            if !rem_lc.magnitude().div_rem(lc.magnitude()).1.is_zero() {
-                return None;
-            }
-            let q_coeff = rem_lc.div_exact(&lc);
+            // One division decides and delivers: an indivisible leading
+            // coefficient means no integer quotient exists, and otherwise the
+            // same Algorithm D call yields the coefficient.
+            let q_coeff = rem_lc.div_exact_checked(&lc)?;
             let shift = rem_degree - divisor_degree;
             // remainder ← remainder − q_coeff·xˢʰⁱᶠᵗ·divisor
             let subtrahend = divisor.shift_up(shift).scale(&q_coeff);
@@ -310,7 +353,10 @@ impl PolyZ {
         Some((Self::new(quotient), remainder))
     }
 
-    /// `self · x^shift` — shift coefficients up.
+    /// `self · x^shift` — prepend `shift` zero coefficients. Constructed
+    /// directly rather than through [`Self::new`]: prepending low-order
+    /// zeros cannot create a trailing zero, so the normalized form is
+    /// preserved and the renormalization pass would be wasted.
     fn shift_up(&self, shift: usize) -> Self {
         if self.is_zero() || shift == 0 {
             return self.clone();
@@ -324,8 +370,9 @@ impl PolyZ {
     /// polynomials' Sylvester matrix, zero exactly when they share a
     /// non-constant factor over ℚ. Computed by Bareiss fraction-free
     /// elimination, which keeps every intermediate entry an integer minor
-    /// determinant, so no rational arithmetic is needed (Bareiss, Math.
-    /// Comp. 22 (1968); Cohen, §3.3.1).
+    /// determinant, so no rational arithmetic is needed (Bareiss,
+    /// *Sylvester's identity and multistep integer-preserving Gaussian
+    /// elimination*, Math. Comp. 22 (1968), 565–578; Cohen, §3.3.1).
     ///
     /// Conventions at the degenerate ends: the resultant of two non-zero
     /// constants is `1`; `res(f, c)` for a non-zero constant `c` is
@@ -354,9 +401,17 @@ impl PolyZ {
 
     /// The discriminant `disc(self) = (−1)^(d(d−1)/2) · res(self, self') /
     /// lc(self)`, where `d = deg self`. Zero exactly when `self` has a
-    /// repeated factor over ℚ. The division by the leading coefficient is
-    /// exact for an integer polynomial (Cohen, §3.3.2). The discriminant of
-    /// a constant or the zero polynomial is `0` by convention.
+    /// repeated factor over ℚ, since the repeated factor is then common to
+    /// `self` and `self'` and the resultant detects it.
+    ///
+    /// The division by the leading coefficient is exact for an integer
+    /// polynomial: `res(f, f') = lc(f)·disc(f)` with `disc` a polynomial in
+    /// the coefficients with integer coefficients (Cohen, §3.3.2). Over ℤ
+    /// the derivative of a polynomial of degree `d ≥ 1` is non-zero, so the
+    /// resultant call is never the degenerate `res(f, 0) = 0`; at `d = 1`
+    /// it takes the constant-argument branch and the result is `1`. The
+    /// discriminant of a constant or the zero polynomial is `0` by
+    /// convention.
     #[must_use]
     pub fn discriminant(&self) -> BigInt {
         let Some(d) = self.degree() else {
@@ -405,6 +460,19 @@ fn sylvester_matrix(a: &PolyZ, b: &PolyZ) -> Vec<Vec<BigInt>> {
 /// elimination: each elimination step divides exactly by the previous
 /// pivot, so all intermediates stay integral, and the last pivot is the
 /// determinant (up to the sign accumulated by row swaps).
+///
+/// Exactness rests on Sylvester's identity — after step `k` the entry at
+/// `(i, j)` is the `(k+1)×(k+1)` minor built from rows `0..=k, i` and
+/// columns `0..=k, j`, and dividing by the previous pivot recovers exactly
+/// that minor from the cross-product. A zero pivot is repaired by
+/// exchanging the whole row with one below, which negates the determinant
+/// and leaves every surviving entry a minor of the exchanged matrix, so the
+/// division stays exact. A column with no non-zero entry on or below the
+/// diagonal makes the matrix singular and the determinant zero.
+///
+/// `previous` is never zero: it starts at 1 and is thereafter the pivot of
+/// the preceding step, which the exchange-or-return above guaranteed
+/// non-zero.
 fn bareiss_determinant(mut matrix: Vec<Vec<BigInt>>) -> BigInt {
     let n = matrix.len();
     if n == 0 {
@@ -444,8 +512,18 @@ fn bareiss_determinant(mut matrix: Vec<Vec<BigInt>>) -> BigInt {
 
 /// A univariate polynomial over ℤ/mℤ for a fixed modulus `m ≥ 2`,
 /// coefficients low-to-high and reduced, normalized to drop trailing
-/// zeros. The modulus travels with the polynomial; operations between two
-/// require the same modulus.
+/// zeros.
+///
+/// The modulus travels with the polynomial, and every binary operation
+/// asserts that the two moduli agree — a **hard `assert_eq!` in release as
+/// well as debug**, not a `debug_assert!`. The whole point of carrying the
+/// modulus in the value is that it cannot drift out of step with the
+/// coefficients; a debug-only check would let an optimized build combine an
+/// 𝔽ₚ element with an 𝔽_q one and hand back a result tagged with whichever
+/// of the two moduli the receiver happened to hold. The check runs before
+/// any short-circuit, so mismatched zero operands panic too. Affected:
+/// [`Self::add`], [`Self::sub`], [`Self::mul`], [`Self::div_rem`],
+/// [`Self::rem`], [`Self::gcd`], and [`Self::pow_mod`].
 ///
 /// Addition, subtraction, multiplication, scaling, and evaluation work for
 /// any `m ≥ 2`. The division-based operations — [`Self::div_rem`],
@@ -462,7 +540,12 @@ pub struct PolyModP {
 
 impl PolyModP {
     /// Build from coefficients low-to-high, reducing each modulo `modulus`
-    /// and normalizing away trailing zeros.
+    /// and normalizing away trailing zeros. Both steps establish the type's
+    /// invariants: coefficients are the least non-negative residues, so two
+    /// representations of one residue class cannot compare unequal, and a
+    /// coefficient that reduces to zero at the top does not inflate the
+    /// reported degree. `modulus < 2` is rejected because ℤ/1ℤ is the zero
+    /// ring, where degree carries no information.
     ///
     /// # Panics
     ///
@@ -482,13 +565,28 @@ impl PolyModP {
         poly
     }
 
-    /// The zero polynomial over `modulus`.
+    /// The zero polynomial over `modulus`: the empty coefficient list, whose
+    /// degree is `None`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `modulus < 2`, as [`Self::new`] does.
     #[must_use]
     pub fn zero(modulus: &BigUint) -> Self {
         Self::new(Vec::new(), modulus)
     }
 
-    /// Reduce an integer polynomial modulo `modulus`.
+    /// Reduce an integer polynomial modulo `modulus`, the ring homomorphism
+    /// `ℤ[x] → (ℤ/mℤ)[x]`. Each coefficient goes through
+    /// [`BigInt::modulo_positive`], which maps a negative integer to its
+    /// least non-negative residue rather than to a negative remainder, so
+    /// the result satisfies this type's reduced-coefficient invariant.
+    /// Reduction can lower the degree, when the leading coefficient is a
+    /// multiple of `modulus`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `modulus < 2`, as [`Self::new`] does.
     #[must_use]
     pub fn from_poly_z(poly: &PolyZ, modulus: &BigUint) -> Self {
         let coeffs = poly
@@ -499,6 +597,9 @@ impl PolyModP {
         Self::new(coeffs, modulus)
     }
 
+    /// Restore the trailing-zero invariant by popping high-order zeros.
+    /// A coefficient becomes zero here through reduction as well as through
+    /// cancellation, so this runs after every construction.
     fn normalize(&mut self) {
         while self.coeffs.last().is_some_and(BigUint::is_zero) {
             self.coeffs.pop();
@@ -546,7 +647,13 @@ impl PolyModP {
         );
     }
 
-    /// `self + other` (mod m).
+    /// `self + other` (mod m), added coefficient-wise (shorter operand
+    /// zero-extended).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the two moduli differ (see the type documentation): a hard
+    /// assertion in every build, checked before anything else.
     #[must_use]
     pub fn add(&self, other: &Self) -> Self {
         self.check_modulus(other);
@@ -560,7 +667,14 @@ impl PolyModP {
         Self::new(coeffs, &self.modulus)
     }
 
-    /// `self − other` (mod m).
+    /// `self − other` (mod m), subtracted coefficient-wise (shorter operand
+    /// zero-extended). Equal leading terms cancel, so the result is
+    /// renormalized and the degree drops accordingly.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the two moduli differ (see the type documentation): a hard
+    /// assertion in every build, checked before anything else.
     #[must_use]
     pub fn sub(&self, other: &Self) -> Self {
         self.check_modulus(other);
@@ -574,7 +688,18 @@ impl PolyModP {
         Self::new(coeffs, &self.modulus)
     }
 
-    /// `self · other` (mod m), schoolbook.
+    /// `self · other` (mod m) by the schoolbook coefficient convolution,
+    /// each partial product reduced as it is accumulated so nothing exceeds
+    /// `m²`. Unlike the ℤ case, `deg self + deg other` is only an upper
+    /// bound on the degree of the product: ℤ/mℤ has zero divisors for
+    /// composite `m`, so the leading coefficients can multiply to zero, and
+    /// the renormalization in [`Self::new`] then drops the top entries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the two moduli differ (see the type documentation): a hard
+    /// assertion in every build, checked before the zero short-circuit, so
+    /// a mismatch involving the zero polynomial panics as well.
     #[must_use]
     pub fn mul(&self, other: &Self) -> Self {
         self.check_modulus(other);
@@ -594,7 +719,9 @@ impl PolyModP {
         Self::new(coeffs, &self.modulus)
     }
 
-    /// `self · c` for a scalar (mod m).
+    /// `self · c` for a scalar (mod m). `c` is a bare [`BigUint`] carrying no
+    /// modulus of its own, so there is nothing to cross-check; it need not
+    /// arrive reduced, since `BigUint::mod_mul` reduces it.
     #[must_use]
     pub fn scale(&self, c: &BigUint) -> Self {
         let coeffs = self
@@ -605,7 +732,10 @@ impl PolyModP {
         Self::new(coeffs, &self.modulus)
     }
 
-    /// Evaluate at `x` (mod m), Horner.
+    /// Evaluate at `x` (mod m) by Horner's method, folding
+    /// `acc ← acc·x + cᵢ` from the leading coefficient down with every step
+    /// reduced, so no intermediate exceeds `m²`. `x` is reduced first and so
+    /// need not arrive in `[0, m)`.
     #[must_use]
     pub fn evaluate(&self, x: &BigUint) -> BigUint {
         let x = x.modulo(&self.modulus);
@@ -620,9 +750,13 @@ impl PolyModP {
         acc
     }
 
-    /// Divide by a scalar's inverse to make the polynomial monic: `self`
-    /// scaled by the inverse of its leading coefficient. The zero
-    /// polynomial is returned unchanged.
+    /// The monic associate of `self`: `self` scaled by the inverse of its
+    /// leading coefficient, so the result generates the same ideal and has
+    /// leading coefficient 1. This is the canonical representative the gcd
+    /// and factorization routines return, since over a field the gcd is
+    /// unique only up to a unit. The zero polynomial has no leading
+    /// coefficient to invert and is returned unchanged; an already-monic
+    /// polynomial short-circuits without an inversion.
     ///
     /// # Panics
     ///
@@ -647,10 +781,21 @@ impl PolyModP {
     /// invertible modulo `m`: `self = quotient·divisor + remainder` with
     /// `deg remainder < deg divisor`.
     ///
+    /// Why the invertibility requirement, and why this is total where
+    /// [`PolyZ::div_rem`] is not: schoolbook long division cancels the
+    /// remainder's leading term by multiplying the divisor by
+    /// `lc(remainder)·lc(divisor)⁻¹`. Over the field ℤ/pℤ that inverse
+    /// always exists for a non-zero divisor, so no step can fail and no
+    /// `Option` is needed. The inverse is computed once, before the loop,
+    /// and reused at every step; each step lowers `deg remainder` by at
+    /// least one, which is what terminates the loop.
+    ///
     /// # Panics
     ///
-    /// Panics if `divisor` is zero or its leading coefficient is not
-    /// invertible modulo `m`.
+    /// Panics if the two moduli differ (see the type documentation), if
+    /// `divisor` is zero, or if the divisor's leading coefficient is not
+    /// invertible modulo `m` — which for composite `m` is a reachable
+    /// panic, not an internal invariant.
     #[must_use]
     pub fn div_rem(&self, divisor: &Self) -> (Self, Self) {
         self.check_modulus(divisor);
@@ -674,14 +819,34 @@ impl PolyModP {
         (Self::new(quotient, &self.modulus), remainder)
     }
 
-    /// `self mod divisor` — the remainder of [`Self::div_rem`].
+    /// `self mod divisor` — the remainder of [`Self::div_rem`], with the
+    /// quotient discarded.
+    ///
+    /// # Panics
+    ///
+    /// Panics exactly as [`Self::div_rem`] does: differing moduli, a zero
+    /// divisor, or a leading coefficient not invertible modulo `m`.
     #[must_use]
     pub fn rem(&self, divisor: &Self) -> Self {
         self.div_rem(divisor).1
     }
 
-    /// Monic greatest common divisor by the Euclidean algorithm; the zero
-    /// polynomial's gcd with `q` is the monic form of `q`.
+    /// The monic greatest common divisor, by the Euclidean algorithm:
+    /// repeatedly replace `(a, b)` with `(b, a mod b)` until `b` is zero,
+    /// then take the monic associate of `a`. Each step strictly lowers
+    /// `deg b`, so the recursion is finite; the gcd is normalized because
+    /// over a field it is unique only up to a unit, and the monic
+    /// representative is the canonical choice.
+    ///
+    /// The zero polynomial is the identity for gcd, so `gcd(0, q)` and
+    /// `gcd(q, 0)` are both the monic form of `q`, and `gcd(0, 0)` is zero.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the two moduli differ (see the type documentation), or if
+    /// some remainder reached during the descent has a leading coefficient
+    /// that is not invertible modulo `m`. Over a prime modulus the latter
+    /// cannot occur, since every non-zero residue is a unit.
     #[must_use]
     pub fn gcd(&self, other: &Self) -> Self {
         self.check_modulus(other);
@@ -695,14 +860,23 @@ impl PolyModP {
         a.make_monic()
     }
 
-    /// `self^exponent mod modulus_poly` by square-and-multiply — the
-    /// primitive behind distinct-degree factorization's `x^(p^d)`.
+    /// `self^exponent mod modulus_poly` by left-to-right binary
+    /// exponentiation — the primitive behind distinct-degree
+    /// factorization's `x^(p^d)`.
+    ///
+    /// Scanning the exponent from its top bit down, each step squares the
+    /// accumulator and multiplies in the base when the bit is set, reducing
+    /// modulo `modulus_poly` after every product. Reducing at every step,
+    /// rather than at the end, is what keeps the degree bounded by
+    /// `deg modulus_poly`: the exponent is `p^d` in the factorization
+    /// routines, so the unreduced power is not representable.
     ///
     /// # Panics
     ///
-    /// Panics if `modulus_poly` is the zero polynomial, or if a leading
-    /// coefficient reached during reduction is not invertible modulo `m`
-    /// (see the type-level note; `m` prime avoids the latter).
+    /// Panics if the two moduli differ (see the type documentation), if
+    /// `modulus_poly` is the zero polynomial, or if a leading coefficient
+    /// reached during reduction is not invertible modulo `m` (`m` prime
+    /// avoids the last).
     #[must_use]
     pub fn pow_mod(&self, exponent: &BigUint, modulus_poly: &Self) -> Self {
         self.check_modulus(modulus_poly);
@@ -721,7 +895,9 @@ impl PolyModP {
         result
     }
 
-    /// `self · x^shift`.
+    /// `self · x^shift` — prepend `shift` zero coefficients. The prepended
+    /// zeros are already reduced and cannot create a trailing zero, so the
+    /// reduce-and-normalize pass in [`Self::new`] has nothing to do here.
     fn shift_up(&self, shift: usize) -> Self {
         if self.is_zero() || shift == 0 {
             return self.clone();
@@ -731,7 +907,9 @@ impl PolyModP {
         Self::new(coeffs, &self.modulus)
     }
 
-    /// The monic polynomial `x` over this modulus.
+    /// The monic polynomial `x` over this modulus — the argument of the
+    /// Frobenius map, needed by both [`Self::distinct_degree`] and
+    /// [`Self::roots`].
     fn monomial_x(modulus: &BigUint) -> Self {
         Self::new(vec![BigUint::zero(), BigUint::one()], modulus)
     }
@@ -741,8 +919,12 @@ impl PolyModP {
     /// monic form of `self` (Cohen, *A Course in Computational Algebraic
     /// Number Theory*, §3.4.2, Squarefree Factorization). The factors are
     /// monic, of degree ≥ 1, and pairwise coprime; a factor with
-    /// multiplicity divisible by `p` is recovered through the `p`-th root
-    /// the characteristic forces.
+    /// multiplicity divisible by `p` is invisible to the derivative and is
+    /// recovered instead through the `p`-th root the characteristic forces.
+    /// The list is returned in ascending order of multiplicity. Each
+    /// multiplicity occurs at most once, so the ordering is total: the
+    /// multiplicities reached directly are coprime to `p` and those reached
+    /// through the `p`-th root are divisible by it.
     ///
     /// # Panics
     ///
@@ -767,12 +949,26 @@ impl PolyModP {
     /// the squarefree factors of `self` whose multiplicity is not a
     /// multiple of `p`, then recurse on the `p`-th root of what remains,
     /// scaling the multiplicity by `p`.
+    ///
+    /// Writing `f = ∏ aᵢⁱ` with the `aᵢ` squarefree and pairwise coprime,
+    /// the loop maintains, at the top of iteration `e`,
+    ///
+    /// ```text
+    /// v = ∏_{p∤i, i≥e} aᵢ           t = ∏_{p∤i, i≥e} aᵢ^(i−e) · ∏_{p|i} aᵢⁱ
+    /// ```
+    ///
+    /// so `gcd(t, v)` advances `v` to `e+1` and the quotient `v / gcd(t, v)`
+    /// is exactly `a_e`. Each iteration strictly shrinks `v`, which is what
+    /// terminates the loop; on exit `v` is a unit and `t` has collapsed to
+    /// `∏_{p|i} aᵢⁱ`, the `p`-th power the recursion consumes.
     fn squarefree_into(&self, mult_shift: usize, out: &mut Vec<(Self, usize)>) {
         let f = self.make_monic();
         let derivative = f.derivative_modp();
-        // gcd(f, f') collects every factor to one less than its multiplicity;
-        // f / that is the product of the distinct factors (radical) whose
-        // multiplicity is coprime to p.
+        // gcd(f, f') keeps each factor of multiplicity i to the power i−1
+        // when p ∤ i, and to the full power i when p | i — differentiating
+        // aᵢⁱ gives i·aᵢ^(i−1)·aᵢ', which vanishes exactly when p | i. So
+        // f / gcd(f, f') is the product of the distinct factors whose
+        // multiplicity is not divisible by p.
         let mut t = f.gcd(&derivative);
         let mut v = f.div_rem(&t).0;
         let mut e = 1usize;
@@ -805,6 +1001,16 @@ impl PolyModP {
     /// The `p`-th root of a polynomial that is known to be a `p`-th power:
     /// `g(xᵖ)` has `g`'s coefficients at positions that are multiples of
     /// `p`, and in 𝔽ₚ each coefficient is its own `p`-th root (Frobenius).
+    ///
+    /// Concretely, `(∑ gᵢxⁱ)ᵖ = ∑ gᵢᵖx^(ip) = ∑ gᵢx^(ip)` over 𝔽ₚ — the
+    /// cross terms carry a binomial coefficient divisible by `p` and the
+    /// coefficients are fixed by Fermat's little theorem — so the root is
+    /// read off by taking every `p`-th coefficient with no arithmetic at
+    /// all. The precondition is unchecked: applied to a polynomial that is
+    /// not a `p`-th power this silently discards the coefficients at
+    /// positions not divisible by `p`. The only caller is
+    /// `squarefree_into`, where the residual `t` is a `p`-th power by
+    /// construction.
     fn pth_root(&self, p: usize) -> Self {
         let coeffs = (0..self.coeffs.len())
             .step_by(p)
@@ -813,7 +1019,12 @@ impl PolyModP {
         Self::new(coeffs, &self.modulus)
     }
 
-    /// The formal derivative over 𝔽ₚ.
+    /// The formal derivative over 𝔽ₚ, `∑ i·cᵢ·xⁱ⁻¹` with the scaling done
+    /// modulo `m`. Unlike the ℤ case it can vanish on a non-constant
+    /// polynomial: the scaling kills every term whose index is a multiple of
+    /// the characteristic, so the derivative is zero exactly when the
+    /// polynomial is `g(xᵖ) = g(x)ᵖ`. That vanishing is what drives the
+    /// recursion in `squarefree_into`.
     fn derivative_modp(&self) -> Self {
         if self.coeffs.len() <= 1 {
             return Self::zero(&self.modulus);
@@ -827,10 +1038,31 @@ impl PolyModP {
     }
 
     /// Distinct-degree factorization of a squarefree monic polynomial:
-    /// the pairs `(d, gₐ)` where `gₐ` is the product of all the degree-`d`
+    /// the pairs `(d, g_d)` where `g_d` is the product of all the degree-`d`
     /// irreducible factors of `self` (Cohen, §3.4.3, Distinct Degree
-    /// Factorization). The `gₐ` are monic; a `d` with no factor of that
+    /// Factorization). The `g_d` are monic; a `d` with no factor of that
     /// degree is omitted.
+    ///
+    /// The mechanism is that `x^(pᵈ) − x` is the product of every monic
+    /// irreducible over 𝔽ₚ whose degree *divides* `d`, so
+    /// `gcd(remaining, x^(pᵈ) − x)` would capture those lower degrees too.
+    /// It does not, because `d` ascends by one from 1 with no gaps and each
+    /// captured block is divided out of `remaining` before the next round,
+    /// so every proper divisor of `d` has already been removed. The
+    /// Frobenius power is advanced in place, `x^(pᵈ) = (x^(pᵈ⁻¹))ᵖ`, one
+    /// [`Self::pow_mod`] per round rather than a fresh exponentiation.
+    ///
+    /// The loop stops once `deg remaining < 2(d+1)`: every irreducible factor
+    /// still present has degree greater than `d`, so two of them would give
+    /// degree at least `2(d+1)`. There is therefore at most one, and the
+    /// residue is emitted whole at its own degree without a further gcd.
+    ///
+    /// Both preconditions are unchecked. A non-squarefree argument yields
+    /// blocks that are not products of *distinct* irreducibles, which the
+    /// equal-degree split then cannot separate; a non-monic argument
+    /// propagates its leading coefficient into the quotients. Both callers
+    /// ([`Self::factor`] via [`Self::squarefree_factorization`], and
+    /// [`Self::is_irreducible`] after its own gcd test) establish them.
     fn distinct_degree(&self) -> Vec<(usize, Self)> {
         let mut factors = Vec::new();
         let mut remaining = self.clone();
@@ -842,7 +1074,8 @@ impl PolyModP {
             d += 1;
             // x^(pᵈ) = (x^(pᵈ⁻¹))ᵖ mod remaining.
             xqi = xqi.pow_mod(&self.modulus, &remaining);
-            // The degree-d factors divide x^(pᵈ) − x.
+            // The degree-d factors divide x^(pᵈ) − x; lower degrees dividing
+            // d were captured and divided out in earlier rounds.
             let diff = xqi.sub(&x).rem(&remaining);
             let g = remaining.gcd(&diff);
             if g.degree().is_some_and(|dg| dg >= 1) {
@@ -858,13 +1091,28 @@ impl PolyModP {
         factors
     }
 
-    /// Split a monic product of degree-`d` irreducibles into its
+    /// Split a monic product of *distinct* degree-`d` irreducibles into its
     /// irreducible factors — the equal-degree step (Cantor & Zassenhaus,
     /// *A new algorithm for factoring polynomials over finite fields*,
     /// Math. Comp. 36 (1981), 587–592; Cohen, §3.4.4, Final Splitting).
-    /// Draws random splitting polynomials from `rng` until each factor is
-    /// isolated; over 𝔽₂ the split uses the trace map, the standard
-    /// characteristic-2 instance.
+    ///
+    /// By the Chinese remainder theorem `𝔽ₚ[x]/(self)` is the product of the
+    /// residue fields `𝔽_(pᵈ)`, one per factor. For odd `p`, raising a random
+    /// element to `(pᵈ−1)/2` lands each component independently on `±1`, so
+    /// `gcd(self, a^((pᵈ−1)/2) − 1)` collects the components that landed on
+    /// `1` — a non-trivial split unless every component agreed. Over 𝔽₂
+    /// there is no such square-root character and the trace map
+    /// `a + a² + a⁴ + … + a^(2^(d−1))` takes its place, mapping each
+    /// component onto 𝔽₂ independently; this is the standard
+    /// characteristic-2 instance, not a special case of the odd formula.
+    ///
+    /// The number of factors is known in advance — `deg self / d`, since the
+    /// factors all have degree `d` — so the loop terminates on a count
+    /// rather than on a fixed point. That count is only correct under the
+    /// stated precondition, which is unchecked: given a `self` that is not a
+    /// product of distinct degree-`d` irreducibles the target is
+    /// unreachable and the stall guard below fires, attributing the failure
+    /// to the `Rng`.
     fn equal_degree_split<R: crate::random::Rng + ?Sized>(
         &self,
         d: usize,
@@ -910,8 +1158,13 @@ impl PolyModP {
                 self.gcd(&trace)
             } else {
                 let exponent = {
+                    // (pᵈ − 1)/2. The dividend is even (pᵈ is odd for odd p),
+                    // and halving is a one-bit shift — no reason to spend a
+                    // full multiprecision division on it.
                     let pd = self.modulus.pow_u64(u64::try_from(d).expect("d fits u64"));
-                    pd.sub_ref(&BigUint::one()).div_rem(&two).0
+                    let mut half = pd.sub_ref(&BigUint::one());
+                    half.shr1();
+                    half
                 };
                 let ae = a.pow_mod(&exponent, self);
                 let ae_minus_one = ae.sub(&Self::new(vec![BigUint::one()], &self.modulus));
@@ -939,7 +1192,16 @@ impl PolyModP {
         factors
     }
 
-    /// A random polynomial of degree below `self`'s, over the modulus.
+    /// A random polynomial of degree below `self`'s, over the modulus:
+    /// `deg self` coefficients drawn uniformly from `[0, m)`, filling
+    /// positions `0 .. deg self − 1`.
+    ///
+    /// The draw may be the zero polynomial, and may have degree strictly
+    /// below `deg self − 1` when high coefficients come up zero; both are
+    /// legitimate elements of the residue ring and the caller treats a zero
+    /// draw as a stalled round. A `random_below` failure — reachable only
+    /// for a zero bound, which `m ≥ 2` excludes — is folded to zero for the
+    /// same reason.
     fn random_below_degree<R: crate::random::Rng + ?Sized>(&self, rng: &mut R) -> Self {
         let deg = self.degree().expect("non-zero");
         let coeffs = (0..deg)
@@ -951,7 +1213,16 @@ impl PolyModP {
     /// Whether `self` is irreducible over 𝔽ₚ. A non-constant polynomial is
     /// irreducible exactly when its distinct-degree factorization is a
     /// single block whose degree equals its own — deterministic, no
-    /// randomness.
+    /// randomness: only `distinct_degree` is used, never the randomized
+    /// equal-degree split, since separating the factors within a block is
+    /// unnecessary when only their count is in question.
+    ///
+    /// Squarefreeness is tested first and separately, because
+    /// distinct-degree factorization presumes it: a repeated factor makes
+    /// `gcd(f, f')` non-constant, and such an `f` is reducible (its repeated
+    /// factor is a proper divisor). The zero polynomial and the constants
+    /// are not irreducible by definition — units and zero are excluded from
+    /// the notion — and return `false`.
     ///
     /// # Panics
     ///
@@ -978,8 +1249,14 @@ impl PolyModP {
 
     /// Complete factorization over 𝔽ₚ into monic irreducibles with
     /// multiplicities: `(factor, e)` with `∏ factorᵉ` equal to the monic
-    /// form of `self`. Squarefree decomposition, then distinct-degree, then
-    /// the randomized equal-degree split drawn from `rng`. That split is Las
+    /// form of `self`. The leading coefficient is not recoverable from the
+    /// factor list, which is why the identity is stated against the monic
+    /// form.
+    ///
+    /// Three stages, each narrowing what the next must handle: squarefree
+    /// decomposition separates the multiplicities, distinct-degree groups
+    /// the remaining factors by degree, and the randomized equal-degree
+    /// split separates the factors within one group. That split is Las
     /// Vegas: it draws until each factor separates, so `rng` must yield
     /// entropy. A source that never does (e.g. all-zero bytes) makes no
     /// progress, and the split panics after a bounded number of fruitless
@@ -1004,16 +1281,30 @@ impl PolyModP {
         result
     }
 
-    /// The roots of `self` in 𝔽ₚ, ascending, each a residue `r` with
-    /// `self(r) ≡ 0`. Computed as the linear factors: intersect with
-    /// `xᵖ − x` (whose roots are all of 𝔽ₚ), then split into linears by the
-    /// same Las Vegas split as [`Self::factor`], so `rng` must yield entropy.
+    /// The roots of `self` in 𝔽ₚ, ascending and without repetition, each a
+    /// residue `r` with `self(r) ≡ 0`.
+    ///
+    /// Computed as the linear factors rather than by trial evaluation, whose
+    /// cost would be proportional to `p`. Since `xᵖ − x` is the product of
+    /// `(x − r)` over every `r ∈ 𝔽ₚ`, `gcd(self, xᵖ − x)` is the product of
+    /// `(x − r)` over exactly the roots of `self`, squarefree because
+    /// `xᵖ − x` is. That product is then broken into linear factors by the
+    /// same Las Vegas equal-degree split as [`Self::factor`] at `d = 1`, and
+    /// each root read off as the negated constant term. Multiplicity is
+    /// discarded: a repeated root is reported once.
+    ///
+    /// A constant has no roots and yields the empty list. So does the zero
+    /// polynomial, which is the one place the return value is a convention
+    /// rather than an answer — every residue is a root of it.
     ///
     /// # Panics
     ///
-    /// Panics on a non-invertible pivot during division. A prime modulus is
-    /// required (see the type documentation); over a composite modulus the
-    /// result is unspecified and may be returned without a panic.
+    /// Panics if `rng` produces no entropy: the equal-degree split cannot
+    /// make progress and gives up after a bounded number of fruitless draws
+    /// rather than looping forever. Also panics on a non-invertible pivot
+    /// during division. A prime modulus is required (see the type
+    /// documentation); over a composite modulus the result is unspecified
+    /// and may be returned without a panic.
     #[must_use]
     pub fn roots<R: crate::random::Rng + ?Sized>(&self, rng: &mut R) -> Vec<BigUint> {
         if self.degree().is_none_or(|d| d == 0) {
