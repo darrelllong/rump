@@ -1076,7 +1076,11 @@ impl PolyModP {
             xqi = xqi.pow_mod(&self.modulus, &remaining);
             // The degree-d factors divide x^(pᵈ) − x; lower degrees dividing
             // d were captured and divided out in earlier rounds.
-            let diff = xqi.sub(&x).rem(&remaining);
+            // pow_mod reduces after every product, so deg(xqi) < deg(remaining),
+            // and the loop guard keeps deg(remaining) ≥ 2 ≥ deg(x) + 1. The
+            // difference is therefore already reduced; a rem here would be a
+            // full division that cannot change it.
+            let diff = xqi.sub(&x);
             let g = remaining.gcd(&diff);
             if g.degree().is_some_and(|dg| dg >= 1) {
                 factors.push((d, g.clone()));
@@ -1133,11 +1137,28 @@ impl PolyModP {
         // source, so this can only fire on a broken one.
         const MAX_STALLED_DRAWS: usize = 256;
         let mut stalled = 0usize;
+        // Neither the splitting exponent nor the constant 1 depends on the
+        // draw, so both are built once rather than per attempt. The exponent
+        // costs a binary exponentiation to a d·log₂p-bit integer, which is the
+        // most expensive thing in the loop that is not a polynomial operation.
+        let one_poly = Self::new(vec![BigUint::one()], &self.modulus);
+        let cz_exponent = if self.modulus == two {
+            None
+        } else {
+            // (pᵈ − 1)/2. The dividend is even (pᵈ is odd for odd p), and
+            // halving is a one-bit shift — no reason to spend a full
+            // multiprecision division on it.
+            let pd = self.modulus.pow_u64(u64::try_from(d).expect("d fits u64"));
+            let mut half = pd.sub_ref(&BigUint::one());
+            half.shr1();
+            Some(half)
+        };
         while factors.len() < target {
             assert!(
                 stalled < MAX_STALLED_DRAWS,
-                "equal-degree split made no progress in {MAX_STALLED_DRAWS} draws; \
-                 the Rng is not producing entropy"
+                "equal-degree split made no progress in {MAX_STALLED_DRAWS} draws: \
+                 either the Rng yields no entropy, or the input is not a product \
+                 of distinct degree-{d} irreducibles as this step requires"
             );
             let before = factors.len();
             // A random splitter of degree < deg self.
@@ -1149,7 +1170,9 @@ impl PolyModP {
             // g captures roughly half the factors: over 𝔽₂ by the trace map,
             // otherwise by a^((pᵈ−1)/2) − 1.
             let g = if self.modulus == two {
-                let mut trace = a.rem(self);
+                // `a` comes from random_below_degree, which fills exactly
+                // deg(self) coefficients, so it is already reduced.
+                let mut trace = a.clone();
                 let mut term = trace.clone();
                 for _ in 1..d {
                     term = term.mul(&term).rem(self);
@@ -1157,17 +1180,11 @@ impl PolyModP {
                 }
                 self.gcd(&trace)
             } else {
-                let exponent = {
-                    // (pᵈ − 1)/2. The dividend is even (pᵈ is odd for odd p),
-                    // and halving is a one-bit shift — no reason to spend a
-                    // full multiprecision division on it.
-                    let pd = self.modulus.pow_u64(u64::try_from(d).expect("d fits u64"));
-                    let mut half = pd.sub_ref(&BigUint::one());
-                    half.shr1();
-                    half
-                };
-                let ae = a.pow_mod(&exponent, self);
-                let ae_minus_one = ae.sub(&Self::new(vec![BigUint::one()], &self.modulus));
+                let exponent = cz_exponent
+                    .as_ref()
+                    .expect("odd modulus takes the exponent branch");
+                let ae = a.pow_mod(exponent, self);
+                let ae_minus_one = ae.sub(&one_poly);
                 self.gcd(&ae_minus_one)
             };
             // Refine every current factor by g.
@@ -1991,7 +2008,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not producing entropy")]
+    #[should_panic(expected = "made no progress")]
     fn factor_with_dead_rng_panics_rather_than_hangs() {
         // An Rng that never yields entropy cannot drive the equal-degree split;
         // it must panic after a bounded number of fruitless draws, not loop

@@ -86,7 +86,7 @@ about it.
 | Discriminant | `PolyZ::discriminant` | Cohen, *A Course in Computational Algebraic Number Theory*, §3.3.2 (disc = (−1)^(d(d−1)/2) res(f, f′)/lc). |
 | Squarefree factorization over 𝔽ₚ | `PolyModP::squarefree_factorization` | Cohen, §3.4.2 (Squarefree Factorization); the characteristic-`p` residual is recovered through its `p`-th root. |
 | Distinct-degree factorization | `PolyModP::distinct_degree` | Cohen, §3.4.3 (Distinct Degree Factorization); the Frobenius `x ↦ xᵖ` reduced modulo the running polynomial. |
-| Equal-degree split (Cantor–Zassenhaus) | `PolyModP::equal_degree_split` (used by `factor`, `roots`, `is_irreducible`) | Cantor & Zassenhaus, *A new algorithm for factoring polynomials over finite fields*, Math. Comp. 36 (1981), 587–592; Cohen, §3.4.4 (Final Splitting). The `p = 2` case uses the trace map, the standard characteristic-2 instance. |
+| Equal-degree split (Cantor–Zassenhaus) | `PolyModP::equal_degree_split` (used by `factor` and `roots`; `is_irreducible` is deterministic and uses only the distinct-degree stage) | Cantor & Zassenhaus, *A new algorithm for factoring polynomials over finite fields*, Math. Comp. 36 (1981), 587–592; Cohen, §3.4.4 (Final Splitting). The `p = 2` case uses the trace map, the standard characteristic-2 instance. |
 
 ## Lattice reduction (`src/lattice.rs`)
 

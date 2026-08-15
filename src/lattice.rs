@@ -211,6 +211,14 @@ fn nearest_int(a: &BigInt, b: &BigInt) -> BigInt {
 /// Every call arrives through [`nearest_int`] with a positive Gram
 /// determinant.
 fn floor_div(num: &BigInt, den: &BigInt) -> BigInt {
+    // The caller's contract: only `nearest_int` calls this, always with a Gram
+    // determinant, which is positive for an independent basis. The sign of
+    // `den` is never inspected below, so a negative one would silently yield
+    // ⌊num/|den|⌋ — check rather than trust.
+    debug_assert!(
+        den.sign() == Sign::Positive,
+        "floor_div requires a positive divisor"
+    );
     let (quotient, remainder) = num.magnitude().div_rem(den.magnitude());
     if num.sign() != Sign::Negative {
         BigInt::from_biguint(quotient)
