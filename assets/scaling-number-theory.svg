@@ -33,7 +33,7 @@
 <circle cx="320.0" cy="248.0" r="2.5" fill="#A64E28"/>
 <circle cx="445.0" cy="218.4" r="2.5" fill="#A64E28"/>
 <circle cx="570.0" cy="187.3" r="2.5" fill="#A64E28"/>
-<path d="M70.0,353.3 L320.0,293.4 L445.0,260.2 L570.0,230.4" fill="none" stroke="#A64E28" stroke-width="2" />
+<path d="M70.0,353.3 L320.0,293.4 L445.0,260.2 L570.0,230.4" fill="none" stroke="#A64E28" stroke-width="2" stroke-dasharray="5,3,1,3"/>
 <circle cx="70.0" cy="353.3" r="2.5" fill="#A64E28"/>
 <circle cx="320.0" cy="293.4" r="2.5" fill="#A64E28"/>
 <circle cx="445.0" cy="260.2" r="2.5" fill="#A64E28"/>
@@ -53,7 +53,7 @@
 <circle cx="320.0" cy="231.5" r="2.5" fill="#3D648A"/>
 <circle cx="445.0" cy="200.7" r="2.5" fill="#3D648A"/>
 <circle cx="570.0" cy="166.1" r="2.5" fill="#3D648A"/>
-<path d="M70.0,308.7 L320.0,261.5 L445.0,233.3 L570.0,200.3" fill="none" stroke="#3D648A" stroke-width="2" />
+<path d="M70.0,308.7 L320.0,261.5 L445.0,233.3 L570.0,200.3" fill="none" stroke="#3D648A" stroke-width="2" stroke-dasharray="5,3,1,3"/>
 <circle cx="70.0" cy="308.7" r="2.5" fill="#3D648A"/>
 <circle cx="320.0" cy="261.5" r="2.5" fill="#3D648A"/>
 <circle cx="445.0" cy="233.3" r="2.5" fill="#3D648A"/>
@@ -73,7 +73,7 @@
 <circle cx="320.0" cy="238.6" r="2.5" fill="#2E7D4F"/>
 <circle cx="445.0" cy="208.8" r="2.5" fill="#2E7D4F"/>
 <circle cx="570.0" cy="176.2" r="2.5" fill="#2E7D4F"/>
-<path d="M70.0,316.1 L320.0,275.9 L445.0,243.0 L570.0,211.4" fill="none" stroke="#2E7D4F" stroke-width="2" />
+<path d="M70.0,316.1 L320.0,275.9 L445.0,243.0 L570.0,211.4" fill="none" stroke="#2E7D4F" stroke-width="2" stroke-dasharray="5,3,1,3"/>
 <circle cx="70.0" cy="316.1" r="2.5" fill="#2E7D4F"/>
 <circle cx="320.0" cy="275.9" r="2.5" fill="#2E7D4F"/>
 <circle cx="445.0" cy="243.0" r="2.5" fill="#2E7D4F"/>
@@ -93,7 +93,7 @@
 <circle cx="320.0" cy="264.3" r="2.5" fill="#A97416"/>
 <circle cx="445.0" cy="217.6" r="2.5" fill="#A97416"/>
 <circle cx="570.0" cy="184.8" r="2.5" fill="#A97416"/>
-<path d="M70.0,371.4 L320.0,302.2 L445.0,255.1 L570.0,224.8" fill="none" stroke="#A97416" stroke-width="2" />
+<path d="M70.0,371.4 L320.0,302.2 L445.0,255.1 L570.0,224.8" fill="none" stroke="#A97416" stroke-width="2" stroke-dasharray="5,3,1,3"/>
 <circle cx="70.0" cy="371.4" r="2.5" fill="#A97416"/>
 <circle cx="320.0" cy="302.2" r="2.5" fill="#A97416"/>
 <circle cx="445.0" cy="255.1" r="2.5" fill="#A97416"/>
@@ -113,7 +113,7 @@
 <circle cx="320.0" cy="160.2" r="2.5" fill="#6D4C91"/>
 <circle cx="445.0" cy="109.0" r="2.5" fill="#6D4C91"/>
 <circle cx="570.0" cy="56.6" r="2.5" fill="#6D4C91"/>
-<path d="M70.0,282.7 L320.0,203.2 L445.0,149.5 L570.0,97.3" fill="none" stroke="#6D4C91" stroke-width="2" />
+<path d="M70.0,282.7 L320.0,203.2 L445.0,149.5 L570.0,97.3" fill="none" stroke="#6D4C91" stroke-width="2" stroke-dasharray="5,3,1,3"/>
 <circle cx="70.0" cy="282.7" r="2.5" fill="#6D4C91"/>
 <circle cx="320.0" cy="203.2" r="2.5" fill="#6D4C91"/>
 <circle cx="445.0" cy="149.5" r="2.5" fill="#6D4C91"/>
@@ -134,6 +134,6 @@
 <text x="600" y="151" font-size="10" fill="#6F675C">EPYC</text>
 <line x1="578" y1="162" x2="596" y2="162" stroke="#211E19" stroke-width="2" stroke-dasharray="1,3"/>
 <text x="600" y="166" font-size="10" fill="#6F675C">Pi</text>
-<line x1="578" y1="177" x2="596" y2="177" stroke="#211E19" stroke-width="2" />
+<line x1="578" y1="177" x2="596" y2="177" stroke="#211E19" stroke-width="2" stroke-dasharray="5,3,1,3"/>
 <text x="600" y="181" font-size="10" fill="#6F675C">A18</text>
 </svg>
