@@ -528,7 +528,7 @@ mod tests {
     type Case = (&'static str, Vec<Vec<BigInt>>, Vec<Vec<BigInt>>);
 
     // The seven locked oracle cases, produced by an independent rational-Fraction
-    // LLL (scratchpad/lll_oracle.py, δ = 3/4) and there verified size-reduced ∧
+    // LLL (scripts/lll_oracle.py, δ = 3/4) and there verified size-reduced ∧
     // Lovász ∧ determinant-invariant.
     fn oracle_cases() -> Vec<Case> {
         vec![
