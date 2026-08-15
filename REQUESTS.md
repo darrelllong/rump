@@ -212,3 +212,16 @@ worked stays visible.
   BPSW terminates the recursion, `remove_factor` is trial division's inner
   loop, and the roots are what intercept perfect powers before the search
   wastes a run on them.
+
+- **All of Tier 3** — items 6 and 7 above. `PolyZ` (over ℤ): `add` / `sub` /
+  `mul`, `evaluate` (Horner), `derivative`, `content` / `primitive_part`,
+  `div_rem` (exact division over ℤ, `None` when the divisor's leading
+  coefficient does not divide evenly — always defined for a monic divisor) and
+  `pseudo_div_rem` (the ℤ-preserving form the resultant path uses),
+  `resultant` and `discriminant` (fraction-free Bareiss over the Sylvester
+  matrix). `PolyModP` (over 𝔽_p): `add` / `sub` / `mul`, `div_rem` / `rem` /
+  `gcd` / `make_monic` / `pow_mod`, `squarefree_factorization`,
+  `is_irreducible`, `factor` (squarefree → distinct-degree →
+  Cantor–Zassenhaus), and `roots`. `lll_reduce` / `lll_reduce_delta` (integral
+  LLL over ℤ, default δ = 3/4, settable). Every algorithm carries its
+  primary-source citation; see CITATIONS.md.

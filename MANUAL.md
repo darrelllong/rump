@@ -742,8 +742,9 @@ assert!(!is_probable_prime_bpsw(&BigUint::from_u64(5_459)));
 ℤ/mℤ; both store coefficients low-to-high and normalize away trailing
 zeros, so the zero polynomial is the empty coefficient list. `PolyZ`
 offers `add`/`sub`/`mul`, `evaluate` (Horner), `derivative`, `content` and
-`primitive_part`, and `pseudo_div_rem` (integer-preserving division by
-premultiplication). `PolyModP` adds `div_rem`/`rem`/`gcd`/`make_monic`/
+`primitive_part`, `div_rem` (exact division over ℤ, `None` when it does not
+divide evenly), and `pseudo_div_rem` (the always-defined integer-preserving
+form). `PolyModP` adds `div_rem`/`rem`/`gcd`/`make_monic`/
 `pow_mod` — the division-based operations invert a leading coefficient, so
 they require a prime modulus and panic on a non-invertible pivot.
 
@@ -752,6 +753,16 @@ they require a prime modulus and panic on a non-invertible pivot.
 let a = PolyZ::from_i64_slice(&[1, 1]); // x + 1
 let b = PolyZ::from_i64_slice(&[2, 1]); // x + 2
 assert_eq!(a.mul(&b), PolyZ::from_i64_slice(&[2, 3, 1]));
+
+// Exact division over ℤ: (x^2 + 3x + 2) / (x + 1) = x + 2, no remainder.
+let (q, r) = a.mul(&b).div_rem(&a).expect("x + 1 divides");
+assert_eq!(q, b); // x + 2
+assert!(r.is_zero());
+// A leading coefficient that does not divide has no integer quotient.
+assert_eq!(
+    PolyZ::from_i64_slice(&[1, 0, 1]).div_rem(&PolyZ::from_i64_slice(&[1, 2])),
+    None
+);
 
 // Evaluation and derivative.
 assert_eq!(a.mul(&b).evaluate(&BigInt::from_i64(3)), BigInt::from_i64(20)); // 9+9+2

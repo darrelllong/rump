@@ -255,6 +255,52 @@ impl PolyZ {
         (quotient, remainder)
     }
 
+    /// Exact division over ℤ: `Some((quotient, remainder))` satisfying
+    /// `self = quotient·divisor + remainder` with `deg remainder <
+    /// deg divisor`, returned when the division stays in ℤ — in particular
+    /// always for a monic divisor (leading coefficient `±1`). Returns `None`
+    /// when a leading coefficient does not divide evenly, so no such quotient
+    /// exists over ℤ; use [`Self::pseudo_div_rem`] for the always-defined
+    /// ℤ-preserving form `ℓ·self = quotient·divisor + remainder`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `divisor` is the zero polynomial.
+    #[must_use]
+    pub fn div_rem(&self, divisor: &Self) -> Option<(Self, Self)> {
+        assert!(!divisor.is_zero(), "division by the zero polynomial");
+        let divisor_degree = divisor.degree().expect("non-zero divisor has a degree");
+        if self.degree().is_none_or(|d| d < divisor_degree) {
+            // Nothing to divide: self = 0·divisor + self.
+            return Some((Self::zero(), self.clone()));
+        }
+        let self_degree = self.degree().expect("degree checked above");
+        let lc = divisor.leading_coefficient();
+        let mut remainder = self.clone();
+        let mut quotient = vec![BigInt::zero(); self_degree - divisor_degree + 1];
+        // Cancel the remainder's leading term each step, dividing exactly by
+        // the divisor's leading coefficient; a step that does not divide has
+        // no integer quotient, so the whole division fails.
+        while let Some(rem_degree) = remainder.degree() {
+            if rem_degree < divisor_degree {
+                break;
+            }
+            let rem_lc = remainder.leading_coefficient();
+            // rem_lc must be an exact multiple of lc (divisibility is a
+            // magnitude property; sign is carried by div_exact).
+            if !rem_lc.magnitude().div_rem(lc.magnitude()).1.is_zero() {
+                return None;
+            }
+            let q_coeff = rem_lc.div_exact(&lc);
+            let shift = rem_degree - divisor_degree;
+            // remainder ← remainder − q_coeff·xˢʰⁱᶠᵗ·divisor
+            let subtrahend = divisor.shift_up(shift).scale(&q_coeff);
+            remainder = remainder.sub(&subtrahend);
+            quotient[shift] = q_coeff;
+        }
+        Some((Self::new(quotient), remainder))
+    }
+
     /// `self · x^shift` — shift coefficients up.
     fn shift_up(&self, shift: usize) -> Self {
         if self.is_zero() || shift == 0 {
@@ -1102,6 +1148,72 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn poly_z_exact_division_worked_cases() {
+        // (x^2 + 3x + 2) = (x + 1)(x + 2): exact, zero remainder.
+        let a = PolyZ::from_i64_slice(&[2, 3, 1]);
+        let b = PolyZ::from_i64_slice(&[1, 1]); // x + 1
+        let (q, r) = a.div_rem(&b).expect("exact division");
+        assert_eq!(q, PolyZ::from_i64_slice(&[2, 1])); // x + 2
+        assert!(r.is_zero());
+        // (x^2 + 1) / (x + 1) = (x - 1) remainder 2 — monic divisor, always Some.
+        let a = PolyZ::from_i64_slice(&[1, 0, 1]);
+        let (q, r) = a.div_rem(&b).expect("monic divisor divides");
+        assert_eq!(q, PolyZ::from_i64_slice(&[-1, 1])); // x - 1
+        assert_eq!(r, PolyZ::from_i64_slice(&[2]));
+        // 2x + 1 has leading coefficient 2, which does not divide 1: no ℤ
+        // quotient for x^2 + 1.
+        let two_x_plus_one = PolyZ::from_i64_slice(&[1, 2]);
+        assert_eq!(
+            PolyZ::from_i64_slice(&[1, 0, 1]).div_rem(&two_x_plus_one),
+            None
+        );
+        // Dividend of smaller degree: quotient 0, remainder the dividend.
+        let (q, r) = b.div_rem(&a).expect("smaller dividend");
+        assert!(q.is_zero());
+        assert_eq!(r, b);
+    }
+
+    #[test]
+    #[should_panic(expected = "zero polynomial")]
+    fn poly_z_div_rem_panics_on_zero_divisor() {
+        let _ = PolyZ::from_i64_slice(&[1, 2, 3]).div_rem(&PolyZ::zero());
+    }
+
+    #[test]
+    fn poly_z_div_rem_identity_and_agrees_with_pseudo_on_monic() {
+        let mut rng = SplitMix64 {
+            state: 0x0d1f_0000_0001,
+        };
+        for _ in 0..1000 {
+            let a = rng.poly_z(8, 12);
+            let b = rng.poly_z(5, 12);
+            // When exact division exists, the identity must hold with a
+            // remainder of lower degree.
+            if !b.is_zero() {
+                if let Some((q, r)) = a.div_rem(&b) {
+                    assert_eq!(q.mul(&b).add(&r), a, "exact division identity");
+                    if let (Some(dr), Some(db)) = (r.degree(), b.degree()) {
+                        assert!(dr < db, "remainder degree");
+                    }
+                }
+            }
+            // A monic divisor always divides over ℤ, and there exact division
+            // coincides with pseudo-division (ℓ = 1). The two are separate
+            // code paths, so agreement cross-checks both.
+            let deg = 1 + (rng.next_u64() % 4) as usize;
+            let mut coeffs: Vec<i64> = (0..deg).map(|_| (rng.next_u64() % 13) as i64 - 6).collect();
+            coeffs.push(1); // monic leading coefficient
+            let monic = PolyZ::from_i64_slice(&coeffs);
+            let exact = a.div_rem(&monic).expect("monic divisor divides");
+            let pseudo = a.pseudo_div_rem(&monic);
+            assert_eq!(
+                exact, pseudo,
+                "monic: exact division equals pseudo-division"
+            );
         }
     }
 

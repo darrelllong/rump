@@ -600,6 +600,16 @@ fn manual_polynomials() {
     let b = PolyZ::from_i64_slice(&[2, 1]); // x + 2
     assert_eq!(a.mul(&b), PolyZ::from_i64_slice(&[2, 3, 1]));
 
+    // Exact division over ℤ: (x^2 + 3x + 2) / (x + 1) = x + 2, no remainder.
+    let (q, r) = a.mul(&b).div_rem(&a).expect("x + 1 divides");
+    assert_eq!(q, b); // x + 2
+    assert!(r.is_zero());
+    // A leading coefficient that does not divide has no integer quotient.
+    assert_eq!(
+        PolyZ::from_i64_slice(&[1, 0, 1]).div_rem(&PolyZ::from_i64_slice(&[1, 2])),
+        None
+    );
+
     // Evaluation and derivative.
     assert_eq!(
         a.mul(&b).evaluate(&BigInt::from_i64(3)),
