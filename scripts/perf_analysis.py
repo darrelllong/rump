@@ -173,15 +173,22 @@ PALETTE = ["#A64E28", "#3D648A", "#2E7D4F", "#A97416", "#6D4C91", "#8A8378"]
 PLOT_FAMILIES = {"gcd-at-scale": ["gcd", "gcdext", "modinv", "jacobi"]}
 
 # Per-family override of the operations a *scaling line plot* should draw,
-# where that differs from the table's family. The raw `sqrtmod` and `isprime`
-# are heavy-tail mixtures whose MEAN does not scale: a rare slow population
-# (the 2-adic descent; composites that survive the sieve) dominates the mean,
-# and undersampling that tail makes it sawtooth from size to size — e.g. the
-# 7168-bit sqrtmod mean is 22 ms while its own p50 and p99 are both ~0.12 ms.
-# A scaling line through such a mean is meaningless. The plot therefore draws
-# the conditioned single-population series, which are genuine scaling curves;
-# the raw mixture's spread lives in the extrema table (min/p50/p99/max), not
-# as a line.
+# where that differs from the table's family.
+#
+# The raw `sqrtmod` and `isprime` are heavy-tail mixtures. Their mean is a
+# perfectly well-defined quantity — the average cost over random inputs — and it
+# does grow with size; the problem is estimating it. A rare expensive population
+# (the 2-adic descent; composites surviving the sieve) carries most of the mean's
+# mass, so pinning it takes hundreds of readings, and at the wide sizes the
+# session collects a handful: generating each trial's random prime costs far more
+# than the operation timed. A line through means estimated from single-digit
+# samples plots sampling noise, not scaling.
+#
+# The plot therefore draws the conditioned single-population series, whose cost
+# is nearly deterministic at each size and whose means converge in a few
+# readings. The mixtures' behaviour belongs in the extrema table, where the
+# reading count and the min/p50/p99/max spread state plainly how well each cell
+# is known. Restore them here once their samples clear the reduction's floor.
 SCALING_PLOT_OPS = {
     "variable-time": ["sqrtmod_blum", "sqrtmod_descent", "isprime_true"],
 }
