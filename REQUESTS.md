@@ -1,7 +1,7 @@
 # REQUESTS
 
-Primitives the [factoring](https://github.com/darrelllong/factoring) consumer
-wants from rump. Everything here is a general `BigUint`/`BigInt` operation, or
+Primitives the `factoring` consumer (hosted alongside this on the Forgejo at
+`sequoia`) wants from rump. Everything here is a general `BigUint`/`BigInt` operation, or
 general algebra over one — nothing that knows it is looking for factors.
 Trial division, Pollard's rho, the Knuth–Schroeppel multiplier, sieving,
 smoothness testing against a factor base: those stay downstream and are not
@@ -11,8 +11,9 @@ Each entry says what it is wanted for, and what the consumer does today
 instead. Ordering is by how much the workaround costs, not by how much work
 the primitive would be.
 
-Written 2026-08-14, against rump 0.2.0, after implementing Pollard's rho and
-the classical quadratic sieve.
+Written 2026-08-14 against rump 0.2.0, after implementing Pollard's rho and
+the classical quadratic sieve; revised the same day against 0.2.1, while
+starting the number field sieve.
 
 ---
 
@@ -22,142 +23,58 @@ These already exist in the consumer as private helpers. Each is small, each is
 plainly rump's kind of thing, and each is a place where two crates can now
 disagree about the same arithmetic.
 
-### 1. `BigUint::div_rem_u64` (and `to_u64`)
+### 0. `BigInt` signed arithmetic: `mul_ref`, `div_rem`, `abs`
 
-The quadratic sieve's confirmation step divides a candidate by factor base
-primes until it is one. The primes are `u64`; the candidate is not. Today:
-
-```rust
-let divisor = BigUint::from_u64(prime);      // heap allocation, per prime,
-loop {                                        // per candidate
-    let (quotient, remainder) = magnitude.div_rem(&divisor);
-    if !remainder.is_zero() { break; }
-    magnitude = quotient;
-}
-```
-
-`rem_u64` exists and avoids the allocation, but only answers *whether* the
-prime divides — recovering the quotient still needs the `BigUint` round trip.
-A `div_rem_u64(&self, u64) -> (Self, u64)` would remove an allocation from
-what is, measurably, the hottest non-sieve loop in the program. `remove_factor`
-already does the ladder for the multi-precision case; the word-sized case is
-the one the sieve actually wants.
-
-Related, and smaller: `to_u64(&self) -> Option<u64>`, returning `None` when the
-value does not fit. The consumer writes `value.low_u128() as u64` in a dozen
-places, each of which is a silent truncation if the assumption behind it is
-ever wrong. `low_u128` is the right primitive for range-pinned callers; this is
-the one for callers who want the assumption checked.
-
-### 2. `primes_below(bound) -> Vec<u64>`
-
-A sieve of Eratosthenes. The consumer has now written it twice — once for
-trial division, once for the factor base — and they are the same twenty lines.
-Generating small primes is number theory, not factoring: `is_probable_prime`
-already lives here, and this is the bulk companion to it.
-
-A segmented or iterator form would be better than a `Vec` for large bounds,
-but the `Vec` form is what is actually needed today.
-
-### 3. `sqrt_mod` for prime powers
-
-`sqrt_mod` handles a prime modulus. Sieving needs roots modulo `p^e`, so that a
-value divisible by `p³` can be credited three times rather than once. The
-consumer implements Hensel's lift itself:
+**Blocking for GNFS.** `BigInt` is a `Sign` joined to a `BigUint`, and the
+public surface can add, subtract, negate, compare, and scale by an *unsigned*
+factor — but it cannot multiply two signed values, divide, or take an absolute
+value:
 
 ```rust
-// src/qs/base.rs — Newton's correction over the p-adics
-fn hensel_lift(root: u64, kn: &BigUint, prime: u64, modulus: u64, next: u64) -> Option<u64>
+let a = BigInt::from_i64(-6);
+let b = BigInt::from_i64(7);
+a.mul_ref(&b);   // error[E0624]: method `mul_ref` is private
+a.div_rem(&b);   // error[E0599]: no method named `div_rem`
+a.abs();         // error[E0599]: no method named `abs`
 ```
 
-The lift is generic — it has nothing to do with sieving — and the awkward
-cases (`p = 2`, where the count of solutions goes 1, 2, 4 as `e` passes 1, 2,
-3, and only when `a ≡ 1 mod 8`) are exactly the ones a library should own
-rather than each caller. Suggested shape:
+`mul_ref` already exists and is already correct — `PolyZ::mul` and
+`PolyZ::scale` call it — it is simply not `pub`. Making it public costs
+nothing and removes the largest of the three duplications.
+
+`div_rem` and `abs` are the other two. The number field sieve needs them
+constantly and in places where getting the sign convention wrong is a silent
+wrong answer rather than a crash:
+
+- **Balanced base-`m` expansion.** Polynomial selection writes `n` in base `m`
+  with coefficients reduced into `(−m/2, m/2]`, which is a signed division per
+  coefficient. Balanced rather than least-non-negative coefficients are the
+  whole point: they roughly halve the size of the norms the sieve then has to
+  find smooth.
+- **Symmetric lifting.** The algebraic square root recovers a result modulo
+  `q^k` and must map it back to the symmetric range `(−q^k/2, q^k/2]`. Same
+  operation, and the step where an off-by-one in the sign convention produces
+  a plausible wrong `β` rather than an error.
+- **Coefficient bounds.** Deciding how far to Hensel-lift means comparing
+  `|coefficient|` against a bound, which wants `abs` and the `Ord` that
+  `BigInt` already has.
+
+Suggested shapes, matching the `BigUint` originals:
 
 ```rust
-pub fn sqrt_mod_prime_power(a: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint>
+pub fn mul_ref(&self, other: &Self) -> Self;          // just make the existing one pub
+pub fn div_rem(&self, divisor: &Self) -> (Self, Self); // truncated, remainder takes the dividend's sign
+pub fn abs(&self) -> BigUint;                          // or -> Self; either is usable
 ```
 
-returning every solution, empty when there is none.
+For `div_rem`, please document which convention it takes — truncated toward
+zero (C, Rust `/`) or floored (Python). Either is fine; the consumer needs to
+know which, because `modulo_positive` already exists and implies the floored
+one is available somewhere.
 
-### 4. A floating-point size estimate
-
-Parameter selection wants `ln n` as an `f64`: the quadratic sieve's smoothness
-bound is `exp(½√(ln n · ln ln n))`, and every tuning heuristic in the
-literature is written in those terms. The consumer currently sizes everything
-off `to_str_radix(10).len()` and a lookup table, which is a decimal-digit proxy
-for a natural logarithm.
-
-`ln_approx(&self) -> f64`, or `to_f64_lossy(&self) -> f64` saturating to
-infinity, would let the heuristics be written the way they are stated.
-
----
-
-## Tier 2 — would change what is possible, not just how it is written
-
-### 5. Batch smoothness testing (product and remainder trees)
-
-Bernstein's *How to find smooth parts of integers*: to test many numbers for
-smoothness over a fixed set of primes, form the product `P` of the primes by a
-product tree, then reduce it against the candidates by a remainder tree, then
-take gcds. It replaces per-candidate trial division with one pass whose cost is
-near-linear in the total input size.
-
-This is the standard way a modern sieve handles cofactors, and it is pure
-`BigUint` — a product tree and a remainder tree, no notion of what the numbers
-mean. Suggested shape:
-
-```rust
-pub fn product_tree(values: &[BigUint]) -> Vec<Vec<BigUint>>;
-pub fn remainder_tree(tree: &[Vec<BigUint>], modulus: &BigUint) -> Vec<BigUint>;
-pub fn smooth_parts(values: &[BigUint], primes: &[u64]) -> Vec<BigUint>;
-```
-
-The first two are the general primitives; the third is the convenience built
-from them. The consumer would use all three.
-
----
-
-## Tier 3 — the general number field sieve needs these
-
-Not needed for the quadratic sieve, which is where the consumer is now.
-Recorded because they are long-lead items and because the answer to "should
-rump do polynomials?" is yes, and this is why.
-
-### 6. Polynomials over `ℤ` and over `ℤ/mℤ`
-
-GNFS is built on a degree-5 or -6 polynomial over `ℤ` and its behaviour modulo
-small primes. Nothing in it is factoring-specific — it is the polynomial
-algebra any computer-algebra layer provides, and rump already contains a
-special case of it in `Gf2m`, which is polynomial arithmetic over `GF(2)` with
-a fixed modulus and a bit-packed representation.
-
-What GNFS actually reaches for:
-
-- `Poly<BigInt>`: add, sub, mul, `div_rem`, pseudo-division, evaluation and
-  Horner, derivative, content and primitive part.
-- **Resultant** and **discriminant**. The norm `N(a − αb) = b^d f(a/b)` is the
-  homogeneous form, and the resultant is how the algebraic side is computed at
-  all. This is the single most important entry in this section.
-- Over `𝔽_p`: squarefree decomposition, irreducibility testing, factorization
-  (Cantor–Zassenhaus or Berlekamp), and **root finding** — the algebraic factor
-  base is exactly the set of roots of `f` modulo each small prime.
-
-A `Poly<T>` generic over a coefficient ring is the ambitious version; concrete
-`PolyZ` and `PolyModP` types would be enough and would fit the crate's existing
-style, which prefers a named type with a documented representation over a
-tower of traits.
-
-### 7. LLL lattice reduction
-
-Polynomial selection searches a lattice, and the final square root step uses
-reduction as well. `lll_reduce(basis: &mut [Vec<BigInt>])` over `ℤ`, with the
-usual `δ = 3/4` and a settable parameter.
-
-LLL is general — it is used for far more than factoring — and it is the kind of
-algorithm that is worth having exactly once, implemented carefully, rather than
-badly in each consumer.
+Until these land the consumer carries `src/gnfs/arith.rs`, which reimplements
+all three from `sign()` and `magnitude()` — the exact duplication this file
+exists to retire.
 
 ---
 
@@ -166,35 +83,46 @@ badly in each consumer.
 For the record, so the boundary stays where it is:
 
 - Sieving, factor bases, smoothness bounds, the Knuth–Schroeppel multiplier,
-  Brent's cycle detection, linear algebra over `GF(2)` sized for relation
-  matrices — all of these know they are factoring, and all of them stay in the
-  consumer.
-- Elliptic curves. ECM is the obvious gap between rho and the sieve, but the
+  Brent's cycle detection, `GF(2)` linear algebra sized for relation matrices,
+  base-`m` polynomial selection, the algebraic square root — all of these know
+  they are factoring, and all of them stay in the consumer.
+- Elliptic curves. ECM is the obvious gap between rho and the sieves, but the
   curve arithmetic it needs is Montgomery-form `x`-only ladders chosen for
-  factoring's failure mode (a curve operation that fails *is* the factor), not
-  general-purpose EC. That belongs downstream too.
+  factoring's failure mode — a curve operation that *fails* is the factor —
+  not general-purpose EC. That belongs downstream too.
 
 ---
 
 ## Delivered
 
-Kept as a record of what the list has already produced, so the boundary that
-worked stays visible.
+rump 0.2.1 closed every other entry this file has ever carried. Kept as a
+record, so the boundary that worked stays visible.
 
-- **All of Tiers 1 and 2** (9ec0872) — items 1 through 5 above.
-  `BigUint::div_rem_u64` / `to_u64`, `primes_below`,
-  `sqrt_mod_prime_power` (every root mod `p^e`: quadratic Hensel for odd
-  `p`, the mod-8 dyadic structure, valuation reduction for `p | a`),
-  `BigUint::to_f64_lossy` / `ln_approx`, and Bernstein's `product_tree` /
-  `remainder_tree` / `smooth_parts`. The signatures are as requested;
-  `sqrt_mod_prime_power`'s returned set is `p^⌊v/2⌋` roots when `p^v ∥ a`,
-  so beware calling it with `a` divisible by a large base prime.
+**0.2.1 — the whole outstanding list.**
 
-- **`MontgomeryCtx::add_mont` / `sub_mont`, `BigUint::mod_add` / `mod_sub`**
-  (93b4d57). Pollard's rho iterates `x ↦ x² + c` inside the Montgomery domain,
-  and the `+ c` was a hand-written conditional subtraction downstream, correct
-  only under a reduced-operand precondition living in a comment. It is now one
-  call, with the precondition debug-checked where it belongs:
+- `primes_below` (was #2). The consumer had written a sieve of Eratosthenes
+  twice; both are gone.
+- `sqrt_mod_prime_power` (was #3). The quadratic sieve's factor base carried
+  its own Hensel lift for roots modulo `p^e`.
+- `BigUint::div_rem_u64` and `to_u64` (was #1), and `ln_approx` /
+  `to_f64_lossy` (was #4). The first removes an allocation from the sieve's
+  hottest confirmation loop; the second lets parameter heuristics be written
+  as the literature states them instead of off a decimal-digit proxy.
+- `product_tree`, `remainder_tree`, `smooth_parts` (was #5) — batch smoothness
+  by Bernstein's method.
+- `PolyZ` and `PolyModP` (was #6), with `resultant`, `discriminant`,
+  `squarefree_factorization`, `is_irreducible`, `factor`, and `roots`. This is
+  what makes the number field sieve possible at all: `resultant` is the
+  algebraic norm, and `roots` modulo a small prime *is* the algebraic factor
+  base.
+- `lll_reduce` and `lll_reduce_delta` (was #7).
+
+**0.2.0 and 93b4d57 — the earlier round.**
+
+- `MontgomeryCtx::add_mont` / `sub_mont`, `BigUint::mod_add` / `mod_sub`.
+  Pollard's rho iterates `x ↦ x² + c` inside the Montgomery domain, and the
+  `+ c` was a hand-written conditional subtraction downstream, correct only
+  under a reduced-operand precondition living in a comment. Now one call:
 
   ```rust
   fn next(ctx: &MontgomeryCtx, y: &BigUint, c: &BigUint) -> BigUint {
@@ -202,26 +130,10 @@ worked stays visible.
   }
   ```
 
-- **Decimal and radix conversion** — `from_str_radix`, `to_str_radix`,
-  `Display`, `FromStr` (0.2.0). Factoring is a decimal-facing activity and the
-  consumer had written a chunked converter of its own; it was deleted the day
-  0.2.0 landed.
-
-- **`is_probable_prime_bpsw`, `remove_factor`, `nth_root_floor`, `is_square`,
-  `sqrt_rem`** (0.2.0). All four are load-bearing in the factoring driver:
-  BPSW terminates the recursion, `remove_factor` is trial division's inner
-  loop, and the roots are what intercept perfect powers before the search
-  wastes a run on them.
-
-- **All of Tier 3** — items 6 and 7 above. `PolyZ` (over ℤ): `add` / `sub` /
-  `mul`, `evaluate` (Horner), `derivative`, `content` / `primitive_part`,
-  `div_rem` (exact division over ℤ, `None` when the divisor's leading
-  coefficient does not divide evenly — always defined for a monic divisor) and
-  `pseudo_div_rem` (the ℤ-preserving form the resultant path uses),
-  `resultant` and `discriminant` (fraction-free Bareiss over the Sylvester
-  matrix). `PolyModP` (over 𝔽_p): `add` / `sub` / `mul`, `div_rem` / `rem` /
-  `gcd` / `make_monic` / `pow_mod`, `squarefree_factorization`,
-  `is_irreducible`, `factor` (squarefree → distinct-degree →
-  Cantor–Zassenhaus), and `roots`. `lll_reduce` / `lll_reduce_delta` (integral
-  LLL over ℤ, default δ = 3/4, settable). Every algorithm carries its
-  primary-source citation; see CITATIONS.md.
+- Decimal and radix conversion — `from_str_radix`, `to_str_radix`, `Display`,
+  `FromStr`. Factoring is a decimal-facing activity and the consumer had a
+  chunked converter of its own; it was deleted the day 0.2.0 landed.
+- `is_probable_prime_bpsw`, `remove_factor`, `nth_root_floor`, `is_square`,
+  `sqrt_rem`. All load-bearing in the factoring driver: BPSW terminates the
+  recursion, `remove_factor` is trial division's inner loop, and the roots
+  intercept perfect powers before the search wastes a run on them.
