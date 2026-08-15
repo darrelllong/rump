@@ -1441,21 +1441,28 @@ fn sqrt_mod_descent(
         }
     }
 
+    // Run the descent in the Montgomery domain: use square_mont / mul_mont
+    // throughout — no encode/decode per round — and decode only the final root.
+    // Montgomery form is canonical, so the `!= 1` tests compare encoded values
+    // directly. `pow` returns an ordinary residue, so encode the three seeds
+    // (c, t, r) once to enter the domain.
+    let one_mont = ctx.encode(&one);
+
     let mut m = s;
-    let mut c = ctx.pow(&z, q);
-    let mut t = ctx.pow(a, q);
+    let mut c = ctx.encode(&ctx.pow(&z, q));
+    let mut t = ctx.encode(&ctx.pow(a, q));
     let mut r = {
         let mut half = q.add_ref(&one);
         half.shr1();
-        ctx.pow(a, &half)
+        ctx.encode(&ctx.pow(a, &half))
     };
 
-    while t != one {
+    while t != one_mont {
         // Least i with t^(2^i) = 1; it exists below m while p is prime.
         let mut i = 0usize;
         let mut probe = t.clone();
-        while probe != one && i < m {
-            probe = ctx.square(&probe);
+        while probe != one_mont && i < m {
+            probe = ctx.square_mont(&probe);
             i += 1;
         }
         if i == m {
@@ -1466,14 +1473,14 @@ fn sqrt_mod_descent(
 
         let mut b = c;
         for _ in 0..(m - i - 1) {
-            b = ctx.square(&b);
+            b = ctx.square_mont(&b);
         }
         m = i;
-        c = ctx.square(&b);
-        t = ctx.mul(&t, &c);
-        r = ctx.mul(&r, &b);
+        c = ctx.square_mont(&b);
+        t = ctx.mul_mont(&t, &c);
+        r = ctx.mul_mont(&r, &b);
     }
-    Some(r)
+    Some(ctx.decode(&r))
 }
 
 /// Bound on the deterministic non-residue scans in both square-root
@@ -2499,20 +2506,29 @@ fn is_witness(
 ) -> bool {
     let one = BigUint::one();
     let n_minus_one = ctx.modulus().sub_ref(&one);
-    let mut value = ctx.pow(base, odd_factor);
+    // Do the squaring chain in the Montgomery domain: encode the comparison
+    // constants once, and hold `value` in encoded form so each step is a single
+    // `square_mont` rather than the encode/REDC/decode round trip `ctx.square`
+    // would pay per round. Montgomery form is canonical (`x·R mod n` in
+    // `[0, n)`), so equality of encoded values is equality of the residues.
+    // `pow` returns an ordinary residue, so encode its result once to enter the
+    // domain.
+    let one_mont = ctx.encode(&one);
+    let n_minus_one_mont = ctx.encode(&n_minus_one);
+    let mut value = ctx.encode(&ctx.pow(base, odd_factor));
 
     // Miller-Rabin witness test (HAC Algorithm 4.24): a non-trivial square
     // root of 1 proves compositeness, and failing to end at 1 is the usual
     // Fermat backstop.
     for _ in 0..two_adic_exponent {
-        let next = ctx.square(&value);
-        if next == one && value != one && value != n_minus_one {
+        let next = ctx.square_mont(&value);
+        if next == one_mont && value != one_mont && value != n_minus_one_mont {
             return true;
         }
         value = next;
     }
 
-    value != one
+    value != one_mont
 }
 
 /// Every prime below `bound` (exclusive), ascending, by the sieve of
