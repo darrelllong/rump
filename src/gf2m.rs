@@ -438,9 +438,14 @@ impl Gf2m {
     /// `z² + z = c` — the quadratic behind compressed-point decompression on
     /// binary curves. The field degree must be odd (all FIPS 186-4 binary
     /// curve degrees are); on an even degree the half-trace is not a solver of
-    /// `z² + z = c`, so this asserts odd degree in debug builds.
+    /// `z² + z = c`, so calling it there is a programming error and it panics
+    /// rather than return a value that fails its own equation.
     /// [`Self::solve_quadratic`] is the total form that handles every degree
     /// and checks the trace itself.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the field degree is even.
     ///
     /// The input is reduced modulo the field polynomial first, as
     /// [`Self::trace`], [`Self::sqrt`], and [`Self::solve_quadratic`] do, so a
@@ -448,7 +453,7 @@ impl Gf2m {
     /// half-trace as its reduced form.
     #[must_use]
     pub fn half_trace(&self, c: &BigUint) -> BigUint {
-        debug_assert!(
+        assert!(
             self.degree % 2 == 1,
             "half_trace is defined for odd field degree; use solve_quadratic for even degrees"
         );
@@ -734,6 +739,16 @@ mod tests {
             "the representative is genuinely unreduced"
         );
         assert_eq!(field.half_trace(&unreduced), field.half_trace(&c));
+    }
+
+    #[test]
+    #[should_panic(expected = "odd field degree")]
+    fn half_trace_panics_on_even_degree() {
+        // half_trace is not a solver of z² + z = c on an even degree; calling
+        // it there is a programming error and must panic in every build, not
+        // return a value that fails its own equation (review §2.2).
+        let field = gf4(); // GF(2^4), even degree
+        let _ = field.half_trace(&BigUint::from_u64(0b10)); // x
     }
 
     fn splitmix(state: &mut u64) -> u64 {

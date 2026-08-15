@@ -536,7 +536,14 @@ impl PolyModP {
     }
 
     fn check_modulus(&self, other: &Self) {
-        debug_assert_eq!(self.modulus, other.modulus, "operands share a modulus");
+        // A hard assert in every build: the whole point of the type is that the
+        // modulus cannot drift out of step with the coefficients, and a
+        // debug-only check would let a release build silently combine an 𝔽ₚ
+        // element with an 𝔽_q one and tag the result with one of the two moduli.
+        assert_eq!(
+            self.modulus, other.modulus,
+            "PolyModP operands must share a modulus"
+        );
     }
 
     /// `self + other` (mod m).
@@ -870,10 +877,25 @@ impl PolyModP {
         let target = total_degree / d;
         let mut factors = vec![self.make_monic()];
         let two = BigUint::from_u64(2);
+        // Cantor–Zassenhaus is Las Vegas: each draw splits a given pair of
+        // factors with probability ≥ 1/2, so the loop finishes quickly for any
+        // Rng that produces entropy. Bound the consecutive draws that make no
+        // progress so a dead or all-zero Rng fails loudly instead of spinning
+        // forever — 256 fruitless draws has probability ≈ 2⁻²⁵⁶ for a working
+        // source, so this can only fire on a broken one.
+        const MAX_STALLED_DRAWS: usize = 256;
+        let mut stalled = 0usize;
         while factors.len() < target {
+            assert!(
+                stalled < MAX_STALLED_DRAWS,
+                "equal-degree split made no progress in {MAX_STALLED_DRAWS} draws; \
+                 the Rng is not producing entropy"
+            );
+            let before = factors.len();
             // A random splitter of degree < deg self.
             let a = self.random_below_degree(rng);
             if a.is_zero() {
+                stalled += 1;
                 continue;
             }
             // g captures roughly half the factors: over 𝔽₂ by the trace map,
@@ -908,6 +930,11 @@ impl PolyModP {
                 }
             }
             factors = refined;
+            if factors.len() > before {
+                stalled = 0;
+            } else {
+                stalled += 1;
+            }
         }
         factors
     }
@@ -954,14 +981,16 @@ impl PolyModP {
     /// form of `self`. Squarefree decomposition, then distinct-degree, then
     /// the randomized equal-degree split drawn from `rng`. That split is Las
     /// Vegas: it draws until each factor separates, so `rng` must yield
-    /// entropy — a source returning only zero bytes does not terminate.
+    /// entropy. A source that never does (e.g. all-zero bytes) makes no
+    /// progress, and the split panics after a bounded number of fruitless
+    /// draws rather than looping forever.
     ///
     /// # Panics
     ///
-    /// Panics if `self` is constant or zero, or on a non-invertible pivot
-    /// during division. A prime modulus is required (see the type
-    /// documentation); over a composite modulus the result is unspecified
-    /// and may be returned without a panic.
+    /// Panics if `self` is constant or zero, on a non-invertible pivot during
+    /// division, or if `rng` produces no entropy (the split stalls). A prime
+    /// modulus is required (see the type documentation); over a composite
+    /// modulus the result is unspecified and may be returned without a panic.
     #[must_use]
     pub fn factor<R: crate::random::Rng + ?Sized>(&self, rng: &mut R) -> Vec<(Self, usize)> {
         let mut result = Vec::new();
@@ -1658,6 +1687,34 @@ mod tests {
         let c_big = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 1, 0, 1]), &p); // x³+x+1
         assert_eq!(factors[0].0, c_small);
         assert_eq!(factors[1].0, c_big);
+    }
+
+    #[test]
+    #[should_panic(expected = "share a modulus")]
+    fn poly_mod_p_rejects_mixed_moduli() {
+        // Combining an 𝔽₅ element with an 𝔽₇ one must panic in every build, not
+        // silently emit a value tagged with one modulus (review §2.1).
+        let a = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[2]), &BigUint::from_u64(5));
+        let b = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[3]), &BigUint::from_u64(7));
+        let _ = a.add(&b);
+    }
+
+    #[test]
+    #[should_panic(expected = "not producing entropy")]
+    fn factor_with_dead_rng_panics_rather_than_hangs() {
+        // An Rng that never yields entropy cannot drive the equal-degree split;
+        // it must panic after a bounded number of fruitless draws, not loop
+        // forever (review §2.4 / §5.4). x² − 1 = (x−1)(x+1) mod 7 leaves a
+        // degree-1 block of two factors, so the split is actually entered.
+        struct ZeroRng;
+        impl crate::random::Rng for ZeroRng {
+            fn fill_bytes(&mut self, dest: &mut [u8]) {
+                dest.fill(0);
+            }
+        }
+        let p = BigUint::from_u64(7);
+        let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
+        let _ = f.factor(&mut ZeroRng);
     }
 
     #[test]
