@@ -2820,12 +2820,15 @@ pub fn is_probable_prime_with_bases(candidate: &BigUint, bases: &[u64]) -> bool 
 /// `candidate − 1` satisfies the strong test for every modulus and so yields
 /// `false`.
 ///
-/// Note what happens on candidates the round cannot run against: zero, one,
-/// and *every* even value return `true`, `2` included. This is a
-/// compositeness-proof primitive rather than a primality test, and it has no
-/// special case for the one even prime; the probable-prime wrappers reach `2`
-/// through their trial-division screen, which decides the small primes before
-/// any witness is consulted, and direct callers must screen likewise.
+/// Note what happens on candidates no round can run against, since there is no
+/// Montgomery context for them: zero, one, and every even value return `true`
+/// — **except `2`**, which returns `false`. That exception is the contract
+/// rather than a convenience. `true` here is an assertion that the candidate
+/// is *proven composite*, and `2` is prime, so no witness may claim otherwise;
+/// a caller screening its input with this primitive would otherwise discard
+/// the one even prime on the strength of a proof that does not exist. What
+/// `false` does not say, here as everywhere, is that the candidate is prime —
+/// only that this witness proved nothing.
 #[must_use]
 pub fn miller_rabin_witness(candidate: &BigUint, witness: &BigUint) -> bool {
     let Some(ctx) = MontgomeryCtx::new(candidate) else {
@@ -5396,12 +5399,27 @@ mod tests {
         assert!(!miller_rabin_witness(&n341, &BigUint::from_u64(340)));
         assert!(!miller_rabin_witness(&n341, &n341));
 
-        // Even and degenerate candidates are composite by inspection.
-        assert!(miller_rabin_witness(
-            &BigUint::from_u64(100),
-            &BigUint::from_u64(3)
-        ));
-        assert!(miller_rabin_witness(&BigUint::one(), &BigUint::from_u64(3)));
+        // Candidates no round can run against, where the answer comes from
+        // parity and inspection rather than from a witness. Two is the case
+        // worth pinning: it is even, so no Montgomery context exists for it,
+        // and it is prime, so `true` — "proven composite" — would be a false
+        // proof. Every other value here is composite by inspection.
+        for (candidate, proven_composite) in [
+            (0u64, true),
+            (1, true),
+            (2, false),
+            (3, false),
+            (4, true),
+            (100, true),
+        ] {
+            for base in [0u64, 1, 2, 3, 5] {
+                assert_eq!(
+                    miller_rabin_witness(&BigUint::from_u64(candidate), &BigUint::from_u64(base)),
+                    proven_composite,
+                    "candidate {candidate}, witness {base}"
+                );
+            }
+        }
     }
 
     #[test]
