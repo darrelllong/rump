@@ -355,6 +355,25 @@ fn poly_split_dense_enough(
 /// that refuses.
 pub const MAX_ROOT_LEVEL: usize = 1 << 20;
 
+/// Panics unless a level of `current` candidates can absorb `adding` more
+/// without passing [`MAX_ROOT_LEVEL`].
+///
+/// Both push paths go through this, which is the point. An earlier
+/// revision guarded only the branching push, and so enforced
+/// `|next| ≤ MAX_ROOT_LEVEL + |level|` rather than the bound it documented
+/// — a level of one branching root followed by simple ones overran the cap
+/// by one per simple root, and since `|level|` obeys only the same
+/// recurrence the real ceiling was twice the stated one. The check is a
+/// function rather than two `assert!`s so that it can be tested at small
+/// widths, `MAX_ROOT_LEVEL` being far too large to reach in a test.
+fn check_root_level_width(current: usize, adding: u64, limit: usize) {
+    let total = (current as u64).checked_add(adding);
+    assert!(
+        total.is_some_and(|total| total <= limit as u64),
+        "the Hensel lift would widen past {limit} candidates"
+    );
+}
+
 /// The number of non-zero coefficients — one linear pass against the
 /// quadratic work the answer decides.
 fn count_nonzero<T>(coeffs: &[T], is_zero: impl Fn(&T) -> bool) -> usize {
@@ -1125,11 +1144,7 @@ impl PolyZ {
                 if slope.is_zero() {
                     if value.is_zero() {
                         let span = prime.to_u64().unwrap_or(u64::MAX);
-                        assert!(
-                            span <= MAX_ROOT_LEVEL as u64
-                                && next.len() as u64 + span <= MAX_ROOT_LEVEL as u64,
-                            "a branching root would widen the lift past {MAX_ROOT_LEVEL} candidates"
-                        );
+                        check_root_level_width(next.len(), span, MAX_ROOT_LEVEL);
                         for t in 0..span {
                             next.push(r.add_ref(&BigUint::from_u64(t).mul_ref(&modulus)));
                         }
@@ -1143,6 +1158,7 @@ impl PolyZ {
                         .expect("a non-zero residue is invertible modulo a prime");
                     let negated = BigUint::mod_sub(&BigUint::zero(), &s.modulo(prime), prime);
                     let t = BigUint::mod_mul(&negated, &inverse, prime);
+                    check_root_level_width(next.len(), 1, MAX_ROOT_LEVEL);
                     next.push(r.add_ref(&t.mul_ref(&modulus)));
                 }
             }
@@ -1156,12 +1172,8 @@ impl PolyZ {
                 .pow_u64(content_valuation as u64)
                 .to_u64()
                 .unwrap_or(u64::MAX);
-            assert!(
-                span
-                    .checked_mul(level.len() as u64)
-                    .is_some_and(|total| total <= MAX_ROOT_LEVEL as u64),
-                "a common factor of p^{content_valuation} multiplies the root count past {MAX_ROOT_LEVEL}"
-            );
+            let total = span.saturating_mul(level.len() as u64);
+            check_root_level_width(0, total, MAX_ROOT_LEVEL);
             let mut expanded = Vec::with_capacity(level.len() * span as usize);
             for r in &level {
                 for t in 0..span {
@@ -3303,6 +3315,105 @@ mod tests {
     }
 
     #[test]
+    fn root_level_width_guard_covers_both_push_paths() {
+        // `MAX_ROOT_LEVEL` is far too large to reach in a test, so the
+        // check itself is tested at small widths. Both push paths call it —
+        // an earlier revision guarded only the branching one, which let a
+        // level of one branching root followed by simple ones overrun the
+        // cap by one per simple root.
+        use super::check_root_level_width;
+        check_root_level_width(0, 16, 16);
+        check_root_level_width(15, 1, 16);
+        check_root_level_width(16, 0, 16);
+        // Saturating rather than wrapping: a span that overflows `u64` when
+        // added must be refused, not admitted.
+        assert!(
+            std::panic::catch_unwind(|| check_root_level_width(1, u64::MAX, 16)).is_err(),
+            "an overflowing width must be refused"
+        );
+        assert!(
+            std::panic::catch_unwind(|| check_root_level_width(16, 1, 16)).is_err(),
+            "one past the limit must be refused"
+        );
+        assert!(
+            std::panic::catch_unwind(|| check_root_level_width(0, 17, 16)).is_err(),
+            "a single oversized branch must be refused"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "every residue is a root of the zero polynomial")]
+    fn roots_mod_prime_power_rejects_the_zero_polynomial() {
+        let mut rng = SplitMix64 { state: 3 };
+        let _ = PolyZ::zero().roots_mod_prime_power(&BigUint::from_u64(5), 2, &mut rng);
+    }
+
+    #[test]
+    #[should_panic(expected = "divisible by p^e")]
+    fn roots_mod_prime_power_rejects_a_content_divisible_by_the_whole_power() {
+        // 9x + 9 modulo 3²: every residue is a root, and the subtraction
+        // `exponent - content_valuation` would wrap without this refusal —
+        // release builds have overflow checks off, so the lift would then
+        // run for about 2³² levels.
+        let mut rng = SplitMix64 { state: 5 };
+        let _ = PolyZ::from_i64_slice(&[9, 9]).roots_mod_prime_power(
+            &BigUint::from_u64(3),
+            2,
+            &mut rng,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "widen past")]
+    fn roots_mod_prime_power_refuses_a_branch_too_wide_to_list() {
+        // A 40-bit prime is far below 2⁶⁴, which is what an earlier
+        // revision guarded on; x² branches at every level, so the second
+        // level would hold p candidates.
+        let mut rng = SplitMix64 { state: 7 };
+        let _ = PolyZ::from_i64_slice(&[0, 0, 1]).roots_mod_prime_power(
+            &BigUint::from_u64(1_099_511_627_791),
+            2,
+            &mut rng,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "widen past")]
+    fn roots_mod_prime_power_guards_the_simple_lift_path_too() {
+        // The scenario that showed the guard was in the wrong place: one
+        // branching root widens the level to just under the cap — passing
+        // its own check, which is made while the level is still short — and
+        // the simple roots after it each add one more. With the check on
+        // the branching push alone the level ran past `MAX_ROOT_LEVEL` by
+        // one per simple root, so the enforced bound was twice the
+        // documented one.
+        //
+        // p = 1048573 is the largest prime below 2²⁰ = MAX_ROOT_LEVEL, so
+        // the double root at 0 branches to within three of the cap and the
+        // four simple roots at 1..4 carry it over. This is the only shape
+        // that reaches the cap at the shipped constant, which is why it is
+        // worth its cost.
+        let mut rng = SplitMix64 { state: 13 };
+        let x = PolyZ::from_i64_slice(&[0, 1]);
+        let mut f = x.mul(&x);
+        for c in 1..=4i64 {
+            f = f.mul(&PolyZ::from_i64_slice(&[-c, 1]));
+        }
+        let _ = f.roots_mod_prime_power(&BigUint::from_u64(1_048_573), 2, &mut rng);
+    }
+
+    #[test]
+    #[should_panic(expected = "widen past")]
+    fn roots_mod_prime_power_refuses_an_expansion_too_wide_to_list() {
+        // Content 2⁴⁰ against exponent 41: one root modulo 2 expands into
+        // 2⁴⁰ residues modulo 2⁴¹.
+        let mut rng = SplitMix64 { state: 11 };
+        let scale = BigInt::from_biguint(BigUint::from_u64(2).pow_u64(40));
+        let f = PolyZ::from_i64_slice(&[1, 1]).scale(&scale);
+        let _ = f.roots_mod_prime_power(&BigUint::from_u64(2), 41, &mut rng);
+    }
+
+    #[test]
     #[should_panic(expected = "positive exponent")]
     fn roots_mod_prime_power_rejects_a_zero_exponent() {
         let mut rng = SplitMix64 { state: 1 };
@@ -4295,12 +4406,18 @@ mod tests {
                 let f = match round % 3 {
                     0 => g.clone(),
                     1 => g.mul(&g),
-                    // A content divisible by p: the root set is the same as
-                    // for `g` at one lower precision, spread back out. This
-                    // is the family an earlier revision refused outright,
-                    // with a panic message asserting — falsely — that every
-                    // residue was a root.
-                    _ => g.scale(&BigInt::from_biguint(prime.clone())),
+                    // A content divisible by p, to a power that varies —
+                    // scaling by `p` alone only ever reaches valuation one,
+                    // and the deep-stripping path where `pᵛ` is a real power
+                    // and the expansion actually multiplies the root count
+                    // is the part worth exercising. This is the family an
+                    // earlier revision refused outright, with a panic
+                    // message asserting — falsely — that every residue was
+                    // a root.
+                    _ => {
+                        let power = 1 + (rng.next_u64() as u32 % e.max(1));
+                        g.scale(&BigInt::from_biguint(prime.pow_u64(u64::from(power))))
+                    }
                 };
                 if f.is_zero() {
                     continue;

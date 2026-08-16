@@ -62,11 +62,11 @@ them remains subject to the joint triage.
    (HAC 14.42/14.44) for either parity: reduce/mul_mod/square_mod/pow_mod.
    The second product is HAC Note 14.45(ii)'s exact half-product as of
    2026-08-17, taken up to a measured 32 kbit: against a plain division
-   `reduce` reads 1.55× at 512 bits, 1.03× at 2048 and 1.30× at 8192, where
-   the full-product version trailed by up to a third at 2–4 kbit. At 256
-   bits the two are close and which wins depends on the modulus — a quarter
-   of sampled pairs favour division, reproducibly — so no figure is quoted
-   there. The half-product is quadratic, so above 32 kbit the
+   `reduce` reads 1.4× at 512 bits, 1.26× at 1024 and 1.31× at 8192, where
+   the full-product version trailed a division by up to a third at 2–4 kbit.
+   At 256, 2048 and 4096 bits the distribution straddles parity — which of
+   the two wins depends on the modulus, reproducibly — so those widths are
+   reported as parity rather than given a figure. The half-product is quadratic, so above 32 kbit the
    dispatched full product wins and is used instead. Note 14.45(i)'s
    approximate *high* half remains open, and would trade exactness for a
    wider correction bound.

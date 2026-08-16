@@ -468,10 +468,11 @@ inside rump itself has since landed: Cipolla's square root now caps
 `sqrt_mod`'s 2-adic tail at its measured dispatch crossover (the extrema
 section below), and Montgomery's batch inversion trades one Lehmer
 inversion for three multiplications per element. Barrett's low half-product (HAC Note 14.45(ii)) has since landed too, worth
-1.4× on `reduce` at 2 kbit and putting it ahead of a plain division at every
-width measured from 512 bits up; at 256 bits the two are close and which wins
-depends on the modulus, so no figure is quoted there. Being quadratic itself,
-the half-product is taken only up to a measured 32 kbit. Squaring gained a kernel
+1.4× on `reduce` at 512 bits, 1.26× at 1024 and 1.31× at 8192, where the
+full-product version trailed a division by up to a third at 2–4 kbit. At 256,
+2048 and 4096 bits the two straddle parity and which wins depends on the
+modulus, so those widths get no figure. Being quadratic itself, the
+half-product is taken only up to a measured 32 kbit. Squaring gained a kernel
 that forms each cross term once, worth 12% at 8 limbs rising toward its
 half-the-products ceiling, and applied between 8 and 448 limbs — outside
 that range squaring is the general multiplication and the saving is zero. The queue's remaining constant-factor candidates —

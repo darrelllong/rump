@@ -71,10 +71,12 @@ const SQR_SCHOOLBOOK_MIN_LIMBS: usize = 8;
 // (`squaring_crossover_timing`, run with `--ignored`), quoting only widths
 // at which `mul_ref` would actually reach Toom-3 — below its own 128-limb
 // threshold that comparison measures a kernel production never calls:
-// across six runs on M4, as ranges rather than single figures, because
-// the spread between runs is wider than the precision a single figure
-// implies: +7–9% at 128 limbs, +14–15% at 160, +36–40% at 192, +3–6% at
-// 256, +19–25% at 384, and −12 to −15% at 512. What carries the threshold
+// as the observed range rather than a single figure, because the spread
+// between runs is wider than the precision a single figure implies. These
+// bound every reading taken across nine runs on M4 — two here and seven in
+// the review that caught the previous, narrower ranges — not a typical
+// one: +6.7 to +10.1% at 128 limbs, +14.0 to +17.5% at 160, +36 to +40% at
+// 192, +3 to +6% at 256, +19 to +25% at 384, and −12 to −15% at 512. What carries the threshold
 // is the sign and its persistence across runs, not any one magnitude. The series is not monotone either, because
 // Toom-3's three-way split lands differently on each width (192 = 3·64
 // divides exactly, 256 does not), so the threshold is the last width the
@@ -3505,21 +3507,34 @@ impl PartialOrd for BigInt {
 /// a high and a low half. The second of the two products needs only its
 /// low `k+1` limbs, and forms only those — the half-product of HAC Note
 /// 14.45(ii), exact rather than approximate, since a partial product at or
-/// above the window cannot influence a limb below it. Measured on M4
-/// against a plain division of the same operands: `reduce` runs 1.55× at
-/// 512 bits, 1.26× at 1024, 1.03× at 2048, 1.01× at 4096 and 1.30× at
-/// 8192, where before the half-product it trailed a division by up to a
-/// third at 2–4 kbit.
+/// above the window cannot influence a limb below it.
 ///
-/// At 256 bits it is deliberately not given a number. The two are close
-/// there and which one wins depends on the modulus: over twenty-four
-/// random modulus/dividend pairs, each timed nine times with the order
-/// alternated, the per-pair medians run from 0.96× to 1.32× and a quarter
-/// of them are below 1.0 — reproducibly so, nine estimates out of nine on
-/// the same pair. Three earlier revisions of this comment each quoted a
-/// single figure (0.96×, then 1.23×), and each was a true reading of an
-/// under-sampled draw. A distribution straddling 1.0 does not have a
-/// headline number.
+/// Measured on M4 against a plain division of the same operands, twelve
+/// random modulus/dividend pairs per width, each timed nine times with the
+/// order alternated, three runs. A figure is quoted only where every
+/// sampled pair falls on the same side of parity; where the distribution
+/// straddles 1.0 the width is named as parity and left without one, since
+/// a headline number there is a report of which draw was taken:
+///
+/// ```text
+///   512 bits   1.4×      12/12 pairs ahead
+///  1024 bits   1.26×     12/12 pairs ahead
+///  2048 bits   parity    per-pair medians 0.98–1.11, 1–2 of 12 behind
+///  4096 bits   parity    per-pair medians 1.00–1.10, 0–1 of 12 behind
+///  8192 bits   1.31×     12/12 pairs ahead
+///   256 bits   parity    per-pair medians 0.96–1.32, a quarter behind
+/// ```
+///
+/// Before the half-product, `reduce` *trailed* a division by up to a third
+/// at 2–4 kbit, so parity there is the gain. The series is not monotone —
+/// the win is large at 512, erodes through 2–4 kbit, and returns at 8192 —
+/// because the division it is measured against has its own crossovers.
+///
+/// This comment has been wrong three times in the same way: 0.96× at 256
+/// bits, then 1.23× at 256 bits, then 1.03× and 1.01× at 2048 and 4096.
+/// Each was a true reading of an under-sampled draw from a distribution
+/// sitting on 1.0. The rule above is the fix; quoting a fourth number
+/// would not be.
 /// The half-product is itself quadratic, so it is taken only up to
 /// `BARRETT_HALF_PRODUCT_MAX_LIMBS` (32 kbit, the measured parity point);
 /// above that the dispatched full product's better exponent wins and the
@@ -3535,6 +3550,12 @@ pub struct BarrettCtx {
     modulus: BigUint,
     mu: BigUint,
     limb_count: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Corrections taken by the last `BarrettCtx::reduce` on this thread.
+    static CORRECTIONS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 impl BarrettCtx {
@@ -3618,7 +3639,25 @@ impl BarrettCtx {
             corrections += 1;
             debug_assert!(corrections <= 2, "HAC Note 14.44 bounds the corrections");
         }
+        #[cfg(test)]
+        CORRECTIONS.with(|cell| cell.set(corrections));
         r
+    }
+
+    /// The correction count of the last [`reduce`](Self::reduce) on this
+    /// thread, for the test that shows HAC Note 14.44's bound of two is
+    /// attained rather than merely respected.
+    ///
+    /// Two corrections happen about once in five hundred reductions and
+    /// only on particular modulus shapes, so a test that does not look at
+    /// the count cannot tell whether it ever reached the bound — and an
+    /// earlier measurement, taken with a counter that tracked a running
+    /// maximum rather than the per-call value, concluded wrongly that two
+    /// was unreachable. The count is observable so that conclusion can be
+    /// checked rather than assumed.
+    #[cfg(test)]
+    pub(crate) fn last_corrections() -> u32 {
+        CORRECTIONS.with(std::cell::Cell::get)
     }
 
     /// `(a + b) mod n` — the additive counterpart of [`Self::mul_mod`], so a
@@ -4805,12 +4844,16 @@ mod tests {
         let cutoff = BARRETT_HALF_PRODUCT_MAX_LIMBS;
         let mut seed = 0x5a11_b0bb_0000_0001;
         for k in [cutoff - 1, cutoff, cutoff + 1, cutoff + 2] {
-            // Four modulus shapes at each width, not one. A random odd
-            // modulus with a full top limb is the easy case; the other
-            // three are the ones that matter. An **even** modulus is what
-            // this type exists for — Montgomery cannot take it, and
-            // `mod_pow` routes it here — and a single-shape test would
-            // never reduce one at width. A top limb of 1 maximizes μ, and
+            // Four modulus shapes at each width, not one. `reduce` itself
+            // is parity-blind — comparisons, shifts, two products and the
+            // correction loop, with nothing that branches on the low bit —
+            // so the even shape is not closing a class of parity defect;
+            // the parity-sensitive code is in `MontgomeryCtx::new` and in
+            // `mod_pow`'s routing, neither of which this test reaches. It
+            // is here because an even modulus is the case this type exists
+            // to serve and ought to be exercised at width somewhere, and
+            // because it is another independent μ. The other two shapes do
+            // carry a specific argument: a top limb of 1 maximizes μ and
             // all-ones maximizes the quotient estimate's error, so between
             // them they stress `q̂` from both ends.
             let mut shapes = Vec::new();
@@ -4856,6 +4899,124 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[ignore = "search for a two-correction witness; run with --ignored"]
+    fn barrett_correction_search() {
+        use super::BarrettCtx;
+        let mut seed = 0x7777_0000_0000_0001;
+        let mut seen = [0usize; 4];
+        let mut witness: Option<(String, String)> = None;
+        for k in 1usize..=4 {
+            let mut shapes: Vec<(String, BigUint)> = Vec::new();
+            for d in [1u64, 3, 5, 7, 9, 17, 33, 65, 257, 1025] {
+                let mut n = BigUint::zero();
+                n.set_bit(64 * (k - 1));
+                shapes.push((format!("b^{}+{d}", k - 1), n.add_ref(&BigUint::from_u64(d))));
+                let mut m = BigUint::zero();
+                m.set_bit(64 * k);
+                shapes.push((format!("b^{k}-{d}"), m.sub_ref(&BigUint::from_u64(d))));
+                shapes.push((format!("b^{k}+{d}"), m.add_ref(&BigUint::from_u64(d))));
+            }
+            for _ in 0..40 {
+                let mut r = seeded_biguint(k, &mut seed);
+                r.set_bit(64 * k - 1);
+                shapes.push(("random".into(), r));
+            }
+            for (label, n) in shapes {
+                if n.bits() < 2 {
+                    continue;
+                }
+                let ctx = BarrettCtx::new(&n).expect("ok");
+                let kk = n.bits().div_ceil(64);
+                let mut top = BigUint::zero();
+                top.set_bit(128 * kk);
+                let top = top.sub_ref(&BigUint::one());
+                for _ in 0..600 {
+                    let x = match seed % 3 {
+                        0 => seeded_biguint(2 * kk, &mut seed).modulo(&top),
+                        1 => top.sub_ref(&seeded_biguint(kk, &mut seed).modulo(&top)),
+                        _ => n.mul_ref(&seeded_biguint(kk, &mut seed)).modulo(&top),
+                    };
+                    assert_eq!(ctx.reduce(&x), x.modulo(&n));
+                    let t = BarrettCtx::last_corrections() as usize;
+                    seen[t.min(3)] += 1;
+                    if t == 2 && witness.is_none() {
+                        witness = Some((
+                            format!("{label} (k={kk}) n={}", n.to_str_radix(16)),
+                            x.to_str_radix(16),
+                        ));
+                    }
+                }
+            }
+        }
+        println!("corrections histogram: {seen:?}");
+        if let Some((n, x)) = &witness {
+            println!("witness modulus: {n}");
+            println!("witness x: {x}");
+        } else {
+            println!("no two-correction witness found");
+        }
+    }
+
+    #[test]
+    fn barrett_correction_bound_is_attained_and_not_exceeded() {
+        // HAC Note 14.44 bounds `q̂`'s shortfall at two, and the reduction
+        // loop carries a `debug_assert` for it. A bound that is never
+        // reached is indistinguishable from a bound that is wrong, so this
+        // demands the tight case exist rather than merely not be exceeded.
+        //
+        // Finding it needs the right shapes. Two corrections are
+        // concentrated on moduli just above a power of the base — `b² + 1`
+        // is the readiest witness — and are missed entirely by a sweep over
+        // random moduli, or by dividends drawn only from near the top of the
+        // range. `barrett_correction_search`, run with `--ignored`, is the
+        // wider sweep this was cut down from: 678 two-correction reductions
+        // in 168 000, and no three-correction reduction at any width.
+        use super::BarrettCtx;
+        let mut seed = 0xc0de_1044_0000_0001;
+        let mut seen = [0usize; 3];
+        for k in 2usize..=4 {
+            let mut shapes = Vec::new();
+            for d in [1u64, 3, 5, 17, 257] {
+                let mut n = BigUint::zero();
+                n.set_bit(64 * (k - 1));
+                shapes.push(n.add_ref(&BigUint::from_u64(d)));
+            }
+            let mut random = seeded_biguint(k, &mut seed);
+            random.set_bit(64 * k - 1);
+            shapes.push(random);
+
+            for n in shapes {
+                if n.bits() < 2 {
+                    continue;
+                }
+                let width = n.bits().div_ceil(64);
+                let ctx = BarrettCtx::new(&n).expect("a modulus of at least 2");
+                let mut top = BigUint::zero();
+                top.set_bit(128 * width);
+                let top = top.sub_ref(&BigUint::one());
+                for step in 0..250u64 {
+                    // Uniform over the accepted range, and multiples of `n`
+                    // near it — the two draws the witnesses come from.
+                    let x = if step % 2 == 0 {
+                        seeded_biguint(2 * width, &mut seed).modulo(&top)
+                    } else {
+                        n.mul_ref(&seeded_biguint(width, &mut seed)).modulo(&top)
+                    };
+                    assert_eq!(ctx.reduce(&x), x.modulo(&n), "k = {k}, step {step}");
+                    let taken = BarrettCtx::last_corrections();
+                    assert!(taken <= 2, "k = {k}: {taken} corrections exceeds the bound");
+                    seen[taken as usize] += 1;
+                }
+            }
+        }
+        assert!(seen[2] > 0, "two corrections never occurred: {seen:?}");
+        assert!(
+            seen[0] > 0 && seen[1] > 0,
+            "the easy cases must occur too: {seen:?}"
+        );
     }
 
     #[test]
