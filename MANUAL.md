@@ -747,16 +747,19 @@ assert_eq!(parts[0], BigUint::from_u64(360));
 assert_eq!(parts[1], BigUint::from_u64(2));
 ```
 
-The batch is built from `product_tree` (the values' pairwise-product tree,
-root equal to their product) and `remainder_tree` (a modulus reduced
-against every leaf in one descent). Both are public for callers who want
-the reductions without the smoothness step; `remainder_tree` panics on a
-zero leaf, which it would divide by.
+The batch is built from `product_tree` (the values' pairwise-product tree)
+and `remainder_tree` (a modulus reduced against every leaf in one descent).
+`product_tree` returns a `ProductTree`, whose levels are private: the
+descent is correct only for the exact shape the constructor produces, so
+construction is the only way to obtain one. Read it back with `root()`,
+`leaves()`, `len()`, `is_empty()`, or `levels()` for the intermediate
+products. `remainder_tree` panics on a zero leaf, which it would divide by.
 
 ```rust
 let values = [BigUint::from_u64(7), BigUint::from_u64(11), BigUint::from_u64(13)];
 let tree = product_tree(&values);
-assert_eq!(tree.last().unwrap()[0], BigUint::from_u64(7 * 11 * 13)); // 1001
+assert_eq!(*tree.root().unwrap(), BigUint::from_u64(7 * 11 * 13)); // 1001
+assert_eq!(tree.len(), 3);
 
 let residues = remainder_tree(&tree, &BigUint::from_u64(100));
 assert_eq!(residues, vec![
@@ -923,6 +926,97 @@ assert_eq!(fs[1].0.degree(), Some(2)); // x^2 + 1
 assert!(fs.iter().all(|(_, e)| *e == 1));
 ```
 
+A further group serves computation in the quotient ring ℤ[x]/(f) with `f`
+monic, and the traffic between ℤ and ℤ/mℤ that such computation involves.
+
+`rem_monic` reduces modulo a monic divisor without forming the quotient.
+Division by a monic polynomial cannot fail, so unlike `div_rem` it returns
+a value rather than an `Option`, and each step is one multiply-subtract
+with no coefficient division at all. `product_mod_monic` multiplies many
+polynomials in ℤ[x]/(f) by a product tree, reducing at every level:
+pairing keeps both operands the same size, which is the shape `mul`'s
+Karatsuba wants, and because reduction is a ring homomorphism the answer
+equals the fold multiplied out and reduced once — at a fraction of the
+cost, since no intermediate is ever allowed to exceed `deg f`.
+
+`PolyModP::symmetric_lift` returns the ℤ[x] representative with
+coefficients in (−m/2, m/2]. That is the lift to use when a modular
+computation was meant to recover an integer answer: a modulus wider than
+twice the height returns the true polynomial exactly, signs and all.
+`PolyModP::with_modulus` re-reads the same coefficient representatives at
+a different modulus. Narrowing (the new modulus divides the old) is the
+ring projection and preserves sums and products; widening (the old divides
+the new) is its canonical section, which preserves only equality — it is
+the seeding step of a Newton lift, not a ring map.
+
+`PolyZ::balanced_base_expansion` writes `n = Σ cₖ mᵏ` with every digit
+below the top in the symmetric range, the representation the number-field
+sieve's polynomial selection wants because it halves `max |cₖ|` at no
+cost. `homogeneous_substitution` evaluates the homogenization
+`F(X, Y) = Yᵈ f(X/Y)` at a pair of polynomials, which is how a norm
+`bᵈ f(a/b)` or a change of coordinates is taken without leaving ℤ[x].
+`roots_mod_prime_power` finds every root modulo `pᵉ` by Hensel lifting
+from the roots modulo `p`, branching where the derivative vanishes.
+
+```rust
+struct Lcg2(u64);
+impl Rng for Lcg2 {
+    fn fill_bytes(&mut self, d: &mut [u8]) {
+        for b in d {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *b = (self.0 >> 33) as u8;
+        }
+    }
+}
+let mut rng = Lcg2(0x2024_1111);
+
+// Reduction modulo the monic x^2 + 1 is a ring homomorphism.
+let f = PolyZ::from_i64_slice(&[1, 0, 1]);
+let a = PolyZ::from_i64_slice(&[3, 2, 5]); // 5x^2 + 2x + 3
+let b = PolyZ::from_i64_slice(&[1, 7]); // 7x + 1
+assert_eq!(
+    a.mul(&b).rem_monic(&f),
+    a.rem_monic(&f).mul(&b.rem_monic(&f)).rem_monic(&f)
+);
+
+// The product tree in Z[x]/(f) agrees with the fold, reduced once.
+let x = PolyZ::from_i64_slice(&[0, 1]);
+let factors = [a.clone(), b.clone(), x.clone()];
+assert_eq!(
+    PolyZ::product_mod_monic(&factors, &f),
+    a.mul(&b).mul(&x).rem_monic(&f)
+);
+
+// Balanced base-1000 expansion of 1234567890: digits in (-500, 500].
+let n = BigInt::from_i64(1_234_567_890);
+let base = BigUint::from_u64(1_000);
+let g = PolyZ::balanced_base_expansion(&n, &base, 3);
+assert_eq!(g, PolyZ::from_i64_slice(&[-110, -432, 235, 1]));
+assert_eq!(g.evaluate(&BigInt::from_i64(1_000)), n); // exact, by construction
+
+// Homogenization of x^2 + 1 at (2x, 3): 3^2·1 + (2x)^2 = 4x^2 + 9.
+assert_eq!(
+    f.homogeneous_substitution(
+        &PolyZ::from_i64_slice(&[0, 2]),
+        &PolyZ::from_i64_slice(&[3])
+    ),
+    PolyZ::from_i64_slice(&[9, 0, 4])
+);
+
+// Square roots of 2 modulo 7^3 = 343, lifted from ±3 modulo 7.
+let sqrt2 = PolyZ::from_i64_slice(&[-2, 0, 1]).roots_mod_prime_power(
+    &BigUint::from_u64(7),
+    3,
+    &mut rng,
+);
+assert_eq!(sqrt2, vec![BigUint::from_u64(108), BigUint::from_u64(235)]);
+assert_eq!(108u64 * 108 % 343, 2);
+
+// A symmetric lift recovers the integer polynomial it came from.
+let wide = BigUint::from_u64(2).pow_u64(96);
+assert_eq!(PolyModP::from_poly_z(&a, &wide).symmetric_lift(), a);
+```
+
 ## Lattice reduction
 
 `lll_reduce` applies the Lenstra–Lenstra–Lovász algorithm to an ordered
@@ -1033,6 +1127,9 @@ recoverable conditions:
 | `PolyModP` division / `gcd` / `factor` | a non-invertible pivot (composite modulus) |
 | `squarefree_factorization` / `factor` | the polynomial is constant or zero |
 | `PolyModP::factor` / `roots` | the supplied `Rng` makes no progress (the equal-degree splitter's stall guard) |
+| `PolyZ::rem_monic` / `product_mod_monic` | the divisor is zero or its leading coefficient is not 1 |
+| `PolyZ::balanced_base_expansion` | the base is below 2 |
+| `PolyZ::roots_mod_prime_power` | the exponent is zero, the base is below 2, the polynomial is zero or has every coefficient divisible by `pᵉ` (every residue is then a root), or the lift would exceed `MAX_ROOT_LEVEL` candidates at some level or in its answer |
 | `lll_reduce` / `lll_reduce_delta` | dependent, ragged, or zero-length rows; the `_delta` form also on `δ ∉ (1/4, 1)` or a zero denominator |
 | `to_be_bytes_padded` | the value needs more than the requested byte length |
 | `MontgomeryCtx::mul_mont` / `square_mont` / their `_with_workspace` forms / `pow_encoded` | given an operand not reduced below the modulus — the shared in-domain contract, asserted in debug builds; in release a grossly over-width operand trips the internal bounds check. `encode` and `decode` instead reduce any representative and never panic on width |

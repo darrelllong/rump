@@ -494,7 +494,8 @@ fn manual_batch_smoothness() {
         BigUint::from_u64(13),
     ];
     let tree = product_tree(&values);
-    assert_eq!(tree.last().unwrap()[0], BigUint::from_u64(7 * 11 * 13)); // 1001
+    assert_eq!(*tree.root().unwrap(), BigUint::from_u64(7 * 11 * 13)); // 1001
+    assert_eq!(tree.len(), 3);
 
     let residues = remainder_tree(&tree, &BigUint::from_u64(100));
     assert_eq!(
@@ -740,4 +741,64 @@ fn manual_lattice() {
     lll_reduce(&mut basis);
     // Reduction returns short vectors spanning the same lattice.
     assert_eq!(basis, vec![row(&[1, 32]), row(&[40, 1])]);
+}
+
+#[test]
+fn manual_polynomials_quotient_rings_and_lifting() {
+    struct Lcg2(u64);
+    impl Rng for Lcg2 {
+        fn fill_bytes(&mut self, d: &mut [u8]) {
+            for b in d {
+                self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+                *b = (self.0 >> 33) as u8;
+            }
+        }
+    }
+    let mut rng = Lcg2(0x2024_1111);
+
+    // Reduction modulo the monic x^2 + 1 is a ring homomorphism.
+    let f = PolyZ::from_i64_slice(&[1, 0, 1]);
+    let a = PolyZ::from_i64_slice(&[3, 2, 5]); // 5x^2 + 2x + 3
+    let b = PolyZ::from_i64_slice(&[1, 7]); // 7x + 1
+    assert_eq!(
+        a.mul(&b).rem_monic(&f),
+        a.rem_monic(&f).mul(&b.rem_monic(&f)).rem_monic(&f)
+    );
+
+    // The product tree in Z[x]/(f) agrees with the fold, reduced once.
+    let x = PolyZ::from_i64_slice(&[0, 1]);
+    let factors = [a.clone(), b.clone(), x.clone()];
+    assert_eq!(
+        PolyZ::product_mod_monic(&factors, &f),
+        a.mul(&b).mul(&x).rem_monic(&f)
+    );
+
+    // Balanced base-1000 expansion of 1234567890: digits in (-500, 500].
+    let n = BigInt::from_i64(1_234_567_890);
+    let base = BigUint::from_u64(1_000);
+    let g = PolyZ::balanced_base_expansion(&n, &base, 3);
+    assert_eq!(g, PolyZ::from_i64_slice(&[-110, -432, 235, 1]));
+    assert_eq!(g.evaluate(&BigInt::from_i64(1_000)), n); // exact, by construction
+
+    // Homogenization of x^2 + 1 at (2x, 3): 3^2·1 + (2x)^2 = 4x^2 + 9.
+    assert_eq!(
+        f.homogeneous_substitution(
+            &PolyZ::from_i64_slice(&[0, 2]),
+            &PolyZ::from_i64_slice(&[3])
+        ),
+        PolyZ::from_i64_slice(&[9, 0, 4])
+    );
+
+    // Square roots of 2 modulo 7^3 = 343, lifted from ±3 modulo 7.
+    let sqrt2 = PolyZ::from_i64_slice(&[-2, 0, 1]).roots_mod_prime_power(
+        &BigUint::from_u64(7),
+        3,
+        &mut rng,
+    );
+    assert_eq!(sqrt2, vec![BigUint::from_u64(108), BigUint::from_u64(235)]);
+    assert_eq!(108u64 * 108 % 343, 2);
+
+    // A symmetric lift recovers the integer polynomial it came from.
+    let wide = BigUint::from_u64(2).pow_u64(96);
+    assert_eq!(PolyModP::from_poly_z(&a, &wide).symmetric_lift(), a);
 }

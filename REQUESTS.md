@@ -99,47 +99,54 @@ ideal — and hand over only the bits.
 
 ---
 
-### Polynomial pieces that ended up downstream
+### Polynomial pieces that ended up downstream — five of six delivered
 
-All of these derive from `PolyZ`/`PolyModP` and none knows it is looking for
-factors. Small individually; listed together because they are one afternoon's
-work in `poly.rs` and they are all things the type arguably should have had.
+Delivered 2026-08-16 in `src/poly.rs`, documented in `MANUAL.md` and
+`manual.tex`, cited in `CITATIONS.md`:
 
 - **Roots modulo a prime power, by Hensel lifting.**
-  `src/gnfs/select.rs:321` (`lifted_valuation`, with `expected_valuation` at
-  :276 as the caller). Counting the roots of `f` modulo `p^k` needs the lift
-  to branch: a root with `f'(r) ≡ 0` fans into `p` roots one level up or into
-  none, and only `f'(r) ≢ 0` gives Hensel's unique lift. Getting this wrong is
-  not academic — the consumer's polynomial score used the unique-lift formula
-  everywhere and was off by 50% at `p = 2` and `p = 5` on ordinary inputs.
-  Companion to the existing `sqrt_mod_prime_power`, which already does exactly
-  this branching for `x² − a`.
+  `PolyZ::roots_mod_prime_power(prime, exponent, rng)`. The branching case is
+  handled as described — `f'(r) ≢ 0 (mod p)` gives the unique lift
+  `t ≡ −s·f'(r)⁻¹`, `f'(r) ≡ 0` gives all `p` lifts or none according to
+  whether `p^{k+1} | f(r)`. Two generalizations beyond the consumer's version:
+  a polynomial whose content is divisible by `p` is *answered* rather than
+  refused (the roots of `f/pᵛ` at precision `e−v`, expanded back), and the
+  width cap is on the candidate count rather than on the prime, with
+  `MAX_ROOT_LEVEL` exported. The consumer's `LIFT_WIDTH` truncation is not
+  reproduced: rump refuses rather than silently returning some of the roots.
+  Verified against exhaustive search over every residue for nine `(p, e)`
+  pairs, including forced-branching cubes and non-primitive polynomials.
 
-- **Reduction modulo a monic polynomial.** `src/gnfs/sqrt.rs:234`. `PolyZ` has
-  `div_rem` and `pseudo_div_rem`; what is wanted is the cheap monic case,
-  which is a ring homomorphism and is what makes the next entry work.
+- **Reduction modulo a monic polynomial.** `PolyZ::rem_monic`. Total, not an
+  `Option` — a monic divisor always divides over ℤ — and it forms no quotient
+  and performs no coefficient division, since the quotient coefficient is the
+  remainder's leading coefficient.
 
-- **Product tree over a quotient ring.** `src/gnfs/sqrt.rs:186`. The product of
-  thousands of polynomials reduced modulo a monic `f` at every level, so no
-  intermediate exceeds `deg f`. Pairing rather than folding is the difference
-  between quadratic and `n log n`, and rump already has the integer analogue in
-  `product_tree`.
+- **Product tree over a quotient ring.** `PolyZ::product_mod_monic`. Pairing,
+  reducing at every level.
 
-- **Square root in `ℤ[x]/(f, q^k)` by Newton lifting.** `src/gnfs/sqrt.rs:283`,
-  with `symmetric_lift` and `widen` beside it. Newton on `β² − δ` with the
-  inverse maintained alongside, doubling the modulus each step, lifting
-  coefficients to the symmetric range. General `p`-adic machinery.
+- **Homogeneous substitution.** `PolyZ::homogeneous_substitution(a, b)`,
+  evaluating `F(X,Y) = Yᵈ f(X/Y)` at a pair of polynomials, with both power
+  ladders built once.
 
-- **Homogeneous substitution.** `src/gnfs/lattice.rs:313`. Composing `f` with a
-  linear change of variables in homogeneous form,
-  `G(x) = Σ cₖ A(x)^k B(x)^{d−k}`. Ordinary polynomial composition.
+- **Balanced base-`m` expansion.** `PolyZ::balanced_base_expansion(n, base,
+  degree)`. Digits below the top in `(−m/2, m/2]`, the top carrying the
+  remainder so the identity is exact for every requested degree. The
+  consumer's `Option` and its monic-degree check were selection *policy* and
+  stayed downstream.
 
-- **Balanced base-`m` expansion.** `src/gnfs/select.rs:393`. Writing an integer
-  in base `m` with digits in `(−m/2, m/2]` and returning the coefficients.
-  Halves the size of every digit; uses the `symmetric_remainder` already
-  delivered. (This file previously listed base-`m` *polynomial selection* as
-  deliberately downstream — the selection policy still is. The expansion
-  itself is just a representation.)
+**Still outstanding: the square root in `ℤ[x]/(f, q^k)` by Newton lifting.**
+Its two building blocks are delivered — `PolyModP::symmetric_lift` and
+`PolyModP::with_modulus`, with a test showing they compose into the lift —
+but the lift itself is not, because the consumer's version is inseparable
+from its stopping rule. `lift_target_bits` and `MAX_LIFTS` decide when a
+failing check becomes a verdict, and they are calibrated on the measured
+`H(β)/H(δ)` ratio of number-field-sieve dependencies. A general version needs
+the caller to name a target precision instead, which is a different signature
+from the one the consumer uses; filing it that way is the next step rather
+than a port. Note also that `with_modulus`'s two divisibility directions
+behave differently — narrowing is the ring projection, widening is only a
+section — which the consumer's `widen` relies on without saying so.
 
 ---
 

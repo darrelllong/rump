@@ -240,7 +240,9 @@ assert_eq!(out, BigUint::from_u64(1_037));
 
 \code{mul\_ref} dispatches on operand size across a ladder of kernels, each
 asymptotically cheaper but with a larger constant, so each engages only past
-its measured crossover; \code{square\_ref} delegates to \code{mul\_ref}.
+its measured crossover. \code{square\_ref} has its own ladder
+(\S\ref{sec:squaring}), since a squaring can form each distinct cross term
+once.
 
 \paragraph{Schoolbook (Knuth, Algorithm M).}
 The base case, $O(mn)$ limb products, used below 32 limbs.
@@ -289,6 +291,32 @@ favors there.
 assert_eq!(a.mul_ref(&b), BigUint::from_u64(37_000));
 assert_eq!(b.square_ref(), BigUint::from_u64(1_369));
 \end{lstlisting}
+
+\subsection{Squaring}
+\label{sec:squaring}
+
+\code{square\_ref} is not \code{mul\_ref(a, a)}: a squaring forms each
+distinct cross term once and doubles it, so
+\begin{equation}
+a^2 \;=\; \sum_i a_i^2 \beta^{2i}
+        \;+\; 2 \sum_{i<j} a_i a_j \beta^{\,i+j},
+\end{equation}
+which is $n(n+1)/2$ limb products against the general multiplication's
+$n^2$ --- a ceiling of half the work, approached as the products come to
+dominate the carry walks. The kernel accumulates the strict upper triangle,
+doubles the whole buffer with one shift (which is what keeps the
+$2a_ia_j$ term from overflowing a \code{u128} accumulator), then adds the
+diagonal; the doubling cannot overflow, since twice the upper triangle is
+at most $a^2 < \beta^{2n}$.
+
+Three regimes, each measured against the kernel it displaces: below 8 limbs
+the passes do not repay themselves and the general multiplication is used;
+from there to the Karatsuba crossover the schoolbook squaring; from there
+to 256 limbs a Karatsuba squaring, whose three sub-products are themselves
+squares, since $z_1 = (a_0+a_1)^2 - a_0^2 - a_1^2$; and at 256 limbs and
+above the Toom kernels win outright and it hands back. End to end the
+saving is 15\% at 8 limbs, 36\% at 16, 27\% at 64, and parity outside the
+specialized range.
 
 \subsection{Division and remainder}
 
@@ -811,9 +839,11 @@ assert_eq!(kronecker(&BigUint::from_u64(5), &BigUint::from_u64(8)), -1);
 \subsection{Modular exponentiation and inverses}
 
 \code{mod\_pow(b, e, n)} computes $b^e \bmod n$ for any $n \ge 1$: through
-the Montgomery ladder when $n$ is odd, and by binary exponentiation with
-direct reductions when $n$ is even (where Montgomery cannot operate ---
-callers with a fixed even modulus should hold a \code{BarrettCtx}).
+the Montgomery ladder when $n$ is odd, and over a \code{BarrettCtx} when
+$n$ is even (where Montgomery cannot operate). Neither route divides per
+step. A caller holding one even modulus across many exponentiations should
+build the \code{BarrettCtx} itself and keep it, since the context costs one
+division to precompute $\mu$, which \code{mod\_pow} pays per call.
 
 \code{mod\_inverse(a, n)} returns $a^{-1} \bmod n$ from the extended
 Euclidean identity: when $\gcd(a, n) = 1$, the cofactor $s$ in
@@ -1028,7 +1058,11 @@ assert_eq!(
 
 \code{product\_tree(values)} builds the pairwise-product tree over its
 leaves --- level 0 the values, each parent the product of its two children,
-the root $\prod_i x_i$. \code{remainder\_tree(tree, z)} reduces $z$ down
+the root $\prod_i x_i$ --- and returns a \code{ProductTree}, whose levels
+are private: the descent below is correct only for the exact shape this
+constructor produces, so construction is the only way to obtain one. Read
+it back with \code{root()}, \code{leaves()}, \code{len()},
+\code{is\_empty()}, or \code{levels()}. \code{remainder\_tree(tree, z)} reduces $z$ down
 the tree, $z \bmod$ each node, reaching $z \bmod x_i$ at every leaf for one
 tree descent instead of $k$ full-width divisions; it panics on a zero leaf,
 which it would divide by.
@@ -1067,7 +1101,8 @@ assert_eq!(parts[1], BigUint::from_u64(2));
 // descent reduces a modulus against every leaf.
 let leaves = [BigUint::from_u64(7), BigUint::from_u64(11), BigUint::from_u64(13)];
 let tree = product_tree(&leaves);
-assert_eq!(tree.last().unwrap()[0], BigUint::from_u64(7 * 11 * 13)); // 1001
+assert_eq!(*tree.root().unwrap(), BigUint::from_u64(7 * 11 * 13)); // 1001
+assert_eq!(tree.len(), 3);
 let residues = remainder_tree(&tree, &BigUint::from_u64(100));
 assert_eq!(residues, vec![
     BigUint::from_u64(100 % 7),
@@ -1186,7 +1221,18 @@ modulus panics on the first non-invertible pivot.
 
 \subsection{Arithmetic over $\Z$}
 
-\code{add}/\code{sub}/\code{mul} (schoolbook convolution),
+\code{add}/\code{sub}/\code{mul} (the coefficient convolution: schoolbook
+below 96 coefficients, Karatsuba above, with two further clauses. The
+crossover is measured over operand \emph{ratios}, not balanced pairs
+alone, because a split at half the longer operand saves almost nothing
+when the shorter one barely reaches past it --- so between 96 and 128
+coefficients only near-balanced pairs split, and above 128 every ratio
+does. And the split is refused to an operand too \emph{sparse} to pay for
+it, since the schoolbook pass skips a zero coefficient's whole inner loop
+and the split's sums destroy that saving; the density a pair must reach is
+computed from the two kernels' own coefficient-product counts and so falls
+as the operands grow, from three quarters at 96 coefficients to under a
+quarter at 2048),
 \code{evaluate} (Horner: fold $\mathit{acc} \gets \mathit{acc} \cdot x +
 c_i$ from the top --- one multiplication and addition per coefficient),
 \code{derivative} (the formal rule $\sum i\,c_i x^{i-1}$),
@@ -1365,6 +1411,146 @@ let h = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[0, 1, 0, 1]), &p);
 let mut fs = h.factor(&mut rng);
 fs.sort_by_key(|(fac, _)| fac.degree());
 assert_eq!(fs.len(), 2);
+\end{lstlisting}
+
+\subsection{Quotient rings, lifting, and base expansions}
+
+Let $f \in \Z[x]$ be monic. Division by $f$ cannot fail over $\Z$, its
+leading coefficient being a unit, so \code{rem\_monic} returns a value
+where \code{div\_rem} must return an \code{Option}, and
+\[
+  \Z[x] \longrightarrow \Z[x]/(f), \qquad g \longmapsto g \bmod f
+\]
+is a ring homomorphism. Monicity also makes each step cheap: the quotient
+coefficient \emph{is} the remainder's leading coefficient, so a step is one
+multiply--subtract across the divisor's window with no coefficient division
+anywhere, and the quotient is never formed. A divisor with $\lc = -1$
+generates the same ideal; negate it and the remainder is unchanged.
+
+\code{product\_mod\_monic} forms $\prod_i g_i$ in $\Z[x]/(f)$ by a product
+tree. A fold multiplies a running product, whose coefficients grow with
+every term, by a fresh small one, so the work at step $k$ is proportional
+to $k$ and the total is quadratic in the number of factors; pairing keeps
+both operands the same size at every level --- the shape \code{mul}'s
+Karatsuba and Toom kernels want --- and the depth is logarithmic.
+Reducing at every level rather than once at the end is sound precisely
+because reduction is a homomorphism, and it is what holds every
+intermediate to degree $\deg f$ instead of letting the degree grow with
+the number of factors.
+
+\code{balanced\_base\_expansion} writes
+\[
+  n = \sum_{k=0}^{d} c_k m^k, \qquad |c_k| \le m/2 \quad (k < d),
+\]
+by the recurrence $c_k = \operatorname{symrem}(r_k, m)$ and
+$r_{k+1} = (r_k - c_k)/m$, the division being exact because
+$r_k \equiv c_k \pmod m$. Only the first $d$ digits are reduced; $c_d$
+carries whatever remains, so the identity is exact for \emph{every}
+requested $d$ and choosing $d$ too small loses no information. Against the
+ordinary expansion with digits in $[0, m)$ this halves $\max_k |c_k|$ at no
+cost, which is why polynomial selection for the number-field sieve uses it:
+there $f(m) = n$ by construction and the norms one needs small are governed
+by the coefficient bound.
+
+\code{homogeneous\_substitution} evaluates the homogenization
+\[
+  F(X, Y) = Y^d f(X/Y) = \sum_{k=0}^{d} c_k X^k Y^{d-k}
+\]
+at a pair of polynomials $(a, b)$ --- the unique degree-$d$ form in two
+variables restricting to $f$ on $Y = 1$. Where \code{evaluate} answers
+``what is $f$ at a point'', this answers ``what does $f$ become under a
+projective change of variables'', and the two agree at $b = 1$. It is the
+form to use whenever the argument is a ratio: an algebraic norm
+$b^d f(a/b)$ is this at constants, and composing a linear change of
+coordinates into $f$ is this at linear $a$ and $b$. Both power ladders are
+built once, so the cost is $2d$ multiplications to build and $d + 1$ to
+combine rather than repeated powering, and zero coefficients are skipped.
+
+\code{roots\_mod\_prime\_power} returns every root of $f$ modulo $p^e$ by
+Hensel lifting. Taylor truncated after one term is exact one level up,
+\[
+  f(r + t p^k) \equiv f(r) + t\,p^k f'(r) \pmod{p^{k+1}},
+\]
+and writing $f(r) = s\,p^k$ --- legitimate because $r$ is a root modulo
+$p^k$ --- the congruence is linear in $t$. Where
+$f'(r) \not\equiv 0 \pmod p$ the coefficient is invertible and there is
+exactly one lift, $t \equiv -s\,f'(r)^{-1}$; where $f'(r) \equiv 0$ the $t$
+term vanishes and the congruence no longer mentions $t$, so either
+$p^{k+1} \mid f(r)$ and all $p$ lifts are roots or none is. The simple case
+is Hensel's lemma (Cohen, \S1.6); the branching case is what a general
+root-finder must add to it, and it is why the number of roots modulo $p^e$
+is not in general the number modulo $p$ --- the multiple roots, those lying
+over primes dividing $\disc f$, are where the tree widens.
+
+Two lifts move between $\Z/m\Z$ and $\Z$. \code{symmetric\_lift} takes each
+coefficient to its representative of least absolute value in $(-m/2, m/2]$:
+\code{coefficients} exposes the canonical representatives in $[0, m)$,
+which is the right normal form for arithmetic and the wrong one for size,
+since a class near $m$ is a small negative number in disguise. A modulus
+wider than twice the height therefore returns the true integer polynomial
+exactly. \code{with\_modulus} re-reads the same representatives at another
+modulus, and the two divisibility directions behave differently. Narrowing
+($m' \mid m$) is the projection $\Z/m\Z \to \Z/m'\Z$, a ring
+homomorphism, so sums and products agree before and after. Widening
+($m \mid m'$) is that projection's canonical section, and a section
+between rings of different size is never additive --- at $m = 7$,
+$m' = 49$, $5 + 4$ widens to $2$ but widens-then-adds to $9$. Only
+equality survives. Widening is nonetheless the operation wanted: it is the
+seeding step of a Newton lift.
+
+\begin{lstlisting}
+struct Lcg2(u64);
+impl Rng for Lcg2 {
+    fn fill_bytes(&mut self, d: &mut [u8]) {
+        for b in d {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *b = (self.0 >> 33) as u8;
+        }
+    }
+}
+let mut rng = Lcg2(0x2024_1111);
+
+// Reduction modulo the monic x^2 + 1 is a ring homomorphism.
+let f = PolyZ::from_i64_slice(&[1, 0, 1]);
+let a = PolyZ::from_i64_slice(&[3, 2, 5]); // 5x^2 + 2x + 3
+let b = PolyZ::from_i64_slice(&[1, 7]);    // 7x + 1
+assert_eq!(
+    a.mul(&b).rem_monic(&f),
+    a.rem_monic(&f).mul(&b.rem_monic(&f)).rem_monic(&f)
+);
+
+// The product tree in Z[x]/(f) agrees with the fold, reduced once.
+let x = PolyZ::from_i64_slice(&[0, 1]);
+let factors = [a.clone(), b.clone(), x.clone()];
+assert_eq!(
+    PolyZ::product_mod_monic(&factors, &f),
+    a.mul(&b).mul(&x).rem_monic(&f)
+);
+
+// Balanced base-1000 expansion of 1234567890: digits in (-500, 500].
+let n = BigInt::from_i64(1_234_567_890);
+let base = BigUint::from_u64(1_000);
+let g = PolyZ::balanced_base_expansion(&n, &base, 3);
+assert_eq!(g, PolyZ::from_i64_slice(&[-110, -432, 235, 1]));
+assert_eq!(g.evaluate(&BigInt::from_i64(1_000)), n);
+
+// Homogenization of x^2 + 1 at (2x, 3): 3^2 + (2x)^2 = 4x^2 + 9.
+assert_eq!(
+    f.homogeneous_substitution(
+        &PolyZ::from_i64_slice(&[0, 2]),
+        &PolyZ::from_i64_slice(&[3])
+    ),
+    PolyZ::from_i64_slice(&[9, 0, 4])
+);
+
+// Square roots of 2 modulo 7^3 = 343, lifted from +-3 modulo 7.
+let sqrt2 = PolyZ::from_i64_slice(&[-2, 0, 1])
+    .roots_mod_prime_power(&BigUint::from_u64(7), 3, &mut rng);
+assert_eq!(sqrt2, vec![BigUint::from_u64(108), BigUint::from_u64(235)]);
+
+// A symmetric lift recovers the integer polynomial it came from.
+let wide = BigUint::from_u64(2).pow_u64(96);
+assert_eq!(PolyModP::from_poly_z(&a, &wide).symmetric_lift(), a);
 \end{lstlisting}
 
 \section{Lattice reduction: \code{lll\_reduce}}
@@ -1558,6 +1744,9 @@ returns \code{Option} instead.
 \code{PolyModP} division / \code{gcd} / \code{factor} & a non-invertible pivot (composite modulus) \\
 \code{squarefree\_factorization} / \code{factor} & the polynomial is constant or zero \\
 \code{factor} / \code{roots} & the supplied \code{Rng} makes no progress (the equal-degree splitter's stall guard) \\
+\code{rem\_monic} / \code{product\_mod\_monic} & the divisor is zero or is not monic \\
+\code{balanced\_base\_expansion} & the base is below 2 \\
+\code{roots\_mod\_prime\_power} & a zero exponent, a base below 2, a polynomial that is zero or has every coefficient divisible by $p^e$, or a lift wider than \code{MAX\_ROOT\_LEVEL} \\
 \code{lll\_reduce} / \code{lll\_reduce\_delta} & dependent rows, ragged or zero-length rows; the \code{\_delta} form also on $\delta \notin (\tfrac14, 1)$ or a zero denominator \\
 samplers (\S\ref{sec:random}) & the generator trips a stall guard (see \S\ref{sec:random} for what each guard can and cannot detect) \\
 \bottomrule

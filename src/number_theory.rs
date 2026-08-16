@@ -18,7 +18,7 @@
 //! caller-supplied generator — since rump chooses no entropy source of its
 //! own.
 
-use crate::bigint::{BigInt, BigUint, MontgomeryCtx, Sign};
+use crate::bigint::{BarrettCtx, BigInt, BigUint, MontgomeryCtx, Sign};
 
 // ─── Divisibility ──────────────────────────────────────────────────────────────
 
@@ -1222,6 +1222,61 @@ fn gcd_extended_lehmer(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
 
 // ─── Batch smoothness (Bernstein) ──────────────────────────────────────────
 
+/// A product tree: the levels of pairwise products over a leaf sequence,
+/// built by [`product_tree`] and consumed by [`remainder_tree`].
+///
+/// The levels are private, and that is the point. [`remainder_tree`]'s
+/// descent is correct only against the exact shape [`product_tree`]
+/// produces — every parent the product of its two children, every level
+/// half the length of the one below it, rounded up — and neither a type
+/// alias for `Vec<Vec<BigUint>>` nor a documented precondition can keep a
+/// caller from handing over something else. A hand-built `[[2, 3], [5]]`
+/// against the modulus 7 returns `[0, 2]` where the leaves demand
+/// `[1, 1]`, and an undersized parent level indexes past the running
+/// remainders — a panic the descent never advertised. Construction is
+/// therefore the only way to obtain one, which establishes the invariant
+/// once instead of trusting it on every call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProductTree {
+    levels: Vec<Vec<BigUint>>,
+}
+
+impl ProductTree {
+    /// The leaves, in the order they were given to [`product_tree`].
+    #[must_use]
+    pub fn leaves(&self) -> &[BigUint] {
+        self.levels.first().map_or(&[], Vec::as_slice)
+    }
+
+    /// The root — the product of every leaf — or `None` for an empty tree,
+    /// which has no product to name.
+    #[must_use]
+    pub fn root(&self) -> Option<&BigUint> {
+        self.levels.last().map(|top| &top[0])
+    }
+
+    /// The number of leaves.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.leaves().len()
+    }
+
+    /// Whether the tree has no leaves.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.levels.is_empty()
+    }
+
+    /// The levels, low to high: index 0 is the leaves, the last holds the
+    /// single root. Exposed for inspection — a caller that wants to see
+    /// the intermediate products — while construction stays the only way
+    /// to build one.
+    #[must_use]
+    pub fn levels(&self) -> &[Vec<BigUint>] {
+        &self.levels
+    }
+}
+
 /// The product tree of `values`: level 0 is the values themselves, each
 /// higher level the pairwise products of the level below, the top level a
 /// single root equal to the product of all of them. An odd node at any
@@ -1236,9 +1291,9 @@ fn gcd_extended_lehmer(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
 /// Reference: Bernstein, *How to find smooth parts of integers* (2004);
 /// the product/remainder tree is the standard fast multiple-reduction.
 #[must_use]
-pub fn product_tree(values: &[BigUint]) -> Vec<Vec<BigUint>> {
+pub fn product_tree(values: &[BigUint]) -> ProductTree {
     if values.is_empty() {
-        return Vec::new();
+        return ProductTree { levels: Vec::new() };
     }
     let mut levels = vec![values.to_vec()];
     while levels.last().expect("non-empty").len() > 1 {
@@ -1255,7 +1310,7 @@ pub fn product_tree(values: &[BigUint]) -> Vec<Vec<BigUint>> {
         }
         levels.push(up);
     }
-    levels
+    ProductTree { levels }
 }
 
 /// `modulus mod vᵢ` for every leaf `vᵢ` of a [`product_tree`], by one
@@ -1269,16 +1324,19 @@ pub fn product_tree(values: &[BigUint]) -> Vec<Vec<BigUint>> {
 ///
 /// Panics if any leaf is zero — reduction divides by it.
 #[must_use]
-pub fn remainder_tree(tree: &[Vec<BigUint>], modulus: &BigUint) -> Vec<BigUint> {
-    let Some(root_level) = tree.last() else {
+pub fn remainder_tree(tree: &ProductTree, modulus: &BigUint) -> Vec<BigUint> {
+    let levels = &tree.levels;
+    let Some(root_level) = levels.last() else {
         return Vec::new();
     };
     // Remainders against the top level.
     let mut remainders: Vec<BigUint> = root_level.iter().map(|v| modulus.modulo(v)).collect();
     // Descend: level index from top−1 down to 0; a node's parent remainder
-    // reduces against the node's own value.
-    for level in (0..tree.len() - 1).rev() {
-        let here = &tree[level];
+    // reduces against the node's own value. Every index below is in range
+    // because the argument is a `ProductTree`, whose only constructor is
+    // `product_tree` — see that type.
+    for level in (0..levels.len() - 1).rev() {
+        let here = &levels[level];
         let mut next = Vec::with_capacity(here.len());
         for (j, value) in here.iter().enumerate() {
             next.push(remainders[j / 2].modulo(value));
@@ -1301,17 +1359,38 @@ pub fn remainder_tree(tree: &[Vec<BigUint>], modulus: &BigUint) -> Vec<BigUint> 
 /// `vᵢ` and `z mod vᵢ` divides `z` and is therefore in the base. One
 /// batched pass replaces per-value trial division (Bernstein, 2004).
 ///
+/// The `primes` are a caller obligation, and one of the two ways to break
+/// it is rejected rather than documented: an entry below two is not a
+/// prime and cannot mean one, so it panics. A *composite* entry is
+/// accepted and behaves predictably — the algorithm depends on the primes
+/// dividing `z`, not on the entries being irreducible, so passing `4`
+/// computes the smooth part over `{2}`. Passing genuine primes is still
+/// the intended use; passing `0` would have made `z` zero and reported
+/// every value fully smooth, which is why that case is now a panic and
+/// not a silent wrong answer.
+///
 /// Trivial values pass through: `0` (divisible by every prime) maps to
 /// `0`, `1` maps to `1`, and neither joins the tree.
+///
+/// # Panics
+///
+/// Panics if any entry of `primes` is below two, and — through
+/// [`remainder_tree`] — if a non-trivial value is zero, which it would
+/// divide by. (A zero *value* is intercepted before the tree; the
+/// remaining zero-divisor path is unreachable from here.)
 #[must_use]
 pub fn smooth_parts(values: &[BigUint], primes: &[u64]) -> Vec<BigUint> {
+    assert!(
+        primes.iter().all(|&p| p >= 2),
+        "every entry of `primes` must be at least two"
+    );
     if values.is_empty() {
         return Vec::new();
     }
     // z = ∏ primes, itself via a product tree for the near-linear cost.
     let prime_values: Vec<BigUint> = primes.iter().map(|&p| BigUint::from_u64(p)).collect();
-    let z = match product_tree(&prime_values).last() {
-        Some(root) => root[0].clone(),
+    let z = match product_tree(&prime_values).root() {
+        Some(root) => root.clone(),
         None => BigUint::one(), // no primes: nothing is smooth beyond 1
     };
 
@@ -2389,12 +2468,16 @@ pub fn kronecker(a: &BigUint, n: &BigUint) -> i8 {
 
 /// `base^exponent mod modulus` by square-and-multiply.
 ///
-/// Dispatches on the modulus parity, because the fast reduction only exists
-/// for odd moduli: an odd modulus runs the exponentiation in a
-/// [`MontgomeryCtx`] (each step a REDC, no division), while an even modulus —
-/// which has no Montgomery form — falls back to a binary square-and-multiply
-/// that reduces with [`BigUint::mod_mul`] at every step. Both yield the same
-/// value; the split is purely which reduction is available.
+/// Dispatches on the modulus parity, because Montgomery's reduction only
+/// exists for odd moduli: an odd modulus runs the exponentiation in a
+/// [`MontgomeryCtx`] (each step a REDC, no division), while an even
+/// modulus — which has no Montgomery form — runs it over a
+/// [`BarrettCtx`], whose reduction is two multiplications and no division
+/// either. Both yield the same value; the split is purely which reduction
+/// is available. A caller holding one even modulus across many
+/// exponentiations should build the [`BarrettCtx`] itself and keep it: the
+/// context costs one division to precompute `μ`, which this function pays
+/// per call.
 ///
 /// # Panics
 ///
@@ -2409,15 +2492,26 @@ pub fn mod_pow(base: &BigUint, exponent: &BigUint, modulus: &BigUint) -> BigUint
         return ctx.pow(base, exponent);
     }
 
-    let mut result = BigUint::one();
-    let mut power = base.modulo(modulus);
-    for bit in 0..exponent.bits() {
-        if exponent.bit(bit) {
-            result = BigUint::mod_mul(&result, &power, modulus);
-        }
-        power = BigUint::mod_mul(&power, &power, modulus);
+    // A zero exponent is answered before any context is built. `μ` costs a
+    // full `b^{2k} ÷ n` division, which for a wide modulus dwarfs the
+    // answer: measured, building it first made `mod_pow(base, 0, n)` 209×
+    // slower at 8192 bits than the empty ladder it replaced.
+    if exponent.is_zero() {
+        return BigUint::one().modulo(modulus);
     }
-    result
+
+    // Even modulus: Montgomery cannot operate, so the ladder runs over a
+    // Barrett context rather than reducing each step by a full division.
+    // That routing is only correct to *prefer* since Barrett's second
+    // product became a half-product — before that, `reduce` trailed a
+    // division by up to a third at 2–4 kbit and this would have been a
+    // pessimization. Measured against the previous ladder on identical
+    // inputs: 1.25× at 256 bits, 1.31× at 512, 1.36× at 1024, 1.12× at
+    // 2048, 1.10× at 4096 — the win shrinks with width, because both the
+    // reduction's and the squaring's advantages do. The context exists for
+    // every modulus at least two, which the checks above have established.
+    let ctx = BarrettCtx::new(modulus).expect("modulus is at least two here");
+    ctx.pow_mod(base, exponent)
 }
 
 /// Multiplicative inverse `a^{-1} mod n`, if it exists (*Handbook of Applied
@@ -4442,15 +4536,51 @@ mod tests {
             for v in &values {
                 product = product.mul_ref(v);
             }
-            assert_eq!(tree.last().unwrap()[0], product, "root is the product");
+            assert_eq!(*tree.root().unwrap(), product, "root is the product");
             // Each leaf remainder equals a direct reduction.
             let batched = remainder_tree(&tree, &modulus);
             for (v, r) in values.iter().zip(&batched) {
                 assert_eq!(*r, modulus.modulo(v), "batched vs direct reduction");
             }
         }
-        assert!(product_tree(&[]).is_empty());
-        assert!(remainder_tree(&[], &BigUint::from_u64(5)).is_empty());
+        let empty = product_tree(&[]);
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+        assert!(empty.root().is_none());
+        assert!(empty.leaves().is_empty());
+        assert!(remainder_tree(&empty, &BigUint::from_u64(5)).is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "every entry of `primes` must be at least two")]
+    fn smooth_parts_rejects_a_non_prime_below_two() {
+        // Zero would make the primes' product zero, and every value would
+        // then report as fully smooth — the silent wrong answer the guard
+        // exists to prevent.
+        let _ = super::smooth_parts(&[BigUint::from_u64(6)], &[0]);
+    }
+
+    #[test]
+    fn product_tree_accessors_describe_the_tree() {
+        let values: Vec<BigUint> = [7u64, 11, 13, 17, 19]
+            .iter()
+            .map(|&v| BigUint::from_u64(v))
+            .collect();
+        let tree = product_tree(&values);
+        assert_eq!(tree.leaves(), values.as_slice());
+        assert_eq!(tree.len(), 5);
+        assert!(!tree.is_empty());
+        assert_eq!(
+            *tree.root().expect("non-empty"),
+            BigUint::from_u64(7 * 11 * 13 * 17 * 19)
+        );
+        // Levels run low to high, halving (rounded up) as they rise.
+        let levels = tree.levels();
+        assert_eq!(levels[0].len(), 5);
+        assert_eq!(levels.last().expect("non-empty").len(), 1);
+        for pair in levels.windows(2) {
+            assert_eq!(pair[1].len(), pair[0].len().div_ceil(2));
+        }
     }
 
     #[test]

@@ -47,6 +47,53 @@ const TOOM4_THRESHOLD_LIMBS: usize = 3072;
 // at 192, and wins 25-35% at 256 rising toward 2x at 512. Set at the first
 // size that wins across every measured ratio.
 const UNBALANCED_THRESHOLD_LIMBS: usize = 256;
+// Width at or above which squaring runs its own kernel rather than the
+// general multiplication. The kernel forms each cross term once, so its
+// ceiling is a saving of (n−1)/2n — half the limb products,
+// asymptotically — but it reaches that ceiling only once the products
+// dominate its three passes and their carry walks.
+//
+// Measured on M4 (`squaring_crossover_timing`, run with `--ignored`) at the
+// widths this constant actually gates, which is 8 up to the Karatsuba
+// threshold: +12% at 8 limbs, +29% at 12, +36% at 16, +29% at 24. Below 8
+// the measurement is inconclusive — the five passes at 1–6 limbs straddle
+// zero and one width reads a loss — so the floor sits where the win is
+// legible rather than where the arithmetic first favours it.
+const SQR_SCHOOLBOOK_MIN_LIMBS: usize = 8;
+// Width at or above which squaring stops splitting Karatsuba-style and
+// hands over to the multiplication ladder's Toom kernels. Asymptotics say
+// only that Toom eventually wins (its 1.465 against Karatsuba's 1.585);
+// they do not say where, and the ordinary multiplication crossover is the
+// wrong place to guess, because a Karatsuba *square* carries a constant
+// factor an ordinary Karatsuba product does not.
+//
+// Measured against `mul_toom3_ref` on the same operands
+// (`squaring_crossover_timing`, run with `--ignored`), quoting only widths
+// at which `mul_ref` would actually reach Toom-3 — below its own 128-limb
+// threshold that comparison measures a kernel production never calls:
+// across six runs on M4, as ranges rather than single figures, because
+// the spread between runs is wider than the precision a single figure
+// implies: +7–9% at 128 limbs, +14–15% at 160, +36–40% at 192, +3–6% at
+// 256, +19–25% at 384, and −12 to −15% at 512. What carries the threshold
+// is the sign and its persistence across runs, not any one magnitude. The series is not monotone either, because
+// Toom-3's three-way split lands differently on each width (192 = 3·64
+// divides exactly, 256 does not), so the threshold is the last width the
+// squaring is consistently ahead at rather than a crossing point read off
+// a curve. Raising it from an earlier, wrongly-signed reading of 256 was
+// confirmed end to end against a build of the previous revision, six
+// passes alternating order: public `square_ref` is 6.5% faster at 288
+// limbs, 23% at 384, 25% at 447, and at parity at 512 where the handoff
+// takes effect.
+const SQR_KARATSUBA_MAX_LIMBS: usize = 448;
+// Modulus width up to which Barrett's second multiplication is taken as a
+// schoolbook half-product rather than a dispatched full product. The half
+// costs `k²/2` limb products against the ladder's `O(k^{1.585})`, so it
+// wins while `k` is small and loses once the better exponent tells:
+// measured on M4, `reduce` is 1.44× ahead at 2 kbit (32 limbs) and 1.33× at
+// 8 kbit (128 limbs), at parity near 32 kbit (512 limbs), and behind by
+// 1.19× at 64 kbit and 1.32× at 128 kbit. The handoff sits at the measured
+// parity point.
+const BARRETT_HALF_PRODUCT_MAX_LIMBS: usize = 512;
 
 /// Bitset of the 44 quadratic residues modulo 256, one bit per residue
 /// across four words, derived by enumeration.
@@ -1424,17 +1471,174 @@ impl BigUint {
         Self::mul_schoolbook_ref(self, other)
     }
 
-    /// Square a value.
+    /// Square a value, exploiting the symmetry that lets a squaring form
+    /// each distinct cross term once instead of twice.
     ///
-    /// There is no dedicated integer squaring kernel: this delegates to
-    /// [`Self::mul_ref`], so it costs a full multiply rather than exploiting
-    /// the symmetry that lets a squaring form each cross term once. That
-    /// symmetry is worth a separate kernel only where squarings dominate a hot
-    /// loop, which for this crate is the modular exponentiation ladder — see
-    /// [`MontgomeryCtx::square_mont`], which does have one.
+    /// Three regimes, each measured against the kernel it displaces rather
+    /// than against a proxy. Below `SQR_SCHOOLBOOK_MIN_LIMBS` (8) the
+    /// specialized passes do not repay themselves and this is
+    /// [`Self::mul_ref`]. From there to the Karatsuba crossover it is
+    /// `sqr_schoolbook_ref`, forming each cross term once. From there to
+    /// `SQR_KARATSUBA_MAX_LIMBS` (448) it is `sqr_karatsuba_ref`, the same
+    /// split with all three sub-products squarings, measured ahead of the
+    /// Toom-3 multiplication it would otherwise defer to. At 448 limbs and
+    /// above Toom wins and this hands back to [`Self::mul_ref`].
+    ///
+    /// End to end, against the multiplication a caller would otherwise
+    /// write: +12% at 8 limbs, +36% at 16, +32% at 32, +27% at 64, +26% at
+    /// 127. Outside the specialized range the two are the same code, less
+    /// this function's dispatch — which at one and two limbs is a
+    /// reproducible 3–5% of an operation that costs some fifteen
+    /// nanoseconds, the price of choosing between four kernels rather than
+    /// calling one.
+    ///
+    /// The Montgomery domain keeps its own in-domain squaring
+    /// ([`MontgomeryCtx::square_mont`]), which fuses the reduction and is
+    /// not reached from here.
     #[must_use]
     pub fn square_ref(&self) -> Self {
-        self.mul_ref(self)
+        // Zero needs no special case: its width is below every threshold,
+        // so it takes the multiplication, which short-circuits it.
+        // Ordered so the narrowest operands — the commonest, and the ones
+        // whose absolute cost leaves least room for dispatch — decide on a
+        // single comparison.
+        let width = self.limbs.len();
+        if width < SQR_SCHOOLBOOK_MIN_LIMBS {
+            // Too narrow for the specialized kernel's three passes to repay
+            // themselves. (Zero lands here too, and the multiplication
+            // short-circuits it.)
+            return self.mul_ref(self);
+        }
+        if width < KARATSUBA_THRESHOLD_LIMBS {
+            return Self::sqr_schoolbook_ref(self);
+        }
+        if width >= SQR_KARATSUBA_MAX_LIMBS {
+            // Wide enough that the multiplication ladder's Toom kernels
+            // beat a Karatsuba square outright.
+            return self.mul_ref(self);
+        }
+        self.sqr_karatsuba_ref()
+    }
+
+    /// Schoolbook squaring: `n(n+1)/2` limb products against the general
+    /// multiplication's `n²`, by forming each distinct cross term once
+    /// (*Handbook of Applied Cryptography*, Algorithm 14.16).
+    ///
+    /// Three passes rather than the obvious one. The strict upper triangle
+    /// `Σ_{i<j} aᵢaⱼB^{i+j}` accumulates first; doubling it then accounts
+    /// for the lower triangle, which is its mirror image; and the diagonal
+    /// `Σ aᵢ²B^{2i}` is added last. Doubling the accumulated sum once, as a
+    /// single shift over the buffer, is what avoids the `2·aᵢ·aⱼ` term that
+    /// would otherwise overflow a `u128` accumulator and force a wider
+    /// carry discipline.
+    ///
+    /// The doubling cannot overflow the buffer: twice the strict upper
+    /// triangle is at most the whole square, and `a < B^n` gives
+    /// `a² < B^{2n}`, the buffer's width. The debug assertion records that.
+    fn sqr_schoolbook_ref(value: &Self) -> Self {
+        let n = value.limbs.len();
+        let mut out = vec![0u64; 2 * n];
+
+        // Pass one: the strict upper triangle, each cross term once.
+        for i in 0..n {
+            let a_i = u128::from(value.limbs[i]);
+            if a_i == 0 {
+                continue;
+            }
+            let mut carry = 0u128;
+            for j in (i + 1)..n {
+                let idx = i + j;
+                let acc = u128::from(out[idx]) + a_i * u128::from(value.limbs[j]) + carry;
+                out[idx] = low_u64(acc);
+                carry = acc >> 64;
+            }
+            let mut idx = i + n;
+            while carry != 0 {
+                let acc = u128::from(out[idx]) + carry;
+                out[idx] = low_u64(acc);
+                carry = acc >> 64;
+                idx += 1;
+            }
+        }
+
+        // Pass two: double, accounting for the lower triangle.
+        let mut carry = 0u64;
+        for limb in &mut out {
+            let next = *limb >> 63;
+            *limb = (*limb << 1) | carry;
+            carry = next;
+        }
+        debug_assert!(
+            carry == 0,
+            "twice the cross terms is at most the square, which the buffer holds"
+        );
+
+        // Pass three: the diagonal. A term at `2i` occupies two limbs, and
+        // its carry lands on `2i + 2` — which is the next iteration's own
+        // position, so the ripple is carried in the loop variable rather
+        // than re-walked.
+        let mut carry = 0u128;
+        for i in 0..n {
+            let a_i = u128::from(value.limbs[i]);
+            let acc = u128::from(out[2 * i]) + a_i * a_i + carry;
+            out[2 * i] = low_u64(acc);
+            let acc = u128::from(out[2 * i + 1]) + (acc >> 64);
+            out[2 * i + 1] = low_u64(acc);
+            carry = acc >> 64;
+        }
+        debug_assert!(carry == 0, "the square fits the buffer");
+
+        let mut result = Self { limbs: out };
+        result.normalize();
+        result
+    }
+
+    /// Karatsuba squaring: the same split as [`Self::mul_karatsuba_ref`],
+    /// but every sub-product is itself a square, so the three recursive
+    /// calls are squarings and the middle term needs no separate operand.
+    /// Writing `a = a₁B + a₀` for `B = 2^{64·split}`,
+    ///
+    /// ```text
+    /// a² = a₁²B² + ((a₀+a₁)² − a₀² − a₁²)·B + a₀².
+    /// ```
+    ///
+    /// The subtractions cannot underflow: `(a₀+a₁)²` dominates both squares
+    /// removed from it, their cross term being non-negative.
+    fn sqr_karatsuba_ref(&self) -> Self {
+        // Unreachable from `square_ref`, which only routes widths of at
+        // least `KARATSUBA_THRESHOLD_LIMBS` here, so `split >= 16`; kept
+        // because the function is meaningful on its own terms and a zero
+        // split would recurse forever.
+        let split = self.limbs.len() / 2;
+        if split == 0 {
+            return Self::sqr_schoolbook_ref(self);
+        }
+        let (low, high) = self.split_at_limb(split);
+        // Unlike the multiplication's split, which halves the *longer* of
+        // two operands and so can leave the shorter one's high half empty,
+        // this halves the operand's own width: `split = len/2 <= len − 1`
+        // for every `len >= 2`, so the high half retains `limbs[len − 1]`,
+        // which normalization guarantees is non-zero. No bail-out is
+        // reachable here.
+        debug_assert!(
+            !high.is_zero(),
+            "a normalized operand split at half its own width has a non-zero high half"
+        );
+
+        let z0 = low.square_ref();
+        let z2 = high.square_ref();
+        let sum = low.add_ref(&high);
+        let mut z1 = sum.square_ref();
+        z1.sub_assign_ref(&z0);
+        z1.sub_assign_ref(&z2);
+
+        let mut out = z0;
+        z1.shl_bits(split * 64);
+        out.add_assign_ref(&z1);
+        let mut z2_shifted = z2;
+        z2_shifted.shl_bits(split * 128);
+        out.add_assign_ref(&z2_shifted);
+        out
     }
 
     /// Split into low `[0, split)` and high `[split, len)` limb halves, each
@@ -1830,6 +2034,51 @@ impl BigUint {
             acc.add_assign_ref(coefficient.magnitude());
         }
         acc
+    }
+
+    /// The low `limit` limbs of `lhs · rhs` — the product modulo
+    /// `2^{64·limit}`, computed without forming the rest of it.
+    ///
+    /// Every partial product lands at a fixed position, so one whose
+    /// position is at or above `limit` cannot influence any limb below it
+    /// and is simply never computed; the same is true of a carry walking
+    /// off the top of the window. That makes the result *exact* rather than
+    /// approximate, and costs about half the limb products of the full
+    /// multiplication when `limit` is half the product's width.
+    ///
+    /// This is the half-product of *Handbook of Applied Cryptography*, Note
+    /// 14.45(ii), which observes that Barrett reduction's second
+    /// multiplication needs only the low `k+1` limbs of `q̂·n`.
+    fn mul_low_ref(lhs: &Self, rhs: &Self, limit: usize) -> Self {
+        let mut out = vec![0u64; limit];
+        for (i, &lhs_limb) in lhs.limbs.iter().enumerate() {
+            if i >= limit {
+                break;
+            }
+            let mut carry = 0u128;
+            for (j, &rhs_limb) in rhs.limbs.iter().enumerate() {
+                let idx = i + j;
+                if idx >= limit {
+                    break;
+                }
+                let acc =
+                    u128::from(out[idx]) + u128::from(lhs_limb) * u128::from(rhs_limb) + carry;
+                out[idx] = low_u64(acc);
+                carry = acc >> 64;
+            }
+            // A carry leaving the window belongs to a limb the caller
+            // discards, so it is dropped rather than propagated.
+            let mut idx = i + rhs.limbs.len();
+            while carry != 0 && idx < limit {
+                let acc = u128::from(out[idx]) + carry;
+                out[idx] = low_u64(acc);
+                carry = acc >> 64;
+                idx += 1;
+            }
+        }
+        let mut result = Self { limbs: out };
+        result.normalize();
+        result
     }
 
     /// Classic operand-scanning long multiplication (Knuth, *TAOCP* vol. 2,
@@ -3253,15 +3502,32 @@ impl PartialOrd for BigInt {
 /// follow.
 ///
 /// The products here are computed in full where the algorithm needs only
-/// a high and a low half, and the consequence is measured plainly (M4, 64
-/// distinct inputs per size, three agreeing runs): `reduce` runs about
-/// 1.1× *ahead* of a division below ~1–2 kbit, up to ~1.5× *behind* it at
-/// 2–4 kbit — Knuth's division beats two full products there — and back
-/// to parity near 8 kbit, where Toom multiplication engages. The
-/// context's value is the capability: a fixed-modulus context on *even*
-/// moduli, where Montgomery cannot operate. The half-product refinement
-/// that would restore the classical advantage is HAC Note 14.45(ii) and
-/// (iii), also Brent and Zimmermann, *Modern Computer Arithmetic*, §2.4.
+/// a high and a low half. The second of the two products needs only its
+/// low `k+1` limbs, and forms only those — the half-product of HAC Note
+/// 14.45(ii), exact rather than approximate, since a partial product at or
+/// above the window cannot influence a limb below it. Measured on M4
+/// against a plain division of the same operands: `reduce` runs 1.55× at
+/// 512 bits, 1.26× at 1024, 1.03× at 2048, 1.01× at 4096 and 1.30× at
+/// 8192, where before the half-product it trailed a division by up to a
+/// third at 2–4 kbit.
+///
+/// At 256 bits it is deliberately not given a number. The two are close
+/// there and which one wins depends on the modulus: over twenty-four
+/// random modulus/dividend pairs, each timed nine times with the order
+/// alternated, the per-pair medians run from 0.96× to 1.32× and a quarter
+/// of them are below 1.0 — reproducibly so, nine estimates out of nine on
+/// the same pair. Three earlier revisions of this comment each quoted a
+/// single figure (0.96×, then 1.23×), and each was a true reading of an
+/// under-sampled draw. A distribution straddling 1.0 does not have a
+/// headline number.
+/// The half-product is itself quadratic, so it is taken only up to
+/// `BARRETT_HALF_PRODUCT_MAX_LIMBS` (32 kbit, the measured parity point);
+/// above that the dispatched full product's better exponent wins and the
+/// window is taken from it. The first product's high half is always formed
+/// in full; refining it (HAC Note 14.45(i)) trades exactness for a wider
+/// correction bound and is not taken here. The context's other value is the capability: a
+/// fixed-modulus context on *even* moduli, where Montgomery cannot
+/// operate.
 ///
 /// Like the rest of the crate, variable-time.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3323,7 +3589,21 @@ impl BarrettCtx {
         // lifted by b^(k+1) when it wraps.
         let window = 64 * (k + 1);
         let x_low = x.low_bits(window);
-        let qn_low = q.mul_ref(&self.modulus).low_bits(window);
+        // Only the low k+1 limbs of q̂·n survive the window, so only those
+        // are formed (HAC Note 14.45(ii)); the half-product is exact.
+        //
+        // It is also schoolbook, and therefore quadratic, where the full
+        // product would dispatch to Karatsuba and Toom. Half of `k²` beats
+        // `k^{1.585}` only up to a point: measured, `reduce` gains 1.44× at
+        // 2 kbit and 1.33× at 8 kbit, reaches parity near 32 kbit, and
+        // *loses* 1.19× at 64 kbit and 1.32× at 128 kbit. Past
+        // `BARRETT_HALF_PRODUCT_MAX_LIMBS` the full product's better
+        // exponent wins and the window is taken from it instead.
+        let qn_low = if k <= BARRETT_HALF_PRODUCT_MAX_LIMBS {
+            BigUint::mul_low_ref(&q, &self.modulus, k + 1)
+        } else {
+            q.mul_ref(&self.modulus).low_bits(window)
+        };
         let mut r = if x_low >= qn_low {
             x_low.sub_ref(&qn_low)
         } else {
@@ -3370,10 +3650,11 @@ impl BarrettCtx {
         self.reduce(&a.mul_ref(&b))
     }
 
-    /// `a² mod n`. The square comes from [`BigUint::square_ref`], which has
-    /// no dedicated squaring kernel, so this costs a full multiplication plus
-    /// one Barrett reduction; the cross-term saving exists only in the
-    /// Montgomery domain ([`MontgomeryCtx::square_mont`]).
+    /// `a² mod n`. The square comes from [`BigUint::square_ref`], whose
+    /// specialized kernels form each cross term once between 8 and 256
+    /// limbs, so this costs a squaring plus one Barrett reduction. The
+    /// Montgomery domain's [`MontgomeryCtx::square_mont`] goes further
+    /// still, fusing the reduction into the kernel.
     #[must_use]
     pub fn square_mod(&self, a: &BigUint) -> BigUint {
         let a = self.reduce(a);
@@ -4154,7 +4435,10 @@ mod tests {
         assert_eq!(least.sign(), Sign::Negative);
         assert_eq!(*least.magnitude(), BigUint::from_u128(1u128 << 127));
     }
-    use super::{BigInt, BigUint, MontgomeryCtx, Sign, UNBALANCED_THRESHOLD_LIMBS};
+    use super::{
+        BigInt, BigUint, MontgomeryCtx, Sign, KARATSUBA_THRESHOLD_LIMBS, SQR_KARATSUBA_MAX_LIMBS,
+        SQR_SCHOOLBOOK_MIN_LIMBS, TOOM3_THRESHOLD_LIMBS, UNBALANCED_THRESHOLD_LIMBS,
+    };
 
     fn lcg_next(state: &mut u64) -> u64 {
         *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -4504,9 +4788,103 @@ mod tests {
     }
 
     #[test]
+    fn barrett_reduce_straddles_the_half_product_cutoff() {
+        // Above `BARRETT_HALF_PRODUCT_MAX_LIMBS`, `reduce` takes the window
+        // from a dispatched full product instead of the schoolbook half
+        // product. Nothing else in the crate builds a modulus that wide, so
+        // without this test the branch is unexecuted by every gate and a
+        // corrupted arm passes the entire suite.
+        //
+        // What this cannot catch, and no value-based test can: the two arms
+        // are exactly equal by construction, so deleting the cutoff,
+        // inverting its predicate, or moving it to the wrong width all
+        // still compute the right answer. Only the timing changes, and only
+        // above 32 kbit. The constant is guarded by the comment on it and
+        // by `--ignored` measurement, not by this.
+        use super::{BarrettCtx, BARRETT_HALF_PRODUCT_MAX_LIMBS};
+        let cutoff = BARRETT_HALF_PRODUCT_MAX_LIMBS;
+        let mut seed = 0x5a11_b0bb_0000_0001;
+        for k in [cutoff - 1, cutoff, cutoff + 1, cutoff + 2] {
+            // Four modulus shapes at each width, not one. A random odd
+            // modulus with a full top limb is the easy case; the other
+            // three are the ones that matter. An **even** modulus is what
+            // this type exists for — Montgomery cannot take it, and
+            // `mod_pow` routes it here — and a single-shape test would
+            // never reduce one at width. A top limb of 1 maximizes μ, and
+            // all-ones maximizes the quotient estimate's error, so between
+            // them they stress `q̂` from both ends.
+            let mut shapes = Vec::new();
+            let mut odd = seeded_biguint(k, &mut seed);
+            odd.limbs[0] |= 1;
+            odd.set_bit(64 * k - 1); // exactly k limbs, so the branch is the k tested
+            let mut even = odd.clone();
+            even.limbs[0] &= !1;
+            shapes.push(("random odd", odd));
+            shapes.push(("random even", even));
+            let mut small_top = seeded_biguint(k - 1, &mut seed);
+            small_top.set_bit(64 * (k - 1)); // top limb exactly 1
+            shapes.push(("top limb 1", small_top));
+            let mut ones = BigUint::zero();
+            ones.set_bit(64 * k);
+            shapes.push(("all ones", ones.sub_ref(&BigUint::one())));
+
+            for (label, n) in shapes {
+                assert_eq!(n.bits().div_ceil(64), k, "{label}: k = {k} as intended");
+                let ctx = BarrettCtx::new(&n).expect("a modulus of at least 2");
+                for _ in 0..2 {
+                    let a = seeded_biguint(k, &mut seed).modulo(&n);
+                    let b = seeded_biguint(k, &mut seed).modulo(&n);
+                    let wide = a.mul_ref(&b);
+                    assert_eq!(ctx.reduce(&wide), wide.modulo(&n), "{label}, k = {k}");
+                }
+                // The ends of the range, where an off-by-one in the
+                // correction loop shows up: 0, n − 1, n itself, the largest
+                // square, and the top of the accepted input range.
+                assert!(ctx.reduce(&BigUint::zero()).is_zero(), "{label}, zero");
+                let below = n.sub_ref(&BigUint::one());
+                assert_eq!(ctx.reduce(&below), below, "{label}, n - 1");
+                assert!(ctx.reduce(&n).is_zero(), "{label}, n");
+                let square = below.square_ref();
+                assert_eq!(ctx.reduce(&square), square.modulo(&n), "{label}, (n-1)^2");
+                let mut widest = BigUint::zero();
+                widest.set_bit(128 * k);
+                let widest = widest.sub_ref(&BigUint::one());
+                assert_eq!(
+                    ctx.reduce(&widest),
+                    widest.modulo(&n),
+                    "{label}, the widest accepted input"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn barrett_pow_matches_mod_pow() {
         use super::BarrettCtx;
         use crate::number_theory::mod_pow;
+
+        // A deliberately slow reference: square-and-multiply with a full
+        // product and a direct division at every step, sharing no code with
+        // either context. It exists because `mod_pow` now *delegates* even
+        // moduli to `BarrettCtx::pow_mod` — comparing the two against each
+        // other would be an identity, not a test, and the odd branch's
+        // independence (Montgomery) would have quietly become the only
+        // real coverage.
+        fn reference_pow(base: &BigUint, exponent: &BigUint, modulus: &BigUint) -> BigUint {
+            if modulus.is_one() {
+                return BigUint::zero();
+            }
+            let mut result = BigUint::one().modulo(modulus);
+            let mut power = base.modulo(modulus);
+            for bit in 0..exponent.bits() {
+                if exponent.bit(bit) {
+                    result = result.mul_ref(&power).modulo(modulus);
+                }
+                power = power.mul_ref(&power).modulo(modulus);
+            }
+            result
+        }
+
         let mut seed = 0xba22_e77e_0000_0002;
         for &words in &[1usize, 4, 16] {
             for parity_even in [false, true] {
@@ -4522,15 +4900,70 @@ mod tests {
                 let ctx = BarrettCtx::new(&n).expect("at least 2");
                 let base = seeded_biguint(words, &mut seed);
                 let exponent = seeded_biguint(2, &mut seed);
+                let expected = reference_pow(&base, &exponent, &n);
+                // Both public routes against the independent ladder.
                 assert_eq!(
                     ctx.pow_mod(&base, &exponent),
+                    expected,
+                    "BarrettCtx::pow_mod at {words} words, even = {parity_even}"
+                );
+                assert_eq!(
                     mod_pow(&base, &exponent, &n),
-                    "{words} words, even = {parity_even}"
+                    expected,
+                    "mod_pow at {words} words, even = {parity_even}"
                 );
                 assert_eq!(
                     ctx.pow_mod(&base, &BigUint::zero()),
                     BigUint::one().modulo(&n)
                 );
+            }
+        }
+
+        // The corners the random sweep will not reach, every one an even
+        // modulus so they exercise the delegated path: the smallest
+        // modulus, powers of two, a non-power-of-two even modulus, a
+        // multi-limb even modulus, exponents 0 and 1, and bases far wider
+        // than the modulus.
+        let mut wide = BigUint::one();
+        wide.shl_bits(300);
+        let wide_even = wide.add_ref(&BigUint::from_u64(2));
+        let mut base_wider = BigUint::one();
+        base_wider.shl_bits(700);
+        base_wider = base_wider.add_ref(&BigUint::from_u64(12_345));
+        for modulus in [
+            BigUint::from_u64(2),
+            BigUint::from_u64(4),
+            BigUint::from_u64(1024),
+            BigUint::from_u64(30),
+            BigUint::from_u64(u64::MAX - 1),
+            wide_even,
+        ] {
+            for base in [
+                BigUint::zero(),
+                BigUint::one(),
+                BigUint::from_u64(7),
+                modulus.clone(),
+                base_wider.clone(),
+            ] {
+                for exponent in [
+                    BigUint::zero(),
+                    BigUint::one(),
+                    BigUint::from_u64(2),
+                    BigUint::from_u64(65_537),
+                ] {
+                    let expected = reference_pow(&base, &exponent, &modulus);
+                    assert_eq!(
+                        mod_pow(&base, &exponent, &modulus),
+                        expected,
+                        "mod_pow corner: base {base}, exponent {exponent}, modulus {modulus}"
+                    );
+                    let ctx = BarrettCtx::new(&modulus).expect("at least 2");
+                    assert_eq!(
+                        ctx.pow_mod(&base, &exponent),
+                        expected,
+                        "BarrettCtx corner: base {base}, exponent {exponent}, modulus {modulus}"
+                    );
+                }
             }
         }
     }
@@ -5188,13 +5621,76 @@ mod tests {
 
     #[test]
     fn square_ref_matches_mul_ref() {
+        // The squaring ladder against the multiplication it specializes, at
+        // every width where its dispatch changes hands — one limb either
+        // side of `SQR_SCHOOLBOOK_MIN_LIMBS` (multiplication vs schoolbook
+        // squaring), of the Karatsuba threshold (schoolbook vs Karatsuba
+        // squaring), and of `SQR_KARATSUBA_MAX_LIMBS` (Karatsuba squaring
+        // vs handing back to the multiply ladder) — plus odd widths, which
+        // make the split halves unequal, and operands with interior zeros
+        // and all-ones limbs.
         let mut seed = 0x9e37_79b9_7f4a_7c15;
-        for words in [1usize, 2, 8, 32, 48] {
-            for _ in 0..8 {
+        let k = KARATSUBA_THRESHOLD_LIMBS;
+        let smin = SQR_SCHOOLBOOK_MIN_LIMBS;
+        let smax = SQR_KARATSUBA_MAX_LIMBS;
+        let widths = [
+            1usize,
+            2,
+            3,
+            smin - 1,
+            smin,
+            smin + 1,
+            31,
+            k - 1,
+            k,
+            k + 1,
+            2 * k + 1,
+            TOOM3_THRESHOLD_LIMBS,
+            smax - 1,
+            smax,
+            smax + 1,
+        ];
+        for words in widths {
+            for _ in 0..4 {
                 let value = seeded_biguint(words, &mut seed);
-                assert_eq!(value.square_ref(), value.mul_ref(&value));
+                assert_eq!(
+                    value.square_ref(),
+                    value.mul_ref(&value),
+                    "square != mul at {words} limbs"
+                );
+                // And against the schoolbook kernel directly, so a defect
+                // shared by both dispatched paths cannot hide.
+                assert_eq!(
+                    value.square_ref(),
+                    BigUint::mul_schoolbook_ref(&value, &value),
+                    "square != schoolbook at {words} limbs"
+                );
             }
         }
+        // Interior zero limbs, which make whole rows of the cross-term
+        // pass vanish. (A *trailing* run of zeros cannot be built: the
+        // constructor normalizes it away, which is also why the Karatsuba
+        // squaring needs no empty-high-half bail-out — see its assertion.)
+        let mut limbs = seeded_biguint(k + 4, &mut seed).limbs().to_vec();
+        for limb in &mut limbs[2..(k + 4) / 2] {
+            *limb = 0;
+        }
+        limbs[0] |= 1;
+        let holed = BigUint::from_limbs(limbs);
+        assert_eq!(holed.square_ref(), holed.mul_ref(&holed));
+        // All-ones operands: the worst case for every carry chain in the
+        // three passes, and the shape that would expose a doubling that
+        // overflowed its buffer.
+        for words in [1usize, 2, 8, k, k + 1, 2 * k] {
+            let ones = BigUint::from_limbs(vec![u64::MAX; words]);
+            assert_eq!(
+                ones.square_ref(),
+                BigUint::mul_schoolbook_ref(&ones, &ones),
+                "all-ones square at {words} limbs"
+            );
+        }
+        assert!(BigUint::zero().square_ref().is_zero());
+        assert_eq!(BigUint::one().square_ref(), BigUint::one());
     }
 
     #[test]
@@ -5530,6 +6026,178 @@ mod tests {
                     if unbal < school { "unbal" } else { "school" }
                 );
             }
+        }
+    }
+
+    #[test]
+    fn mul_low_ref_matches_the_truncated_full_product() {
+        // The half-product against the full product it replaces, truncated
+        // to the same window: limits below, at, and above each operand's
+        // width, and the degenerate limit of zero.
+        let mut seed = 0x1010_7ef7_0000_0001;
+        for &(la, lb) in &[(1usize, 1usize), (2, 3), (4, 4), (8, 5), (17, 16), (32, 32)] {
+            let a = seeded_biguint(la, &mut seed);
+            let b = seeded_biguint(lb, &mut seed);
+            let full = a.mul_ref(&b);
+            for limit in 0..=(la + lb + 1) {
+                let expected = if limit == 0 {
+                    BigUint::zero()
+                } else {
+                    full.low_bits(64 * limit)
+                };
+                assert_eq!(
+                    BigUint::mul_low_ref(&a, &b, limit),
+                    expected,
+                    "mul_low_ref({la} limbs, {lb} limbs, limit {limit})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing probe for the squaring thresholds; run with --ignored"]
+    fn squaring_crossover_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        // Paired interleaved chunks with the order alternated between
+        // passes, and every pass printed: a median alone cannot show
+        // whether a claimed win clears the run-to-run spread.
+        fn paired_saving(
+            passes: usize,
+            chunk: u32,
+            flip: bool,
+            a: &mut dyn FnMut(),
+            b: &mut dyn FnMut(),
+        ) -> f64 {
+            let (mut ta, mut tb) = (0f64, 0f64);
+            for _ in 0..passes {
+                if flip {
+                    let t = Instant::now();
+                    for _ in 0..chunk {
+                        b();
+                    }
+                    tb += t.elapsed().as_secs_f64();
+                    let t = Instant::now();
+                    for _ in 0..chunk {
+                        a();
+                    }
+                    ta += t.elapsed().as_secs_f64();
+                } else {
+                    let t = Instant::now();
+                    for _ in 0..chunk {
+                        a();
+                    }
+                    ta += t.elapsed().as_secs_f64();
+                    let t = Instant::now();
+                    for _ in 0..chunk {
+                        b();
+                    }
+                    tb += t.elapsed().as_secs_f64();
+                }
+            }
+            (ta - tb) / ta * 100.0
+        }
+
+        fn report(label: &str, w: usize, p: [f64; 5]) {
+            let mut sorted = p;
+            sorted.sort_by(f64::total_cmp);
+            eprintln!(
+                "{label:<22} {w:>5} {:>+8.1}%   {:+6.1} {:+6.1} {:+6.1} {:+6.1} {:+6.1}",
+                sorted[2], p[0], p[1], p[2], p[3], p[4]
+            );
+        }
+
+        let mut seed = 0x59ea_5011_0000_0001;
+        eprintln!("saving of the second kernel over the first; median then every pass");
+        eprintln!(
+            "{:<22} {:>5} {:>9}   passes",
+            "comparison", "limbs", "median"
+        );
+        for &w in &[
+            1usize, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 112, 127, 128, 160, 192, 256, 384, 512,
+        ] {
+            let v = seeded_biguint(w, &mut seed);
+            let chunk = (2_000_000 / (w * w)).max(50) as u32;
+
+            // The lower handoff: general schoolbook against schoolbook
+            // squaring, the pair `SQR_SCHOOLBOOK_MIN_LIMBS` sits between.
+            if w <= 64 {
+                let mut p = [0f64; 5];
+                for (k, slot) in p.iter_mut().enumerate() {
+                    *slot = paired_saving(
+                        3,
+                        chunk,
+                        k % 2 == 1,
+                        &mut || {
+                            black_box(BigUint::mul_schoolbook_ref(black_box(&v), black_box(&v)));
+                        },
+                        &mut || {
+                            black_box(BigUint::sqr_schoolbook_ref(black_box(&v)));
+                        },
+                    );
+                }
+                report("schoolbook sqr", w, p);
+            }
+
+            // The middle regime: the general Karatsuba against Karatsuba
+            // squaring, both forced, so the comparison is the kernels' and
+            // not the dispatcher's.
+            if (KARATSUBA_THRESHOLD_LIMBS / 2..=512).contains(&w) {
+                let mut p = [0f64; 5];
+                for (k, slot) in p.iter_mut().enumerate() {
+                    *slot = paired_saving(
+                        3,
+                        chunk,
+                        k % 2 == 1,
+                        &mut || {
+                            black_box(black_box(&v).mul_karatsuba_ref(black_box(&v)));
+                        },
+                        &mut || {
+                            black_box(black_box(&v).sqr_karatsuba_ref());
+                        },
+                    );
+                }
+                report("karatsuba sqr", w, p);
+            }
+
+            // The upper handoff: Karatsuba squaring against the Toom-3
+            // multiplication it hands over to, which is the comparison the
+            // 128-limb boundary actually rests on.
+            if w >= 64 {
+                let mut p = [0f64; 5];
+                for (k, slot) in p.iter_mut().enumerate() {
+                    *slot = paired_saving(
+                        3,
+                        chunk,
+                        k % 2 == 1,
+                        &mut || {
+                            black_box(black_box(&v).mul_toom3_ref(black_box(&v)));
+                        },
+                        &mut || {
+                            black_box(black_box(&v).sqr_karatsuba_ref());
+                        },
+                    );
+                }
+                report("karatsuba sqr vs toom3", w, p);
+            }
+
+            // And the public entry points, which is what a caller sees.
+            let mut p = [0f64; 5];
+            for (k, slot) in p.iter_mut().enumerate() {
+                *slot = paired_saving(
+                    3,
+                    chunk,
+                    k % 2 == 1,
+                    &mut || {
+                        black_box(black_box(&v).mul_ref(black_box(&v)));
+                    },
+                    &mut || {
+                        black_box(black_box(&v).square_ref());
+                    },
+                );
+            }
+            report("square_ref vs mul_ref", w, p);
         }
     }
 

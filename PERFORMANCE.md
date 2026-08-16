@@ -1,5 +1,20 @@
 # PERFORMANCE
 
+> **Built in diagnostic mode — four cells are invalid, not merely
+> provisional.** `scripts/check_bench_consistency.py` proves that
+> `jacobi_8192` and `sqrtmod_8192` (hardy) and the GMP-column `add_256` and
+> `divrem_256` (darby) report a mean outside the range their own order
+> statistics allow, so those cells cannot describe the samples they name.
+> A default build refuses to assemble this document; this one was produced
+> with `PERF_ALLOW_INVALID=1` so the surrounding measurements stay readable
+> while those hosts are unavailable. Do not quote the four named cells.
+>
+> Separately, every table here predates the squaring kernel, the Barrett
+> half-product, and the polynomial convolution work of 2026-08-17: the
+> `sqr`, `modpow`, and `mul` rows measure the code as it stood before them.
+> The prose below says what those changes measured; the tables will say it
+> when the fleet re-runs.
+
 Per-primitive microbenchmarks of rump, driven by
 [pilot-bench](https://github.com/darrelllong/pilot-bench) over random operands,
 with a per-primitive comparison against GMP. Every number here is reproducible
@@ -452,9 +467,16 @@ GMP's assembly base cases, Toom against FFT — not algorithms. Measured work
 inside rump itself has since landed: Cipolla's square root now caps
 `sqrt_mod`'s 2-adic tail at its measured dispatch crossover (the extrema
 section below), and Montgomery's batch inversion trades one Lehmer
-inversion for three multiplications per element. The queue's remaining
-constant-factor candidates — Barrett's half products, the perfect-power
-residue filters — are recorded in ROADMAP.md.
+inversion for three multiplications per element. Barrett's low half-product (HAC Note 14.45(ii)) has since landed too, worth
+1.4× on `reduce` at 2 kbit and putting it ahead of a plain division at every
+width measured from 512 bits up; at 256 bits the two are close and which wins
+depends on the modulus, so no figure is quoted there. Being quadratic itself,
+the half-product is taken only up to a measured 32 kbit. Squaring gained a kernel
+that forms each cross term once, worth 12% at 8 limbs rising toward its
+half-the-products ceiling, and applied between 8 and 448 limbs — outside
+that range squaring is the general multiplication and the saving is zero. The queue's remaining constant-factor candidates —
+Note 14.45(i)'s approximate high half, the perfect-power residue filters —
+are recorded in ROADMAP.md.
 
 ## GCD at scale
 

@@ -86,9 +86,9 @@ pub use number_theory::{
     is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker,
     lcm, legendre, miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow,
     primes_below, product_tree, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
-    remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation,
+    remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, ProductTree,
 };
-pub use poly::{PolyModP, PolyZ};
+pub use poly::{PolyModP, PolyZ, MAX_ROOT_LEVEL};
 pub use random::{
     random_below, random_coprime_below, random_nonzero_below, random_probable_prime, Rng,
 };

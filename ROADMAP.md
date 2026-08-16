@@ -60,10 +60,16 @@ them remains subject to the joint triage.
    bounded, so composite moduli — odd squares included — yield None.
 9. **Barrett reduction context** — completed 2026-08-14. `BarrettCtx`
    (HAC 14.42/14.44) for either parity: reduce/mul_mod/square_mod/pow_mod.
-   Full products where half-products would serve: ~1.1× ahead of division
-   below 2 kbit, up to 1.5× behind at 2–4 kbit, parity near 8 kbit — the
-   value is the even-modulus capability; HAC Note 14.45's half products
-   are the follow-up.
+   The second product is HAC Note 14.45(ii)'s exact half-product as of
+   2026-08-17, taken up to a measured 32 kbit: against a plain division
+   `reduce` reads 1.55× at 512 bits, 1.03× at 2048 and 1.30× at 8192, where
+   the full-product version trailed by up to a third at 2–4 kbit. At 256
+   bits the two are close and which wins depends on the modulus — a quarter
+   of sampled pairs favour division, reproducibly — so no figure is quoted
+   there. The half-product is quadratic, so above 32 kbit the
+   dispatched full product wins and is used instead. Note 14.45(i)'s
+   approximate *high* half remains open, and would trade exactness for a
+   wider correction bound.
 
 Each item lands with the established discipline: primary source, independent
 oracle, differential verification, measured thresholds where dispatch is
