@@ -19,6 +19,12 @@ starting the number field sieve.
 
 ## Tier 1 — outstanding
 
+Every entry names the file and line where the consumer's implementation
+sits, so a mover can read the working version rather than start from the
+description. The consumer keeps its copy running until each lands, then
+deletes it — none of these are urgent, and all of them are general algebra
+that ended up downstream because it was written where it was first needed.
+
 ### Real roots and the real factorisation of a `PolyZ`
 
 `PolyZ` already carries `resultant`, `discriminant`, and — through `PolyModP`
@@ -60,6 +66,94 @@ first:
   naive reading puts them. `|f|` does not rise and fall monotonically between
   them — a cubic with one real root has two critical points on the same side
   of it — so the roots of `f'` are wanted alongside the roots of `f`.
+
+---
+
+### Sparse `GF(2)` linear algebra: null space, Block Lanczos, singleton peel
+
+**Consumer's code:** `src/qs/linalg.rs` (501 lines — `null_space` at :43,
+`prune` at :151) and `src/qs/lanczos.rs` (546 lines — `dependencies` at :290).
+
+This file previously recorded `GF(2)` linear algebra as deliberately *not*
+requested, on the grounds that it was "sized for relation matrices". That was
+the wrong test and the entry has been removed. Solving `Mx = 0` over `GF(2)`
+for a large sparse `M` is not a factoring problem — it is the same computation
+in index-calculus discrete logarithms, in coding theory, and anywhere a parity
+system gets large. Only the *matrix* is factoring's; the solver is not.
+
+Three pieces, usable separately:
+
+- **Dense null space** by Gauss–Jordan over bit-packed rows. Cubic, and right
+  below a few thousand columns.
+- **Block Lanczos** over `GF(2)`, Montgomery's method (EUROCRYPT '95,
+  equations 18–20 and figure 1), including the subspace selection `invert`
+  and the cleanup for the `ker(A) ⊋ ker(M)` gap that the method leaves. This
+  is the piece worth having: it is sparse-time where Gauss–Jordan is cubic,
+  and it is fiddly enough that a second implementation would be a waste.
+- **Singleton peel** — repeatedly drop rows holding a column no other row
+  touches, cascading. Ordinary sparse preprocessing; the XOR-of-indices trick
+  in `prune` keeps it linear.
+
+The consumer would keep the *layout* — which column means which prime or
+ideal — and hand over only the bits.
+
+---
+
+### Polynomial pieces that ended up downstream
+
+All of these derive from `PolyZ`/`PolyModP` and none knows it is looking for
+factors. Small individually; listed together because they are one afternoon's
+work in `poly.rs` and they are all things the type arguably should have had.
+
+- **Roots modulo a prime power, by Hensel lifting.**
+  `src/gnfs/select.rs:321` (`lifted_valuation`, with `expected_valuation` at
+  :276 as the caller). Counting the roots of `f` modulo `p^k` needs the lift
+  to branch: a root with `f'(r) ≡ 0` fans into `p` roots one level up or into
+  none, and only `f'(r) ≢ 0` gives Hensel's unique lift. Getting this wrong is
+  not academic — the consumer's polynomial score used the unique-lift formula
+  everywhere and was off by 50% at `p = 2` and `p = 5` on ordinary inputs.
+  Companion to the existing `sqrt_mod_prime_power`, which already does exactly
+  this branching for `x² − a`.
+
+- **Reduction modulo a monic polynomial.** `src/gnfs/sqrt.rs:234`. `PolyZ` has
+  `div_rem` and `pseudo_div_rem`; what is wanted is the cheap monic case,
+  which is a ring homomorphism and is what makes the next entry work.
+
+- **Product tree over a quotient ring.** `src/gnfs/sqrt.rs:186`. The product of
+  thousands of polynomials reduced modulo a monic `f` at every level, so no
+  intermediate exceeds `deg f`. Pairing rather than folding is the difference
+  between quadratic and `n log n`, and rump already has the integer analogue in
+  `product_tree`.
+
+- **Square root in `ℤ[x]/(f, q^k)` by Newton lifting.** `src/gnfs/sqrt.rs:283`,
+  with `symmetric_lift` and `widen` beside it. Newton on `β² − δ` with the
+  inverse maintained alongside, doubling the modulus each step, lifting
+  coefficients to the symmetric range. General `p`-adic machinery.
+
+- **Homogeneous substitution.** `src/gnfs/lattice.rs:313`. Composing `f` with a
+  linear change of variables in homogeneous form,
+  `G(x) = Σ cₖ A(x)^k B(x)^{d−k}`. Ordinary polynomial composition.
+
+- **Balanced base-`m` expansion.** `src/gnfs/select.rs:393`. Writing an integer
+  in base `m` with digits in `(−m/2, m/2]` and returning the coefficients.
+  Halves the size of every digit; uses the `symmetric_remainder` already
+  delivered. (This file previously listed base-`m` *polynomial selection* as
+  deliberately downstream — the selection policy still is. The expansion
+  itself is just a representation.)
+
+---
+
+### Two-dimensional lattice reduction under a weighted norm
+
+**Consumer's code:** `src/gnfs/lattice.rs:352` (`gauss_reduce`, with `norm_sq`
+and `dot` beside it).
+
+Lagrange–Gauss reduction of a two-dimensional basis, but under a *skewed* norm
+`(x/√s)² + (y·√s)²` rather than the Euclidean one, in `i128` throughout. rump
+has `lll_reduce` over `BigInt` for general dimension; the two-dimensional case
+is exact, terminates in `O(log)` steps, and wants no bignums. The weight is
+the general part — reduction under a diagonal form is what any anisotropic
+lattice problem needs.
 
 ---
 
@@ -116,9 +210,16 @@ The `BigInt` signed ring was delivered after 0.2.1 (see below);
 For the record, so the boundary stays where it is:
 
 - Sieving, factor bases, smoothness bounds, the Knuth–Schroeppel multiplier,
-  Brent's cycle detection, `GF(2)` linear algebra sized for relation matrices,
-  base-`m` polynomial selection, the algebraic square root — all of these know
-  they are factoring, and all of them stay in the consumer.
+  Brent's cycle detection, the *policy* of base-`m` polynomial selection, the
+  bar and tolerance machinery — all of these know they are factoring, and all
+  of them stay in the consumer.
+- **Retracted 2026-08-16:** this list used to include "`GF(2)` linear algebra
+  sized for relation matrices", "base-`m` polynomial selection" without the
+  qualifier above, and "the algebraic square root". That applied the wrong
+  test. The rule is whether the *code* knows it is looking for factors, not
+  whether factoring is what happens to call it — and a `GF(2)` solver, a
+  balanced expansion, and a Newton lift in a quotient ring do not. All three
+  are now requested above.
 - Elliptic curves. ECM is the obvious gap between rho and the sieves, but the
   curve arithmetic it needs is Montgomery-form `x`-only ladders chosen for
   factoring's failure mode — a curve operation that *fails* is the factor —
