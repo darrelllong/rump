@@ -21,6 +21,29 @@ starting the number field sieve.
 
 Nothing outstanding.
 
+**Implemented directly, 2026-08-16, by the consumer rather than requested.**
+Four primitives the factoring crate had grown local copies of. Each is
+arithmetic on numbers with nothing in it that knows about factoring, which is
+the test this file applies, so they were written here rather than filed:
+
+- `BigUint::digit_count(radix)`. Size-driven parameter tables ask how long a
+  number is and throw the digits away; `to_str_radix(radix).len()` answers by
+  producing the whole expansion, which is quadratic in the limbs. Logarithm
+  from the limbs, boundary settled by comparison — the powers of the radix are
+  the only place the floor is ambiguous, and they are exactly where a naive
+  version is wrong. Tested against `to_str_radix` at every power of six radices.
+- `BigInt::from_i128`. `BigUint::from_u128` and `BigInt::from_i64` both
+  existed; the signed double word did not, so the consumer was building it by
+  printing the value in decimal and parsing it back.
+- `gcd_u64` made public. It already existed as `gcd`'s single-limb base case.
+- `mod_inverse_u64`. The word-sized companion to `mod_inverse`, carrying its
+  Bézout coefficients in `i128` because the intermediate is not bounded by
+  `u64` even though the answer is.
+
+Two callers in the consumer had independently grown the same extended Euclid
+under two names, which is the usual sign that something belongs one level
+down.
+
 **Withdrawn 2026-08-15, same day it was raised: `BigInt::to_i64`.** Asked for
 on behalf of the lattice sieve, which solved `i·P + j·Q = 0` over `BigInt` to
 find where the rational form crosses zero on a row and needed that `i` as an

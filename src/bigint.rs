@@ -787,6 +787,46 @@ impl BigUint {
         (mantissa as f64).ln() + ((bits - mantissa_bits) as f64) * core::f64::consts::LN_2
     }
 
+    /// How many digits the value has in `radix`, without writing them out.
+    ///
+    /// [`Self::to_str_radix`] answers this too, by producing the whole
+    /// expansion — repeated division, quadratic in the limbs — when the caller
+    /// wanted a single number. Size-driven tuning asks for the length and
+    /// throws the digits away, and at that point the expansion is the cost.
+    ///
+    /// The logarithm decides every value but one class: `log_radix(n)` is an
+    /// integer exactly at the powers of `radix`, and there the floor can land
+    /// either side of it. So the estimate is corrected by comparison, which
+    /// runs at most once in each direction and costs about one exponentiation
+    /// by squaring rather than one division per digit.
+    ///
+    /// Zero has one digit, by the convention that writes it `0`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `radix` is below two, which names no positional system.
+    #[must_use]
+    pub fn digit_count(&self, radix: u32) -> usize {
+        assert!(radix >= 2, "radix must be at least two");
+        if self.is_zero() {
+            return 1;
+        }
+        let radix_value = BigUint::from_u64(u64::from(radix));
+        let estimate = self.ln_approx() / f64::from(radix).ln();
+        let mut digits = if estimate.is_finite() && estimate > 0.0 {
+            estimate as usize + 1
+        } else {
+            1
+        };
+        while digits > 1 && *self < radix_value.pow_u64(digits as u64 - 1) {
+            digits -= 1;
+        }
+        while *self >= radix_value.pow_u64(digits as u64) {
+            digits += 1;
+        }
+        digits
+    }
+
     /// The low 128 bits as a `u128`; bits above position 127 are silently
     /// dropped. For callers that have already pinned their operand range
     /// (fixed-field reductions and the like).
@@ -3617,6 +3657,19 @@ impl BigInt {
         Self::from_parts(Sign::Positive, magnitude)
     }
 
+    /// Construct from a signed double word. Total for the same reason as
+    /// [`Self::from_i64`]: `i128::MIN` has no `i128` negation, and its
+    /// magnitude `2^127` is an ordinary `u128`.
+    #[must_use]
+    pub fn from_i128(value: i128) -> Self {
+        let sign = if value < 0 {
+            Sign::Negative
+        } else {
+            Sign::Positive
+        };
+        Self::from_parts(sign, BigUint::from_u128(value.unsigned_abs()))
+    }
+
     /// Construct from a machine-word signed value. The magnitude is taken
     /// with `unsigned_abs`, which is total: `i64::MIN` has no `i64` negation
     /// but its magnitude `2^63` is an ordinary `u64`.
@@ -3970,6 +4023,68 @@ impl BigInt {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn digit_count_matches_writing_the_digits_out() {
+        // The oracle is the expansion it exists to avoid producing.
+        let check = |value: &BigUint, radix: u32| {
+            assert_eq!(
+                value.digit_count(radix),
+                value.to_str_radix(radix).len(),
+                "radix {radix} on {}",
+                value.to_str_radix(10)
+            );
+        };
+        for radix in [2u32, 3, 8, 10, 16, 36] {
+            let base = BigUint::from_u64(u64::from(radix));
+            check(&BigUint::zero(), radix);
+            for value in [1u64, 2, 7, 63, 64, 65, u64::MAX] {
+                check(&BigUint::from_u64(value), radix);
+            }
+            // The powers are the whole reason for the correction: the
+            // logarithm is an integer there and its floor can fall either way.
+            for exponent in 0..40u64 {
+                let power = base.pow_u64(exponent);
+                check(&power, radix);
+                check(&power.add_ref(&BigUint::one()), radix);
+                if exponent > 0 {
+                    check(&power.sub_ref(&BigUint::one()), radix);
+                }
+            }
+        }
+        // And far past anything a machine word reaches.
+        check(&BigUint::from_u64(10).pow_u64(3_000), 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "radix must be at least two")]
+    fn digit_count_refuses_a_radix_below_two() {
+        let _ = BigUint::from_u64(5).digit_count(1);
+    }
+
+    #[test]
+    fn from_i128_is_total_including_the_minimum() {
+        for value in [
+            0i128,
+            1,
+            -1,
+            i128::from(i64::MAX),
+            i128::from(i64::MIN),
+            i128::MAX,
+        ] {
+            let made = BigInt::from_i128(value);
+            let expected = if value < 0 {
+                BigInt::from_biguint(BigUint::from_u128(value.unsigned_abs())).negated()
+            } else {
+                BigInt::from_biguint(BigUint::from_u128(value.unsigned_abs()))
+            };
+            assert_eq!(made, expected, "from_i128({value})");
+        }
+        // i128::MIN has no i128 negation; its magnitude is an ordinary u128.
+        let least = BigInt::from_i128(i128::MIN);
+        assert_eq!(least.sign(), Sign::Negative);
+        assert_eq!(*least.magnitude(), BigUint::from_u128(1u128 << 127));
+    }
     use super::{BigInt, BigUint, MontgomeryCtx, Sign, UNBALANCED_THRESHOLD_LIMBS};
 
     fn lcg_next(state: &mut u64) -> u64 {

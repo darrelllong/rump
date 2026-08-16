@@ -34,8 +34,15 @@ use crate::bigint::{BigInt, BigUint, MontgomeryCtx, Sign};
 // the batch replaces. `gcd`, `gcd_extended`, and `mod_inverse` all share this
 // engine.
 
-/// Single-word Euclid, the base case once both operands fit in one limb.
-fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+/// Greatest common divisor of two machine words.
+///
+/// Single-word Euclid, and the base case [`gcd`] falls to once both operands
+/// fit in one limb. Public because callers holding word-sized values — sieve
+/// coordinates, residues, small cofactors — would otherwise pay two heap
+/// allocations to ask a question the hardware answers directly, and the
+/// subquadratic machinery above has nothing to amortise at this size.
+#[must_use]
+pub fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
         let remainder = a % b;
         a = b;
@@ -1075,6 +1082,36 @@ fn gcd_lehmer(lhs: &BigUint, rhs: &BigUint) -> BigUint {
             debug_assert!(a >= b, "Lehmer transform preserves a >= b");
         }
     }
+}
+
+/// Modular inverse of a machine word, or `None` when there is none.
+///
+/// The word-sized companion to [`mod_inverse`], by the extended Euclidean
+/// algorithm. `None` means the value shares a factor with the modulus; for a
+/// prime modulus that is exactly the multiples of it.
+///
+/// The Bézout coefficients are carried in `i128`, which is what makes this
+/// total: they are bounded by the modulus in magnitude, but the intermediate
+/// `old_s - quotient * s` is not bounded by `u64`, and computing it there
+/// would wrap.
+///
+/// # Panics
+///
+/// Panics when the modulus is zero, which is not a modulus.
+#[must_use]
+pub fn mod_inverse_u64(value: u64, modulus: u64) -> Option<u64> {
+    assert!(modulus != 0, "modulus must be non-zero");
+    let modulus_signed = i128::from(modulus);
+    let (mut old_r, mut r) = (i128::from(value).rem_euclid(modulus_signed), modulus_signed);
+    let (mut old_s, mut s) = (1i128, 0i128);
+    while r != 0 {
+        let quotient = old_r / r;
+        (old_r, r) = (r, old_r - quotient * r);
+        (old_s, s) = (s, old_s - quotient * s);
+    }
+    (old_r == 1).then(|| {
+        u64::try_from(old_s.rem_euclid(modulus_signed)).expect("a residue modulo a u64 fits u64")
+    })
 }
 
 /// Greatest common divisor.
@@ -3102,6 +3139,52 @@ pub fn is_probable_prime_bpsw(n: &BigUint) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn gcd_u64_agrees_with_the_wide_one() {
+        for (a, b) in [
+            (0u64, 0u64),
+            (0, 7),
+            (7, 0),
+            (12, 18),
+            (17, 5),
+            (u64::MAX, 3),
+            (1 << 40, 1 << 24),
+        ] {
+            let wide = gcd(&BigUint::from_u64(a), &BigUint::from_u64(b));
+            assert_eq!(BigUint::from_u64(gcd_u64(a, b)), wide, "gcd({a}, {b})");
+        }
+    }
+
+    #[test]
+    fn mod_inverse_u64_inverts_exactly_what_it_should() {
+        for modulus in [2u64, 3, 97, 65_537, 4_294_967_291] {
+            for value in [1u64, 2, 5, modulus - 1, modulus + 1, modulus * 3 + 2] {
+                match mod_inverse_u64(value, modulus) {
+                    Some(inverse) => {
+                        let product = (u128::from(value % modulus) * u128::from(inverse))
+                            % u128::from(modulus);
+                        assert_eq!(product, 1, "{value} * {inverse} mod {modulus}");
+                    }
+                    None => assert_ne!(
+                        gcd_u64(value % modulus, modulus),
+                        1,
+                        "{value} is coprime to {modulus} and should have inverted"
+                    ),
+                }
+            }
+        }
+        // A shared factor has no inverse.
+        assert_eq!(mod_inverse_u64(6, 9), None);
+        assert_eq!(mod_inverse_u64(0, 7), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "modulus must be non-zero")]
+    fn mod_inverse_u64_refuses_a_zero_modulus() {
+        let _ = mod_inverse_u64(3, 0);
+    }
     use super::{
         gcd, is_probable_prime, is_probable_prime_with_bases, jacobi, lcm, miller_rabin_witness,
         mod_inverse, mod_pow,
