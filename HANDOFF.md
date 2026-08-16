@@ -218,13 +218,25 @@ memory, the exact provenance this list exists to catch); Rabin 1980's venue
 for `is_irreducible`;
 *Guide to ECC* §2.3.5 and Algorithms 2.41–2.45 for tap-wise reduction; Knuth
 §3.4.1 for `random_below`; IEEE Std 1363-2000 Annex A.4.7 for the even-degree
-quadratic solver; whether Bodrato's optimised sequence really describes the
+quadratic solver; Knuth §4.6.3 as newly applied to `Gf2m::pow` (the section
+is verified for the same method at `MontgomeryCtx::pow`, but this
+application was recalled, not checked); whether Bodrato's optimised sequence really describes the
 Toom interpolation as written (it reads as a first-principles Vandermonde
 solve); and Dussé & Kaliski EUROCRYPT '90 as where the word-level `n₀'`
-constant "was introduced". `CITATIONS.md` is also missing rows for
-`Gf2m::trace`/`half_trace`/`solve_quadratic`, `Gf2m::is_irreducible`,
-`Gf2m::pow`, the tap-wise reduction, and `random_below`, though the crate root
-claims the table is complete.
+constant "was introduced". The once-missing `CITATIONS.md` rows were closed
+2026-08-15 in two passes: a pattern sweep (which found `mont_sqr`
+HAC 14.16, `BarrettCtx::pow_mod` §4.6.3, `gcd_extended` HAC 2.107 / Knuth
+Algorithm X, `mod_inverse` HAC 2.142 — and *missed* Dussé & Kaliski,
+because that citation has no algorithm number for a pattern to hit), then
+an exhaustive line-by-line read of every comment in every source file,
+which is the method to repeat next time. The read also surfaced: two
+straggler `3.3·10²⁴` (ψ₁₃) claims in the BPSW doc and a test comment that
+every pattern sweep had missed, now fixed; two mis-transcribed rows
+(`hgcd2_jacobi.c`, which the code never names, and Cohen "§2.6.3" for the
+code's "Algorithm 2.6.3"), now corrected; and the test-oracle provenance
+(OEIS, GMP 6.3.0 vectors, `jacobitab.h`, CPython, Python), now collected
+in its own table section. All new rows are transcriptions and are marked
+as such in the file's header — the physical checks above still apply.
 
 One caution from experience: an agent-reported "defect" claiming HAC Algorithm
 14.82 is sliding-window was **wrong** — 14.82 is left-to-right k-ary (14.85 is

@@ -503,7 +503,16 @@ boundary ($x = \REDC(\bar x)$). \code{one\_mont()} is $\bar 1 = R \bmod n$.
 
 \code{mul}, \code{square}, and \code{pow} are one-shot forms that convert
 internally; \code{pow\_encoded} reuses an already encoded base across
-exponents. The exponentiation ladder has two engines, chosen by exponent
+exponents. For loops where the product \emph{is} the loop,
+\code{mul\_mont\_with\_workspace} / \code{square\_mont\_with\_workspace}
+thread one caller-owned scratch buffer through a sequence of domain
+operations, allocating it once instead of per multiply --- measured
+per-operation at about 43\% for a 64-bit modulus, roughly 25--33\% at
+256 bits, and roughly 20\% at 512, falling to 2--3\% at 2048 bits and to the edge
+of measurement ($\sim$1\%) at 4096; the in-tree
+\code{mont\_workspace\_timing} probe reproduces the numbers, printing
+its per-pass spread. The workspace holds unscrubbed intermediates,
+exactly as the discarded per-call buffer does. The exponentiation ladder has two engines, chosen by exponent
 width: above 64 bits, left-to-right $k$-ary with a fixed 4-bit window table
 held in the domain (HAC Algorithm~14.82), seeded from the top window; at 64
 bits or fewer (e.g.\ the F4 public exponent 65\,537), right-to-left binary
@@ -511,7 +520,8 @@ square-and-multiply, which skips the window-table setup that would dominate
 so short a ladder. Both wipe their workspaces on exit.
 
 \begin{contract}[In-domain operands are reduced]
-\code{mul\_mont}, \code{square\_mont}, and \code{pow\_encoded} require
+\code{mul\_mont} and \code{square\_mont} (in both their allocating and
+\code{\_with\_workspace} forms) and \code{pow\_encoded} require
 operands already reduced below the modulus. An operand \emph{wider} than
 the modulus panics in every build (it does not fit the kernel's
 modulus-width windows); an unreduced operand of the modulus's width trips
@@ -535,6 +545,15 @@ let a_mont = ctx.encode(&a);
 let b_mont = ctx.encode(&b);
 let product_mont = ctx.mul_mont(&a_mont, &b_mont);
 assert_eq!(ctx.decode(&product_mont), BigUint::from_u64(30));
+
+// Loops thread one workspace through the domain operations: the same
+// values, one allocation instead of one per multiply.
+let mut ws: Vec<u64> = Vec::new();
+assert_eq!(ctx.mul_mont_with_workspace(&a_mont, &b_mont, &mut ws), product_mont);
+assert_eq!(
+    ctx.square_mont_with_workspace(&a_mont, &mut ws),
+    ctx.square_mont(&a_mont)
+);
 assert_eq!(ctx.decode(&ctx.sub_mont(&a_mont, &b_mont)), BigUint::from_u64(96));
 \end{lstlisting}
 
@@ -1486,7 +1505,7 @@ returns \code{Option} instead.
 \code{rational\_reconstruct\_bounded} & $2ND \ge m$ (the uniqueness contract) \\
 \code{to\_be\_bytes\_padded} & the value exceeds the requested width \\
 \code{from\_str\_radix} / \code{to\_str\_radix} & the radix is outside $[2, 36]$ \\
-\code{mul\_mont} / \code{square\_mont} / \code{pow\_encoded} & an operand \emph{wider} than the modulus, in every build; an unreduced operand of the modulus's width trips a debug assert only (\S\ref{sec:montgomery}) \\
+\code{mul\_mont} / \code{square\_mont} / their \code{\_with\_workspace} forms / \code{pow\_encoded} & an operand \emph{wider} than the modulus, in every build; an unreduced operand of the modulus's width trips a debug assert only (\S\ref{sec:montgomery}) \\
 \code{Gf2m::half\_trace} & the field degree is even \\
 \code{PolyZ} / \code{PolyModP} division & the divisor is the zero polynomial \\
 \code{PolyModP::new} / \code{zero} / \code{from\_poly\_z} & the modulus is below 2 \\

@@ -261,6 +261,19 @@ fn manual_montgomery_domain() {
     let b_mont = ctx.encode(&b);
     let product_mont = ctx.mul_mont(&a_mont, &b_mont);
     assert_eq!(ctx.decode(&product_mont), BigUint::from_u64(30));
+
+    // Loops thread one workspace through the domain operations: the same
+    // values, one allocation instead of one per multiply.
+    let mut ws: Vec<u64> = Vec::new();
+    assert_eq!(
+        ctx.mul_mont_with_workspace(&a_mont, &b_mont, &mut ws),
+        product_mont
+    );
+    assert_eq!(
+        ctx.square_mont_with_workspace(&a_mont, &mut ws),
+        ctx.square_mont(&a_mont)
+    );
+
     assert_eq!(ctx.decode(&ctx.square_mont(&a_mont)), BigUint::from_u64(25));
     assert_eq!(
         ctx.decode(&ctx.add_mont(&a_mont, &b_mont)),

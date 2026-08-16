@@ -259,7 +259,8 @@ impl Gf2m {
 
     /// Raise a field element to a non-negative integer power.
     ///
-    /// Left-to-right binary square-and-multiply: seed the accumulator with the
+    /// Left-to-right binary square-and-multiply (Knuth, *TAOCP* vol. 2,
+    /// §4.6.3): seed the accumulator with the
     /// base (the leading exponent bit, which is always set), then walk the
     /// remaining bits from most to least significant, squaring at every step
     /// and multiplying by the base where the bit is set. One squaring per

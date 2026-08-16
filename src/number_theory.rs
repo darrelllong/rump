@@ -2652,8 +2652,15 @@ fn is_witness(
     let n_minus_one_mont = ctx.modulus().sub_ref(&one_mont);
     let mut value = ctx.encode(&ctx.pow(base, odd_factor));
 
+    // One workspace for the whole squaring chain: v₂(n−1) squarings per
+    // round, each of which would otherwise allocate and drop its scratch.
+    // Measured: invisible on is_probable_prime end to end — the chain is
+    // ~2 squarings for a random candidate against the ~`bits` inside
+    // `ctx.pow`, which reuses its workspace internally — so this is
+    // strictly-less-allocation housekeeping, not a performance claim.
+    let mut workspace = Vec::new();
     for _ in 0..two_adic_exponent {
-        let next = ctx.square_mont(&value);
+        let next = ctx.square_mont_with_workspace(&value, &mut workspace);
         if next == one_mont && value != one_mont && value != n_minus_one_mont {
             return true;
         }
@@ -2820,11 +2827,11 @@ pub fn miller_rabin_witness(candidate: &BigUint, witness: &BigUint) -> bool {
 /// before any of that machinery is asked to run.
 ///
 /// The divisibility test cannot distinguish a sieve prime from its multiples
-/// on its own, so a hit is disambiguated by size: only a candidate below
-/// `2^10` can equal a member of the table (the largest is 997), and for such a
-/// candidate the residue modulo `2^10` is the candidate itself, so comparing
-/// that residue to the divisor decides identity without building a `BigUint`
-/// per table entry.
+/// on its own, so a hit is disambiguated by a direct word comparison:
+/// `to_u64` narrows the candidate (or reports it too wide to equal any table
+/// entry) and equality decides identity, without building a `BigUint` per
+/// table entry and without any invariant tying the test to the table's
+/// current width — extending `SMALL_TRIAL_PRIMES` cannot break it.
 fn small_prime_screen(candidate: &BigUint) -> Option<bool> {
     if candidate.is_zero() || candidate == &BigUint::one() {
         return Some(false);
@@ -2833,11 +2840,8 @@ fn small_prime_screen(candidate: &BigUint) -> Option<bool> {
         let prime = u64::from(prime);
         if candidate.rem_u64(prime) == 0 {
             // A small prime divides itself as well as its composite
-            // multiples. For candidates below 2^10, the residue modulo 2^10
-            // distinguishes the identity case without allocating a temporary
-            // BigUint for every sieve entry.
-            let is_the_prime = candidate.bits() <= 10 && candidate.rem_u64(1u64 << 10) == prime;
-            return Some(is_the_prime);
+            // multiples; one narrowing comparison separates the two.
+            return Some(candidate.to_u64() == Some(prime));
         }
     }
     None
@@ -3064,8 +3068,9 @@ pub fn is_strong_lucas_probable_prime(n: &BigUint) -> bool {
 /// that bound (verified independently by Galway), whose strong subset has
 /// been checked exhaustively against the Lucas stage — so below 2⁶⁴ the
 /// test is deterministic. [`is_probable_prime`]'s twelve fixed bases are
-/// deterministic further, to 3.3·10²⁴ (Sorenson and Webster), and the two
-/// tests fail differently above their bounds, which is why both exist.
+/// deterministic further, to ψ₁₂ ≈ 3.19·10²³ (Sorenson and Webster; see
+/// `MR_BASES` for the exact bound), and the two tests fail differently
+/// above their bounds, which is why both exist.
 ///
 /// Above 2⁶⁴ this is a probable-prime test, not a proof, and its
 /// parameters are a fixed function of the candidate: as with any fixed
@@ -4562,7 +4567,7 @@ mod tests {
     fn bpsw_agrees_with_deterministic_miller_rabin_on_random_words() {
         use super::is_probable_prime_bpsw;
         // Above the sieve's reach the twelve-base test is the practical
-        // reference (deterministic to 3.3·10²⁴, Sorenson & Webster). The
+        // reference (deterministic to ψ₁₂ ≈ 3.19·10²³, Sorenson & Webster). The
         // two tests share only the trial-division screen, which the sieve
         // test above checks against an independent oracle.
         let mut rng = SplitMix64 {

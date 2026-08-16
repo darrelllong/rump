@@ -2995,6 +2995,43 @@ impl MontgomeryCtx {
         )
     }
 
+    /// [`Self::mul_mont`] with a caller-supplied workspace, for the loops
+    /// where the product *is* the loop: the kernel pads its operands and
+    /// carves scratch out of one buffer, and threading that buffer through
+    /// a sequence of calls allocates it once instead of per multiply.
+    /// Pass the same `Vec` (empty on the first call — it is sized on
+    /// demand) to every domain operation in the loop. Measured
+    /// per-operation at exact modulus widths by `mont_workspace_timing` in
+    /// this file (run with `--ignored`; it interleaves the two forms in
+    /// paired chunks so drift cancels, and prints every pass so a figure
+    /// inside the spread reads as the noise it is): about 43% saved at one
+    /// limb, roughly 25–33% at four, and ~20% at eight — the 64–512-bit
+    /// moduli where Pollard rho actually runs — falling to 2–3% at 32
+    /// limbs and to the edge of measurement (~1%) at 64, where the kernel
+    /// dominates the allocator.
+    ///
+    /// The workspace holds unscrubbed Montgomery intermediates, exactly as
+    /// [`Self::mul_mont`]'s discarded buffer does (see the scope note
+    /// there); a caller that wants it wiped scrubs it after the loop.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either operand occupies more limbs than the modulus, as
+    /// in [`Self::mul_mont`].
+    #[must_use]
+    pub fn mul_mont_with_workspace(
+        &self,
+        lhs: &BigUint,
+        rhs: &BigUint,
+        workspace: &mut Vec<u64>,
+    ) -> BigUint {
+        debug_assert!(
+            lhs < &self.modulus && rhs < &self.modulus,
+            "domain operands arrive reduced"
+        );
+        BigUint::montgomery_mul_odd_with_workspace(lhs, rhs, &self.modulus, self.n0_inv, workspace)
+    }
+
     /// Square a residue that is already in Montgomery form, staying in
     /// Montgomery form.
     ///
@@ -3022,6 +3059,21 @@ impl MontgomeryCtx {
             self.n0_inv,
             &mut workspace,
         )
+    }
+
+    /// [`Self::square_mont`] with a caller-supplied workspace — the
+    /// squaring companion to [`Self::mul_mont_with_workspace`], sharing its
+    /// contract, its scrubbing posture, and its buffer (the two size their
+    /// windows independently from the same `Vec`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `value` occupies more limbs than the modulus, as in
+    /// [`Self::mul_mont`].
+    #[must_use]
+    pub fn square_mont_with_workspace(&self, value: &BigUint, workspace: &mut Vec<u64>) -> BigUint {
+        debug_assert!(value < &self.modulus, "domain operand arrives reduced");
+        BigUint::montgomery_sqr_odd_with_workspace(value, &self.modulus, self.n0_inv, workspace)
     }
 
     /// Add two residues in Montgomery form, staying in Montgomery form:
@@ -5110,6 +5162,150 @@ mod tests {
             a.mul_unbalanced_ref(&b),
             BigUint::mul_schoolbook_ref(&a, &b)
         );
+    }
+
+    /// An odd modulus of exactly `limbs` limbs, for the Montgomery tests.
+    fn seeded_odd_modulus(limbs: usize, state: &mut u64) -> BigUint {
+        let mut n = seeded_biguint(limbs, state);
+        n.limbs[0] |= 1;
+        n
+    }
+
+    #[test]
+    fn mont_workspace_variants_match_allocating_forms() {
+        // The with_workspace wrappers against their allocating twins and the
+        // plain modular product, with ONE buffer shared across widths and
+        // across both methods in both orders — so the resize-only-grow path,
+        // the smaller-window-after-larger path, and stale contents from a
+        // previous width are all exercised. The width order is deliberately
+        // non-monotonic: a narrower modulus following a wider one is the
+        // only shape that hands the kernels an over-long buffer (an
+        // ascending sweep always resizes to an exact fit), and the 16 → 2
+        // and 8 → 1 steps force that shape for both kernels. copy_padded
+        // zero-fills and the kernels clear their scratch on entry, so none
+        // of it may show.
+        let mut seed = 0x0dd5_eed0_0000_0001;
+        let mut ws: Vec<u64> = Vec::new();
+        for &limbs in &[16usize, 2, 3, 8, 1, 5] {
+            let n = seeded_odd_modulus(limbs, &mut seed);
+            let ctx = MontgomeryCtx::new(&n).expect("odd modulus");
+            let mut x = ctx.encode(&seeded_biguint(limbs, &mut seed));
+            let y = ctx.encode(&seeded_biguint(limbs, &mut seed));
+            for round in 0..200 {
+                // Alternate the call order so each window size follows the
+                // other's leftovers.
+                let next = if round % 2 == 0 {
+                    let m = ctx.mul_mont_with_workspace(&x, &y, &mut ws);
+                    assert_eq!(m, ctx.mul_mont(&x, &y), "mul at {limbs} limbs");
+                    let s = ctx.square_mont_with_workspace(&m, &mut ws);
+                    assert_eq!(s, ctx.square_mont(&m), "sqr at {limbs} limbs");
+                    s
+                } else {
+                    let s = ctx.square_mont_with_workspace(&x, &mut ws);
+                    assert_eq!(s, ctx.square_mont(&x), "sqr at {limbs} limbs");
+                    let m = ctx.mul_mont_with_workspace(&s, &y, &mut ws);
+                    assert_eq!(m, ctx.mul_mont(&s, &y), "mul at {limbs} limbs");
+                    m
+                };
+                x = next;
+            }
+            // Decoded agreement with the reduction-based product: the domain
+            // arithmetic and the ordinary arithmetic name the same value.
+            let product = ctx.mul_mont_with_workspace(&x, &y, &mut ws);
+            assert_eq!(
+                ctx.decode(&product),
+                BigUint::mod_mul(&ctx.decode(&x), &ctx.decode(&y), &n),
+                "domain product decodes to the modular product at {limbs} limbs"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "timing probe for the with_workspace docs; run with --ignored"]
+    fn mont_workspace_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        /// One pass: alternate the two forms in short chunks across the
+        /// whole pass, so slow drift (thermal, frequency scaling) hits both
+        /// sides equally instead of landing on whichever ran second; the
+        /// naive measure-A-then-measure-B design was shown to report up to
+        /// 20% on a function compared against itself. Returns the saving
+        /// of `b` over `a` in percent.
+        fn paired_saving(chunks: u32, chunk: u32, a: &mut dyn FnMut(), b: &mut dyn FnMut()) -> f64 {
+            let (mut total_a, mut total_b) = (0f64, 0f64);
+            for _ in 0..chunks {
+                let t = Instant::now();
+                for _ in 0..chunk {
+                    a();
+                }
+                total_a += t.elapsed().as_secs_f64();
+                let t = Instant::now();
+                for _ in 0..chunk {
+                    b();
+                }
+                total_b += t.elapsed().as_secs_f64();
+            }
+            (total_a - total_b) / total_a * 100.0
+        }
+
+        /// Five interleaved passes; print every pass so the spread is
+        /// visible, and report the median as the figure. A claimed saving
+        /// smaller than the printed spread is noise and must be quoted as
+        /// noise.
+        fn report(label: &str, limbs: usize, mut passes: [f64; 5]) {
+            passes.sort_by(f64::total_cmp);
+            eprintln!(
+                "{limbs:>6} {label} median {:+6.1}%  passes {:+5.1} {:+5.1} {:+5.1} {:+5.1} {:+5.1}",
+                passes[2], passes[0], passes[1], passes[2], passes[3], passes[4]
+            );
+        }
+
+        let mut seed = 0x0dd5_eed0_0000_0002;
+        for &limbs in &[1usize, 4, 8, 32, 64] {
+            let n = seeded_odd_modulus(limbs, &mut seed);
+            let ctx = MontgomeryCtx::new(&n).expect("odd modulus");
+            let a = ctx.encode(&seeded_biguint(limbs, &mut seed));
+            let b = ctx.encode(&seeded_biguint(limbs, &mut seed));
+            let chunk = 256u32;
+            let chunks = ((2_000_000 / (limbs * limbs)).max(4_000) as u32 / chunk).max(8);
+
+            let mut ws = Vec::new();
+            let mut sqr_passes = [0f64; 5];
+            for pass in &mut sqr_passes {
+                *pass = paired_saving(
+                    chunks,
+                    chunk,
+                    &mut || {
+                        black_box(ctx.square_mont(black_box(&a)));
+                    },
+                    &mut || {
+                        black_box(ctx.square_mont_with_workspace(black_box(&a), &mut ws));
+                    },
+                );
+            }
+            report("sqr", limbs, sqr_passes);
+
+            let mut ws2 = Vec::new();
+            let mut mul_passes = [0f64; 5];
+            for pass in &mut mul_passes {
+                *pass = paired_saving(
+                    chunks,
+                    chunk,
+                    &mut || {
+                        black_box(ctx.mul_mont(black_box(&a), black_box(&b)));
+                    },
+                    &mut || {
+                        black_box(ctx.mul_mont_with_workspace(
+                            black_box(&a),
+                            black_box(&b),
+                            &mut ws2,
+                        ));
+                    },
+                );
+            }
+            report("mul", limbs, mul_passes);
+        }
     }
 
     #[test]

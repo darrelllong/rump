@@ -374,7 +374,15 @@ encode once, stay in the domain with `mul_mont` / `square_mont` /
 subtraction are one compare-and-correct each — and decode at the boundary;
 `one_mont()` is the encoding of one. `mul`, `square`, and
 `pow` are the one-shot forms that convert internally. `pow_encoded` reuses
-an already encoded base across exponents.
+an already encoded base across exponents. For the loops where the product
+*is* the loop, `mul_mont_with_workspace` / `square_mont_with_workspace`
+thread one caller-owned scratch buffer through a sequence of domain
+operations, allocating it once instead of per multiply — measured
+per-operation at about 43% for a 64-bit modulus, roughly 25–33% at 256
+bits, and ~20% at 512, falling to 2–3% at 2048 bits and to the edge of measurement
+(~1%) at 4096 (the in-tree `mont_workspace_timing` probe reproduces the
+numbers with its per-pass spread printed). The workspace holds unscrubbed
+intermediates, exactly as the discarded per-call buffer does.
 
 ```rust
 let p = BigUint::from_u64(97);
@@ -395,6 +403,15 @@ let a_mont = ctx.encode(&a);
 let b_mont = ctx.encode(&b);
 let product_mont = ctx.mul_mont(&a_mont, &b_mont);
 assert_eq!(ctx.decode(&product_mont), BigUint::from_u64(30));
+
+// Loops thread one workspace through the domain operations: the same
+// values, one allocation instead of one per multiply.
+let mut ws: Vec<u64> = Vec::new();
+assert_eq!(ctx.mul_mont_with_workspace(&a_mont, &b_mont, &mut ws), product_mont);
+assert_eq!(
+    ctx.square_mont_with_workspace(&a_mont, &mut ws),
+    ctx.square_mont(&a_mont)
+);
 assert_eq!(
     ctx.decode(&ctx.square_mont(&a_mont)),
     BigUint::from_u64(25)
@@ -970,7 +987,7 @@ recoverable conditions:
 | `sqrt_mod_prime_power` | `e == 0` or `p < 2` |
 | `remainder_tree` / `smooth_parts` | a value (leaf) is zero — but `smooth_parts` maps a zero value to zero rather than reducing it |
 | `to_be_bytes_padded` | the value needs more than the requested byte length |
-| `MontgomeryCtx::mul_mont` / `square_mont` / `pow_encoded` | given an operand not reduced below the modulus — the shared in-domain contract, asserted in debug builds; in release a grossly over-width operand trips the internal bounds check. `encode` and `decode` instead reduce any representative and never panic on width |
+| `MontgomeryCtx::mul_mont` / `square_mont` / their `_with_workspace` forms / `pow_encoded` | given an operand not reduced below the modulus — the shared in-domain contract, asserted in debug builds; in release a grossly over-width operand trips the internal bounds check. `encode` and `decode` instead reduce any representative and never panic on width |
 | `random_below` / `random_nonzero_below` / `random_coprime_below` / `random_probable_prime` | the generator trips a stall guard — see Random sampling above for what each guard can and cannot detect |
 
 Fallible mathematics — a missing inverse, a non-residue, an even Montgomery
