@@ -1828,6 +1828,53 @@ pub fn lcm(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 
 /// Jacobi symbol `(a/n)` for odd `n`, or `None` when `n` is even or zero.
 ///
+/// The Jacobi symbol `(a/n)` for machine words, or `None` for even or zero
+/// `n`.
+///
+/// The word-sized companion to [`jacobi`], as [`gcd_u64`] is to [`gcd`] and
+/// [`mod_inverse_u64`] to [`mod_inverse`]: the same contract with no
+/// allocation, for callers that hold both operands in registers. Sieves are
+/// the motivating shape — a quadratic-character test runs once per character
+/// per surviving candidate, and boxing two words into `BigUint`s to ask a
+/// one-word question is the kind of cost that only shows up multiplied by
+/// millions.
+///
+/// Binary reciprocity throughout, as in [`jacobi`]'s small-operand engine:
+/// strip twos with the supplement — a sign flip exactly when `n ≡ 3, 5
+/// (mod 8)` — then swap, paying the reciprocity flip when both are `≡ 3
+/// (mod 4)`. No Lehmer tier, because there is no size here for it to win at.
+///
+/// For odd prime `n` this is the Legendre symbol: `1` for quadratic
+/// residues, `−1` for non-residues, `0` when `n` divides `a`. `(a/1) = 1` by
+/// the empty-product convention.
+#[must_use]
+pub fn jacobi_u64(a: u64, n: u64) -> Option<i8> {
+    if n == 0 || n.is_multiple_of(2) {
+        return None;
+    }
+    let mut a = a % n;
+    let mut n = n;
+    let mut sign = 1i8;
+    while a != 0 {
+        while a.is_multiple_of(2) {
+            a /= 2;
+            if matches!(n % 8, 3 | 5) {
+                sign = -sign;
+            }
+        }
+        core::mem::swap(&mut a, &mut n);
+        if a % 4 == 3 && n % 4 == 3 {
+            sign = -sign;
+        }
+        a %= n;
+    }
+    if n == 1 {
+        Some(sign)
+    } else {
+        Some(0)
+    }
+}
+
 /// Quadratic reciprocity, in the shape of *Handbook of Applied Cryptography*,
 /// Algorithm 2.149: strip factors of two using the supplement
 /// `(2/n) = (-1)^((n^2 - 1)/8)` — a sign flip exactly when `n ≡ 3, 5 (mod 8)`
@@ -5424,6 +5471,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn jacobi_u64_agrees_with_the_multiprecision_symbol() {
+        // Differential against `jacobi`, which carries the algorithm's own
+        // correctness argument; the word form must be the same function on
+        // the shared domain. Dense small values catch the reciprocity and
+        // supplement signs, the scattered large ones catch overflow.
+        for n in (1u64..200).step_by(2) {
+            for a in 0..200u64 {
+                assert_eq!(
+                    jacobi_u64(a, n),
+                    jacobi(&BigUint::from_u64(a), &BigUint::from_u64(n)),
+                    "({a}/{n})"
+                );
+            }
+        }
+        let mut x = 0x9e3779b97f4a7c15u64;
+        let mut step = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..2_000 {
+            let a = step();
+            let n = step() | 1;
+            assert_eq!(
+                jacobi_u64(a, n),
+                jacobi(&BigUint::from_u64(a), &BigUint::from_u64(n)),
+                "({a}/{n})"
+            );
+        }
+        // Even and zero moduli are outside the symbol's domain.
+        assert_eq!(jacobi_u64(3, 0), None);
+        assert_eq!(jacobi_u64(3, 10), None);
+        // The empty-product convention.
+        assert_eq!(jacobi_u64(7, 1), Some(1));
     }
 
     #[test]
