@@ -136,15 +136,17 @@ operand generation dominates. If a cell cannot clear it, leave it marked
    and the 4096-bit heavy cells that could not clear the 30-reading floor
    marked `insufficient-sample` instead of published. Against moore's
    legacy rows, baase (Grace aarch64) is faster on 91 of 94 comparable
-   ops, median 1.62x, 2-3x on the gcd family. Read the comparison with
-   the same discipline as everything else here: twelve of the 94 pairs
-   carry a `~` (cap-hit, CI above 10%) on one side or the other. Of the
-   three counter-ratios, the two `isprime` rows do blame moore's legacy
-   means (both `~`, CIs of 279% and 401%); `modpow_256` is the reverse —
-   moore's row is clean (0.62% CI, max/min 1.06, as a fixed-width modpow
-   should be) and baase's own is the flagged one (`~`, 178% CI, max/min
-   881 on a data-independent op, which points at interference during
-   that session). That cell is owed a re-run on baase, not an excuse.
+   ops, median 1.63x, 2-3x on the gcd family. Read the comparison with
+   the same discipline as everything else here: eleven of the 94 pairs
+   carry a `~` (cap-hit, CI above 10%) on one side or the other, all on
+   heavy-tailed ops. The two `isprime` counter-ratios blame moore's
+   legacy means (both `~`, CIs of 279% and 401%). A third cell,
+   `modpow_256`, was initially flagged on baase's side (`~`, 178% CI,
+   max/min 881 on a data-independent op — interference during the
+   mid-suite session; its own minimum matched the clean value) and was
+   re-run on the idle machine per this note's discipline: 0.0124 ms,
+   6.15% CI, max/min 2.07, flipping that ratio to 2.6x in baase's
+   favour. Final standing: baase faster on 92 of 94.
 2. **Split the two large files** (carried from the earlier review passes;
    see above). Behaviour-preserving, and
    the safe shape is: keep `src/bigint.rs` and `src/number_theory.rs` as module
