@@ -28,3 +28,4 @@ pilot_result_*/
 *.log
 *.out
 *.toc
+__pycache__/

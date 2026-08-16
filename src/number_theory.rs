@@ -12,9 +12,11 @@
 //! reconstruction, Bernstein's product and remainder trees, and the p-adic
 //! valuation.
 //!
-//! Randomized prime *generation* and adversarially hardened primality testing
-//! live with their consumers (the parent cryptography crate), where the
-//! entropy source and hash live.
+//! Adversarially *hardened* primality testing lives with its consumer (the
+//! parent cryptography crate), where the hash lives. Prime generation is in
+//! this crate — [`crate::random_probable_prime`], driven by a
+//! caller-supplied generator — since rump chooses no entropy source of its
+//! own.
 
 use crate::bigint::{BigInt, BigUint, MontgomeryCtx, Sign};
 
@@ -1087,8 +1089,10 @@ fn gcd_lehmer(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 /// Modular inverse of a machine word, or `None` when there is none.
 ///
 /// The word-sized companion to [`mod_inverse`], by the extended Euclidean
-/// algorithm. `None` means the value shares a factor with the modulus; for a
-/// prime modulus that is exactly the multiples of it.
+/// algorithm (*Handbook of Applied Cryptography*, Algorithm 2.142 — the
+/// same source the wide form cites). `None` means the value shares a
+/// factor with the modulus; for a prime modulus that is exactly the
+/// multiples of it.
 ///
 /// The Bézout coefficients are carried in `i128`, which is what makes this
 /// total: they are bounded by the modulus in magnitude, but the intermediate

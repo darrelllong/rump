@@ -255,8 +255,12 @@ def scaling_svg(family, out, hosts):
                 continue
             path = " ".join(f"{'M' if i==0 else 'L'}{px(x):.1f},{py(y):.1f}" for i, (x, y) in enumerate(pts))
             da = dash.get(hi, "")
+            # Built outside the f-string: expression parts may not contain a
+            # backslash before Python 3.12, and this script must run on the
+            # fleet's system pythons.
+            dash_attr = f'stroke-dasharray="{da}"' if da else ""
             s.append(f'<path d="{path}" fill="none" stroke="{col}" stroke-width="2" '
-                     f'{f"stroke-dasharray=\"{da}\"" if da else ""}/>')
+                     f'{dash_attr}/>')
             for x, y in pts:
                 s.append(f'<circle cx="{px(x):.1f}" cy="{py(y):.1f}" r="2.5" fill="{col}"/>')
     # legend: ops by colour, hosts by dash.
@@ -269,8 +273,10 @@ def scaling_svg(family, out, hosts):
     ly += 6
     for hi, host in enumerate(hosts):
         da = dash.get(hi, "")
+        # Same pre-3.12 portability constraint as the plot path above.
+        dash_attr = f'stroke-dasharray="{da}"' if da else ""
         s.append(f'<line x1="{W-MR+8}" y1="{ly}" x2="{W-MR+26}" y2="{ly}" stroke="#211E19" '
-                 f'stroke-width="2" {f"stroke-dasharray=\"{da}\"" if da else ""}/>')
+                 f'stroke-width="2" {dash_attr}/>')
         s.append(f'<text x="{W-MR+30}" y="{ly+4}" font-size="10" fill="#6F675C">{host}</text>')
         ly += 15
     s.append("</svg>")

@@ -5,13 +5,13 @@
 //! it in both places — a drifted manual fails here.
 
 use rump::{
-    crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
+    crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
     is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
-    lll_reduce, miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_pow, primes_below,
-    product_tree, random_below, random_coprime_below, random_nonzero_below, random_probable_prime,
-    rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
-    smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, BarrettCtx, BigInt, BigUint, Gf2m,
-    MontgomeryCtx, PolyModP, PolyZ, Rng, Sign,
+    lll_reduce, miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow,
+    primes_below, product_tree, random_below, random_coprime_below, random_nonzero_below,
+    random_probable_prime, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
+    remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, BarrettCtx, BigInt,
+    BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Rng, Sign,
 };
 
 #[test]
@@ -196,6 +196,13 @@ fn manual_bigint_signed() {
     let ten = BigInt::from_biguint(BigUint::from_u64(10));
     let minus_three = BigInt::from_parts(Sign::Negative, BigUint::from_u64(3));
 
+    // i128 construction is total: i128::MIN's magnitude is a u128.
+    assert_eq!(BigInt::from_i128(-3), minus_three);
+    assert_eq!(
+        *BigInt::from_i128(i128::MIN).magnitude(),
+        BigUint::from_u128(1u128 << 127)
+    );
+
     assert_eq!(minus_three.sign(), Sign::Negative);
     assert_eq!(*minus_three.magnitude(), BigUint::from_u64(3));
     assert_eq!(minus_three.negated().sign(), Sign::Positive);
@@ -366,6 +373,10 @@ fn manual_number_theory_divisibility() {
     let (g, s, t) = gcd_extended(&a, &b);
     let bezout = s.mul_biguint_ref(&a).add_ref(&t.mul_biguint_ref(&b));
     assert_eq!(bezout, BigInt::from_biguint(g));
+
+    // The word-sized form answers without an allocation.
+    assert_eq!(gcd_u64(240, 46), 2);
+    assert_eq!(gcd_u64(0, 7), 7); // gcd(0, b) = b
 }
 
 #[test]
@@ -414,6 +425,11 @@ fn manual_number_theory_modular() {
         None
     );
 
+    // The word-sized companion: extended Euclid with i128 cofactors, so it is
+    // total over u64; panics only on a zero modulus.
+    assert_eq!(mod_inverse_u64(3, 7), Some(5));
+    assert_eq!(mod_inverse_u64(2, 4), None); // shares a factor
+
     let root = sqrt_mod(&BigUint::from_u64(2), &p).expect("2 is a residue mod 41");
     assert_eq!(BigUint::mod_mul(&root, &root, &p), BigUint::from_u64(2));
     assert_eq!(sqrt_mod(&BigUint::from_u64(3), &p), None); // non-residue
@@ -439,6 +455,12 @@ fn manual_bulk_primes_word_division_estimates() {
 
     assert_eq!(BigUint::from_u64(8).to_f64_lossy(), 8.0);
     assert!((BigUint::from_u64(1_000).ln_approx() - 1_000f64.ln()).abs() < 1e-9);
+
+    // Digit counts without the digits: the boundary cases are the powers.
+    assert_eq!(BigUint::from_u64(1_000).digit_count(10), 4);
+    assert_eq!(BigUint::from_u64(999).digit_count(10), 3);
+    assert_eq!(BigUint::from_u64(255).digit_count(16), 2); // "ff"
+    assert_eq!(BigUint::zero().digit_count(10), 1); // written "0"
 }
 
 #[test]

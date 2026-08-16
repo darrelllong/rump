@@ -136,10 +136,11 @@ rust-mp = "0.2"
 
 \begin{lstlisting}
 use rump::{
-    crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
-    is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi,
-    kronecker, lcm, legendre, miller_rabin_witness, mod_inverse,
-    mod_inverse_batch, mod_pow, primes_below, product_tree, random_below,
+    crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime,
+    is_probable_prime_bpsw, is_probable_prime_with_bases,
+    is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
+    miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_inverse_u64,
+    mod_pow, primes_below, product_tree, random_below,
     random_coprime_below, random_nonzero_below, random_probable_prime,
     rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
     remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation,
@@ -148,10 +149,13 @@ use rump::{
 };
 \end{lstlisting}
 
-This manual documents the development tree that ships as version 0.2.2. Two
-behaviours described here are new at that version and absent from earlier
-releases: the samplers' stall guards (\S\ref{sec:random}) and the unbalanced
-multiplication kernel (\S\ref{sec:mul}).
+This manual tracks the development tree (version 0.2.2 and the work on
+\code{main} above that tag). Behaviours new since 0.2.1 and absent from
+earlier releases include the samplers' stall guards
+(\S\ref{sec:random}), the unbalanced multiplication kernel
+(\S\ref{sec:mul}), the public signed ring, and the word-and-size
+primitives (\code{digit\_count}, \code{from\_i128}, \code{gcd\_u64},
+\code{mod\_inverse\_u64}).
 
 \subsection{Notation}
 
@@ -180,7 +184,8 @@ and panics when the value does not fit. \code{low\_u128} and
 
 \code{from\_str\_radix} / \code{to\_str\_radix} convert against any radix
 $2 \le r \le 36$; \code{Display} and \code{FromStr} are the base-10 special
-case. Power-of-two radices convert by direct bit packing. The rest run
+case, and \code{FromStr}'s error type is the exported
+\code{ParseBigIntError}. Power-of-two radices convert by direct bit packing. The rest run
 classical word-sized conversion at small sizes and switch to
 divide-and-conquer against a ladder of squared radix powers above measured
 crossovers: to parse $n$ digits, split at the largest $r^{2^j}$ below the
@@ -368,13 +373,31 @@ otherwise); \code{to\_f64\_lossy} saturates to infinity above the
 \code{f64} range; \code{ln\_approx} computes $\ln a$ from the top bits and
 the bit length, staying finite far past the \code{f64} range --- for
 size-driven parameter heuristics, not for arithmetic.
+\code{digit\_count(r)} returns the written length
+\begin{equation}
+d_r(a) \;=\; \lfloor \log_r a \rfloor + 1 \quad (a \ge 1),
+\qquad d_r(0) = 1,
+\end{equation}
+from the limbs: a logarithm estimate with the power-of-$r$ boundary ---
+the one class the floating-point estimate cannot settle --- corrected by
+comparison against $r^{d-1}$ and $r^d$, so no expansion is produced. It
+panics for $r < 2$.
+
+\begin{lstlisting}
+assert_eq!(BigUint::from_u64(1_000).digit_count(10), 4);
+assert_eq!(BigUint::from_u64(999).digit_count(10), 3);
+assert_eq!(BigUint::from_u64(255).digit_count(16), 2); // "ff"
+assert_eq!(BigUint::zero().digit_count(10), 1); // written "0"
+\end{lstlisting}
 
 \section{Signed integers: \code{BigInt} and \code{Sign}}
 
 A \code{BigInt} is a \code{Sign} (\code{Negative}, \code{Zero},
 \code{Positive}) joined to a \code{BigUint} magnitude, with zero normalized
 to \code{Sign::Zero}. Construct with \code{from\_biguint} (non-negative),
-\code{from\_parts}, or \code{from\_i64}; read back with \code{sign()} and
+\code{from\_parts}, \code{from\_i64}, or \code{from\_i128} (total over its
+range: \code{i128::MIN}'s magnitude $2^{127}$ is an ordinary
+\code{u128}); read back with \code{sign()} and
 \code{magnitude()}; \code{negated} flips the sign. \code{add\_ref} /
 \code{sub\_ref} are signed with in-place forms; \code{mul\_ref} is the full
 signed product and \code{mul\_biguint\_ref} scales by an unsigned factor;
@@ -567,9 +590,12 @@ are \code{BigUint} bit patterns: bit $i$ is the coefficient of $x^i$.
 constants; \emph{irreducibility is the caller's contract} ---
 \code{Gf2m::is\_irreducible} (below) guards it for untrusted polynomials.
 On a reducible modulus the ring $\F_2[x]/(f)$ is not a field: \code{inverse}
-and \code{div} report non-units as \code{None} and \code{solve\_quadratic}
-verifies its root, but \code{sqrt} silently returns a wrong value there,
-because squaring is a bijection only in a field.
+and \code{div} report non-units as \code{None}, \code{solve\_quadratic}
+verifies its root, and \code{trace} \emph{panics} in every build when the
+Frobenius sum leaves $\{0, 1\}$ (a sum that is possible only outside a
+field); \code{sqrt} alone silently returns a wrong value there, because
+squaring is a bijection only in a field and its signature can carry
+neither a panic nor a \code{None}.
 
 \subsection{Arithmetic}
 
@@ -692,8 +718,10 @@ assert!(Gf2m::is_irreducible(&BigUint::from_u64(0x11B)));   // AES
 
 \code{gcd(a, b)} computes $\gcd(a, b)$ with $\gcd(a, 0) = a$;
 \code{lcm(a, b)} $= ab / \gcd(a, b)$, with $\operatorname{lcm}(a, 0) = 0$.
-\code{gcd\_extended} returns the B\'ezout triple $(g, s, t)$ of signed
-cofactors with
+\code{gcd\_u64} is the word-sized form --- single-word Euclid, the base
+case the wide \code{gcd} falls to, public so callers holding machine words
+skip the heap entirely. \code{gcd\_extended} returns the B\'ezout triple
+$(g, s, t)$ of signed cofactors with
 \begin{equation}
 g \;=\; \gcd(a, b) \;=\; a s + b t .
 \end{equation}
@@ -728,6 +756,10 @@ assert_eq!(
 let (g, s, t) = gcd_extended(&a, &b);
 let bezout = s.mul_biguint_ref(&a).add_ref(&t.mul_biguint_ref(&b));
 assert_eq!(bezout, BigInt::from_biguint(g));
+
+// The word-sized form answers without an allocation.
+assert_eq!(gcd_u64(240, 46), 2);
+assert_eq!(gcd_u64(0, 7), 7); // gcd(0, b) = b
 \end{lstlisting}
 
 \subsection{Quadratic-residue symbols}
@@ -787,6 +819,16 @@ callers with a fixed even modulus should hold a \code{BarrettCtx}).
 Euclidean identity: when $\gcd(a, n) = 1$, the cofactor $s$ in
 $as + nt = 1$ reduces to the inverse; when the gcd exceeds one there is no
 inverse and the result is \code{None}.
+
+\code{mod\_inverse\_u64} is the word-sized companion: extended Euclid
+with the B\'ezout coefficients carried in \code{i128} --- the intermediate
+$s_{k-1} - q_k s_k$ is not bounded by \code{u64} and would wrap there ---
+so it is total over \code{u64} and panics only on a zero modulus.
+
+\begin{lstlisting}
+assert_eq!(mod_inverse_u64(3, 7), Some(5));
+assert_eq!(mod_inverse_u64(2, 4), None); // shares a factor
+\end{lstlisting}
 
 \code{mod\_inverse\_batch} inverts a whole slice at the cost of one
 inversion and $3(k-1)$ multiplications --- Montgomery's trick. With prefix
@@ -1498,6 +1540,8 @@ returns \code{Option} instead.
 \code{div\_rem} / \code{div\_rem\_u64} / \code{modulo} / \code{rem\_u64} & the divisor or modulus is zero \\
 \code{mod\_mul} / \code{mod\_pow} / \code{mod\_add} / \code{mod\_sub} & the modulus is zero \\
 \code{ln\_approx} & the value is zero \\
+\code{digit\_count} & the radix is below 2 \\
+\code{mod\_inverse\_u64} & the modulus is zero \\
 \code{nth\_root\_floor} & $k = 0$ \\
 \code{sqrt\_mod\_prime\_power} & $e = 0$ or $p < 2$ \\
 \code{valuation} / \code{remove\_factor} & $n = 0$ or $p < 2$ \\
@@ -1507,6 +1551,7 @@ returns \code{Option} instead.
 \code{from\_str\_radix} / \code{to\_str\_radix} & the radix is outside $[2, 36]$ \\
 \code{mul\_mont} / \code{square\_mont} / their \code{\_with\_workspace} forms / \code{pow\_encoded} & an operand \emph{wider} than the modulus, in every build; an unreduced operand of the modulus's width trips a debug assert only (\S\ref{sec:montgomery}) \\
 \code{Gf2m::half\_trace} & the field degree is even \\
+\code{Gf2m::trace} & a reducible modulus makes the Frobenius sum leave GF(2) \\
 \code{PolyZ} / \code{PolyModP} division & the divisor is the zero polynomial \\
 \code{PolyModP::new} / \code{zero} / \code{from\_poly\_z} & the modulus is below 2 \\
 \code{PolyModP} (mixed moduli) & the two operands carry different moduli \\

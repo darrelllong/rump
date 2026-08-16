@@ -17,13 +17,13 @@ rust-mp = "0.2"
 
 ```rust
 use rump::{
-    crt_combine, gcd, gcd_extended, is_probable_prime, is_probable_prime_bpsw,
+    crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
     is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
-    miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_pow, primes_below, product_tree,
-    random_below, random_coprime_below, random_nonzero_below, random_probable_prime,
-    rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts,
-    sqrt_mod, sqrt_mod_prime_power, valuation, BarrettCtx, BigInt, BigUint, Gf2m, MontgomeryCtx,
-    Rng, Sign,
+    lll_reduce, miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow,
+    primes_below, product_tree, random_below, random_coprime_below, random_nonzero_below,
+    random_probable_prime, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
+    remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, BarrettCtx, BigInt,
+    BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Rng, Sign,
 };
 ```
 
@@ -110,7 +110,8 @@ standard library's contract. `BigInt`'s forms carry an optional leading
 `-`. `Display` and `FromStr` are the base-10 special case, so `format!`
 with `{}` and `.parse()` work as for machine integers, with two named
 divergences: a leading `+` is rejected (the parser reads values, not
-literals), and the `{:x}`/`{:o}`/`{:b}` format traits are not implemented
+literals — the `FromStr` error type is the exported `ParseBigIntError`),
+and the `{:x}`/`{:o}`/`{:b}` format traits are not implemented
 — hexadecimal and binary come from `to_str_radix`. Power-of-two radices
 convert by direct bit packing; the rest run classical word-sized
 conversion at small sizes and divide-and-conquer against a ladder of
@@ -236,7 +237,9 @@ assert_eq!(product, BigUint::from_u64(22)); // 123 · 456 = 56 088 ≡ 22 (mod 9
 ## Signed integers: BigInt and Sign
 
 A `BigInt` is a `Sign` joined to a `BigUint` magnitude. Construct with
-`from_biguint` (non-negative) or `from_parts`; read back with `sign()` and
+`from_biguint` (non-negative), `from_parts`, `from_i64`, or `from_i128`
+(total over its range — `i128::MIN`'s magnitude `2^127` is an ordinary
+`u128`); read back with `sign()` and
 `magnitude()`; `negated` flips the sign. `add_ref` / `sub_ref` are signed,
 and `add_assign_ref` / `sub_assign_ref` are their in-place forms, reusing
 the magnitude's buffer in every sign combination (nothing panics — the
@@ -253,6 +256,13 @@ Euclid needs.
 ```rust
 let ten = BigInt::from_biguint(BigUint::from_u64(10));
 let minus_three = BigInt::from_parts(Sign::Negative, BigUint::from_u64(3));
+
+// i128 construction is total: i128::MIN's magnitude is a u128.
+assert_eq!(BigInt::from_i128(-3), minus_three);
+assert_eq!(
+    *BigInt::from_i128(i128::MIN).magnitude(),
+    BigUint::from_u128(1u128 << 127)
+);
 
 assert_eq!(minus_three.sign(), Sign::Negative);
 assert_eq!(*minus_three.magnitude(), BigUint::from_u64(3));
@@ -511,7 +521,9 @@ assert!(Gf2m::is_irreducible(&BigUint::from_u64(0x11B)));
 `gcd` and `lcm` by Euclid — `gcd`, `gcd_extended`, and `mod_inverse` share a
 Lehmer-accelerated engine, and `gcd` switches to subquadratic Half-GCD above
 ~131 kbit; `gcd_extended` returns the Bézout triple `(g, s, t)` with
-`g = a·s + b·t`.
+`g = a·s + b·t`. `gcd_u64` is the word-sized form — single-word Euclid, the
+base case the wide `gcd` falls to, public so callers holding machine words
+(sieve coordinates, residues, small cofactors) skip the heap entirely.
 
 ```rust
 let a = BigUint::from_u64(240);
@@ -526,6 +538,10 @@ assert_eq!(
 let (g, s, t) = gcd_extended(&a, &b);
 let bezout = s.mul_biguint_ref(&a).add_ref(&t.mul_biguint_ref(&b));
 assert_eq!(bezout, BigInt::from_biguint(g));
+
+// The word-sized form answers without an allocation.
+assert_eq!(gcd_u64(240, 46), 2);
+assert_eq!(gcd_u64(0, 7), 7); // gcd(0, b) = b
 ```
 
 ### Quadratic-residue symbols
@@ -551,7 +567,8 @@ assert_eq!(kronecker(&BigUint::one(), &BigUint::zero()), 1); // (1/0) = 1
 ### Modular arithmetic
 
 `mod_pow` for any non-zero modulus (Montgomery when odd), `mod_inverse`
-(`None` when the gcd exceeds one), `sqrt_mod` by Tonelli–Shanks with a
+(`None` when the gcd exceeds one; `mod_inverse_u64` is its word-sized
+companion), `sqrt_mod` by Tonelli–Shanks with a
 dispatch to Cipolla's algorithm where the prime's 2-adic depth makes the
 descent quadratic (`None` for non-residues; the result is verified by
 squaring, so a composite modulus also yields `None`), and `crt_combine`
@@ -571,6 +588,11 @@ assert_eq!(
     Some(BigUint::from_u64(5)) // 3 · 5 = 15 ≡ 1 (mod 7)
 );
 assert_eq!(mod_inverse(&BigUint::from_u64(2), &BigUint::from_u64(4)), None);
+
+// The word-sized companion: extended Euclid with i128 cofactors, so it is
+// total over u64; panics only on a zero modulus.
+assert_eq!(mod_inverse_u64(3, 7), Some(5));
+assert_eq!(mod_inverse_u64(2, 4), None); // shares a factor
 
 let root = sqrt_mod(&BigUint::from_u64(2), &p).expect("2 is a residue mod 41");
 assert_eq!(BigUint::mod_mul(&root, &root, &p), BigUint::from_u64(2));
@@ -666,7 +688,12 @@ machine word returning quotient and remainder without a heap-allocated
 divisor, and `to_u64` narrows to a word when the value fits (`None`
 otherwise), the checked counterpart to `low_u128`. `to_f64_lossy`
 saturates to infinity above the `f64` range and `ln_approx` stays finite
-far past it, for size-driven parameter heuristics.
+far past it, for size-driven parameter heuristics. `digit_count(radix)`
+answers "how long is this number written in that radix" from the limbs —
+a logarithm with the power-of-radix boundary settled by comparison —
+without producing the expansion that `to_str_radix(radix).len()` would
+build only to throw away; zero has one digit, and a radix below two
+panics.
 
 ```rust
 assert_eq!(primes_below(20), vec![2, 3, 5, 7, 11, 13, 17, 19]);
@@ -678,6 +705,12 @@ assert_eq!(BigUint::from_u128(1u128 << 64).to_u64(), None);
 
 assert_eq!(BigUint::from_u64(8).to_f64_lossy(), 8.0);
 assert!((BigUint::from_u64(1_000).ln_approx() - 1_000f64.ln()).abs() < 1e-9);
+
+// Digit counts without the digits: the boundary cases are the powers.
+assert_eq!(BigUint::from_u64(1_000).digit_count(10), 4);
+assert_eq!(BigUint::from_u64(999).digit_count(10), 3);
+assert_eq!(BigUint::from_u64(255).digit_count(16), 2); // "ff"
+assert_eq!(BigUint::zero().digit_count(10), 1); // written "0"
 ```
 
 ### Prime-power square roots
@@ -984,8 +1017,23 @@ recoverable conditions:
 | `div_rem` / `div_rem_u64` / `modulo` / `rem_u64` | the divisor or modulus is zero |
 | `BigUint::mod_mul` / `mod_pow` / `mod_add` / `mod_sub` | the modulus is zero |
 | `ln_approx` | the value is zero |
+| `digit_count` | the radix is below 2 |
+| `mod_inverse_u64` | the modulus is zero |
+| `nth_root_floor` | `k == 0` |
 | `sqrt_mod_prime_power` | `e == 0` or `p < 2` |
+| `valuation` / `remove_factor` | `n == 0` or `p < 2` |
+| `rational_reconstruct_bounded` | `2·N·D >= m` (the uniqueness contract) |
+| `from_str_radix` / `to_str_radix` | the radix is outside `2..=36` |
 | `remainder_tree` / `smooth_parts` | a value (leaf) is zero — but `smooth_parts` maps a zero value to zero rather than reducing it |
+| `Gf2m::half_trace` | the field degree is even |
+| `Gf2m::trace` | a reducible modulus makes the Frobenius sum leave GF(2) |
+| `PolyZ` / `PolyModP` division | the divisor is the zero polynomial |
+| `PolyModP::new` / `zero` / `from_poly_z` | the modulus is below 2 |
+| `PolyModP` (any two-operand op) | the operands carry different moduli |
+| `PolyModP` division / `gcd` / `factor` | a non-invertible pivot (composite modulus) |
+| `squarefree_factorization` / `factor` | the polynomial is constant or zero |
+| `PolyModP::factor` / `roots` | the supplied `Rng` makes no progress (the equal-degree splitter's stall guard) |
+| `lll_reduce` / `lll_reduce_delta` | dependent, ragged, or zero-length rows; the `_delta` form also on `δ ∉ (1/4, 1)` or a zero denominator |
 | `to_be_bytes_padded` | the value needs more than the requested byte length |
 | `MontgomeryCtx::mul_mont` / `square_mont` / their `_with_workspace` forms / `pow_encoded` | given an operand not reduced below the modulus — the shared in-domain contract, asserted in debug builds; in release a grossly over-width operand trips the internal bounds check. `encode` and `decode` instead reduce any representative and never panic on width |
 | `random_below` / `random_nonzero_below` / `random_coprime_below` / `random_probable_prime` | the generator trips a stall guard — see Random sampling above for what each guard can and cannot detect |

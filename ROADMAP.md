@@ -86,7 +86,10 @@ proposed for exclusion or for an explicitly bounded scope.
 
 **Efficient — all of it.** Core ops (`add` … `trailing_zeros`), integer
 functions (`sqrt_floor`, `sqrt_rem`, `nth_root_floor` and `is_square` /
-`is_perfect_power` by Newton iteration, `log_floor`), radix string I/O, and
+`is_perfect_power` by Newton iteration, `log_floor` — its use case served
+since 2026-08-16 by `digit_count(radix)` = floor(log_r n) + 1, with
+`bits()` the base-2 form; a bare floor-log remains unimplemented), radix
+string I/O, and
 signed byte I/O. Already present: the core ops, byte I/O, `sqrt_floor`, and
 the multiplication ladder through Toom-4.
 
@@ -96,10 +99,12 @@ routinely live there, not before.
 
 ## 2. Divisibility and Euclidean algorithms
 
-**Efficient — all of it.** `divides`, `binary_gcd`, `coprime`, `valuation`,
-`remove_factor`, `gcd_many`, and `batch_gcd` by product/remainder trees
+**Efficient — all of it.** `divides`, `binary_gcd`, `coprime`, `gcd_many`,
+and `batch_gcd` by product/remainder trees
 (O(M(N)·log) over the whole input; the classic shared-factor audit). Already
-present: `gcd`, `gcd_extended` (Lehmer → Half-GCD), `lcm`.
+present: `gcd`, `gcd_extended` (Lehmer → Half-GCD), `lcm`, `valuation`,
+`remove_factor`, `gcd_u64`, and the trees themselves (`product_tree`,
+`remainder_tree`, public since 0.2.1).
 
 ## 3. Modular integers
 
@@ -117,10 +122,11 @@ shared variable-time paths — decide that deliberately at triage.
 
 **Efficient — all of it.** `solve_linear_congruence`, `crt_pair`, `crt`,
 generalized CRT for non-coprime moduli, precompute/reconstruct contexts,
-`symmetric_residue`, product/remainder trees, and **rational
+`symmetric_residue`, and **rational
 reconstruction** — landed 2026-08-14 (queue item 4), the key that unlocks
 exact linear algebra (§11). Present: `crt_combine` (Garner),
-`rational_reconstruct`, `rational_reconstruct_bounded`.
+`rational_reconstruct`, `rational_reconstruct_bounded`, and the
+product/remainder trees (public since 0.2.1, listed under §2).
 
 ## 5. Exponentiation and multiplicative structure
 
@@ -146,8 +152,9 @@ the Hilbert symbol (needs §2's `valuation`). The subquadratic Jacobi
 
 **Efficient (prime modulus):** Tonelli–Shanks and Cipolla (both present —
 Cipolla landed 2026-08-14 as queue item 8, dispatched where the descent's
-2-adic tail lives); still open: the mod-8 special cases, Hensel lifting to
-prime powers, nth roots mod p, and both-roots return.
+2-adic tail lives); the mod-8 special cases, Hensel lifting to prime
+powers, and all-roots return landed with `sqrt_mod_prime_power` (0.2.1);
+still open: nth roots mod p.
 
 **Gated on factoring:** `mod_sqrt_composite` requires the modulus's
 factorization by definition (it *is* integer factoring in disguise) — take
@@ -216,8 +223,12 @@ Newton inversion, multipoint evaluation, interpolation, subproduct trees),
 and factorization over F_p — square-free, distinct-degree, equal-degree,
 Cantor–Zassenhaus (randomized polynomial), Berlekamp — plus integer
 polynomial factorization via LLL (van Hoeij). The substrate for §13 and much
-of §8; the natural second pillar after the integer layer. Present: only the
-GF(2)[x] internals behind `Gf2m`.
+of §8; the natural second pillar after the integer layer. Present:
+`PolyZ`/`PolyModP` with exact and pseudo-division, resultant, discriminant,
+the full squarefree/distinct-degree/Cantor–Zassenhaus pipeline,
+`is_irreducible`, and `roots` (0.2.1), alongside the GF(2)[x] internals
+behind `Gf2m`; still open here: the asymptotic upgrades (Newton inversion,
+multipoint evaluation, subproduct trees), Berlekamp, and van Hoeij.
 
 ## 13. Finite fields
 
@@ -229,14 +240,17 @@ in `Gf2m`.
 
 ## 14. Lattices
 
-**Efficient:** exact and floating Gram–Schmidt, **LLL** (polynomial time;
-delivers most of the analytical value — Coppersmith-style experiments,
-knapsack attacks), Babai nearest-plane, integer kernel, determinant/volume,
-dual lattice.
+**Efficient:** exact and floating Gram–Schmidt, **LLL** — present since
+0.2.1 (`lll_reduce`, `lll_reduce_delta`, Cohen's integral Algorithm 2.6.3,
+tested against an independent rational oracle); it delivers most of the
+analytical value (Coppersmith-style experiments, knapsack attacks). Still
+open here: Babai nearest-plane, integer kernel, determinant/volume, dual
+lattice.
 
 **Out / bounded:** SVP/CVP are NP-hard — enumeration helpers only, explicitly
 dimension-bounded. BKZ done credibly is research-grade floating-point
-orchestration; propose LLL first and treat BKZ as its own later decision.
+orchestration; LLL shipped first (0.2.1, above) exactly as this section
+once proposed, and BKZ remains its own later decision.
 
 ## 15. Continued fractions
 
@@ -260,16 +274,20 @@ exponentially many outputs — iterators only, never materialized.
 1. Arbitrary-precision integers — **largely present**
 2. GCD and extended GCD — **present** (Lehmer + Half-GCD)
 3. Modular contexts and exponentiation — **present** (Montgomery and Barrett)
-4. Modular inverse and square roots — **present** (one root, odd primes)
+4. Modular inverse and square roots — **present** (`sqrt_mod` one root mod an odd prime; `sqrt_mod_prime_power` all roots mod `p^e`, `p = 2` included)
 5. Jacobi and Kronecker symbols — **present**
 6. CRT and rational reconstruction — **present** (Garner; reconstruction landed 2026-08-14)
-7. Sieving and primality testing — **partial** (Miller–Rabin and BPSW; ranged sieving absent)
-8. Basic factorization — absent
-9. Polynomial arithmetic over ℤ and F_p — absent
+7. Sieving and primality testing — **partial** (Miller–Rabin, BPSW, and bulk
+   `primes_below`; *segmented/ranged* sieving absent)
+8. Basic factorization — absent (deliberately: it lives downstream, see
+   REQUESTS.md's boundary)
+9. Polynomial arithmetic over ℤ and F_p — **present** (0.2.1: `PolyZ`,
+   `PolyModP`, resultant/discriminant, factorization, roots)
 10. Prime and extension fields — **partial** (GF(2^m) only)
 11. Exact matrices and linear algebra — absent
-12. LLL — absent
+12. LLL — **present** (0.2.1: `lll_reduce`, `lll_reduce_delta`, integral form)
 
-Triage still decides everything; on the current codebase, the shortest path
-through this list runs 6 → 7 → 8 → 9 → 10 → 11 → 12. Its two named first
-steps — Baillie–PSW and rational reconstruction — both landed 2026-08-14.
+Triage still decides everything; of the shortest path this list once named
+(6 → 7 → 8 → 9 → 10 → 11 → 12), items 6, 9, and 12 are done and 8 stays
+downstream by design — what remains is the rest of 7 (segmented sieving)
+and 10 → 11.

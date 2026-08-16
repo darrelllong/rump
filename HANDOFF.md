@@ -1,12 +1,12 @@
 # HANDOFF — picking rump up on another machine
 
-State as of commit `e9e9f87` on `origin/main`, tag `v0.2.1`, crate version
-`0.2.1` (unreleased work sits on `main` above the tag). Everything below is in
-the repository unless marked otherwise.
+State as of commit `7a52dd4` on `origin/main`, tag `v0.2.2`, crate version
+`0.2.2` (post-tag work sits on `main` above the tag, as it did for 0.2.1).
+Everything below is in the repository unless marked otherwise.
 
 ```sh
 git clone git@github.com:darrelllong/rump.git && cd rump
-cargo test && cargo test --release      # 170 lib tests green + 9 ignored timing probes
+cargo test && cargo test --release      # 178 lib tests green + 10 ignored timing probes
 cargo clippy --release --all-targets    # warning-clean
 cargo fmt --check                       # clean
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --lib   # clean
@@ -16,10 +16,6 @@ If those five commands are green you have the same tree this note describes.
 
 ## What is not in git and must be carried across
 
-- **`~/rump/REVIEW.md`** — the external reviewer's report. Three passes were
-  against the published 0.1.1 tree; the fourth is against `5f05f9a`/`v0.2.1`
-  and is the one that matters. Its verdict and the outstanding items are
-  summarised under "The external review" below, but bring the file.
 - **`~/rump-tier3.bundle`, `~/rump-perfdocs.bundle`** — `git bundle` mirrors of
   all branches and tags, made as belt-and-braces while work lived on an
   ephemeral scratchpad. `origin/main` is now ahead of both; they are only a
@@ -28,6 +24,9 @@ If those five commands are green you have the same tree this note describes.
   `$HOME/pilot-bench/build/cli/bench` (override with `PILOT_BENCH_CLI`). Only
   needed to re-measure; not needed to build or test.
 - **libgmp** — only for the comparison column (`scripts/bench_gmp.sh`).
+
+(`REVIEW.md`, formerly on this list, was committed to the repository at
+`7a52dd4` and is now tracked.)
 
 ## Toolchain
 
@@ -44,25 +43,31 @@ squarefree/distinct-degree/Cantor–Zassenhaus factorisation, roots) and integra
 LLL. The last Tier 1 item — the public `BigInt` signed ring (`mul_ref`,
 truncated `div_rem`, `abs`), the external reviewer's standing #1 — landed
 2026-08-15, differentially tested against `i128` and documented in MANUAL.md
-and the LaTeX manual. `REQUESTS.md` records the whole list as cleared.
-
-The external reviewer's ship blockers are closed and re-verified on the real
-tree. Since `v0.2.1` the tree has also had a full documentation pass and a
-round of defect fixes; see "Outstanding work".
+and the LaTeX manual. Four word-and-size primitives the consumer had grown
+locally (`BigUint::digit_count`, `BigInt::from_i128`, `gcd_u64`,
+`mod_inverse_u64`) followed at `61cbcef`. `REQUESTS.md` records the whole
+list as cleared.
 
 ## The external review
 
-The 0.2.1 pass **withdrew** the earlier "not production ready" verdict: every
-hang and false-prime path was reproduced as fixed, with tests that fail if the
-guards are reverted. Its two acceptance-gating items were then fixed here (hard
-`assert_eq!` on mixed `PolyModP` moduli; `half_trace` panicking on even degree),
-along with the Las Vegas retry cap. Its remaining non-blocking asks:
+`REVIEW.md` (tracked in the repository since `7a52dd4`) is the current pass,
+written against `c0f0b1c`/v0.2.2. Its verdict opens "This is not a toy
+multiprecision library" and its three gaps — the `2¹⁰`-coupled trial-screen
+identity, the per-call allocation in the public `mul_mont`/`square_mont`,
+and the incomplete `CITATIONS.md` against the crate-root claim — were
+answered at `55e81e5`, each closed with measurement or an exhaustive check
+through five adversarial review rounds. Two of its observations are already
+superseded by later commits and should be read accordingly:
+`miller_rabin_witness(2)` now returns `false` (fixed at `7a52dd4`, the same
+commit that tracked the file), and README no longer lists the
+Bezout/Jacobi HGCD transform as a standing item.
 
-1. **Split `src/bigint.rs` (~4.8 kLOC) and `src/number_theory.rs` (~5.2 kLOC).**
-   Not started. A behaviour-preserving plan is in "Outstanding work" below. The
-   reviewer says it will keep listing this until done.
-2. Point the Miller–Rabin and Tonelli inner loops at the Montgomery domain —
-   **done** (`12cafc2`), and note the trap recorded below.
+The current pass does **not** re-list the file split. The demand came from
+the earlier passes (against 0.1.1 and v0.2.1, which said it would stay
+listed until done); the files remain monolithic — `src/bigint.rs`
+~5.8 kLOC, `src/number_theory.rs` ~5.5 kLOC — so the split stays on the
+outstanding-work list below on its own merits, not on the current
+reviewer's.
 
 ## The measurement story — read this before touching benchmarks
 
@@ -107,9 +112,10 @@ inconsistent and need re-running on their own hosts:
 
 `python3 scripts/check_bench_consistency.py bench/*.md` lists them. Note the
 GMP column is affected too — the same harness produced it. Ideally the whole
-fleet (hardy = M4, moore = EPYC 7452, darby = Pi 5, verne = A18 Pro) is
-re-measured with the fixed harness; until then the wide variable-time cells
-should be read as provisional. Re-measure one row with:
+fleet (hardy = M4, moore = EPYC 7452, darby = Pi 5, verne = A18 Pro, and now
+baase = 20-core aarch64 Grace-class, added 2026-08-16) is re-measured with
+the fixed harness; until then the wide variable-time cells should be read as
+provisional. Re-measure one row with:
 
 ```sh
 cargo build --release --bin pilot_mp
@@ -124,8 +130,23 @@ operand generation dominates. If a cell cannot clear it, leave it marked
 ## Outstanding work, in the order I would do it
 
 1. **Re-measure the four rows above** (fleet task; hardy is the machine that
-   produced most of the affected data).
-2. **Split the two large files** (reviewer item 1). Behaviour-preserving, and
+   produced most of the affected data). `bench/primitives_baase.md` landed
+   2026-08-16 — the first host measured entirely with the fixed harness:
+   94 published rows, every one carrying its reading count, all consistent,
+   and the 4096-bit heavy cells that could not clear the 30-reading floor
+   marked `insufficient-sample` instead of published. Against moore's
+   legacy rows, baase (Grace aarch64) is faster on 91 of 94 comparable
+   ops, median 1.62x, 2-3x on the gcd family. Read the comparison with
+   the same discipline as everything else here: twelve of the 94 pairs
+   carry a `~` (cap-hit, CI above 10%) on one side or the other. Of the
+   three counter-ratios, the two `isprime` rows do blame moore's legacy
+   means (both `~`, CIs of 279% and 401%); `modpow_256` is the reverse —
+   moore's row is clean (0.62% CI, max/min 1.06, as a fixed-width modpow
+   should be) and baase's own is the flagged one (`~`, 178% CI, max/min
+   881 on a data-independent op, which points at interference during
+   that session). That cell is owed a re-run on baase, not an excuse.
+2. **Split the two large files** (carried from the earlier review passes;
+   see above). Behaviour-preserving, and
    the safe shape is: keep `src/bigint.rs` and `src/number_theory.rs` as module
    roots and add sibling directories, moving one cohesive block at a time with
    `cargo build` after each move so visibility errors stay local. Suggested
@@ -138,9 +159,10 @@ operand generation dominates. If a cell cannot clear it, leave it marked
    the test modules in the roots initially — they reach many private items, and
    splitting code without moving tests is still the win. Expect no test edits;
    if a test needs changing, the move changed behaviour — stop.
-3. **Cut 0.2.2**: bump `Cargo.toml` (and `Cargo.lock` via `cargo check`),
-   commit, tag `v0.2.2`, push. **Do not publish to crates.io** — the owner
-   holds that release explicitly; `v0.2.1` was git-only for the same reason.
+
+(The former item 3, cutting 0.2.2, was done 2026-08-15: `Cargo.toml` and the
+lock are bumped, `v0.2.2` is tagged and pushed, git-only. **Do not publish to
+crates.io** — the owner holds that release explicitly, as with `v0.2.1`.)
 
 ## Deferred defects: resolved 2026-08-15
 
@@ -168,15 +190,20 @@ travelling across the swap; `gf2m::reduce` via a new `pub(crate)`
   Below it, lopsided shapes stay schoolbook, which wins there. The
   `long == 2·short` Karatsuba admission edge is fixed (strict `<`) with a
   table-driven boundary test.
-- *Sampler stall caps.* A rejection-count cap is sound for `random_below` /
-  `random_nonzero_below` (acceptance ≥ 1/2 always; capped at 256). It is
-  **unsound** for `random_coprime_below` and `random_probable_prime` — a
-  primorial `coprime_to` legitimately leaves 1 as the only unit below the
-  bound, and a count cap fired at coin-flip odds on a working generator.
-  Those two instead cap consecutive draws of the *same rejected candidate*
-  (256), the one signature a working generator cannot produce; the prime
-  search also skips the Miller–Rabin re-screen on a repeat. `should_panic`
-  tests cover all four.
+- *Sampler stall caps* (final design, after two reviewer-forced reversals).
+  A rejection-count cap is sound where its probability argument is
+  argument-independent: `random_below` / `random_nonzero_below` (acceptance
+  ≥ 1/2 always; 256), and `random_probable_prime`, whose cap scales with
+  the width (`64·bits`; survival under `e⁻¹¹¹` at every width) and so
+  catches even a generator cycling among several composites — plus an inner
+  repeat detector that skips the Miller–Rabin re-screen, so a *pinned*
+  generator fails after one screen. `random_coprime_below` is the one
+  sampler where no usable count exists (a primorial `coprime_to`
+  legitimately leaves 1 as the only unit below the bound, and a count cap
+  fired at coin-flip odds on a working generator); it detects only a pinned
+  generator, and the cycling gap is documented at module, function, and
+  manual level rather than papered over. `should_panic` tests cover every
+  guard, including the two-cycle prime-search case.
 - *`shl_bits` scrub.* The "would be free" claim was wrong: measured 3–5% on
   every large balanced multiplication (the shift sits on Karatsuba/Toom
   recomposition). Not scrubbed; the decision and the number are in the
@@ -276,17 +303,18 @@ is correct. Check before you correct.
 | `src/gf2m.rs` | GF(2^m) |
 | `src/poly.rs` | `PolyZ`, `PolyModP` |
 | `src/lattice.rs` | integral LLL |
-| `src/random.rs`, `src/scrub.rs` | sampling; the single audited `unsafe` |
+| `src/random.rs`, `src/scrub.rs` | sampling; the volatile scrub — the non-test audited `unsafe` (the other audited site is the test probe in `bigint.rs`) |
 | `scripts/bench_primitives.sh` | measurement — read its reduction before changing anything |
 | `scripts/check_bench_consistency.py` | the self-consistency guard |
 | `scripts/build_performance.sh` | assembles PERFORMANCE.md; **the prose lives here**, not in the generated file |
 | `scripts/perf_analysis.py` | tables and SVGs |
 | `scripts/lll_oracle.py` | independent rational LLL, the oracle `src/lattice.rs` tests against |
 | `MANUAL.md` / `tests/manual_examples.rs` | documented API, mirrored as tests |
-| `manual.tex` / `manual.pdf` | the LaTeX reference manual, with the defining equations per primitive; every listing is extracted and executed against the crate before a rebuild (`pdflatex manual.tex`, twice) |
+| `manual.tex` / `manual.pdf` | the LaTeX reference manual, with the defining equations per primitive; `scripts/check_manual_tex.sh` extracts every listing and executes it against the crate, and a rebuild (`pdflatex manual.tex`, twice) is gated on that passing |
 | `CITATIONS.md` | primary sources |
 | `REQUESTS.md` | the consumer's list, cleared |
 | `ROADMAP.md` | proposed scope, pending triage |
+| `REVIEW.md` | the external reviewer's current pass (against v0.2.2), tracked since `7a52dd4`; two observations superseded — see "The external review" |
 
 `PERFORMANCE.md` is **generated**. Edit
 `scripts/build_performance.sh` and regenerate; edits to the document are lost.

@@ -64,7 +64,7 @@ Algorithm M.
 | Quotient-batch buffer bound | `QuotientLog` | Lamé's theorem (classical): F₁₈₁ > 2¹²⁴ > F₁₈₀ caps a 124-bit window at 178 Euclidean steps, which sizes the fixed buffer. |
 | Half-GCD (subquadratic) | `hgcd`, `gcd_via_hgcd`, `gcd_extended_via_hgcd` | Möller, *On Schönhage's algorithm and subquadratic integer gcd computation*, Math. Comp. 77 (2008), 589–607, Figure 4 (the algorithm behind GMP's `mpn_hgcd`); Equation 4, Lemmas 5–7, and §6.3 are cited at the specific steps they justify, and `HGCD_BASE_LIMBS` / `hgcd_base` are the analogues of GMP's `HGCD_THRESHOLD` / `hgcd2` loop. |
 | Extended Euclid (Bézout cofactors) | `gcd_extended` | *Handbook of Applied Cryptography*, Algorithm 2.107; Knuth, *TAOCP* vol. 2, §4.5.2, Algorithm X. |
-| Modular inverse | `mod_inverse` | *Handbook of Applied Cryptography*, Algorithm 2.142, reduced into `[0, n)`. |
+| Modular inverse | `mod_inverse`, `mod_inverse_u64` (the word-sized form, Bézout coefficients carried in `i128`) | *Handbook of Applied Cryptography*, Algorithm 2.142, reduced into `[0, n)`. |
 
 ## Symbols and residuosity (`src/number_theory.rs`)
 

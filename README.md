@@ -33,9 +33,21 @@ enforcing a clean API.
   rational reconstruction (`rational_reconstruct`,
   `rational_reconstruct_bounded`) recovering the unique bounded fraction
   from its residue; `valuation`/`remove_factor` by a squared-power
-  ladder. The integer layer adds `sqrt_rem`/`sqrt_floor` (certified
-  Newton), `nth_root_floor`, `is_square`, `is_perfect_power`, `popcount`,
-  and `trailing_zeros`.
+  ladder; word-sized forms (`gcd_u64`, `mod_inverse_u64`) for callers
+  holding machine words. The integer layer adds `sqrt_rem`/`sqrt_floor`
+  (certified Newton), `nth_root_floor`, `is_square`, `is_perfect_power`,
+  `popcount`, `trailing_zeros`, and `digit_count` (written length in any
+  radix, without producing the digits).
+- **`BarrettCtx`** — fixed-modulus reduction for a modulus of either
+  parity (HAC Algorithm 14.42), the complement to the odd-modulus
+  Montgomery domain, with `mul_mod`, `square_mod`, and `pow_mod` built on
+  it.
+- **`PolyZ`, `PolyModP`** — dense univariate polynomials over ℤ and 𝔽ₚ:
+  exact and pseudo-division, resultant and discriminant (Bareiss),
+  squarefree/distinct-degree/Cantor–Zassenhaus factorization,
+  `is_irreducible`, and `roots`.
+- **`lll_reduce`, `lll_reduce_delta`** — integral LLL lattice basis
+  reduction (Cohen's Algorithm 2.6.3), exact integer Gram data throughout.
 
 - **`Gf2m`** — binary extension fields GF(2^m): XOR addition, word-level
   comb multiplication (*Guide to ECC*, Algorithm 2.36) with tap-wise
@@ -56,8 +68,9 @@ inputs. Adversarially hardened primality testing lives with its consumer
 
 ## Properties
 
-- `#![deny(unsafe_code)]`; the sole audited exception is a six-line
-  volatile-write scrub helper.
+- `#![deny(unsafe_code)]`; the audited exceptions are a six-line
+  volatile-write scrub helper and the test probe that verifies the scrub
+  by reading the raw buffer tail back.
 - **Variable-time, for non-secret data.** Operations take data-dependent
   paths. Do not use this crate where timing must not leak secrets.
 - **Not a secret-scrubbing or constant-time type, and does not pretend to be.**
@@ -74,8 +87,9 @@ inputs. Adversarially hardened primality testing lives with its consumer
 [PERFORMANCE.md](PERFORMANCE.md) is the full per-primitive report: pilot-bench
 means with confidence intervals and variable-time extrema over random operands,
 log–log scaling graphs, fitted complexity exponents, and a per-primitive
-comparison against GMP on three hosts — Apple M4, AMD EPYC 7452, and Raspberry
-Pi 5. Regenerate the data with `scripts/bench_primitives.sh` (rump and, via
+comparison against GMP on four hosts — Apple M4, AMD EPYC 7452, Raspberry
+Pi 5, and Apple A18 Pro. Regenerate the data with
+`scripts/bench_primitives.sh` (rump and, via
 `pilot_gmp`, GMP through the same harness) and the document with
 `scripts/build_performance.sh`.
 
@@ -89,15 +103,22 @@ that remains at crypto sizes is GMP's assembly inner loops, not the algorithm
 (on the Raspberry Pi, where that assembly edge shrinks, `mul` is only 1.3–1.9×).
 Above ~131 kbit, `gcd` dispatches to **Half-GCD** (Möller, Math. Comp. 77
 (2008); the algorithm behind GMP's `mpn_hgcd`) and goes subquadratic — see
-PERFORMANCE.md's "GCD at scale". The standing items are carrying that
-transform through the Bézout cofactors (`gcd_extended`, `mod_inverse`) and the
-Jacobi symbol.
+PERFORMANCE.md's "GCD at scale". The same transform is carried through
+the Bézout cofactors (`gcd_extended` and `mod_inverse`, above ~32 kbit)
+and the Jacobi symbol (`jacobi_hgcd` — Möller's threading design, as in
+GMP's `mpn_hgcd_jacobi`; Brent and Zimmermann's published subquadratic
+symbol reaches the same complexity by the binary route).
 
 ## Manual
 
 [MANUAL.md](MANUAL.md) documents every public API with a worked example.
 Every code block in it is replicated in `tests/manual_examples.rs` and
 asserted on `cargo test`, so the manual cannot drift from the code.
+
+[manual.tex](manual.tex) (built copy: `manual.pdf`) is the LaTeX reference
+manual — the same surface with the defining mathematics for each
+primitive; `scripts/check_manual_tex.sh` extracts its listings and
+executes them against the crate, and a rebuild is gated on that passing.
 
 [CITATIONS.md](CITATIONS.md) is the primary-source reference list: every
 non-schoolbook algorithm in the crate with the paper, book, or standard it

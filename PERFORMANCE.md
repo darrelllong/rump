@@ -29,17 +29,28 @@ division; most odd composites fall to the 168-prime sieve within
 microseconds; the ≈ 8 % that survive it (Mertens: ∏(1 − 1/p) over p ≤ 997 is
 ≈ 0.081) pay at least one full Miller–Rabin exponentiation — 2.8 ms at 2048
 bits, 24 ms at 4096 — and a prime, at probability 1/ln 2ⁿ, pays all twelve
-rounds. The mean is real and increases monotonically with size, but the tail
-sets it, so a faithful estimate requires a sample of several hundred trials;
-these two operations therefore receive a 120 s collection session where the
-others receive 30 s. (An earlier revision of this table showed `isprime`
+rounds. The mean is real, but the tail sets it, so a faithful
+estimate requires a sample of several hundred trials; these two operations
+therefore receive a 120 s collection session where the others receive 30 s.
+Every row the current harness produces publishes the reading count `n`
+behind its figures (the committed tables predate that column and are owed
+re-measurement — see the provisional-rows note below), because at the
+widest sizes the budget is not enough: a reading costs a fresh random operand,
+and generating a multi-kilobit random prime takes far longer than the operation
+being timed, so a 180 s session at 7168 bits collected four readings. The mean
+of four draws from a bimodal cost is not a measurement — it is one coin flip
+between the fast Jacobi exit and the full descent — so the reduction refuses to
+report a mean below a thirty-reading floor and marks the cell
+`insufficient-sample` instead. `scripts/check_bench_consistency.py` enforces the
+matching arithmetic invariant: a reported mean must lie inside the range its own
+order statistics allow. (An earlier revision of this table showed `isprime`
 means *decreasing* past 2048 bits. That was a harness defect, not arithmetic:
 the operand pool then generated a random prime at the operand size for every
 operation, so each 4096-bit trial cost seconds of setup and the session
 starved — too few trials to contain the 8 % tail. With the corrected pool the
 means are monotone through 6144 bits — 217 µs, 1.41 ms, 5.06 ms, 11.5 ms at
 2048, 4096, 5120, 6144 — with the tail present at every width;
-`bench/isprime_extended_hardy.md` holds the verification rows.) `sqrt_mod` has the same structure — a non-residue
+`bench/heavy_extended_hardy.md` holds the verification rows.) `sqrt_mod` has the same structure — a non-residue
 rejects after one Euler-criterion exponentiation, a modulus with
 `p ≡ 3 (mod 4)` takes a single exponentiation, and a high 2-adic valuation
 takes the full Tonelli–Shanks descent — plus one cost the harness cannot
@@ -126,8 +137,13 @@ Karatsuba split, still below the Toom crossover (~8192 bits). `sqrtmod` and
 `isprime` are heavy-tailed: the mean is set by a rare expensive population (the
 Tonelli descent; sieve-surviving composites), so a finite sample estimates it
 only loosely and the fitted exponent is unreliable — read their extrema (see
-above). The mean reported is the whole-sample mean, so it is always consistent
-with those extrema.
+above). Every mean the current harness reports is the whole-sample mean and
+therefore consistent with those extrema by construction. Four legacy rows
+measured before that fix still violate the invariant and are provisional
+until re-measured on their own hosts — `jacobi_8192` and `sqrtmod_8192`
+(hardy), and the GMP-column `add_256` and `divrem_256` (darby);
+`scripts/check_bench_consistency.py` lists exactly these, and the build
+proceeds past them only because they are known and named here.
 
 | Method | Complexity | M4 α | EPYC α | Pi α | A18 α |
 |---|---|---|---|---|---|

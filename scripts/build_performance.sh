@@ -72,8 +72,10 @@ bits, 24 ms at 4096 — and a prime, at probability 1/ln 2ⁿ, pays all twelve
 rounds. The mean is real, but the tail sets it, so a faithful
 estimate requires a sample of several hundred trials; these two operations
 therefore receive a 120 s collection session where the others receive 30 s.
-Every row publishes the reading count `n` behind its figures, because at the
-widest sizes that budget is not enough: a reading costs a fresh random operand,
+Every row the current harness produces publishes the reading count `n`
+behind its figures (the committed tables predate that column and are owed
+re-measurement — see the provisional-rows note below), because at the
+widest sizes the budget is not enough: a reading costs a fresh random operand,
 and generating a multi-kilobit random prime takes far longer than the operation
 being timed, so a 180 s session at 7168 bits collected four readings. The mean
 of four draws from a bimodal cost is not a measurement — it is one coin flip
@@ -88,7 +90,7 @@ operation, so each 4096-bit trial cost seconds of setup and the session
 starved — too few trials to contain the 8 % tail. With the corrected pool the
 means are monotone through 6144 bits — 217 µs, 1.41 ms, 5.06 ms, 11.5 ms at
 2048, 4096, 5120, 6144 — with the tail present at every width;
-`bench/isprime_extended_hardy.md` holds the verification rows.) `sqrt_mod` has the same structure — a non-residue
+`bench/heavy_extended_hardy.md` holds the verification rows.) `sqrt_mod` has the same structure — a non-residue
 rejects after one Euler-criterion exponentiation, a modulus with
 `p ≡ 3 (mod 4)` takes a single exponentiation, and a high 2-adic valuation
 takes the full Tonelli–Shanks descent — plus one cost the harness cannot
@@ -175,8 +177,13 @@ Karatsuba split, still below the Toom crossover (~8192 bits). `sqrtmod` and
 `isprime` are heavy-tailed: the mean is set by a rare expensive population (the
 Tonelli descent; sieve-surviving composites), so a finite sample estimates it
 only loosely and the fitted exponent is unreliable — read their extrema (see
-above). The mean reported is the whole-sample mean, so it is always consistent
-with those extrema.
+above). Every mean the current harness reports is the whole-sample mean and
+therefore consistent with those extrema by construction. Four legacy rows
+measured before that fix still violate the invariant and are provisional
+until re-measured on their own hosts — `jacobi_8192` and `sqrtmod_8192`
+(hardy), and the GMP-column `add_256` and `divrem_256` (darby);
+`scripts/check_bench_consistency.py` lists exactly these, and the build
+proceeds past them only because they are known and named here.
 
 MD
 

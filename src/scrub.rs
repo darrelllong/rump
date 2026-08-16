@@ -1,4 +1,6 @@
-//! Volatile zeroization, the crate's sole `unsafe` exception.
+//! Volatile zeroization, the crate's sole non-test `unsafe` exception
+//! (the other audited site is the test probe that reads a scrubbed
+//! buffer's raw tail back; the crate root names both).
 //!
 //! Verbatim from the parent crate's audited helper (`cryptography-rs`,
 //! `src/ct.rs`), carried here so [`crate::BigUint`] can wipe its limbs on
@@ -48,7 +50,7 @@ use core::sync::atomic::{compiler_fence, Ordering};
 /// non-null, aligned, and valid for a write of `T` for the duration of the
 /// borrow. `write_volatile` does not run a destructor on the overwritten
 /// value; `T: Copy` means there is none to run.
-#[allow(unsafe_code)] // sole audited exception to the crate-wide deny: volatile scrub
+#[allow(unsafe_code)] // the non-test audited exception to the crate-wide deny: volatile scrub
 pub fn zeroize_slice<T: Copy + Default>(slice: &mut [T]) {
     for item in slice.iter_mut() {
         unsafe { ptr::write_volatile(std::ptr::from_mut::<T>(item), T::default()) };
