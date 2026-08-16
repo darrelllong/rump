@@ -92,6 +92,19 @@ For the record, so the boundary stays where it is:
 Every entry this file has ever carried is closed. Kept as a record, so the
 boundary that worked stays visible.
 
+**Post-0.2.1 — `BigInt::symmetric_remainder`.**
+
+The last function in the consumer's `gnfs::arith`, and the only one that was
+ever more than indirection. It is `modulo_positive`'s companion — the other
+canonical representative, the one that is smallest in absolute value rather
+than non-negative — and the consumer wanted it in two places at once: the
+balanced base-`m` expansion, where it roughly halves every norm the sieve must
+find smooth, and the lift of the algebraic square root out of `ℤ/q^k`, where
+taking the non-negative representative instead produces a plausible wrong
+answer rather than an error. With this delivered `gnfs::arith` is deleted;
+`mul`, `div_rem` and `abs` had been indirection to `mul_ref`, `div_rem` and
+`magnitude()` since 0.2.2, across fifty-three call sites.
+
 **Post-0.2.1 — `BigInt` signed arithmetic (was Tier 1 #0, blocking for
 GNFS).**
 

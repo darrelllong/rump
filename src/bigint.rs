@@ -4019,10 +4019,79 @@ impl BigInt {
             }
         }
     }
+
+    /// The representative of `self` modulo `modulus` in the *symmetric* range
+    /// `(−modulus/2, modulus/2]`.
+    ///
+    /// [`Self::modulo_positive`]'s companion, and the other canonical choice
+    /// of representative. Where that one is what residue arithmetic wants,
+    /// this is what *size* wants: it is the smallest representative in
+    /// absolute value, which halves the magnitude of a reduced coefficient and
+    /// so of everything built from one.
+    ///
+    /// The range is half-open at the upper end, so an exact half — possible
+    /// only for even `modulus` — stays positive: `5 mod 10` is `5`, not `−5`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `modulus == 0`.
+    ///
+    /// ```
+    /// use rump::{BigInt, BigUint};
+    ///
+    /// let ten = BigUint::from_u64(10);
+    /// let reduced = |value: i64| BigInt::from_i64(value).symmetric_remainder(&ten);
+    /// assert_eq!(reduced(7), BigInt::from_i64(-3));
+    /// assert_eq!(reduced(-7), BigInt::from_i64(3));
+    /// assert_eq!(reduced(5), BigInt::from_i64(5));
+    /// ```
+    #[must_use]
+    pub fn symmetric_remainder(&self, modulus: &BigUint) -> BigInt {
+        assert!(!modulus.is_zero(), "modulus must be non-zero");
+        let reduced = self.modulo_positive(modulus);
+        // reduced ∈ [0, modulus). Anything strictly above the midpoint belongs
+        // on the negative side: subtracting the modulus lands it in
+        // (−modulus/2, 0).
+        if reduced.mul_ref(&BigUint::from_u64(2)) > *modulus {
+            BigInt::from_biguint(reduced).sub_ref(&BigInt::from_biguint(modulus.clone()))
+        } else {
+            BigInt::from_biguint(reduced)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn symmetric_remainder_is_congruent_and_smallest() {
+        // The two properties that define it, checked against the other
+        // representative rather than against a table: the result is congruent
+        // to `modulo_positive`, and no other representative of the class is
+        // smaller in absolute value.
+        for m in [1u64, 2, 7, 8, 97, 1_000, 1_001] {
+            let modulus = BigUint::from_u64(m);
+            for value in -60i64..=60 {
+                let signed = BigInt::from_i64(value);
+                let symmetric = signed.symmetric_remainder(&modulus);
+                assert_eq!(
+                    symmetric.modulo_positive(&modulus),
+                    signed.modulo_positive(&modulus),
+                    "value {value} mod {m}: not the same residue"
+                );
+                // (−m/2, m/2]: doubled magnitude at most m, and equal only on
+                // the positive side.
+                let doubled = symmetric.magnitude().mul_ref(&BigUint::from_u64(2));
+                assert!(doubled <= modulus, "value {value} mod {m}: not reduced");
+                if doubled == modulus {
+                    assert!(
+                        symmetric.sign() != Sign::Negative,
+                        "value {value} mod {m}: the half belongs on the positive side"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn digit_count_matches_writing_the_digits_out() {
