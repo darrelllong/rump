@@ -17,9 +17,55 @@ starting the number field sieve.
 
 ---
 
+## Tier 1 — outstanding
+
+### Real roots and the real factorisation of a `PolyZ`
+
+`PolyZ` already carries `resultant`, `discriminant`, and — through `PolyModP`
+— roots modulo a prime. What it has no answer for is where a polynomial
+crosses the *real* line, and that is the conspicuous gap in an otherwise
+complete polynomial type.
+
+Wanted, roughly:
+
+```text
+PolyZ::real_roots(&self) -> Vec<f64>
+PolyZ::factor_real(&self) -> (f64, Vec<f64>, Vec<(f64, f64)>)
+        // leading coefficient, real roots, conjugate pairs (p, q)
+```
+
+so that a caller can write `|f(x)| = |c| · ∏|x − rⱼ| · ∏((x − pₖ)² + qₖ²)`
+without owning any of the numerics.
+
+**What the consumer does today.** `src/gnfs/model.rs`, about 470 lines: complex
+arithmetic, a Cauchy bound for the starting circle, Durand–Kerner to find all
+roots at once, deflation, and a bisection refinement for the real ones. It is
+correct and tested, and none of it knows it is looking for factors — the
+module's *prose* is about sieve lines because that is what calls it, but every
+function in it is ordinary polynomial numerics.
+
+**What the workaround costs.** Nothing measurable. This is a boundary request
+rather than a performance one, which is why it sits at the bottom of an
+ordering by cost: the consumer is holding general algebra that the rule in this
+file's header says belongs here. Worth doing when `poly.rs` is next open
+anyway, not before.
+
+Two things a mover should keep, because they were arrived at by being wrong
+first:
+
+- `f64` is ample for this and the consumer says so explicitly. The answer
+  selects which integer positions to evaluate *exactly*; being a place or two
+  out costs nothing.
+- The real minima of `|f|` between consecutive real roots are **not** where a
+  naive reading puts them. `|f|` does not rise and fall monotonically between
+  them — a cubic with one real root has two critical points on the same side
+  of it — so the roots of `f'` are wanted alongside the roots of `f`.
+
+---
+
 ## Tier 1 — cleared
 
-Nothing outstanding.
+Nothing else outstanding.
 
 **Implemented directly, 2026-08-16, by the consumer rather than requested.**
 Four primitives the factoring crate had grown local copies of. Each is
