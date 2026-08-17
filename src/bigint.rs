@@ -71,12 +71,18 @@ const SQR_SCHOOLBOOK_MIN_LIMBS: usize = 8;
 // (`squaring_crossover_timing`, run with `--ignored`), quoting only widths
 // at which `mul_ref` would actually reach Toom-3 — below its own 128-limb
 // threshold that comparison measures a kernel production never calls:
-// as the observed range rather than a single figure, because the spread
-// between runs is wider than the precision a single figure implies. These
-// bound every reading taken across nine runs on M4 — two here and seven in
-// the review that caught the previous, narrower ranges — not a typical
-// one: +6.7 to +10.1% at 128 limbs, +14.0 to +17.5% at 160, +36 to +40% at
-// 192, +3 to +6% at 256, +19 to +25% at 384, and −12 to −15% at 512. What carries the threshold
+// as the range observed rather than a single figure, because the spread
+// between runs is wider than the precision a single figure implies. Across
+// thirteen runs on M4: +6.2 to +10.1% at 128 limbs, +12.6 to +20.3% at
+// 160, +36 to +40% at 192, +3 to +6% at 256, +19 to +25% at 384, and −12
+// to −15% at 512.
+//
+// These are sample extremes, not bounds, and two revisions of this comment
+// have now been written as though they were — the fourteenth run will
+// probably widen them again. Only the sign and its persistence across runs
+// carry the threshold; the magnitudes are here to show how far from zero
+// each row sits, which is why the 512 row matters and the 256 row does
+// not. What carries the threshold
 // is the sign and its persistence across runs, not any one magnitude. The series is not monotone either, because
 // Toom-3's three-way split lands differently on each width (192 = 3·64
 // divides exactly, 256 does not), so the threshold is the last width the
@@ -3520,10 +3526,18 @@ impl PartialOrd for BigInt {
 ///   512 bits   1.4×      12/12 pairs ahead
 ///  1024 bits   1.26×     12/12 pairs ahead
 ///  2048 bits   parity    per-pair medians 0.98–1.11, 1–2 of 12 behind
-///  4096 bits   parity    per-pair medians 1.00–1.10, 0–1 of 12 behind
+///  4096 bits   parity    per-pair medians 0.99–1.10, 0–4 of 12 behind
 ///  8192 bits   1.31×     12/12 pairs ahead
-///   256 bits   parity    per-pair medians 0.96–1.32, a quarter behind
+///   256 bits   parity    per-pair medians 0.96–1.32, a fifth behind
 /// ```
+///
+/// Those intervals are the spread *observed*, not a bound on it. A sample
+/// minimum and maximum over `n` runs is exceeded by run `n + 1` with
+/// probability about `2/n`, so quoting one as though it were a bound is
+/// the same error as quoting a median as though it were the answer, one
+/// level down. What the table is for is the classification in its second
+/// column; the intervals are there to show how close the parity rows are
+/// to their neighbours, not to bound anything.
 ///
 /// Before the half-product, `reduce` *trailed* a division by up to a third
 /// at 2–4 kbit, so parity there is the gain. The series is not monotone —
@@ -4952,6 +4966,13 @@ mod tests {
             }
         }
         println!("corrections histogram: {seen:?}");
+        // The gating test cites this probe for the claim that three
+        // corrections never occur, so the probe enforces it rather than
+        // merely printing it — a sweep that only reports cannot support a
+        // claim, which is the shape of error that let a running-maximum
+        // counter conclude two was unreachable.
+        assert_eq!(seen[3], 0, "HAC Note 14.44's bound of two was exceeded");
+        assert!(seen[2] > 0, "the sweep must reach the bound: {seen:?}");
         if let Some((n, x)) = &witness {
             println!("witness modulus: {n}");
             println!("witness x: {x}");

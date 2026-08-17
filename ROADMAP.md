@@ -65,8 +65,9 @@ them remains subject to the joint triage.
    `reduce` reads 1.4× at 512 bits, 1.26× at 1024 and 1.31× at 8192, where
    the full-product version trailed a division by up to a third at 2–4 kbit.
    At 256, 2048 and 4096 bits the distribution straddles parity — which of
-   the two wins depends on the modulus, reproducibly — so those widths are
-   reported as parity rather than given a figure. The half-product is quadratic, so above 32 kbit the
+   the two wins depends on the modulus, reproducibly, up to a third of
+   sampled pairs favouring division — so those widths are reported as
+   parity rather than given a figure. The half-product is quadratic, so above 32 kbit the
    dispatched full product wins and is used instead. Note 14.45(i)'s
    approximate *high* half remains open, and would trade exactness for a
    wider correction bound.

@@ -291,6 +291,37 @@ is correct. Check before you correct.
   but returns an *ordinary* residue, so `while t != one_mont` never terminated.
   It was caught only because a benchmark hung. Run the suite; do not kill it
   early.
+- **Mutation-test by exit status, never by grepping the output.** A harness
+  that decides a mutation was caught with `grep -q "failed"` matches the `0
+  failed` in a *passing* result line and reports success unconditionally.
+  Mine did, for six mutations, and the review caught it rather than the
+  harness. Use `if cargo test ...; then echo SURVIVED; else echo CAUGHT; fi`.
+- **A mutation reverted while a build is in flight produces a failure that
+  survives the revert.** Cargo's fingerprint is mtime-based, so two things
+  follow. A `cargo test` started before the restore compiles the *mutated*
+  source and fails afterwards, against a working tree that is byte-identical
+  to clean — the next invocation rebuilds and passes, which reads as a
+  haunted build. Worse, a restore that preserves or backdates timestamps
+  (`cp -p`, `rsync -a`, `tar -p`, some editors' atomic replace) leaves the
+  mutated artifact in place *indefinitely* against clean source, and cargo
+  reports `Finished in 0.00s`. Restore with plain `cp`, and let any in-flight
+  build finish before believing its result.
+- **Never mutation-test a resource guard without a timeout.** Deleting a guard
+  does not make its test *fail*; it makes the test do the unbounded thing the
+  guard existed to prevent. Removing the branching-push
+  `check_root_level_width` call turns
+  `roots_mod_prime_power_refuses_a_branch_too_wide_to_list` — a `should_panic`
+  test over a 40-bit prime — into a 1.1×10¹² iteration allocation loop. An
+  unbounded `cargo test` against that mutation reached 6.6 GB RSS and was still
+  climbing when killed, with the machine down to 168 MB free. **This is what
+  crashed the machine on 2026-08-16**, and the crash left the mutation in the
+  working tree, where it read as ordinary uncommitted work. Build untimed
+  (a slow build must not read as a hang), then run the covering tests under
+  `timeout`, and score `124` as CAUGHT alongside any other non-zero status.
+  Note `ulimit -v` is *not* enforced on Darwin, so the timeout is the only real
+  bound. Under that harness all five mutations of that guard — its three call
+  sites and two mutations of its body — are CAUGHT: two of the three call sites
+  by hang, one by assertion.
 - Stage files explicitly (never `git add -A`) — concurrent work has been in
   flight in this repository more than once.
 - The MANUAL's code blocks are mirrored verbatim in `tests/manual_examples.rs`
