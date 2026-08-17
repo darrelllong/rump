@@ -11,7 +11,7 @@
 //! and operand shapes that stress the reduction's conditional subtract.
 
 use rump::modular::ModulusError;
-use rump::modular::MontgomeryContext;
+use rump::modular::{MontgomeryContext, MontgomeryScratch};
 use rump::BigUint;
 
 /// Deterministic test generator: splitmix64 (Steele, Lea & Flood 2014),
@@ -390,4 +390,98 @@ fn pow_at_public_key_sizes() {
         check_pow(&ctx, &base, &BigUint::from_u64(65_537));
         check_pow(&ctx, &base, &structured_biguint(2, &mut rng));
     }
+}
+
+/// Two moduli that the old abbreviated context tag could not tell apart.
+///
+/// `2⁶⁴ + 3` and `2⁶⁵ + 3` are both odd, both two limbs, and both have low
+/// limb 3, so a tag of (low limb, limb count) was identical for the two. Each
+/// context accepted the other's residues and decoded them under the wrong
+/// modulus — silently, with no error and a wrong answer. Identity is now the
+/// shared allocation, which cannot collide.
+#[test]
+fn colliding_moduli_do_not_share_a_context() {
+    let a = BigUint::from_u128((1u128 << 64) + 3);
+    let b = BigUint::from_u128((1u128 << 65) + 3);
+    assert_ne!(a, b);
+    // The property that broke the old tag, stated in public terms: both need
+    // two 64-bit limbs, and both are ≡ 3 mod 2⁶⁴, so the low limb matched.
+    assert_eq!(a.bits(), 65);
+    assert_eq!(b.bits(), 66);
+    let low = BigUint::from_u128(1u128 << 64);
+    assert_eq!(a.rem(&low), b.rem(&low));
+
+    let ctx_a = MontgomeryContext::new(&a).expect("odd");
+    let ctx_b = MontgomeryContext::new(&b).expect("odd");
+
+    let value = BigUint::from_u64(7);
+    let residue_a = ctx_a.to_residue(&value);
+
+    // The foreign context must refuse it rather than decode under its own
+    // modulus.
+    assert!(ctx_b.from_residue(&residue_a).is_err());
+    assert_eq!(
+        ctx_a.from_residue(&residue_a).expect("own context"),
+        value,
+        "the owning context still round-trips"
+    );
+}
+
+/// Every residue operation rejects a foreign residue, not just decoding.
+#[test]
+fn every_residue_operation_reports_a_context_mismatch() {
+    let ctx = MontgomeryContext::new(&BigUint::from_u64(97)).expect("odd");
+    let other = MontgomeryContext::new(&BigUint::from_u64(101)).expect("odd");
+
+    let mine = ctx.to_residue(&BigUint::from_u64(5));
+    let theirs = other.to_residue(&BigUint::from_u64(5));
+    let mut scratch = MontgomeryScratch::new();
+
+    assert!(ctx.from_residue(&theirs).is_err());
+    assert!(ctx.from_residue_with(&theirs, &mut scratch).is_err());
+    assert!(ctx.mul_residue(&theirs, &mine).is_err());
+    assert!(ctx.mul_residue(&mine, &theirs).is_err());
+    assert!(ctx.mul_residue_with(&theirs, &mine, &mut scratch).is_err());
+    assert!(ctx.square_residue(&theirs).is_err());
+    assert!(ctx.square_residue_with(&theirs, &mut scratch).is_err());
+    assert!(ctx.add_residue(&theirs, &mine).is_err());
+    assert!(ctx.add_residue(&mine, &theirs).is_err());
+    assert!(ctx.sub_residue(&theirs, &mine).is_err());
+    assert!(ctx.sub_residue(&mine, &theirs).is_err());
+    assert!(ctx.pow_residue(&theirs, &BigUint::from_u64(3)).is_err());
+
+    // The same calls on its own residues succeed, so the assertions above are
+    // rejecting the foreignness and not the operation.
+    assert!(ctx.mul_residue(&mine, &mine).is_ok());
+    assert!(ctx.square_residue(&mine).is_ok());
+    assert!(ctx.add_residue(&mine, &mine).is_ok());
+    assert!(ctx.sub_residue(&mine, &mine).is_ok());
+    assert!(ctx.pow_residue(&mine, &BigUint::from_u64(3)).is_ok());
+}
+
+/// A cloned context shares the identity, so it accepts the original's
+/// residues — cloning a context must not invalidate values already made.
+#[test]
+fn a_cloned_context_accepts_the_originals_residues() {
+    let ctx = MontgomeryContext::new(&BigUint::from_u64(97)).expect("odd");
+    let residue = ctx.to_residue(&BigUint::from_u64(5));
+    let clone = ctx.clone();
+
+    assert_eq!(
+        clone.from_residue(&residue).expect("clone shares identity"),
+        BigUint::from_u64(5)
+    );
+    let squared = clone
+        .square_residue(&residue)
+        .expect("clone shares identity");
+    assert_eq!(
+        ctx.from_residue(&squared)
+            .expect("original shares identity"),
+        BigUint::from_u64(25)
+    );
+
+    // A context rebuilt from the same modulus is a different identity: it did
+    // not produce the residue, and the check is on provenance, not value.
+    let rebuilt = MontgomeryContext::new(&BigUint::from_u64(97)).expect("odd");
+    assert!(rebuilt.from_residue(&residue).is_err());
 }

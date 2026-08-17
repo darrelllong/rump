@@ -13,17 +13,22 @@
 
 use super::{bit_span, low_u64, BigUint, ModulusError};
 use core::cmp::Ordering;
+use std::sync::Arc;
 
-/// Identifies the context a [`MontgomeryResidue`] belongs to.
+/// The identity a context and its residues share.
 ///
-/// The modulus's limb count and its low limb: enough to separate the contexts
-/// a program holds at once, while staying `Copy`. A guard against mixing
-/// domains, not a cryptographic binding.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ContextTag {
-    modulus_low: u64,
-    limbs: usize,
-}
+/// Deliberately carries no data: identity *is* the allocation, compared with
+/// [`Arc::ptr_eq`]. A context and its clones share one `Arc`, so a clone
+/// accepts the original's residues; two separately built contexts never share
+/// one, so residues cannot cross between them.
+///
+/// It replaced an abbreviated tag — the modulus's low limb and limb count —
+/// that was not unique: `2⁶⁴ + 3` and `2⁶⁵ + 3` are both odd, both two limbs,
+/// both low limb 3, so each context accepted the other's residues and
+/// decoded them under the wrong modulus. A wider fingerprint would only move
+/// that boundary; sharing one allocation removes it.
+#[derive(Debug, Eq, PartialEq)]
+struct ContextIdentity;
 
 /// A value in a [`MontgomeryContext`]'s domain.
 ///
@@ -32,10 +37,16 @@ struct ContextTag {
 /// There is no way to build one except [`MontgomeryContext::to_residue`] and
 /// no way to read one except [`MontgomeryContext::from_residue`], so an
 /// unencoded, unreduced, or foreign value cannot reach a kernel at all.
+///
+/// Belonging is by provenance, not by modulus: a context and its clones share
+/// one identity, but a context *rebuilt* from the same modulus is a different
+/// one and refuses residues it did not make. That is stricter than the
+/// mathematics requires and deliberately so — it is the same rule in every
+/// case, with no value to compare and so nothing to collide.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MontgomeryResidue {
     value: BigUint,
-    tag: ContextTag,
+    identity: Arc<ContextIdentity>,
 }
 
 /// Reusable scratch for the domain operations.
@@ -81,6 +92,7 @@ impl std::error::Error for ContextMismatch {}
 /// callers stay in the Montgomery domain across whole computations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MontgomeryContext {
+    identity: Arc<ContextIdentity>,
     modulus: BigUint,
     // n0_inv = -n^{-1} mod 2^64 (Montgomery reduction coefficient).
     n0_inv: u64,
@@ -562,6 +574,7 @@ impl MontgomeryContext {
         one_mont.normalize();
 
         Ok(Self {
+            identity: Arc::new(ContextIdentity),
             modulus: modulus.clone(),
             n0_inv,
             r2_mod,
@@ -648,18 +661,13 @@ impl MontgomeryContext {
         self.decode_with_workspace(&square_mont, &mut workspace)
     }
 
-    /// This context's tag, so a residue from another context is caught.
-    #[inline]
-    fn tag(&self) -> ContextTag {
-        ContextTag {
-            modulus_low: self.modulus.limbs[0],
-            limbs: self.modulus.limbs.len(),
-        }
-    }
-
-    /// The tag check every residue operation performs.
+    /// The identity check every residue operation performs.
+    ///
+    /// Pointer equality on the shared `Arc`, so it cannot collide: a residue
+    /// belongs to this context exactly when it was made by this context or a
+    /// clone of it.
     fn check(&self, residue: &MontgomeryResidue) -> Result<(), ContextMismatch> {
-        if residue.tag == self.tag() {
+        if Arc::ptr_eq(&residue.identity, &self.identity) {
             Ok(())
         } else {
             Err(ContextMismatch)
@@ -688,7 +696,7 @@ impl MontgomeryContext {
     ) -> MontgomeryResidue {
         MontgomeryResidue {
             value: self.encode_with_workspace(value, &mut scratch.limbs),
-            tag: self.tag(),
+            identity: Arc::clone(&self.identity),
         }
     }
 
@@ -716,7 +724,7 @@ impl MontgomeryContext {
     pub fn one(&self) -> MontgomeryResidue {
         MontgomeryResidue {
             value: self.one_mont.clone(),
-            tag: self.tag(),
+            identity: Arc::clone(&self.identity),
         }
     }
 
@@ -752,7 +760,7 @@ impl MontgomeryContext {
                 self.n0_inv,
                 &mut scratch.limbs,
             ),
-            tag: self.tag(),
+            identity: Arc::clone(&self.identity),
         })
     }
 
@@ -783,7 +791,7 @@ impl MontgomeryContext {
                 self.n0_inv,
                 &mut scratch.limbs,
             ),
-            tag: self.tag(),
+            identity: Arc::clone(&self.identity),
         })
     }
 
@@ -803,7 +811,7 @@ impl MontgomeryContext {
         self.check(rhs)?;
         Ok(MontgomeryResidue {
             value: BigUint::mod_add(&lhs.value, &rhs.value, &self.modulus),
-            tag: self.tag(),
+            identity: Arc::clone(&self.identity),
         })
     }
 
@@ -821,7 +829,7 @@ impl MontgomeryContext {
         self.check(rhs)?;
         Ok(MontgomeryResidue {
             value: BigUint::mod_sub(&lhs.value, &rhs.value, &self.modulus),
-            tag: self.tag(),
+            identity: Arc::clone(&self.identity),
         })
     }
 
@@ -839,7 +847,7 @@ impl MontgomeryContext {
         let mut workspace = Vec::new();
         Ok(MontgomeryResidue {
             value: self.pow_ladder_encoded(&base.value, exponent, &mut workspace),
-            tag: self.tag(),
+            identity: Arc::clone(&self.identity),
         })
     }
 

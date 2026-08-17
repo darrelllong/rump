@@ -399,6 +399,10 @@ the encoding of one, and the domain operations are `mul_residue`,
 encoding is linear, so domain addition and subtraction are one
 compare-and-correct each.
 
+Belonging is by provenance: a context and its clones share an identity, but a
+context rebuilt from the same modulus is a different one and refuses residues
+it did not make.
+
 The residue is opaque because its invariant cannot be stated in a signature
 that takes a bare integer: a domain value is encoded, reduced, and bound to
 one context. The type carries all three, so an unencoded, unreduced, or

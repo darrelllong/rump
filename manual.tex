@@ -610,6 +610,10 @@ giving $\bar 1 = R \bmod n$. The domain operations are \code{mul\_residue},
 \code{pow\_residue}; the encoding is linear, so domain addition and
 subtraction are one compare-and-correct each.
 
+Belonging is by provenance: a context and its clones share an identity, while
+a context rebuilt from the same modulus is a different one and refuses
+residues it did not make.
+
 The opacity is the point. A domain value must be encoded, reduced, and bound
 to one context, and none of those can be stated in a signature that takes a
 bare integer --- the earlier API took \code{BigUint} and could only check in
