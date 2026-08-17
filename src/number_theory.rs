@@ -1648,7 +1648,7 @@ const CIPOLLA_THRESHOLD_FACTOR: usize = 4;
 ///
 /// The whole squaring chain runs inside the Montgomery domain: the three
 /// seeds are encoded once and every round is a `square_mont`/`mul_mont`, with
-/// a single `decode` on the returned root. [`MontgomeryContext::pow`] returns an
+/// a single `decode` on the returned root. [`MontgomeryContext::pow`](crate::modular::MontgomeryContext::pow) returns an
 /// *ordinary* residue, not an encoded one, which is why each of `c`, `t`, and
 /// `r` is re-encoded after its exponentiation. Montgomery form is canonical
 /// — `x·R mod p` in `[0, p)` — so the `!= one_mont` tests compare encoded
@@ -2878,7 +2878,7 @@ const SMALL_TRIAL_PRIMES: [u16; 168] = [
 ///
 /// The chain runs entirely inside the Montgomery domain: `value` is held
 /// encoded, so each round is one `square_mont` where `ctx.square` would pay an
-/// encode and a decode per round. [`MontgomeryContext::pow`] returns an *ordinary*
+/// encode and a decode per round. [`MontgomeryContext::pow`](crate::modular::MontgomeryContext::pow) returns an *ordinary*
 /// residue rather than an encoded one, so its result is re-encoded once to
 /// enter the domain. Montgomery form is canonical — `x·R mod n` in `[0, n)` —
 /// so the two comparison constants are encoded once and equality of encoded

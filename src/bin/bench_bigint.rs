@@ -9,7 +9,8 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use rump::{BigUint, MontgomeryContext};
+use rump::modular::MontgomeryContext;
+use rump::BigUint;
 
 /// Deterministic test generator: splitmix64 (Steele, Lea & Flood 2014),
 /// vendored so the tests need no dependency. Not a CSPRNG and not meant to

@@ -3302,7 +3302,10 @@ impl BigInt {
     /// zero.
     #[must_use]
     pub(crate) fn gcd(&self, other: &Self) -> Self {
-        Self::from_biguint(crate::number_theory::gcd(&self.magnitude, &other.magnitude))
+        Self::from_biguint(crate::number_theory_impl::gcd(
+            &self.magnitude,
+            &other.magnitude,
+        ))
     }
 
     /// `self^exponent` for a machine-word exponent, by binary
@@ -4179,7 +4182,7 @@ mod tests {
     #[test]
     fn barrett_pow_matches_mod_pow() {
         use super::BarrettContext;
-        use crate::number_theory::mod_pow;
+        use crate::number_theory_impl::mod_pow;
 
         // A deliberately slow reference: square-and-multiply with a full
         // product and a direct division at every step, sharing no code with

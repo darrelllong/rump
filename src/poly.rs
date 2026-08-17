@@ -2,7 +2,7 @@
 //!
 //! Two concrete named types, in the crate's style — a documented
 //! representation rather than a tower of coefficient-ring traits:
-//! [`PolyZ`] over the integers and [`PolyMod`] over a fixed modulus. They
+//! [`PolyZ`](crate::polynomial::PolyZ) over the integers and [`PolyMod`](crate::polynomial::PolyMod) over a fixed modulus. They
 //! are the substrate the general number field sieve is built on (the
 //! algebraic side is a degree-5 or -6 polynomial over ℤ and its behaviour
 //! rem small primes), and more broadly the polynomial layer a computer
@@ -13,9 +13,9 @@
 //! the empty coefficient list and the degree is the last index.
 
 use crate::bigint::{BigInt, BigUint, Sign};
-use crate::number_theory;
+use crate::number_theory_impl as number_theory;
 
-/// Coefficient count at or above which [`PolyZ`] multiplication splits
+/// Coefficient count at or above which [`PolyZ`](crate::polynomial::PolyZ) multiplication splits
 /// Karatsuba-style instead of running the schoolbook convolution.
 ///
 /// The recurrence is the classical one — three half-length convolutions
@@ -82,7 +82,7 @@ const POLY_KARATSUBA_THRESHOLD_Z: usize = 96;
 /// within a point. Medians of six and seven runs.
 const POLY_KARATSUBA_ANY_RATIO_Z: usize = 128;
 
-/// The same threshold for [`PolyMod`], with a balance rule attached.
+/// The same threshold for [`PolyMod`](crate::polynomial::PolyMod), with a balance rule attached.
 ///
 /// Two things move it out. The coefficients do not grow — every one stays
 /// reduced below the modulus — so the multiplication a split saves never
@@ -1084,7 +1084,7 @@ impl PolyZ {
     ///
     /// `prime` must be prime; over a composite the result is unspecified.
     #[must_use]
-    pub fn roots_mod_prime_power<R: crate::random::RandomSource + ?Sized>(
+    pub fn roots_mod_prime_power<R: crate::random_impl::RandomSource + ?Sized>(
         &self,
         prime: &BigUint,
         exponent: u32,
@@ -2332,7 +2332,7 @@ impl PolyMod {
     /// product of distinct degree-`d` irreducibles the target is
     /// unreachable and the stall guard below fires, attributing the failure
     /// to the `RandomSource`.
-    fn equal_degree_split<R: crate::random::RandomSource + ?Sized>(
+    fn equal_degree_split<R: crate::random_impl::RandomSource + ?Sized>(
         &self,
         d: usize,
         rng: &mut R,
@@ -2437,10 +2437,15 @@ impl PolyMod {
     /// output is confined to `[m, 2^bits)` (its own stall guard), which is
     /// the one way a broken `RandomSource` aborts here instead of reaching the
     /// stall assertion in `equal_degree_split`.
-    fn random_below_degree<R: crate::random::RandomSource + ?Sized>(&self, rng: &mut R) -> Self {
+    fn random_below_degree<R: crate::random_impl::RandomSource + ?Sized>(
+        &self,
+        rng: &mut R,
+    ) -> Self {
         let deg = self.degree().expect("non-zero");
         let coeffs = (0..deg)
-            .map(|_| crate::random::random_below(rng, &self.modulus).unwrap_or_else(BigUint::zero))
+            .map(|_| {
+                crate::random_impl::random_below(rng, &self.modulus).unwrap_or_else(BigUint::zero)
+            })
             .collect();
         Self::new(coeffs, &self.modulus)
     }
@@ -2504,7 +2509,7 @@ impl PolyMod {
     /// modulus is required (see the type documentation); over a composite
     /// modulus the result is unspecified and may be returned without a panic.
     #[must_use]
-    pub fn factor<R: crate::random::RandomSource + ?Sized>(
+    pub fn factor<R: crate::random_impl::RandomSource + ?Sized>(
         &self,
         rng: &mut R,
     ) -> Vec<(Self, usize)> {
@@ -2544,7 +2549,7 @@ impl PolyMod {
     /// documentation); over a composite modulus the result is unspecified
     /// and may be returned without a panic.
     #[must_use]
-    pub fn roots<R: crate::random::RandomSource + ?Sized>(&self, rng: &mut R) -> Vec<BigUint> {
+    pub fn roots<R: crate::random_impl::RandomSource + ?Sized>(&self, rng: &mut R) -> Vec<BigUint> {
         if self.degree().is_none_or(|d| d == 0) {
             return Vec::new();
         }
@@ -2640,7 +2645,7 @@ mod tests {
     struct SplitMix64 {
         state: u64,
     }
-    impl crate::random::RandomSource for SplitMix64 {
+    impl crate::random_impl::RandomSource for SplitMix64 {
         fn fill_bytes(&mut self, dest: &mut [u8]) {
             let mut i = 0;
             while i < dest.len() {
@@ -4109,7 +4114,7 @@ mod tests {
         // forever (review §2.4 / §5.4). x² − 1 = (x−1)(x+1) mod 7 leaves a
         // degree-1 block of two factors, so the split is actually entered.
         struct ZeroRng;
-        impl crate::random::RandomSource for ZeroRng {
+        impl crate::random_impl::RandomSource for ZeroRng {
             fn fill_bytes(&mut self, dest: &mut [u8]) {
                 dest.fill(0);
             }
@@ -4430,7 +4435,7 @@ mod tests {
                     .coefficients()
                     .iter()
                     .filter(|c| !c.is_zero())
-                    .map(|c| crate::number_theory::valuation(&c.abs(), &prime))
+                    .map(|c| crate::number_theory_impl::valuation(&c.abs(), &prime))
                     .min()
                     .expect("non-zero");
                 if content_valuation >= e as usize {

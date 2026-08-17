@@ -6,7 +6,9 @@
 //! structured corner cases certifies the fast path computes the exact same
 //! quotient sequence (hence the exact same gcd and Bézout cofactors).
 
-use rump::{gcd, gcd_extended, jacobi, mod_inverse, BigInt, BigUint};
+use rump::modular::mod_inverse;
+use rump::number_theory::{gcd, gcd_extended, jacobi};
+use rump::{BigInt, BigUint};
 
 // ── the oracles: classical Euclid, exactly as rump shipped before Lehmer ──
 

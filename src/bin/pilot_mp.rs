@@ -19,10 +19,10 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use rump::{
-    gcd, gcd_extended, is_probable_prime, jacobi, mod_inverse, mod_pow, mod_sqrt, BigUint, Gf2m,
-    MontgomeryContext,
-};
+use rump::finite_field::Gf2m;
+use rump::modular::{mod_inverse, mod_pow, mod_sqrt, MontgomeryContext};
+use rump::number_theory::{gcd, gcd_extended, is_probable_prime, jacobi};
+use rump::BigUint;
 
 // ─── Random operand generation ──────────────────────────────────────────────
 

@@ -14,7 +14,8 @@
 //! default `cargo test` stays quick while a soak run can push the same code
 //! through orders of magnitude more cases.
 
-use rump::{BigUint, MontgomeryContext};
+use rump::modular::MontgomeryContext;
+use rump::BigUint;
 
 /// Deterministic test generator: splitmix64 (Steele, Lea & Flood 2014),
 /// vendored so the tests need no dependency. Not a CSPRNG and not meant to

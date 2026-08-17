@@ -8,7 +8,9 @@ drift from the code.
 ## Imports and Naming
 
 The crates.io package is `rust-mp`; the library target is `rump`, so code
-always says `use rump::...`:
+always says `use rump::...`. `BigInt`, `BigUint`, and `Sign` are at the crate
+root; every other item has exactly one module path, listed in
+[`NAMES.md`](NAMES.md):
 
 ```toml
 [dependencies]
@@ -16,16 +18,26 @@ rust-mp = "0.3"
 ```
 
 ```rust
-use rump::{
-    crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
-    miller_rabin_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
-    lll_reduce, miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow,
-    primes_below, product_tree, random_below, random_coprime_below, random_nonzero_below,
-    random_probable_prime, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
-    remove_factor, smooth_parts, mod_sqrt, mod_sqrt_prime_power, valuation, BarrettContext, BigInt,
-    BigUint, Gf2m, MontgomeryContext, PolyMod, PolyZ, RandomSource, Sign,
-};
 use core::num::NonZeroU64;
+use rump::finite_field::Gf2m;
+use rump::integer::WordReciprocal;
+use rump::lattice::{gauss_reduce_weighted, lll_reduce};
+use rump::modular::{
+    mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow, mod_sqrt, mod_sqrt_prime_power,
+    BarrettContext, MontgomeryContext,
+};
+use rump::number_theory::{
+    crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
+    is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre, miller_rabin_with_bases,
+    miller_rabin_witness, primes_below, product_tree, rational_reconstruct,
+    rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, valuation,
+    SmoothnessBase,
+};
+use rump::polynomial::{PolyMod, PolyZ};
+use rump::random::{
+    random_below, random_coprime_below, random_nonzero_below, random_probable_prime, RandomSource,
+};
+use rump::{BigInt, BigUint, Sign};
 ```
 
 Two properties define the intended use. Operations are **variable-time** (do

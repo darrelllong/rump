@@ -14,8 +14,8 @@
 //! and `CITATIONS.md` collects them.
 //!
 //! Around that integer core sit three layers with the same discipline:
-//! [`Gf2m`] for binary extension fields GF(2^m), [`PolyZ`]/[`PolyMod`] for
-//! univariate polynomials, and [`lll_reduce`] for lattice basis reduction.
+//! [`Gf2m`](crate::finite_field::Gf2m) for binary extension fields GF(2^m), [`PolyZ`](crate::polynomial::PolyZ)/[`PolyMod`](crate::polynomial::PolyMod) for
+//! univariate polynomials, and [`lll_reduce`](crate::lattice::lll_reduce) for lattice basis reduction.
 //!
 //! The arithmetic and number theory are deterministic functions of their
 //! inputs; the sampling routines (`random_below` and friends) are driven by a
@@ -27,10 +27,10 @@
 //!   paths; do not use them where timing must not leak secrets.
 //! - **Not a secret-scrubbing or constant-time type.** As cheap defense in
 //!   depth every [`BigUint`] volatile-wipes its live limbs on drop, and the
-//!   Montgomery exponentiation ladder ([`MontgomeryContext::pow`] /
+//!   Montgomery exponentiation ladder ([`MontgomeryContext::pow`](crate::modular::MontgomeryContext::pow) /
 //!   `pow_encoded`) wipes its workspaces on exit. That is the extent of it:
 //!   spare capacity and buffers freed on reallocation are not wiped, the
-//!   in-domain [`MontgomeryContext::mul_mont`] / `square_mont` keep their
+//!   in-domain [`MontgomeryContext::mul_mont`](crate::modular::MontgomeryContext::mul_mont) / `square_mont` keep their
 //!   scratch, and `Debug` prints every limb. Cryptographic memory hygiene and
 //!   constant-time operation are out of scope; a consumer that handles key
 //!   material adds them at that layer.
@@ -83,28 +83,65 @@ compile_error!(
      `usize`. 32-bit and 16-bit targets are not supported."
 );
 
+// Implementation modules are private; every public path below is a facade, so
+// each exported item has exactly one public path, as NAMES.md requires.
 mod bigint;
 mod gf2m;
-mod lattice;
-mod number_theory;
+#[path = "lattice.rs"]
+mod lattice_impl;
+#[path = "number_theory.rs"]
+mod number_theory_impl;
 mod poly;
-mod random;
+#[path = "random.rs"]
+mod random_impl;
 mod scrub;
 
-pub use bigint::{
-    BarrettContext, BigInt, BigUint, MontgomeryContext, ParseBigIntError, Sign, WordReciprocal,
-};
-pub use gf2m::Gf2m;
-pub use lattice::{gauss_reduce_weighted, lll_reduce, lll_reduce_delta};
-pub use number_theory::{
-    crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
-    is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker, lcm, legendre,
-    miller_rabin_with_bases, miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_inverse_u64,
-    mod_pow, mod_sqrt, mod_sqrt_prime_power, primes_below, product_tree, rational_reconstruct,
-    rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, valuation,
-    ProductTree, SmoothnessBase,
-};
-pub use poly::{PolyMod, PolyZ, MAX_ENUMERATED_ROOTS};
-pub use random::{
-    random_below, random_coprime_below, random_nonzero_below, random_probable_prime, RandomSource,
-};
+pub use bigint::{BigInt, BigUint, Sign};
+
+/// Machine-word helpers and the parse error for the integer types.
+pub mod integer {
+    pub use crate::bigint::{ParseBigIntError, WordReciprocal};
+}
+
+/// Residue-ring arithmetic: the fixed-modulus contexts and the modular
+/// operations that are free functions.
+pub mod modular {
+    pub use crate::bigint::{BarrettContext, MontgomeryContext};
+    pub use crate::number_theory_impl::{
+        mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow, mod_sqrt, mod_sqrt_prime_power,
+    };
+}
+
+/// Divisibility, symbols, primality, reconstruction, and batching.
+pub mod number_theory {
+    pub use crate::number_theory_impl::{
+        crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
+        is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker, lcm, legendre,
+        miller_rabin_with_bases, miller_rabin_witness, primes_below, product_tree,
+        rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
+        smooth_parts, valuation, ProductTree, SmoothnessBase,
+    };
+}
+
+/// Univariate polynomials over ℤ and over a residue ring.
+pub mod polynomial {
+    pub use crate::poly::{PolyMod, PolyZ, MAX_ENUMERATED_ROOTS};
+}
+
+/// Binary extension fields GF(2^m).
+pub mod finite_field {
+    pub use crate::gf2m::Gf2m;
+}
+
+/// Lattice basis reduction.
+pub mod lattice {
+    pub use crate::lattice_impl::{gauss_reduce_weighted, lll_reduce, lll_reduce_delta};
+}
+
+/// Sampling, driven entirely by a caller-supplied byte source.
+pub mod random {
+    pub use crate::random_impl::{
+        random_below, random_coprime_below, random_nonzero_below, random_probable_prime,
+        RandomSource,
+    };
+}

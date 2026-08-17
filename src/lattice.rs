@@ -1,6 +1,6 @@
 //! Lattice reduction over the integers.
 //!
-//! [`lll_reduce`] applies the Lenstra–Lenstra–Lovász algorithm (A. K. Lenstra,
+//! [`lll_reduce`](crate::lattice::lll_reduce) applies the Lenstra–Lenstra–Lovász algorithm (A. K. Lenstra,
 //! H. W. Lenstra Jr. & L. Lovász, *Factoring polynomials with rational
 //! coefficients*, Math. Ann. 261 (1982), 515–534) to an ordered
 //! basis of a lattice in `ℤ^m`, replacing it in place with an LLL-reduced basis
@@ -368,7 +368,7 @@ fn round_div(numerator: i128, denominator: i128) -> Option<i128> {
 /// Returns the two vectors in non-decreasing order of that norm. The first is
 /// a shortest non-zero vector of the lattice and the second is shortest among
 /// those independent of it — in two dimensions reduction is not a heuristic,
-/// as it is for [`lll_reduce`] in general dimension, but solves the shortest
+/// as it is for [`lll_reduce`](crate::lattice::lll_reduce) in general dimension, but solves the shortest
 /// vector problem outright (Lagrange 1773; Gauss, *Disquisitiones
 /// Arithmeticae* 1801, art. 171; the modern analysis is Vallée, *Gauss'
 /// algorithm revisited*, J. Algorithms 12 (1991), 556–572).

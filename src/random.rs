@@ -45,7 +45,7 @@
 //! Degenerate *arguments* are still reported as `None`.
 
 use crate::bigint::BigUint;
-use crate::number_theory::{gcd, is_probable_prime};
+use crate::number_theory_impl::{gcd, is_probable_prime};
 
 /// Consecutive fruitless draws after which [`random_below`] and
 /// [`random_nonzero_below`] conclude the generator is broken. Both loops
@@ -278,13 +278,13 @@ pub fn random_coprime_below<R: RandomSource + ?Sized>(
 /// integers in `[2^(bits−1), 2^bits)`. The single prime that forcing excludes
 /// is 2 itself, so `bits == 2` always yields 3.
 ///
-/// The screen is [`crate::is_probable_prime`], Miller-Rabin against the fixed
+/// The screen is [`is_probable_prime`](crate::number_theory::is_probable_prime), Miller-Rabin against the fixed
 /// twelve-prime base set: a proof of primality below `ψ₁₂ ≈ 3.19 × 10^23` and a
 /// strong probable-prime test above it. A fixed base set is the right choice
 /// precisely here, where the candidate is drawn by this function rather than
 /// supplied by an adversary who could target the bases; the name is exact, and
 /// a caller wanting more assurance at large widths adds witnesses of its own
-/// through [`crate::miller_rabin_witness`].
+/// through [`miller_rabin_witness`](crate::number_theory::miller_rabin_witness).
 ///
 /// Termination under a working generator is probabilistic, and the stall
 /// guard is two-layered because the failure modes differ in cost. By the
@@ -378,7 +378,7 @@ mod tests {
         RandomSource,
     };
     use crate::bigint::BigUint;
-    use crate::number_theory::{gcd, is_probable_prime};
+    use crate::number_theory_impl::{gcd, is_probable_prime};
 
     /// splitmix64 — Steele, Lea & Flood, *Fast Splittable Pseudorandom Number
     /// Generators*, OOPSLA 2014: a 64-bit additive counter through a fixed

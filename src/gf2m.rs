@@ -2,7 +2,7 @@
 //!
 //! Elements of GF(2^m) are represented as [`BigUint`] values whose bit
 //! pattern encodes a polynomial over GF(2): bit `i` set means the coefficient
-//! of `x^i` is 1. A [`Gf2m`] context holds the field modulus — an irreducible
+//! of `x^i` is 1. A [`Gf2m`](crate::finite_field::Gf2m) context holds the field modulus — an irreducible
 //! polynomial of degree `m`, stored with the same bit-pattern convention —
 //! and derives the degree from it, so the two can never disagree.
 //!
@@ -272,7 +272,7 @@ impl Gf2m {
     /// The exponent is an ordinary integer, not a residue: it is not reduced
     /// rem the group order `2^m − 1`, so a wide exponent costs its full bit
     /// length. `pow(a, 0)` is one for every `a`, including zero, matching
-    /// [`crate::mod_pow`]. The base is reduced once on entry; the exponent is
+    /// [`mod_pow`](crate::modular::mod_pow). The base is reduced once on entry; the exponent is
     /// read bit by bit and never reduced.
     #[must_use]
     pub fn pow(&self, base: &BigUint, exponent: &BigUint) -> BigUint {
@@ -684,7 +684,7 @@ impl Gf2m {
     /// # Panics
     ///
     /// Panics, in every build, if the field degree is even. This is reachable
-    /// — nothing stops a caller from building an even-degree [`Gf2m`] and
+    /// — nothing stops a caller from building an even-degree [`Gf2m`](crate::finite_field::Gf2m) and
     /// calling this — and it is deliberately a panic rather than a silent
     /// wrong answer, because the function has no correct value to return
     /// there. Use [`Self::solve_quadratic`] at even degree.

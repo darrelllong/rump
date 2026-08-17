@@ -5,16 +5,25 @@
 //! it in both places — a drifted manual fails here.
 
 use core::num::NonZeroU64;
-use rump::{
-    crt_combine, gauss_reduce_weighted, gcd, gcd_extended, gcd_u64, is_probable_prime,
-    is_probable_prime_bpsw, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
-    lll_reduce, miller_rabin_with_bases, miller_rabin_witness, mod_inverse, mod_inverse_batch,
-    mod_inverse_u64, mod_pow, mod_sqrt, mod_sqrt_prime_power, primes_below, product_tree,
-    random_below, random_coprime_below, random_nonzero_below, random_probable_prime,
-    rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
-    smooth_parts, valuation, BarrettContext, BigInt, BigUint, Gf2m, MontgomeryContext, PolyMod,
-    PolyZ, RandomSource, Sign, SmoothnessBase, WordReciprocal,
+use rump::finite_field::Gf2m;
+use rump::integer::WordReciprocal;
+use rump::lattice::{gauss_reduce_weighted, lll_reduce};
+use rump::modular::{
+    mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow, mod_sqrt, mod_sqrt_prime_power,
+    BarrettContext, MontgomeryContext,
 };
+use rump::number_theory::{
+    crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
+    is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre, miller_rabin_with_bases,
+    miller_rabin_witness, primes_below, product_tree, rational_reconstruct,
+    rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, valuation,
+    SmoothnessBase,
+};
+use rump::polynomial::{PolyMod, PolyZ};
+use rump::random::{
+    random_below, random_coprime_below, random_nonzero_below, random_probable_prime, RandomSource,
+};
+use rump::{BigInt, BigUint, Sign};
 
 #[test]
 fn manual_biguint_roots_powers_bits() {
