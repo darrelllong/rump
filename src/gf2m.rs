@@ -43,7 +43,7 @@
 //!   degree < m has degree < m).
 //! - **Multiplication** uses the left-to-right comb method with 4-bit windows
 //!   (Algorithm 2.36 of Hankerson, Menezes, Vanstone — *Guide to ECC*),
-//!   followed by polynomial reduction rem the field polynomial.
+//!   followed by polynomial reduction modulo the field polynomial.
 //! - **Squaring** spreads each coefficient to twice its index (Algorithm 2.39
 //!   of the same), the whole of `(Σ aᵢxⁱ)² = Σ aᵢx²ⁱ` in characteristic 2.
 //! - **Inversion** uses the extended Euclidean algorithm for polynomials over
@@ -137,7 +137,7 @@ impl Gf2m {
         out
     }
 
-    /// Multiply two field elements rem the field polynomial.
+    /// Multiply two field elements modulo the field polynomial.
     ///
     /// Left-to-right comb multiplication with 4-bit windows (Hankerson,
     /// Menezes, Vanstone — *Guide to ECC*, Algorithm 2.36): precompute the
@@ -270,7 +270,7 @@ impl Gf2m {
     /// loop.
     ///
     /// The exponent is an ordinary integer, not a residue: it is not reduced
-    /// rem the group order `2^m − 1`, so a wide exponent costs its full bit
+    /// modulo the group order `2^m − 1`, so a wide exponent costs its full bit
     /// length. `pow(a, 0)` is one for every `a`, including zero, matching
     /// [`mod_pow`](crate::modular::mod_pow). The base is reduced once on entry; the exponent is
     /// read bit by bit and never reduced.
@@ -532,7 +532,7 @@ impl Gf2m {
             return true; // x and x + 1
         }
 
-        // Arithmetic rem f needs no irreducibility, so the context's own
+        // Arithmetic modulo f needs no irreducibility, so the context's own
         // reduction machinery drives the test.
         let ring = Self::new(poly.clone()).expect("degree checked above");
         let x = BigUint::from_u64(2);
@@ -710,7 +710,7 @@ impl Gf2m {
         t
     }
 
-    /// Reduce `a` rem the field polynomial, returning the canonical
+    /// Reduce `a` modulo the field polynomial, returning the canonical
     /// representative of its class — the unique value of degree below `m`.
     ///
     /// The guard is the common case and is what makes calling this on entry to
@@ -729,7 +729,7 @@ impl Gf2m {
         BigUint::from_limbs(limbs)
     }
 
-    /// Reduce a limb buffer rem the field polynomial, in place.
+    /// Reduce a limb buffer modulo the field polynomial, in place.
     ///
     /// The word-at-a-time tap folding of *Guide to ECC* §2.3.5 (fast reduction,
     /// e.g. Algorithms 2.41–2.45 for the specific NIST polynomials), here

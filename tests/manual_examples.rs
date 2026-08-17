@@ -7,10 +7,10 @@
 use core::num::NonZeroU64;
 use rump::finite_field::Gf2m;
 use rump::integer::WordReciprocal;
-use rump::lattice::{gauss_reduce_weighted, lll_reduce};
+use rump::lattice::{gauss_reduce_weighted, lll_reduce, ReductionError};
 use rump::modular::{
     mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow, mod_sqrt, mod_sqrt_prime_power,
-    BarrettContext, MontgomeryContext,
+    BarrettContext, ModulusError, MontgomeryContext,
 };
 use rump::number_theory::{
     crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
@@ -264,7 +264,10 @@ fn manual_montgomery_domain() {
     let p = BigUint::from_u64(97);
     let ctx = MontgomeryContext::new(&p).expect("97 is odd");
     assert_eq!(*ctx.modulus(), p);
-    assert!(MontgomeryContext::new(&BigUint::from_u64(100)).is_none()); // even
+    assert_eq!(
+        MontgomeryContext::new(&BigUint::from_u64(100)),
+        Err(ModulusError::Even)
+    ); // even
 
     let a = BigUint::from_u64(5);
     let b = BigUint::from_u64(6);
@@ -567,7 +570,7 @@ fn manual_number_theory_primality() {
     assert!(miller_rabin_witness(&n, &BigUint::from_u64(3))); // 3 is
     assert!(!is_probable_prime(&n)); // the full test rejects it
 
-    // with_bases reduces each base rem n and discards {0, 1, n-1}; a set of
+    // with_bases reduces each base modulo n and discards {0, 1, n-1}; a set of
     // only trivial bases runs no effective round and is not reported prime.
     let composite = BigUint::from_u64(1_022_117); // 1009 × 1013, survives the sieve
     assert!(!miller_rabin_with_bases(&composite, &[1])); // 1 never testifies
@@ -789,21 +792,32 @@ fn manual_lattice() {
     // Reduction returns short vectors spanning the same lattice.
     assert_eq!(basis, vec![row(&[1, 32]), row(&[40, 1])]);
 
+    // Weights are NonZeroU64, so a non-positive weight cannot be written.
+    let nz = |n: u64| NonZeroU64::new(n).expect("literal is non-zero");
+
     // A skew-12 lattice, reduced under the matching diagonal form.
-    let reduced = gauss_reduce_weighted([[1024, 0], [37, 1]], [1, 12]).expect("a valid basis");
+    let basis = [[1024i128, 0], [37, 1]];
+    let reduced = gauss_reduce_weighted(basis, [nz(1), nz(12)]).expect("a valid basis");
     // Same lattice: the determinant is preserved up to sign.
     let det = |b: [[i128; 2]; 2]| b[0][0] * b[1][1] - b[0][1] * b[1][0];
-    assert_eq!(det(reduced).abs(), det([[1024, 0], [37, 1]]).abs());
+    assert_eq!(det(reduced).abs(), det(basis).abs());
 
     // Weights reorder what counts as short: under a heavy x-weight the
     // y-axis vector wins, and under a heavy y-weight the x-axis vector does.
+    let square = [[1i128, 0], [0, 1]];
     assert_eq!(
-        gauss_reduce_weighted([[1, 0], [0, 1]], [100, 1]),
-        Some([[0, 1], [1, 0]])
+        gauss_reduce_weighted(square, [nz(100), nz(1)]),
+        Ok([[0, 1], [1, 0]])
     );
     assert_eq!(
-        gauss_reduce_weighted([[1, 0], [0, 1]], [1, 100]),
-        Some([[1, 0], [0, 1]])
+        gauss_reduce_weighted(square, [nz(1), nz(100)]),
+        Ok([[1, 0], [0, 1]])
+    );
+
+    // A dependent pair is a typed error rather than a panic.
+    assert_eq!(
+        gauss_reduce_weighted([[2, 4], [1, 2]], [nz(1), nz(1)]),
+        Err(ReductionError::DependentBasis)
     );
 }
 
@@ -820,7 +834,7 @@ fn manual_polynomials_quotient_rings_and_lifting() {
     }
     let mut rng = Lcg2(0x2024_1111);
 
-    // Reduction rem the monic x^2 + 1 is a ring homomorphism.
+    // Reduction modulo the monic x^2 + 1 is a ring homomorphism.
     let f = PolyZ::from_i64_slice(&[1, 0, 1]);
     let a = PolyZ::from_i64_slice(&[3, 2, 5]); // 5x^2 + 2x + 3
     let b = PolyZ::from_i64_slice(&[1, 7]); // 7x + 1
@@ -853,7 +867,7 @@ fn manual_polynomials_quotient_rings_and_lifting() {
         PolyZ::from_i64_slice(&[9, 0, 4])
     );
 
-    // Square roots of 2 rem 7^3 = 343, lifted from ±3 rem 7.
+    // Square roots of 2 modulo 7^3 = 343, lifted from ±3 modulo 7.
     let sqrt2 = PolyZ::from_i64_slice(&[-2, 0, 1]).roots_mod_prime_power(
         &BigUint::from_u64(7),
         3,

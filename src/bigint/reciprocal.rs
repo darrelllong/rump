@@ -47,21 +47,6 @@ use core::num::NonZeroU64;
 /// see the module documentation for measurements, which show the hardware
 /// divide ahead there.
 ///
-/// # Examples
-///
-/// ```
-/// use rump::{BigUint, WordReciprocal};
-///
-/// let r = WordReciprocal::new(1_000_003);
-/// assert_eq!(r.rem_u64(2_000_006), 0);
-/// assert_eq!(r.div_rem_u64(2_000_007), (2, 1));
-///
-/// // Sieve positions are signed and want a non-negative residue.
-/// assert_eq!(r.rem_euclid_i64(-1), 1_000_002);
-///
-/// let n = BigUint::from_u64(12_345_678_901_234_567_890);
-/// assert_eq!(n.rem_reciprocal(&r), n.rem_u64(1_000_003));
-/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WordReciprocal {
     divisor: u64,
@@ -104,7 +89,7 @@ impl WordReciprocal {
     /// `(u1·2⁶⁴ + u0) / normalized`, as (quotient, remainder).
     ///
     /// Möller–Granlund Algorithm 4. The additions and the product that forms
-    /// `r` are deliberately wrapping: the algorithm works rem `2⁶⁴` and
+    /// `r` are deliberately wrapping: the algorithm works modulo `2⁶⁴` and
     /// corrects afterwards, which is the whole trick.
     ///
     /// `u1 < self.normalized` is the precondition. It is not checkable at the

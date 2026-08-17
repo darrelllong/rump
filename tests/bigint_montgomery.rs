@@ -10,6 +10,7 @@
 //! 4-bit window alignments, all-zero windows (whose multiply is skipped),
 //! and operand shapes that stress the reduction's conditional subtract.
 
+use rump::modular::ModulusError;
 use rump::modular::MontgomeryContext;
 use rump::BigUint;
 
@@ -246,8 +247,14 @@ fn pow_tiny_and_degenerate_moduli() {
     }
 
     // Even or zero moduli have no Montgomery context.
-    assert!(MontgomeryContext::new(&BigUint::zero()).is_none());
-    assert!(MontgomeryContext::new(&BigUint::from_u64(100)).is_none());
+    assert_eq!(
+        MontgomeryContext::new(&BigUint::zero()),
+        Err(ModulusError::Zero)
+    );
+    assert_eq!(
+        MontgomeryContext::new(&BigUint::from_u64(100)),
+        Err(ModulusError::Even)
+    );
 }
 
 #[test]

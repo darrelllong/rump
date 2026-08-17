@@ -11,7 +11,7 @@
 //! The test module lives in the parent, which is why four of the kernels are
 //! `pub(super)` rather than private.
 
-use super::{low_u64, BigUint};
+use super::{low_u64, BigUint, ModulusError};
 use core::cmp::Ordering;
 
 /// Montgomery arithmetic context for a fixed odd modulus.
@@ -449,20 +449,27 @@ impl MontgomeryContext {
         result
     }
 
-    /// Build a Montgomery context for a modulus, or `None` if the modulus is
-    /// zero or even.
+    /// Build a Montgomery context for an odd, non-zero modulus.
     ///
     /// Montgomery reduction works in the residue system of `R = 2^(64·limbs)`,
     /// and REDC requires `R` and the modulus to be coprime; since `R` is a
     /// power of two, that holds exactly when the modulus is odd. An even (or
-    /// zero) modulus has no Montgomery form, hence the `None` — reach for
-    /// [`BarrettContext`](super::BarrettContext), which reduces rem either parity. Construction also
+    /// zero) modulus has no Montgomery form — reach for
+    /// [`BarrettContext`](super::BarrettContext), which reduces modulo either parity. Construction also
     /// precomputes the inverse `−n⁻¹ mod 2⁶⁴` (Hensel lifting) and `R² mod n`
     /// once, so later encode/multiply steps do not repeat that work.
-    #[must_use]
-    pub fn new(modulus: &BigUint) -> Option<Self> {
-        if modulus.is_zero() || !modulus.is_odd() {
-            return None;
+    ///
+    /// # Errors
+    ///
+    /// [`ModulusError::Zero`] — zero has no residues.
+    /// [`ModulusError::Even`] — `R` is a power of two, so it is coprime to
+    /// the modulus only when the modulus is odd.
+    pub fn new(modulus: &BigUint) -> Result<Self, ModulusError> {
+        if modulus.is_zero() {
+            return Err(ModulusError::Zero);
+        }
+        if !modulus.is_odd() {
+            return Err(ModulusError::Even);
         }
 
         let n0_inv = montgomery_n0_inv(modulus.limbs[0]);
@@ -486,7 +493,7 @@ impl MontgomeryContext {
         let mut one_mont = BigUint { limbs: one_limbs };
         one_mont.normalize();
 
-        Some(Self {
+        Ok(Self {
             modulus: modulus.clone(),
             n0_inv,
             r2_mod,
@@ -503,9 +510,9 @@ impl MontgomeryContext {
     /// Convert an ordinary residue into Montgomery form (the inverse of
     /// [`Self::decode`]).
     ///
-    /// Encoding is multiplication by `R = 2^(64·limbs)` rem `n`, done as one
+    /// Encoding is multiplication by `R = 2^(64·limbs)` modulo `n`, done as one
     /// Montgomery multiplication by the precomputed `R² mod n`: REDC of
-    /// `value · R²` returns `value · R mod n`. The argument is reduced rem
+    /// `value · R²` returns `value · R mod n`. The argument is reduced modulo
     /// `n` first, so any representative is accepted.
     #[must_use]
     pub fn encode(&self, value: &BigUint) -> BigUint {
@@ -535,7 +542,7 @@ impl MontgomeryContext {
         result
     }
 
-    /// Multiply two ordinary residues rem the context modulus — the
+    /// Multiply two ordinary residues modulo the context modulus — the
     /// one-shot encode → multiply → decode round trip.
     ///
     /// Convenient for a single product. Callers doing many operations should
@@ -559,7 +566,7 @@ impl MontgomeryContext {
         result
     }
 
-    /// Square one ordinary residue rem the context modulus — the one-shot
+    /// Square one ordinary residue modulo the context modulus — the one-shot
     /// encode → square → decode round trip.
     ///
     /// Unlike [`Self::mul`] the in-domain step is the dedicated squaring kernel
@@ -813,7 +820,7 @@ impl MontgomeryContext {
 /// reduction was introduced).
 fn montgomery_n0_inv(n0: u64) -> u64 {
     debug_assert!(n0 & 1 == 1, "Montgomery path requires an odd modulus");
-    // Newton/Hensel iteration in Z_(2^64): `inv = 1` inverts `n0` rem 2
+    // Newton/Hensel iteration in Z_(2^64): `inv = 1` inverts `n0` modulo 2
     // (both are odd), and each step doubles the correct low bits —
     // 1, 2, 4, 8, 16, 32, 64 — so six steps reach the full word. Montgomery
     // reduction wants the negation.

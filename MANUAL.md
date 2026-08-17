@@ -21,7 +21,7 @@ rust-mp = "0.3"
 use core::num::NonZeroU64;
 use rump::finite_field::Gf2m;
 use rump::integer::WordReciprocal;
-use rump::lattice::{gauss_reduce_weighted, lll_reduce};
+use rump::lattice::{gauss_reduce_weighted, lll_reduce, ReductionError};
 use rump::modular::{
     mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow, mod_sqrt, mod_sqrt_prime_power,
     BarrettContext, MontgomeryContext,
@@ -1129,16 +1129,27 @@ past `i128` — and because the rounding step needs twice the norm, the working
 bound is that norms fit `2¹²⁶`.
 
 ```rust
+// Weights are NonZeroU64, so a non-positive weight cannot be written.
+let nz = |n: u64| NonZeroU64::new(n).expect("literal is non-zero");
+
 // A skew-12 lattice, reduced under the matching diagonal form.
-let reduced = gauss_reduce_weighted([[1024, 0], [37, 1]], [1, 12]).expect("a valid basis");
+let basis = [[1024i128, 0], [37, 1]];
+let reduced = gauss_reduce_weighted(basis, [nz(1), nz(12)]).expect("a valid basis");
 // Same lattice: the determinant is preserved up to sign.
 let det = |b: [[i128; 2]; 2]| b[0][0] * b[1][1] - b[0][1] * b[1][0];
-assert_eq!(det(reduced).abs(), det([[1024, 0], [37, 1]]).abs());
+assert_eq!(det(reduced).abs(), det(basis).abs());
 
 // Weights reorder what counts as short: under a heavy x-weight the
 // y-axis vector wins, and under a heavy y-weight the x-axis vector does.
-assert_eq!(gauss_reduce_weighted([[1, 0], [0, 1]], [100, 1]), Some([[0, 1], [1, 0]]));
-assert_eq!(gauss_reduce_weighted([[1, 0], [0, 1]], [1, 100]), Some([[1, 0], [0, 1]]));
+let square = [[1i128, 0], [0, 1]];
+assert_eq!(gauss_reduce_weighted(square, [nz(100), nz(1)]), Ok([[0, 1], [1, 0]]));
+assert_eq!(gauss_reduce_weighted(square, [nz(1), nz(100)]), Ok([[1, 0], [0, 1]]));
+
+// A dependent pair is a typed error rather than a panic.
+assert_eq!(
+    gauss_reduce_weighted([[2, 4], [1, 2]], [nz(1), nz(1)]),
+    Err(ReductionError::DependentBasis)
+);
 ```
 
 ## Random sampling

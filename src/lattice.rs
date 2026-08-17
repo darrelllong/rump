@@ -16,6 +16,7 @@
 //! `b*_i` are the Gram–Schmidt vectors.
 
 use crate::bigint::{BigInt, BigUint, Sign};
+use core::num::NonZeroU64;
 
 /// Reduce `basis` in place with the Lovász parameter `δ = 3/4` of the
 /// original Lenstra–Lenstra–Lovász paper, the value for which the reduced
@@ -326,6 +327,34 @@ fn swap_step(
 
 // ─── Two-dimensional reduction under a diagonal form ───────────────────────
 
+/// Why [`gauss_reduce_weighted`] could not reduce.
+///
+/// There is no weight variant: the weights are [`NonZeroU64`], so a
+/// non-positive weight cannot be expressed in the first place.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ReductionError {
+    /// The two vectors are linearly dependent, so they are not a basis.
+    DependentBasis,
+    /// The arithmetic left `i128`. The rounding step forms `2⟨u,v⟩ + ‖u‖²`
+    /// over `2‖u‖²`, so it is twice the norm that must be representable:
+    /// every vector the reduction visits needs `(w₀·x)² + (w₁·y)² < 2¹²⁶`.
+    /// A wrapped norm compares wrongly and would return an unreduced basis
+    /// with no indication, so this is refused instead.
+    OutOfRange,
+}
+
+impl core::fmt::Display for ReductionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::DependentBasis => "the two vectors are linearly dependent",
+            Self::OutOfRange => "the weighted arithmetic does not fit i128",
+        })
+    }
+}
+
+impl std::error::Error for ReductionError {}
+
 /// The squared length of `v` under the diagonal form, `(w₀·v₀)² + (w₁·v₁)²`.
 ///
 /// `None` on overflow rather than a wrapped answer: a wrapped norm compares
@@ -413,38 +442,44 @@ fn round_div(numerator: i128, denominator: i128) -> Option<i128> {
 /// A basis whose norms fill `i128` to the top yields `None` rather than a
 /// wrapped answer — a wrapped norm compares wrongly and would return an
 /// unreduced basis with no indication.
-#[must_use]
-pub fn gauss_reduce_weighted(basis: [[i128; 2]; 2], weights: [i128; 2]) -> Option<[[i128; 2]; 2]> {
-    if weights[0] <= 0 || weights[1] <= 0 {
-        return None;
-    }
+pub fn gauss_reduce_weighted(
+    basis: [[i128; 2]; 2],
+    weights: [NonZeroU64; 2],
+) -> Result<[[i128; 2]; 2], ReductionError> {
+    let weights = [i128::from(weights[0].get()), i128::from(weights[1].get())];
+    let range = || ReductionError::OutOfRange;
+
     let determinant = basis[0][0]
-        .checked_mul(basis[1][1])?
-        .checked_sub(basis[0][1].checked_mul(basis[1][0])?)?;
+        .checked_mul(basis[1][1])
+        .and_then(|a| a.checked_sub(basis[0][1].checked_mul(basis[1][0])?))
+        .ok_or_else(range)?;
     if determinant == 0 {
-        return None;
+        return Err(ReductionError::DependentBasis);
     }
 
     let mut u = basis[0];
     let mut v = basis[1];
-    let mut norm_u = weighted_norm_sq(u, weights)?;
-    if norm_u > weighted_norm_sq(v, weights)? {
+    let mut norm_u = weighted_norm_sq(u, weights).ok_or_else(range)?;
+    if norm_u > weighted_norm_sq(v, weights).ok_or_else(range)? {
         core::mem::swap(&mut u, &mut v);
-        norm_u = weighted_norm_sq(u, weights)?;
+        norm_u = weighted_norm_sq(u, weights).ok_or_else(range)?;
     }
 
     loop {
         // `norm_u > 0` throughout: the determinant is non-zero, so neither
-        // vector is zero, and the weights are positive.
-        let q = round_div(weighted_dot(u, v, weights)?, norm_u)?;
+        // vector is zero, and the weights are positive by construction.
+        let dot = weighted_dot(u, v, weights).ok_or_else(range)?;
+        let q = round_div(dot, norm_u).ok_or_else(range)?;
         let r = [
-            v[0].checked_sub(q.checked_mul(u[0])?)?,
-            v[1].checked_sub(q.checked_mul(u[1])?)?,
+            v[0].checked_sub(q.checked_mul(u[0]).ok_or_else(range)?)
+                .ok_or_else(range)?,
+            v[1].checked_sub(q.checked_mul(u[1]).ok_or_else(range)?)
+                .ok_or_else(range)?,
         ];
-        let norm_r = weighted_norm_sq(r, weights)?;
+        let norm_r = weighted_norm_sq(r, weights).ok_or_else(range)?;
         if norm_r >= norm_u {
             // `u` is a shortest vector; `r` is reduced against it.
-            return Some([u, r]);
+            return Ok([u, r]);
         }
         v = u;
         u = r;
@@ -456,6 +491,15 @@ pub fn gauss_reduce_weighted(basis: [[i128; 2]; 2], weights: [i128; 2]) -> Optio
 mod tests {
     use super::{gauss_reduce_weighted, lll_reduce, lll_reduce_delta, weighted_norm_sq};
     use crate::bigint::{BigInt, Sign};
+    use core::num::NonZeroU64;
+
+    /// Weights as the signature now takes them.
+    fn w(a: u64, b: u64) -> [NonZeroU64; 2] {
+        [
+            NonZeroU64::new(a).expect("test weight is non-zero"),
+            NonZeroU64::new(b).expect("test weight is non-zero"),
+        ]
+    }
 
     fn det(basis: [[i128; 2]; 2]) -> i128 {
         basis[0][0] * basis[1][1] - basis[0][1] * basis[1][0]
@@ -511,7 +555,7 @@ mod tests {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
             ((state >> 33) as i64) as i128
         };
-        for weights in [[1i128, 1], [1, 2], [1, 7], [3, 5], [1, 1000], [64, 1]] {
+        for weights in [w(1, 1), w(1, 2), w(1, 7), w(3, 5), w(1, 1000), w(64, 1)] {
             for _ in 0..200 {
                 let basis = [
                     [next() % 4096, next() % 4096],
@@ -521,6 +565,7 @@ mod tests {
                     continue;
                 }
                 let reduced = gauss_reduce_weighted(basis, weights).expect("a valid basis");
+                let weights = [i128::from(weights[0].get()), i128::from(weights[1].get())];
 
                 // The reduction returns a basis of the *same* lattice: the
                 // determinant is preserved up to sign.
@@ -556,7 +601,7 @@ mod tests {
     #[test]
     fn gauss_reduce_weights_encode_a_rational_skew() {
         // A non-integer skew of the shape `skew_for` produces.
-        let (p, q) = (2_113_745_839i128, 10_000_000i128); // s ≈ 211.3745839
+        let (p, q) = (2_113_745_839u64, 10_000_000u64); // s ≈ 211.3745839
         let s = p as f64 / q as f64;
         let float_norm = |v: [i128; 2]| {
             let a = v[0] as f64 / s.sqrt();
@@ -568,7 +613,7 @@ mod tests {
             [[65_537, 0], [4_099, 1]],
             [[1024, 0], [37, 1]],
         ] {
-            let reduced = gauss_reduce_weighted(basis, [q, p]).expect("a valid basis");
+            let reduced = gauss_reduce_weighted(basis, w(q, p)).expect("a valid basis");
             assert_eq!(det(reduced).abs(), det(basis).abs());
             // Ordered under the metric the caller actually means.
             assert!(
@@ -602,7 +647,7 @@ mod tests {
     #[test]
     fn gauss_reduce_accepts_norms_that_fill_half_the_range() {
         let a = 1i128 << 62;
-        let reduced = gauss_reduce_weighted([[a, a], [a, -a]], [1, 1]).expect("norms fit");
+        let reduced = gauss_reduce_weighted([[a, a], [a, -a]], w(1, 1)).expect("norms fit");
         assert_eq!(det(reduced).abs(), 2 * a * a);
         assert_eq!(
             weighted_norm_sq(reduced[0], [1, 1]).expect("fits"),
@@ -614,32 +659,37 @@ mod tests {
     fn gauss_reduce_leaves_an_already_reduced_basis_alone() {
         // The standard basis is reduced under any weights.
         let basis = [[1i128, 0], [0, 1]];
-        assert_eq!(gauss_reduce_weighted(basis, [1, 1]), Some([[1, 0], [0, 1]]));
+        assert_eq!(gauss_reduce_weighted(basis, w(1, 1)), Ok([[1, 0], [0, 1]]));
         // Under a heavy y-weight the x-axis vector is the shorter one.
         assert_eq!(
-            gauss_reduce_weighted(basis, [1, 100]),
-            Some([[1, 0], [0, 1]])
+            gauss_reduce_weighted(basis, w(1, 100)),
+            Ok([[1, 0], [0, 1]])
         );
         // And under a heavy x-weight the order flips.
         assert_eq!(
-            gauss_reduce_weighted(basis, [100, 1]),
-            Some([[0, 1], [1, 0]])
+            gauss_reduce_weighted(basis, w(100, 1)),
+            Ok([[0, 1], [1, 0]])
         );
     }
 
-    /// Every rejection is a `None`, so a caller tests rather than guards.
+    /// Every rejection is a typed error, so a caller matches rather than
+    /// guards. There is no weight case: `NonZeroU64` makes it unrepresentable.
     #[test]
-    fn gauss_reduce_reports_bad_input_as_none() {
+    fn gauss_reduce_reports_bad_input_as_an_error() {
+        use super::ReductionError;
         // Dependent: the second row is half the first, so no basis.
-        assert!(gauss_reduce_weighted([[2, 4], [1, 2]], [1, 1]).is_none());
-        // A zero or negative weight is not a metric.
-        assert!(gauss_reduce_weighted([[1, 0], [0, 1]], [1, 0]).is_none());
-        assert!(gauss_reduce_weighted([[1, 0], [0, 1]], [-1, 1]).is_none());
+        assert_eq!(
+            gauss_reduce_weighted([[2, 4], [1, 2]], w(1, 1)),
+            Err(ReductionError::DependentBasis)
+        );
         // Past the range: the weighted coordinate squares.
         let big = 1i128 << 100;
-        assert!(gauss_reduce_weighted([[big, 0], [0, 1]], [1, 1]).is_none());
+        assert_eq!(
+            gauss_reduce_weighted([[big, 0], [0, 1]], w(1, 1)),
+            Err(ReductionError::OutOfRange)
+        );
         // And a valid basis still comes back.
-        assert!(gauss_reduce_weighted([[1, 0], [0, 1]], [1, 1]).is_some());
+        assert!(gauss_reduce_weighted([[1, 0], [0, 1]], w(1, 1)).is_ok());
     }
 
     fn rows(data: &[&[i64]]) -> Vec<Vec<BigInt>> {

@@ -12,7 +12,7 @@
 //! The test module lives in the parent, which is why the threshold constant
 //! and `last_corrections` are visible there.
 
-use super::BigUint;
+use super::{BigUint, ModulusError};
 
 // Modulus width up to which Barrett's second multiplication is taken as a
 // schoolbook half-product rather than a dispatched full product. The half
@@ -106,18 +106,20 @@ impl BarrettContext {
     /// subtractions instead of a division, which is the whole point of the
     /// precomputation.
     ///
-    /// `None` for a modulus below 2: zero has no residues, and rem one
+    /// `None` for a modulus below 2: zero has no residues, and modulo one
     /// every residue is zero — neither needs a context.
-    #[must_use]
-    pub fn new(modulus: &BigUint) -> Option<Self> {
-        if modulus.bits() < 2 {
-            return None;
+    pub fn new(modulus: &BigUint) -> Result<Self, ModulusError> {
+        if modulus.is_zero() {
+            return Err(ModulusError::Zero);
+        }
+        if modulus.is_one() {
+            return Err(ModulusError::One);
         }
         let limb_count = modulus.limbs().len();
         let mut numerator = BigUint::zero();
         numerator.set_bit(128 * limb_count);
         let (mu, _) = numerator.div_rem(modulus);
-        Some(Self {
+        Ok(Self {
             modulus: modulus.clone(),
             mu,
             limb_count,

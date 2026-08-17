@@ -55,7 +55,9 @@
 //! throughout. The MSRV is recorded as `rust-version` in `Cargo.toml`.
 //!
 //! ```
-//! use rump::{is_probable_prime, jacobi, mod_pow, BigUint};
+//! use rump::{BigUint};
+//! use rump::modular::{mod_pow};
+//! use rump::number_theory::{is_probable_prime, jacobi};
 //!
 //! let p = BigUint::from_u64(1_000_000_007);
 //! assert!(is_probable_prime(&p));
@@ -106,7 +108,7 @@ pub mod integer {
 /// Residue-ring arithmetic: the fixed-modulus contexts and the modular
 /// operations that are free functions.
 pub mod modular {
-    pub use crate::bigint::{BarrettContext, MontgomeryContext};
+    pub use crate::bigint::{BarrettContext, ModulusError, MontgomeryContext};
     pub use crate::number_theory_impl::{
         mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow, mod_sqrt, mod_sqrt_prime_power,
     };
@@ -119,7 +121,7 @@ pub mod number_theory {
         is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker, lcm, legendre,
         miller_rabin_with_bases, miller_rabin_witness, primes_below, product_tree,
         rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
-        smooth_parts, valuation, ProductTree, SmoothnessBase,
+        smooth_parts, valuation, ProductTree, SmoothnessBase, SmoothnessBaseError,
     };
 }
 
@@ -135,7 +137,9 @@ pub mod finite_field {
 
 /// Lattice basis reduction.
 pub mod lattice {
-    pub use crate::lattice_impl::{gauss_reduce_weighted, lll_reduce, lll_reduce_delta};
+    pub use crate::lattice_impl::{
+        gauss_reduce_weighted, lll_reduce, lll_reduce_delta, ReductionError,
+    };
 }
 
 /// Sampling, driven entirely by a caller-supplied byte source.

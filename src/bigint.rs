@@ -109,7 +109,7 @@ const SQR_SCHOOLBOOK_MIN_LIMBS: usize = 8;
 // takes effect.
 const SQR_KARATSUBA_MAX_LIMBS: usize = 448;
 
-/// Bitset of the 44 quadratic residues rem 256, one bit per residue
+/// Bitset of the 44 quadratic residues modulo 256, one bit per residue
 /// across four words, derived by enumeration.
 const SQUARES_MOD_256: [u64; 4] = [
     0x0202_0212_0203_0213,
@@ -883,7 +883,7 @@ impl BigUint {
     /// The low `k` bits as a fresh value — `self mod 2^k`, splitting at any
     /// bit boundary, limb-aligned or not. Truncation to `⌈k/64⌉` limbs
     /// handles the whole-limb part; a mask clears the surplus bits of the
-    /// boundary limb when `k` is not a multiple of 64. Reduction rem a
+    /// boundary limb when `k` is not a multiple of 64. Reduction modulo a
     /// power of two is a truncation, not a division, which is why
     /// [`BarrettContext::reduce`] can take its `mod b^{k+1}` windows this way.
     #[must_use]
@@ -1098,7 +1098,7 @@ impl BigUint {
 
     /// Whether the value is a perfect square, by residue filters and one
     /// certified square root. The filters reject most non-squares without
-    /// arithmetic: squares occupy 44 of 256 residues rem 256, and the
+    /// arithmetic: squares occupy 44 of 256 residues modulo 256, and the
     /// modulus 9·5·7·13·17 = 69 615 folds five more character tests into a
     /// single word remainder (the classical filter set, as in GMP's
     /// `mpz_perfect_square_p`).
@@ -2032,7 +2032,7 @@ impl BigUint {
         acc
     }
 
-    /// The low `limit` limbs of `lhs · rhs` — the product rem
+    /// The low `limit` limbs of `lhs · rhs` — the product modulo
     /// `2^{64·limit}`, computed without forming the rest of it.
     ///
     /// Every partial product lands at a fixed position, so one whose
@@ -2298,7 +2298,7 @@ impl BigUint {
         }
     }
 
-    /// Compute the remainder rem a machine word.
+    /// Compute the remainder modulo a machine word.
     ///
     /// # Panics
     ///
@@ -2319,7 +2319,7 @@ impl BigUint {
             remainder = acc % u128::from(modulus);
         }
 
-        u64::try_from(remainder).expect("remainder rem u64 fits into u64")
+        u64::try_from(remainder).expect("remainder modulo u64 fits into u64")
     }
 
     /// Compute `(lhs * rhs) mod modulus`.
@@ -2716,6 +2716,40 @@ impl PartialOrd for BigInt {
         Some(self.cmp(other))
     }
 }
+
+/// Why a modulus was refused when building a fixed-modulus context.
+///
+/// The variants describe the *value*, not the context that rejected it, so
+/// one error serves both: [`BarrettContext::new`] returns `Zero` or `One`,
+/// and [`MontgomeryContext::new`] returns `Zero` or `Even`. There is
+/// deliberately no "below two" variant, which would assert something true of
+/// only one of the two.
+///
+/// An unusable modulus is invalid input rather than a mathematical absence,
+/// which is why construction returns `Result` and not `Option`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ModulusError {
+    /// Zero has no residues.
+    Zero,
+    /// Modulo one every residue is zero, so a context computes nothing.
+    One,
+    /// Montgomery reduction requires an odd modulus: `R = 2^(64w)` is
+    /// invertible modulo `n` only when `n` is odd.
+    Even,
+}
+
+impl core::fmt::Display for ModulusError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Zero => "zero is not a modulus",
+            Self::One => "modulo one every residue is zero",
+            Self::Even => "an even modulus has no Montgomery domain",
+        })
+    }
+}
+
+impl std::error::Error for ModulusError {}
 
 /// Error from parsing a [`BigUint`] or [`BigInt`] out of a string: the
 /// input was empty (or a bare sign), or held a character that is not a
@@ -3324,7 +3358,7 @@ impl BigInt {
         Self::from_parts(sign, magnitude)
     }
 
-    /// Reduce rem a positive modulus and return the least non-negative
+    /// Reduce modulo a positive modulus and return the least non-negative
     /// residue, in `[0, modulus)`.
     ///
     /// Rust's `%` on the primitive integers truncates toward zero and gives
@@ -3354,7 +3388,7 @@ impl BigInt {
         }
     }
 
-    /// The representative of `self` rem `modulus` in the *symmetric* range
+    /// The representative of `self` modulo `modulus` in the *symmetric* range
     /// `(−modulus/2, modulus/2]`.
     ///
     /// [`Self::rem_euclid`]'s companion, and the other canonical choice
@@ -3488,6 +3522,7 @@ mod tests {
         assert_eq!(least.sign(), Sign::Negative);
         assert_eq!(*least.magnitude(), BigUint::from_u128(1u128 << 127));
     }
+    use super::ModulusError;
     use super::{
         BigInt, BigUint, MontgomeryContext, Sign, KARATSUBA_THRESHOLD_LIMBS,
         SQR_KARATSUBA_MAX_LIMBS, SQR_SCHOOLBOOK_MIN_LIMBS, TOOM3_THRESHOLD_LIMBS,
@@ -3946,8 +3981,11 @@ mod tests {
                 assert_eq!(ctx.reduce(&x2), x2.rem(&n), "n = {n_small}, x = {x}");
             }
         }
-        assert!(BarrettContext::new(&BigUint::one()).is_none());
-        assert!(BarrettContext::new(&BigUint::zero()).is_none());
+        assert_eq!(BarrettContext::new(&BigUint::one()), Err(ModulusError::One));
+        assert_eq!(
+            BarrettContext::new(&BigUint::zero()),
+            Err(ModulusError::Zero)
+        );
         // The tightest shapes for the quotient estimate: moduli at the
         // limb-boundary edges, b^(k-1) and b^k - 1.
         for k in [2usize, 3, 8] {

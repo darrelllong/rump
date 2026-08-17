@@ -83,7 +83,7 @@ struct IntPool {
     /// scaling-sweep sizes (up to a million bits) would swamp a cheap op's
     /// measurement with pool construction.
     mont: Option<MontState>,
-    /// A guaranteed quadratic residue rem the pool's prime, for the
+    /// A guaranteed quadratic residue modulo the pool's prime, for the
     /// residue-class-conditioned square-root rows.
     residue: Option<BigUint>,
     /// A random probable prime, built only for the ops that read one
@@ -285,7 +285,9 @@ fn int_op(name: &str) -> Option<fn(&mut IntPool)> {
             black_box(BigUint::mod_mul(&p.a, &p.b, &p.modulus));
         },
         "montsetup" => |p| {
-            black_box(MontgomeryContext::new(&p.modulus));
+            // The benchmark measures setup cost; the modulus is odd by
+            // construction, so the result is discarded deliberately.
+            let _ = black_box(MontgomeryContext::new(&p.modulus));
         },
         "montmul" => |p| {
             let m = p.mont();
