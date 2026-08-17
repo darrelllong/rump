@@ -1616,7 +1616,7 @@ pub fn rational_reconstruct(x: &BigUint, m: &BigUint) -> Option<(BigInt, BigUint
 }
 
 /// Above this ratio of `s²` to the modulus bit width, [`mod_sqrt`] leaves
-/// the Tonelli–Shanks descent for [`sqrt_mod_cipolla`]: the descent pays
+/// the Tonelli–Shanks descent for [`mod_sqrt_cipolla`]: the descent pays
 /// on the order of `s²` base-field multiplications while Cipolla's ladder
 /// is flat in `s`, so the crossover sits where `s²` reaches a fixed
 /// multiple of the exponentiation cost, itself linear in the bit width.
@@ -1660,7 +1660,7 @@ const CIPOLLA_THRESHOLD_FACTOR: usize = 4;
 /// `i == m`, meaning `t` has no order below the current bound and there is
 /// nothing left to descend. For a prime `p` neither occurs; [`mod_sqrt`]
 /// verifies the result by squaring regardless.
-fn sqrt_mod_descent(
+fn mod_sqrt_descent(
     a: &BigUint,
     p: &BigUint,
     ctx: &MontgomeryContext,
@@ -1752,7 +1752,7 @@ const NON_RESIDUE_SCAN_BOUND: u32 = 128;
 /// Reference: Cipolla, *Un metodo per la risoluzione della congruenza di
 /// secondo grado*, Rend. Accad. Sci. Fis. Mat. Napoli (3) 9 (1903),
 /// 153–163.
-fn sqrt_mod_cipolla(a: &BigUint, p: &BigUint, ctx: &MontgomeryContext) -> Option<BigUint> {
+fn mod_sqrt_cipolla(a: &BigUint, p: &BigUint, ctx: &MontgomeryContext) -> Option<BigUint> {
     let one = BigUint::one();
     // t = 1, 2, …: the first with t² − a a non-residue, under the same
     // scan bound as the descent's search.
@@ -2361,7 +2361,7 @@ pub fn mod_sqrt_prime_power(a: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
     // a = p^v · unit; solve t² ≡ unit (mod p^(e−v)) for the unit, then
     // x = p^(v/2)·t, each unit root fanning into p^(v/2) roots mod p^e.
     let reduced_exp = e - v;
-    let unit_roots = sqrt_mod_prime_power_unit(&unit, p, reduced_exp);
+    let unit_roots = mod_sqrt_prime_power_unit(&unit, p, reduced_exp);
     if unit_roots.is_empty() {
         return Vec::new();
     }
@@ -2385,7 +2385,7 @@ pub fn mod_sqrt_prime_power(a: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
 
 /// Square roots of a `p`-unit `u` rem `p^e` — the [`mod_sqrt_prime_power`]
 /// core, assuming `gcd(u, p) = 1`.
-fn sqrt_mod_prime_power_unit(u: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
+fn mod_sqrt_prime_power_unit(u: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
     let modulus = p.pow_u64(u64::from(e));
     let u = u.rem(&modulus);
     let two = BigUint::from_u64(2);
@@ -2739,9 +2739,9 @@ pub fn mod_sqrt(a: &BigUint, p: &BigUint) -> Option<BigUint> {
         // quadratically in s.
         let (q, s) = decompose_n_minus_one(p);
         if s * s > CIPOLLA_THRESHOLD_FACTOR * p.bits() {
-            sqrt_mod_cipolla(&a, p, &ctx)?
+            mod_sqrt_cipolla(&a, p, &ctx)?
         } else {
-            sqrt_mod_descent(&a, p, &ctx, &q, s)?
+            mod_sqrt_descent(&a, p, &ctx, &q, s)?
         }
     };
 
@@ -4418,7 +4418,7 @@ mod tests {
     }
 
     #[test]
-    fn sqrt_mod_roundtrips_on_squares() {
+    fn mod_sqrt_roundtrips_on_squares() {
         // Primes covering every residue class the algorithm branches on:
         // 3 mod 4 (shortcut), 5 mod 8 (s = 2), and deep 2-adic descents —
         // 41 and 97 (s = 3, 5) and the NTT primes 15·2^27 + 1 and
@@ -4779,7 +4779,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "prime-power exponent must be at least 1")]
-    fn sqrt_mod_prime_power_rejects_zero_exponent() {
+    fn mod_sqrt_prime_power_rejects_zero_exponent() {
         let _ = super::mod_sqrt_prime_power(&BigUint::one(), &BigUint::from_u64(7), 0);
     }
 
@@ -4819,7 +4819,7 @@ mod tests {
     }
 
     #[test]
-    fn sqrt_mod_prime_power_exhaustive_small() {
+    fn mod_sqrt_prime_power_exhaustive_small() {
         use super::mod_sqrt_prime_power;
         for &p in &[2u64, 3, 5, 7, 11] {
             let max_e = if p == 2 { 7 } else { 4 };
@@ -4839,7 +4839,7 @@ mod tests {
     }
 
     #[test]
-    fn sqrt_mod_prime_power_wide() {
+    fn mod_sqrt_prime_power_wide() {
         use super::mod_sqrt_prime_power;
         let mut rng = SplitMix64 {
             state: 0x5170_0007_0000_0001,
@@ -5044,7 +5044,7 @@ mod tests {
 
     #[test]
     fn cipolla_agrees_with_the_descent() {
-        use super::{mod_sqrt, sqrt_mod_cipolla};
+        use super::{mod_sqrt, mod_sqrt_cipolla};
         use crate::bigint::MontgomeryContext;
         let mut rng = SplitMix64 {
             state: 0xc1b0_11a0_0000_0001,
@@ -5061,7 +5061,7 @@ mod tests {
             let descent_root = mod_sqrt(&a, &p).expect("a is a residue by construction");
             let ctx = MontgomeryContext::new(&p).expect("odd prime");
             let cipolla_root =
-                sqrt_mod_cipolla(&a, &p, &ctx).expect("prime modulus never exhausts the scan");
+                mod_sqrt_cipolla(&a, &p, &ctx).expect("prime modulus never exhausts the scan");
             assert!(
                 cipolla_root == descent_root || cipolla_root == p.sub(&descent_root),
                 "engines disagree at {bits} bits, s = {s}"
@@ -5115,7 +5115,7 @@ mod tests {
     }
 
     #[test]
-    fn sqrt_mod_terminates_on_odd_square_modulus() {
+    fn mod_sqrt_terminates_on_odd_square_modulus() {
         use super::mod_sqrt;
         // An odd perfect square has no Jacobi non-residue, so both engines'
         // parameter scans would once run forever; the bound turns the
@@ -5126,7 +5126,7 @@ mod tests {
     }
 
     #[test]
-    fn sqrt_mod_terminates_on_small_odd_squares() {
+    fn mod_sqrt_terminates_on_small_odd_squares() {
         use super::mod_sqrt;
         // The first odd composite squares. Every odd square is ≡ 1 (mod 4),
         // so each enters the non-residue scan rather than the ≡ 3 shortcut;
@@ -5161,7 +5161,7 @@ mod tests {
     }
 
     #[test]
-    fn sqrt_mod_on_composite_may_return_a_genuine_root() {
+    fn mod_sqrt_on_composite_may_return_a_genuine_root() {
         use super::mod_sqrt;
         // The contract is verification, not primality: for a composite modulus
         // the function returns None or a value that genuinely squares to `a`.
@@ -5179,7 +5179,7 @@ mod tests {
     #[test]
     #[ignore = "timing probe for the Tonelli-Shanks/Cipolla crossover; run with --ignored"]
     fn cipolla_crossover_timing() {
-        use super::{decompose_n_minus_one, sqrt_mod_cipolla, sqrt_mod_descent};
+        use super::{decompose_n_minus_one, mod_sqrt_cipolla, mod_sqrt_descent};
         use crate::bigint::MontgomeryContext;
         use std::hint::black_box;
         use std::time::Instant;
@@ -5212,10 +5212,10 @@ mod tests {
                     best
                 };
                 let descent = time(&|| {
-                    black_box(sqrt_mod_descent(&a, &p, &ctx, &q, s));
+                    black_box(mod_sqrt_descent(&a, &p, &ctx, &q, s));
                 });
                 let cipolla = time(&|| {
-                    black_box(sqrt_mod_cipolla(&a, &p, &ctx));
+                    black_box(mod_sqrt_cipolla(&a, &p, &ctx));
                 });
                 eprintln!("{bits:>6} {s:>6} {descent:>12.1} {cipolla:>12.1}");
             }

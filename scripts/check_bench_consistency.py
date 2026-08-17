@@ -23,7 +23,7 @@ A mean outside that interval cannot have come from the sample its own quantiles
 describe.  That is the signature of the defect this check exists to catch: the
 harness once reported pilot-bench's `readings_mean`, a changepoint-truncated
 "dominant segment" average that discards the heavy tail and so need not lie in
-the sample's range at all (a 7168-bit sqrt_mod cell read 21.9 ms against its own
+the sample's range at all (a 7168-bit mod_sqrt cell read 21.9 ms against its own
 0.12 ms p99).  The reduction now reports the whole-sample mean, which satisfies
 these bounds by construction, and this script keeps that true.
 

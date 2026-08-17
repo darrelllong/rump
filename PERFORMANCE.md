@@ -424,8 +424,8 @@ The comparison sorts rump's primitives into groups, and the grouping is by
 
 - **`add`/`sub` — 1.2–4.5×, formerly 2–15×.** Both pilots now measure the
   same shape: the result written into long-lived storage (GMP's
-  `mpz_add(r, a, b)` into a reused `r`; rump's three-operand `assign_add` /
-  `assign_sub` into a reused buffer — one carry or borrow pass, no
+  `mpz_add(r, a, b)` into a reused `r`; rump's three-operand `add_into` /
+  `sub_into` into a reused buffer — one carry or borrow pass, no
   allocation once the buffer is settled). What remains is code generation:
   rump's carry chain is portable Rust over `u128` accumulators where GMP's
   is assembly `adc`/`sbc`. The band is nearly host-independent — M4
@@ -456,7 +456,7 @@ algorithm for the Jacobi symbol*, ANTS-IX, 2010; the threading design is
 Möller's, GMP's `mpn_hgcd_jacobi`), and in-place `add`/`sub` — the signed
 type's `add_assign_ref`/`sub_assign_ref` reusing the magnitude's buffer in
 every sign combination, the unsigned type's three-operand
-`assign_add`/`assign_sub` writing into caller-held storage, and a
+`add_into`/`sub_into` writing into caller-held storage, and a
 buffer-reusing `Clone::clone_from` — which moved the cheapest operations'
 ratios from 2–15× to 1.2–4.5× (the `add`/`sub` bullet above). The section
 below measures the family at scale.

@@ -3398,7 +3398,7 @@ impl BigInt {
 mod tests {
 
     #[test]
-    fn symmetric_remainder_is_congruent_and_smallest() {
+    fn symmetric_rem_is_congruent_and_smallest() {
         // The two properties that define it, checked against the other
         // representative rather than against a table: the result is congruent
         // to `rem_euclid`, and no other representative of the class is
@@ -4633,7 +4633,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_add_sub_match_two_operand_forms() {
+    fn add_into_sub_into_match_two_operand_forms() {
         let mut seed = 0x5851_f42d_4c95_7f2d;
         let mut out = BigUint::zero();
         for &(wa, wb) in &[(0usize, 0usize), (1, 1), (1, 48), (48, 1), (8, 8), (48, 48)] {
@@ -4664,7 +4664,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_add_reuses_the_buffer() {
+    fn add_into_reuses_the_buffer() {
         let mut seed = 0x0123_4567_89ab_cdef;
         let a = seeded_biguint(32, &mut seed);
         let b = seeded_biguint(32, &mut seed);
@@ -4683,7 +4683,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "BigUint underflow")]
-    fn assign_sub_panics_on_underflow() {
+    fn sub_into_panics_on_underflow() {
         let mut out = BigUint::zero();
         out.sub_into(&BigUint::from_u64(3), &BigUint::from_u64(5));
     }
@@ -4935,7 +4935,7 @@ mod tests {
     }
 
     #[test]
-    fn square_ref_matches_mul_ref() {
+    fn square_matches_mul() {
         // The squaring ladder against the multiplication it specializes, at
         // every width where its dispatch changes hands — one limb either
         // side of `SQR_SCHOOLBOOK_MIN_LIMBS` (multiplication vs schoolbook

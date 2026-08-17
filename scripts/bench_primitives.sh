@@ -26,7 +26,7 @@
 # reduction therefore publishes the reading count `n` with every row and refuses
 # to report a mean below a floor (see MIN_READINGS below).
 #
-# That floor matters most for the heavy-tailed primitives (sqrt_mod,
+# That floor matters most for the heavy-tailed primitives (mod_sqrt,
 # is_probable_prime), whose cost depends on the number-theoretic structure of
 # the random input: a non-residue rejects after one exponentiation while a high
 # 2-adic valuation pays the whole Tonelli–Shanks descent, so the sample variance

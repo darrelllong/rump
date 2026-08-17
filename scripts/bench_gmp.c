@@ -5,7 +5,7 @@
  * (Homebrew) and Linux.  Keep the operations and operand shapes in lockstep
  * with bench_bigint when either changes:
  *
- *   - mul_ref                       n x n multiply
+ *   - mul                           n x n multiply
  *   - mod_mul (odd modulus)         n x n multiply, one reduction
  *   - montgomery_pow (e=65537)      modexp, F4 public exponent
  *   - montgomery_pow (random 256b)  modexp, random 256-bit exponent
