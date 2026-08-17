@@ -88,7 +88,7 @@ primary values. Every other export has one module path:
 | number_theory | gcd/lcm, symbols, primality, CRT, reconstruction, valuations, product trees, smoothness, SmoothnessBaseError | done |
 | polynomial | PolyZ, PolyMod, polynomial limits and errors | done |
 | finite_field | Gf2m | done |
-| gf2 | dense null space, singleton pruning, Block Lanczos, PrunedMatrix | partial — Lanczos pending |
+| gf2 | dense null space, singleton pruning, Block Lanczos, PrunedMatrix | done |
 | lattice | LLL, weighted Gauss reduction, ReductionError | done |
 | random | RandomSource and random-value functions | done |
 
@@ -207,7 +207,7 @@ prime-field promise.
 | factoring dense null space | gf2::dense_null_space | done in Rump; consumer transfer | `(rows, columns) -> Vec<Vec<usize>>`; rows bit-packed little-endian, `u64` per word |
 | factoring singleton peel | gf2::prune_singletons | done in Rump; consumer transfer | returns `PrunedMatrix` |
 | factoring `Reduced` | gf2::PrunedMatrix | done in Rump; consumer transfer | the result type the transfer needs; fields private behind `rows()`, `columns()`, `original()` |
-| factoring Block Lanczos | gf2::block_lanczos_dependencies | pending | takes `&mut R: RandomSource` rather than a `u64` seed — rump chooses no entropy source |
+| factoring Block Lanczos | gf2::block_lanczos_dependencies | done in Rump; consumer transfer | takes `&mut R: RandomSource` rather than a `u64` seed — rump chooses no entropy source |
 
 `PrunedMatrix`'s three parts must agree: one original index per surviving row,
 every row sized for the surviving column count. As public fields they were a
@@ -253,7 +253,7 @@ Transfer state is maintained in both this file and the ownership rows in the
 | polynomial::PolyZ::homogeneous_substitution | gnfs/lattice.rs | Rump canonical; consumer transfer |
 | polynomial::PolyMod symmetric_lift/change_modulus | gnfs/algebraic_square_root.rs | Rump canonical; consumer transfer |
 | lattice::gauss_reduce_weighted | gnfs/lattice.rs | Rump canonical; consumer transfer |
-| gf2 dense/sparse solvers | qs/linalg.rs and qs/lanczos.rs | vocabulary ledgered; Rump implementation next |
+| gf2 dense/sparse solvers | qs/linalg.rs and qs/lanczos.rs | landed in Rump; consumer switch and deletion pending |
 | polynomial::PolyZ::real_roots | gnfs/norm_model.rs | contract ledgered; Rump implementation next |
 | integer::WordReciprocal | six division sites | Rump canonical; consumer transfer |
 | number_theory::SmoothnessBase | relation confirmation | Rump canonical; consumer transfer |
