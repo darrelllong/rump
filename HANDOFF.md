@@ -1,6 +1,6 @@
 # HANDOFF — picking rump up on another machine
 
-State as of `8f12bc5` on `main`, tag `v0.2.2` (at `cf2d1dc`), crate version
+State as of 2026-08-16 on `main`, tag `v0.2.2` (at `cf2d1dc`), crate version
 **`0.3.0`** — bumped 2026-08-16 because `main` above the tag changes
 `product_tree`/`remainder_tree` signatures and was still calling itself
 `0.2.2`; see `CHANGELOG.md`. Post-tag work sits on `main` above the tag, as it
@@ -81,10 +81,12 @@ Bezout/Jacobi HGCD transform as a standing item.
 The current pass does **not** re-list the file split. The demand came from
 the earlier passes (against 0.1.1 and v0.2.1, which said it would stay
 listed until done), and `SECOND-REVIEWER.md` finding 7 raises it again and
-independently. The files remain monolithic and have *grown* since that
-sentence was last written: `src/bigint.rs` 6,737 lines, `src/number_theory.rs`
-5,743, and `src/poly.rs` 4,617, which no earlier pass listed and which the
-split plan below did not cover.
+independently. The files had *grown* since that sentence was last written, not
+shrunk: `src/bigint.rs` stood at 6,737 lines, `src/number_theory.rs` at 5,743,
+and `src/poly.rs` at 4,617 — the last of these listed by no earlier pass and
+covered by no earlier version of the split plan. The split is now under way and
+`src/bigint.rs` is at 5,689; see item 2 below for what has moved and what has
+not.
 
 ## The second review
 
@@ -95,7 +97,7 @@ then-uncommitted tree. Disposition of its seven findings, 2026-08-16:
 |---|---|---|
 | 1 | Crate is not pure safe Rust; remove the scrub and `forbid` | **Partly accepted.** README headline corrected; the `deny`-vs-`forbid` trade written down. Scrub kept and its cost measured — see ROADMAP, "The volatile drop scrub". |
 | 2 | `ProductTree` breaks the public API at 0.2.2 | **Accepted, fixed.** Confirmed against the tag: `v0.2.2` exports `Vec<Vec<BigUint>>`, `main` exports `ProductTree`. Version bumped to 0.3.0 with a `CHANGELOG.md` entry. Git-only; the owner still holds any crates.io release. |
-| 3 | Finish the ownership migration | **Accepted, recorded.** Mostly concerns the `factoring` repository, which is not on this machine. The five landed-but-unmigrated polynomial pieces and their consumer locations are now a state in `REQUESTS.md`. |
+| 3 | Finish the ownership migration | **Accepted, recorded.** Concerns the `factoring` consumer, which *is* checked out here at `~/factoring` — an earlier version of this row said it was not on this machine, which was wrong. The five landed-but-unmigrated polynomial pieces and their consumer locations are a state in `REQUESTS.md`; deleting the copies is a change in that repository. |
 | 4 | Portability contract contradicts the project rule | **Closed.** A `compile_error!` now enforces the documented 64-bit-only contract; verified firing under `--target i686-unknown-linux-gnu` and silent under `aarch64-apple-darwin`. The finding's other remedy — checked sizing on `len * 64` / `len * 128` — is the *alternative* to this one, not a second half of it, and is deliberately not done; see below. |
 | 5 | Thresholds justified on one machine | **Open, already tracked.** Same fleet task as the re-measurement owed below. |
 | 6 | Documentation describes mutually exclusive states | **Accepted, fixed** for `REQUESTS.md` (now a four-state ledger) and README. The Barrett threshold-drift half was already **stale**: `square_mod` no longer says "8 through 256", it quotes `BARRETT_HALF_PRODUCT_MAX_LIMBS`. |
@@ -104,6 +106,21 @@ then-uncommitted tree. Disposition of its seven findings, 2026-08-16:
 Its "Validation performed" section is sound and reproduced here, with one
 caveat worth carrying: it reports 196 unit tests where the tree now has 212,
 because work landed between its base commit and now.
+
+**There are two files named `SECOND-REVIEWER.md`, and they are different
+reviews.** This repository's has seven findings and is dispositioned above.
+The consumer's, at `~/factoring/SECOND-REVIEWER.md`, has ten covering both
+repositories, and three of its rump findings appear in no document here. Do not
+assume the name means the same pass. Dispositions, 2026-08-16:
+
+| Their # | Finding | Disposition |
+|---|---|---|
+| 1 | `MontgomeryCtx`'s `value < modulus` invariant is `debug_assert` only, on a safe public API | **Open, needs an owner's call.** Verified: the assertions sit in `mul_mont`, `square_mont`, `add_mont`/`sub_mont` and their workspace forms. The proposed fix is a context-bound `MontgomeryResidue` returned by `encode`, which would also stop values from different contexts mixing — an API break. The cheaper alternative is promoting the checks to release assertions and measuring. Neither taken. |
+| 2 | The `_with_workspace` forms still allocate every result | **Fixed as documentation; API half open.** Verified: they return an owned `BigUint` built by `out[..width].to_vec()`, so scratch is reused and the result is not. README no longer says "allocation-free". The suggested `mul_mont_into` / `square_mont_into` are not added. |
+| 4 | The Hensel cap skips the initial root set | **Fixed.** The base level is now checked against `MAX_ROOT_LEVEL` before the lift. |
+
+Their findings 8, 9 and 10 restate this repository's 1, 2 and 7. Their 3, 5, 6
+and 7 are consumer-side work.
 
 **Why finding 4's checked sizing is retired rather than deferred.** The
 unchecked products are `bits()` (`limbs.len() * 64`), the `R²` constant
@@ -216,6 +233,22 @@ operand generation dominates. If a cell cannot clear it, leave it marked
    the test modules in the roots initially — they reach many private items, and
    splitting code without moving tests is still the win. Expect no test edits;
    if a test needs changing, the move changed behaviour — stop.
+
+   **Started 2026-08-16.** `src/bigint.rs` is down from 6,737 lines to 5,689:
+   `bigint/montgomery.rs` (830) and `bigint/barrett.rs` (279) are out, each in
+   its own commit, each verified with the full suite and with no test edited —
+   the parent diffs were 4 inserted / 800 deleted and 8 inserted / 257 deleted,
+   which is the check that the move preserved behaviour. The plan's single
+   `montgomery.rs` holding both contexts was split in two on purpose: they are
+   different reduction methods with different preconditions, and one file
+   holding both does not meet the plan's own goal of one reviewable invariant
+   per file. Method that worked, if you continue: verify every block boundary
+   against the file *before* moving anything, move lines verbatim, and let the
+   compiler find the visibility errors — both cuts built on the first attempt.
+   Two imports survive only for intra-doc links and are marked as such; expect
+   more of those, since the two contexts refer to each other. Still to do:
+   `bigint/mul.rs`, `bigint/div.rs`, the `number_theory` cuts, and the `poly`
+   cuts.
 
 (The former item 3, cutting 0.2.2, was done 2026-08-15: `Cargo.toml` and the
 lock are bumped, `v0.2.2` is tagged and pushed, git-only. The crate version is
