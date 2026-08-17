@@ -769,7 +769,7 @@ impl Gf2m {
                 // identity sends to x^(top_word · 64 − degree + t).
                 let w = buf[top_word];
                 buf[top_word] = 0;
-                (w, top_word * 64 - self.degree)
+                (w, crate::bigint::bit_span(top_word, 64) - self.degree)
             } else {
                 // The boundary word itself: only the bits at and above
                 // `boundary_bit` are excess, and bit `boundary_bit` is x^degree
@@ -839,7 +839,7 @@ fn spread_half(half: u32) -> u64 {
 fn limbs_bits(buf: &[u64]) -> usize {
     for (i, &limb) in buf.iter().enumerate().rev() {
         if limb != 0 {
-            return i * 64 + (64 - limb.leading_zeros() as usize);
+            return crate::bigint::bit_span(i, 64) + (64 - limb.leading_zeros() as usize);
         }
     }
     0

@@ -39,9 +39,8 @@ If those five commands are green you have the same tree this note describes.
 ## Toolchain
 
 Rust 1.87 or later (`rust-version` in Cargo.toml; the crate uses
-`is_multiple_of`). **64-bit hosts only** — the limb indexing and the `R²` and
-Karatsuba bit shifts assume a 64-bit `usize`, and this is stated in the crate
-docs. Zero dependencies.
+`is_multiple_of`). Portable: no target-width restriction, and the release gate cross-checks
+`i686-unknown-linux-gnu`. Zero dependencies.
 
 ## Where things stand
 
@@ -102,7 +101,7 @@ then-uncommitted tree. Disposition of its seven findings, 2026-08-16:
 | 1 | Crate is not pure safe Rust; remove the scrub and `forbid` | **Partly accepted.** README headline corrected; the `deny`-vs-`forbid` trade written down. Scrub kept and its cost measured — see ROADMAP, "The volatile drop scrub". |
 | 2 | `ProductTree` breaks the public API at 0.2.2 | **Accepted, fixed.** Confirmed against the tag: `v0.2.2` exports `Vec<Vec<BigUint>>`, `main` exports `ProductTree`. Version bumped to 0.3.0 with a `CHANGELOG.md` entry. Git-only; the owner still holds any crates.io release. |
 | 3 | Finish the ownership migration | **Accepted, recorded.** Concerns the `factoring` consumer, which *is* checked out here at `~/factoring` — an earlier version of this row said it was not on this machine, which was wrong. The five landed-but-unmigrated polynomial pieces and their consumer locations are a state in `REQUESTS.md`; deleting the copies is a change in that repository. |
-| 4 | Portability contract contradicts the project rule | **Closed.** A `compile_error!` now enforces the documented 64-bit-only contract; verified firing under `--target i686-unknown-linux-gnu` and silent under `aarch64-apple-darwin`. The finding's other remedy — checked sizing on `len * 64` / `len * 128` — is the *alternative* to this one, not a second half of it, and is deliberately not done; see below. |
+| 4 | Portability contract contradicts the project rule | **Closed, the other way.** 0.3.0 first added a `compile_error!` refusing non-64-bit targets; that gate is gone and the finding's other remedy is taken instead. Every limb-count to bit-index conversion goes through one checked multiplication (`bit_span`), so an unrepresentable index refuses rather than wrapping, and 32-bit builds are supported and cross-checked in the release gate. |
 | 5 | Thresholds justified on one machine | **Open, already tracked.** Same fleet task as the re-measurement owed below. |
 | 6 | Documentation describes mutually exclusive states | **Accepted, fixed** for `REQUESTS.md` (now a four-state ledger) and README. The Barrett threshold-drift half was already **stale**: `square_mod` no longer says "8 through 256", it quotes `BARRETT_HALF_PRODUCT_MAX_LIMBS`. |
 | 7 | Files beyond reviewable size | **Open.** Item 2 below, now including `src/poly.rs`. |
@@ -126,13 +125,11 @@ assume the name means the same pass. Dispositions, 2026-08-16:
 Their findings 8, 9 and 10 restate this repository's 1, 2 and 7. Their 3, 5, 6
 and 7 are consumer-side work.
 
-**Finding 4's checked sizing is retired, not deferred.** Its two remedies —
-portable sizing plus a 32-bit job, or a compile-time refusal — are
-alternatives, and the gate is the one taken. The unchecked limb-count-to-bit
-products wrap at 2²⁶ and 2²⁵ limbs on a 32-bit `usize` (operands of ~537 MB and
-~268 MB, reachable), but at 2⁵⁸ and 2⁵⁷ on a 64-bit one, where `Vec` aborts on
-capacity overflow long before the product can form. Do not re-list it unless
-the gate is lifted.
+**Finding 4's checked sizing was retired and then taken.** The note here
+argued it was moot behind the 64-bit gate — true while the gate existed, and
+void once the gate was removed for portability. The products wrap at 2²⁶ and
+2²⁵ limbs on a 32-bit `usize` (operands of ~537 MB and ~268 MB, reachable),
+which is why the checked form is now the one in the tree.
 
 ## The measurement story — read this before touching benchmarks
 

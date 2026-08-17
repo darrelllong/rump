@@ -929,7 +929,7 @@ impl BigUint {
             .last()
             .expect("non-zero bigint has at least one limb");
         let top_bits = (u64::BITS - top.leading_zeros()) as usize;
-        (self.limbs.len() - 1) * 64 + top_bits
+        bit_span(self.limbs.len() - 1, 64) + top_bits
     }
 
     /// Integer square root: the largest `r` with `r² ≤ self` — the root
@@ -1016,7 +1016,7 @@ impl BigUint {
         self.limbs
             .iter()
             .position(|&limb| limb != 0)
-            .map(|index| index * 64 + self.limbs[index].trailing_zeros() as usize)
+            .map(|index| bit_span(index, 64) + self.limbs[index].trailing_zeros() as usize)
     }
 
     /// `self^exponent` for a machine-word exponent, by binary
@@ -1607,10 +1607,10 @@ impl BigUint {
         z1.sub_assign_ref(&z2);
 
         let mut out = z0;
-        z1.shl_bits(split * 64);
+        z1.shl_bits(bit_span(split, 64));
         out.add_assign_ref(&z1);
         let mut z2_shifted = z2;
-        z2_shifted.shl_bits(split * 128);
+        z2_shifted.shl_bits(bit_span(split, 128));
         out.add_assign_ref(&z2_shifted);
         out
     }
@@ -1764,11 +1764,11 @@ impl BigUint {
         z1.sub_assign_ref(&z2);
 
         let mut out = z0;
-        z1.shl_bits(split * 64);
+        z1.shl_bits(bit_span(split, 64));
         out.add_assign_ref(&z1);
 
         let mut z2_shifted = z2;
-        z2_shifted.shl_bits(split * 128);
+        z2_shifted.shl_bits(bit_span(split, 128));
         out.add_assign_ref(&z2_shifted);
         out
     }
@@ -1861,7 +1861,7 @@ impl BigUint {
 
         // Recompose Σ cᵢ·B^{ik} by Horner. The product's digits are all
         // non-negative, so this returns to unsigned.
-        let shift = 64 * k;
+        let shift = bit_span(k, 64);
         let mut acc = BigUint::zero();
         for coefficient in [&c4, &c3, &c2, &c1, &c0] {
             debug_assert!(
@@ -1997,7 +1997,7 @@ impl BigUint {
         let c1 = o1.sub(&c3).sub(&c5);
 
         // Recompose Σ cᵢ·B^{ik}; the product digits are all non-negative.
-        let shift = 64 * k;
+        let shift = bit_span(k, 64);
         let mut acc = BigUint::zero();
         for coefficient in [&c6, &c5, &c4, &c3, &c2, &c1, &c0] {
             debug_assert!(
@@ -2821,6 +2821,26 @@ impl core::ops::SubAssign<&BigInt> for BigInt {
     fn sub_assign(&mut self, other: &BigInt) {
         self.sub_assign_ref(other);
     }
+}
+
+/// `limbs · per_limb` as a bit index, refusing rather than wrapping.
+///
+/// Every place that turns a limb count into a bit position goes through here.
+/// On a 64-bit `usize` the product is unreachable in practice — `Vec` aborts
+/// on capacity overflow long before it could form — but the crate is portable,
+/// and on a 32-bit target `len · 64` wraps at operands of about 537 MB and
+/// `len · 128` at about 268 MB, which are reachable. A wrapped index is a
+/// silently wrong answer; this is a refusal.
+///
+/// # Panics
+///
+/// Panics if the product exceeds `usize`, which means the operand cannot be
+/// indexed by bit position on this target at all.
+#[inline]
+pub(crate) fn bit_span(limbs: usize, per_limb: usize) -> usize {
+    limbs
+        .checked_mul(per_limb)
+        .expect("operand too wide to index by bit on this target")
 }
 
 /// The low 64 bits of a `u128` accumulator as a limb. Every kernel here

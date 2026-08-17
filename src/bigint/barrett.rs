@@ -12,7 +12,7 @@
 //! The test module lives in the parent, which is why the threshold constant
 //! and `last_corrections` are visible there.
 
-use super::{BigUint, ModulusError};
+use super::{bit_span, BigUint, ModulusError};
 
 // Modulus width up to which Barrett's second multiplication is taken as a
 // schoolbook half-product rather than a dispatched full product. The half
@@ -117,7 +117,7 @@ impl BarrettContext {
         }
         let limb_count = modulus.limbs().len();
         let mut numerator = BigUint::zero();
-        numerator.set_bit(128 * limb_count);
+        numerator.set_bit(bit_span(limb_count, 128));
         let (mu, _) = numerator.div_rem(modulus);
         Ok(Self {
             modulus: modulus.clone(),
@@ -138,7 +138,7 @@ impl BarrettContext {
     #[must_use]
     pub fn reduce(&self, x: &BigUint) -> BigUint {
         let k = self.limb_count;
-        if x.bits() > 128 * k {
+        if x.bits() > bit_span(k, 128) {
             return x.rem(&self.modulus);
         }
         if *x < self.modulus {
@@ -146,12 +146,12 @@ impl BarrettContext {
         }
         // q̂ = ⌊⌊x/b^(k−1)⌋·μ/b^(k+1)⌋ — the two shifts are limb-aligned.
         let mut q = x.clone();
-        q.shr_bits(64 * (k - 1));
+        q.shr_bits(bit_span(k - 1, 64));
         q = q.mul(&self.mu);
-        q.shr_bits(64 * (k + 1));
+        q.shr_bits(bit_span(k + 1, 64));
         // r = (x − q̂·n) mod b^(k+1); the difference of the two low windows,
         // lifted by b^(k+1) when it wraps.
-        let window = 64 * (k + 1);
+        let window = bit_span(k + 1, 64);
         let x_low = x.low_bits(window);
         // Only the low k+1 limbs of q̂·n survive the window, so only those
         // are formed (HAC Note 14.45(ii)); the half-product is exact.

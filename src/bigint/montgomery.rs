@@ -11,7 +11,7 @@
 //! The test module lives in the parent, which is why four of the kernels are
 //! `pub(super)` rather than private.
 
-use super::{low_u64, BigUint, ModulusError};
+use super::{bit_span, low_u64, BigUint, ModulusError};
 use core::cmp::Ordering;
 
 /// Montgomery arithmetic context for a fixed odd modulus.
@@ -475,7 +475,7 @@ impl MontgomeryContext {
         // domain because `montgomery_mul(a, R^2) = a * R^2 * R^-1 = aR`, the
         // Montgomery encoding of the ordinary residue `a`.
         let mut r2 = BigUint::zero();
-        r2.set_bit(modulus.limbs.len() * 128);
+        r2.set_bit(bit_span(modulus.limbs.len(), 128));
         let r2_mod = r2.rem(modulus);
 
         // `R mod n`, the Montgomery encoding of 1, seeds exponentiation

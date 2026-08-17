@@ -39,13 +39,12 @@
 //! holds every public item to a doc comment, and `MANUAL.md` carries a worked,
 //! test-pinned example for each.
 //!
-//! Targets: the limb layout and the index arithmetic that sizes it — `bits`,
-//! and the `R²`/Karatsuba bit shifts that scale a limb count by 128 — assume a
-//! 64-bit `usize`. rump is developed and tested on 64-bit hosts and is not
-//! supported on 32-bit targets, where a multi-hundred-megabyte operand could
-//! overflow a `usize` index and land a shift in the wrong place. A
-//! `compile_error!` enforces this rather than leaving it to the prose: such a
-//! build fails outright instead of misindexing at run time.
+//! Targets: portable. Every place that turns a limb count into a bit index
+//! goes through one checked multiplication, so an operand too wide to index
+//! on the target refuses rather than wrapping — on a 32-bit `usize` that
+//! boundary is reachable, at operands of roughly 537 MB for `len · 64` and
+//! 268 MB for `len · 128`, and on a 64-bit one it is not. There is no
+//! target-width rejection: 32-bit builds are supported and gated in CI.
 //!
 //! Minimum supported Rust version: 1.87, the release that stabilized
 //! `u64::is_multiple_of` and `usize::is_multiple_of`, which the kernels use
@@ -70,17 +69,6 @@
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-
-// The 64-bit assumption stated in the crate documentation above, enforced.
-// `bits()` scales a limb count by 64 and the `R²` and Karatsuba paths scale
-// one by 128; on a 32-bit `usize` those products overflow for operands in the
-// hundreds of megabytes, which indexes and shifts wrongly rather than failing.
-#[cfg(not(target_pointer_width = "64"))]
-compile_error!(
-    "rump requires a 64-bit target: limb indexing and the R²/Karatsuba bit \
-     shifts scale a limb count by 64 and 128 and assume those products fit a \
-     `usize`. 32-bit and 16-bit targets are not supported."
-);
 
 // Implementation modules are private; every public path below is a facade, so
 // each exported item has exactly one public path, as NAMES.md requires.

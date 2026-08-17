@@ -119,12 +119,12 @@ values live in ordinary heap buffers, freed memory keeps its contents, and
 constant-time operation are out of scope, left to the consumer that handles
 key material.
 
-The crate is supported on 64-bit targets only: the limb layout and the index
-arithmetic that sizes it assume a 64-bit \code{usize}. This is enforced rather
-than merely documented --- a \code{compile\_error!} rejects any target whose
-pointer width is not 64, so a 32-bit build fails with a diagnostic explaining
-why instead of compiling and misindexing at run time on an operand large
-enough to overflow the product.
+The crate is portable and carries no target-width restriction. Every place
+that turns a limb count into a bit index goes through one checked
+multiplication, so an operand too wide to index on the target refuses rather
+than wrapping; on a 32-bit \code{usize} that boundary is reachable, at
+operands of roughly 537\,MB for $\mathrm{len}\cdot 64$ and 268\,MB for
+$\mathrm{len}\cdot 128$, and on a 64-bit one it is not.
 
 \subsection{Imports and naming}
 

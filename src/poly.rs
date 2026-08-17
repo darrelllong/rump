@@ -2916,7 +2916,7 @@ mod tests {
             let mut v = BigUint::zero();
             for k in 0..4 {
                 let mut w = BigUint::from_u64(rng.next_u64());
-                w.shl_bits(64 * k);
+                w.shl_bits(crate::bigint::bit_span(k, 64));
                 v = v.add(&w);
             }
             v.rem(m)

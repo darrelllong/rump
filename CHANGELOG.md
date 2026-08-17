@@ -85,14 +85,19 @@ what a consumer must change, not everything that moved.
 - **`gauss_reduce_weighted`** — exact two-dimensional Lagrange–Gauss reduction
   under a diagonal form `(w₀x)² + (w₁y)²`, in `i128`. For a skewed metric
   `(x/√s)² + (y√s)²` with rational `s = p/q`, pass `weights = [q, p]`.
-- **A `compile_error!` gate on non-64-bit targets.** The crate has documented
-  a 64-bit-only contract since 0.2.x — `bits()` scales a limb count by 64, and
-  the `R²` and Karatsuba paths scale one by 128, products that overflow a
-  32-bit `usize` for operands in the hundreds of megabytes. Until now that
-  restriction was prose, and a 32-bit build compiled and then misindexed at run
-  time. It now fails to build with a diagnostic explaining why. Verified in
-  both directions: the gate fires under `--target i686-unknown-linux-gnu` and
-  is silent under `aarch64-apple-darwin`.
+- **Portable: no target-width restriction.** Earlier 0.3.0 work added a
+  `compile_error!` refusing non-64-bit targets, on the ground that `bits()`
+  scales a limb count by 64 and the `R²` and Karatsuba paths by 128, products
+  that overflow a 32-bit `usize` for operands in the hundreds of megabytes.
+  The gate is gone and the arithmetic is checked instead: every limb-count to
+  bit-index conversion goes through one checked multiplication that refuses an
+  unrepresentable index rather than wrapping. 32-bit builds are supported and
+  the release gate cross-checks `i686-unknown-linux-gnu`.
+- **`#![forbid(unsafe_code)]`, no exceptions.** The volatile scrub helper, the
+  `Drop` policy that called it, and the raw read-back test that verified it are
+  removed. Nothing is wiped now: values live in ordinary heap buffers and
+  freed memory keeps its contents. A consumer handling key material brings its
+  own representation.
 
 ### Documentation
 
