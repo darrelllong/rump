@@ -100,7 +100,7 @@ documentation, and record the cost.
 
 **Correct, and fixed.** `README.md` opened by calling the crate "pure, safe
 Rust" while its own Properties section, sixty lines down, listed two audited
-`unsafe` exceptions. The headline now names them.
+`unsafe` exceptions. The headline now states them.
 
 **Correct, and stated rather than fixed.** `deny(unsafe_code)` is a default an
 inner `allow` can override, not a boundary the compiler enforces against the

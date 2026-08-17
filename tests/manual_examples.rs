@@ -5,13 +5,14 @@
 //! it in both places — a drifted manual fails here.
 
 use rump::{
-    crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
-    is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
-    lll_reduce, miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow,
-    primes_below, product_tree, random_below, random_coprime_below, random_nonzero_below,
-    random_probable_prime, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
-    remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, BarrettCtx, BigInt,
-    BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Reciprocal, Rng, Sign, SmoothBase,
+    crt_combine, gauss_reduce_weighted, gcd, gcd_extended, gcd_u64, is_probable_prime,
+    is_probable_prime_bpsw, is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi,
+    kronecker, lcm, legendre, lll_reduce, miller_rabin_witness, mod_inverse, mod_inverse_batch,
+    mod_inverse_u64, mod_pow, primes_below, product_tree, random_below, random_coprime_below,
+    random_nonzero_below, random_probable_prime, rational_reconstruct,
+    rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, sqrt_mod,
+    sqrt_mod_prime_power, valuation, BarrettCtx, BigInt, BigUint, Gf2m, MontgomeryCtx, PolyModP,
+    PolyZ, Reciprocal, Rng, Sign, SmoothBase,
 };
 
 #[test]
@@ -774,6 +775,23 @@ fn manual_lattice() {
     lll_reduce(&mut basis);
     // Reduction returns short vectors spanning the same lattice.
     assert_eq!(basis, vec![row(&[1, 32]), row(&[40, 1])]);
+
+    // A skew-12 lattice, reduced under the matching diagonal form.
+    let reduced = gauss_reduce_weighted([[1024, 0], [37, 1]], [1, 12]);
+    // Same lattice: the determinant is preserved up to sign.
+    let det = |b: [[i128; 2]; 2]| b[0][0] * b[1][1] - b[0][1] * b[1][0];
+    assert_eq!(det(reduced).abs(), det([[1024, 0], [37, 1]]).abs());
+
+    // Weights reorder what counts as short: under a heavy x-weight the
+    // y-axis vector wins, and under a heavy y-weight the x-axis vector does.
+    assert_eq!(
+        gauss_reduce_weighted([[1, 0], [0, 1]], [100, 1]),
+        [[0, 1], [1, 0]]
+    );
+    assert_eq!(
+        gauss_reduce_weighted([[1, 0], [0, 1]], [1, 100]),
+        [[1, 0], [0, 1]]
+    );
 }
 
 #[test]

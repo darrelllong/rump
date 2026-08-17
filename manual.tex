@@ -124,8 +124,8 @@ must add cryptographic memory hygiene at its own layer.
 The crate is supported on 64-bit targets only: the limb layout and the index
 arithmetic that sizes it assume a 64-bit \code{usize}. This is enforced rather
 than merely documented --- a \code{compile\_error!} rejects any target whose
-pointer width is not 64, so a 32-bit build fails with a diagnostic naming the
-reason instead of compiling and misindexing at run time on an operand large
+pointer width is not 64, so a 32-bit build fails with a diagnostic explaining
+why instead of compiling and misindexing at run time on an operand large
 enough to overflow the product.
 
 \subsection{Imports and naming}
@@ -149,7 +149,7 @@ use rump::{
     rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
     remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation,
     SmoothBase,
-    lll_reduce, lll_reduce_delta,
+    gauss_reduce_weighted, lll_reduce, lll_reduce_delta,
     BarrettCtx, BigInt, BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Reciprocal,
     Rng, Sign,
 };
@@ -1667,6 +1667,39 @@ assert_eq!(basis, vec![row(&[1, 32]), row(&[40, 1])]);
 let mut basis = vec![row(&[201, 37]), row(&[1648, 297])];
 lll_reduce_delta(&mut basis, 99, 100);
 assert_eq!(basis, vec![row(&[1, 32]), row(&[40, 1])]);
+\end{lstlisting}
+
+\subsection{Two dimensions under a diagonal form}
+
+In two dimensions reduction is not a heuristic. Lagrange--Gauss reduction
+solves the shortest-vector problem outright: \code{gauss\_reduce\_weighted}
+returns a shortest non-zero vector of the lattice first and a shortest vector
+independent of it second, under the diagonal form
+\begin{equation}
+\|(x, y)\|^2 \;=\; (w_0 x)^2 + (w_1 y)^2 .
+\end{equation}
+Each round replaces the shorter vector with a strictly shorter one, so the
+squared norms strictly decrease in the positive integers and the loop runs
+$O(\log)$ times; no iteration cap is imposed.
+
+A sieve working under the skewed metric $(x/\sqrt{s})^2 + (y\sqrt{s})^2$
+passes $w = (1, s)$. Scaling a quadratic form by a positive constant changes
+neither the comparisons nor the rounding, and scaling by $s$ clears the
+square roots, so the whole computation is exact \code{i128}. This is the
+substantive difference from a floating-point metric, which loses the ordering
+once the weighted coordinates pass $2^{53}$ and degrades quietly to a poor
+basis. It panics on a dependent pair, a non-positive weight, or a weighted
+norm past \code{i128}.
+
+\begin{lstlisting}
+// A skew-12 lattice, reduced under the matching diagonal form.
+let reduced = gauss_reduce_weighted([[1024, 0], [37, 1]], [1, 12]);
+let det = |b: [[i128; 2]; 2]| b[0][0] * b[1][1] - b[0][1] * b[1][0];
+assert_eq!(det(reduced).abs(), det([[1024, 0], [37, 1]]).abs());
+
+// Weights reorder what counts as short.
+assert_eq!(gauss_reduce_weighted([[1, 0], [0, 1]], [100, 1]), [[0, 1], [1, 0]]);
+assert_eq!(gauss_reduce_weighted([[1, 0], [0, 1]], [1, 100]), [[1, 0], [0, 1]]);
 \end{lstlisting}
 
 \section{Random sampling}

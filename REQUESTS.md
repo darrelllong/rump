@@ -136,6 +136,34 @@ section — which the consumer's `widen` relies on without saying so.
 
 ---
 
+## Landed in rump, consumer migration pending
+
+**Delivered 2026-08-16: two-dimensional reduction under a weighted norm.**
+`gauss_reduce_weighted` is in `src/lattice.rs`, exported from the crate
+root, documented in `MANUAL.md` and `manual.tex` and cited in
+`CITATIONS.md`. Machine integers throughout, as asked — no bignums.
+
+It is exact where the consumer's version is not, and that is the point of
+moving it. The consumer measures `(x/√s)² + (y·√s)²` in `f64` and
+documents the cliff: past `q ≈ 2⁵³` the metric loses the ordering and the
+reduction degrades quietly to a poor basis, showing up as low yield rather
+than a wrong answer. Scaling that form by `s` gives `x² + (s·y)²`, which is
+`weights = [1, s]` — identical comparisons and identical rounding, since a
+positive scale factor changes neither, with the square roots gone. So the
+general form takes integer weights and has no cliff.
+
+Verified on 1 200 random bases across six weightings: the determinant is
+preserved up to sign, both output vectors are integer combinations of the
+input (Cramer, exact divisibility), the output is ordered, and nothing in a
+window around the reduced basis is shorter. That last check is stated over
+the *reduced* basis deliberately — a window over the input basis is not a
+valid oracle, because nearly parallel generators need large coefficients to
+reach the short vectors, and a fixed window misses them and then reports the
+reduction wrong when it is right. That is what the first draft of the test
+did.
+
+The request as filed:
+
 ### Two-dimensional lattice reduction under a weighted norm
 
 **Consumer's code:** `src/gnfs/lattice.rs:352` (`gauss_reduce`, with `norm_sq`
@@ -150,7 +178,6 @@ lattice problem needs.
 
 ---
 
-## Landed in rump, consumer migration pending
 
 **Delivered 2026-08-16: a reusable batch-smoothness context.**
 `SmoothBase` is in `src/number_theory.rs`, exported from the crate root,
@@ -337,11 +364,11 @@ standing risk rather than a defect, and supplied the locations.
 
 Retire, in one integration change against a versioned rump:
 
-The consumer's copies carry *different names* from the rump API that replaces
-them, so search by the name in the third column rather than by the first — a
-search for the rump name finds nothing and reads as "already migrated", which
-is the wrong answer. Line numbers are as of 2026-08-16 and will drift; the
-names will not.
+Each consumer copy is called something else — it was written before the rump
+API existed, so it could hardly have been called after it. Search the third
+column, not the first: searching for the rump symbol returns nothing and reads
+as "already migrated", which is the opposite of the truth. Line numbers are as
+of 2026-08-16 and will drift.
 
 | rump API | consumer file | consumer's name for it |
 |---|---|---|

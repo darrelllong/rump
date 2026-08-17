@@ -1094,6 +1094,32 @@ lll_reduce(&mut basis);
 assert_eq!(basis, vec![row(&[1, 32]), row(&[40, 1])]);
 ```
 
+`gauss_reduce_weighted` is the two-dimensional case, in machine integers and
+under an anisotropic metric. In two dimensions Lagrange–Gauss reduction is
+not a heuristic as LLL is in general dimension: it returns a shortest
+non-zero vector of the lattice outright, first, with the second shortest
+independent of it after. The metric is the diagonal form
+`‖(x, y)‖² = (w₀·x)² + (w₁·y)²`.
+
+A skewed sieve measuring `(x/√s)² + (y·√s)²` passes `weights = [1, s]`:
+scaling a form by a positive constant changes no comparison and no rounding,
+and that scaling clears the square roots, so the arithmetic is exact `i128`
+throughout with no accuracy cliff. It panics on a dependent pair, a
+non-positive weight, or a weighted norm past `i128`.
+
+```rust
+// A skew-12 lattice, reduced under the matching diagonal form.
+let reduced = gauss_reduce_weighted([[1024, 0], [37, 1]], [1, 12]);
+// Same lattice: the determinant is preserved up to sign.
+let det = |b: [[i128; 2]; 2]| b[0][0] * b[1][1] - b[0][1] * b[1][0];
+assert_eq!(det(reduced).abs(), det([[1024, 0], [37, 1]]).abs());
+
+// Weights reorder what counts as short: under a heavy x-weight the
+// y-axis vector wins, and under a heavy y-weight the x-axis vector does.
+assert_eq!(gauss_reduce_weighted([[1, 0], [0, 1]], [100, 1]), [[0, 1], [1, 0]]);
+assert_eq!(gauss_reduce_weighted([[1, 0], [0, 1]], [1, 100]), [[1, 0], [0, 1]]);
+```
+
 ## Random sampling
 
 Implement `Rng` — one method, `fill_bytes` — and every sampler is driven by

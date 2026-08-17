@@ -45,7 +45,7 @@ what a consumer must change, not everything that moved.
   the `R²` and Karatsuba paths scale one by 128, products that overflow a
   32-bit `usize` for operands in the hundreds of megabytes. Until now that
   restriction was prose, and a 32-bit build compiled and then misindexed at run
-  time. It now fails to build with a diagnostic naming the reason. Verified in
+  time. It now fails to build with a diagnostic explaining why. Verified in
   both directions: the gate fires under `--target i686-unknown-linux-gnu` and
   is silent under `aarch64-apple-darwin`.
 

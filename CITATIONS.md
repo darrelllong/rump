@@ -133,6 +133,7 @@ Algorithm M.
 | Algorithm | Location | Reference |
 |---|---|---|
 | LLL reduction (integral) | `lll_reduce`, `lll_reduce_delta` | Lenstra, Lenstra & Lovász, *Factoring polynomials with rational coefficients*, Math. Ann. 261 (1982), 515–534; integral form Cohen, *A Course in Computational Algebraic Number Theory*, Algorithm 2.6.3. |
+| Two-dimensional reduction under a diagonal form | `gauss_reduce_weighted` | Lagrange (1773) and Gauss, *Disquisitiones Arithmeticae* (1801), art. 171 — the two-dimensional case, which solves the shortest-vector problem exactly rather than approximately; the modern analysis is Vallée, *Gauss' algorithm revisited*, J. Algorithms 12 (1991), 556–572. Transcribed; the article and page references are on the HANDOFF check list. |
 
 ## GF(2^m) binary fields (`src/gf2m.rs`)
 

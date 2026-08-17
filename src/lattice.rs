@@ -329,10 +329,276 @@ fn swap_step(
     d[k - 1] = b_new;
 }
 
+// ─── Two-dimensional reduction under a diagonal form ───────────────────────
+
+/// The squared length of `v` under the diagonal form, `(w₀·v₀)² + (w₁·v₁)²`.
+///
+/// `None` on overflow rather than a wrapped answer: a wrapped norm compares
+/// wrongly and would return a basis that is not reduced, silently.
+fn weighted_norm_sq(v: [i128; 2], weights: [i128; 2]) -> Option<i128> {
+    let x = weights[0].checked_mul(v[0])?;
+    let y = weights[1].checked_mul(v[1])?;
+    x.checked_mul(x)?.checked_add(y.checked_mul(y)?)
+}
+
+/// The inner product matching [`weighted_norm_sq`]: `w₀²·u₀·v₀ + w₁²·u₁·v₁`,
+/// formed as `(w₀u₀)(w₀v₀) + (w₁u₁)(w₁v₁)` so the intermediates stay the same
+/// size as the norm's.
+fn weighted_dot(u: [i128; 2], v: [i128; 2], weights: [i128; 2]) -> Option<i128> {
+    let ux = weights[0].checked_mul(u[0])?;
+    let vx = weights[0].checked_mul(v[0])?;
+    let uy = weights[1].checked_mul(u[1])?;
+    let vy = weights[1].checked_mul(v[1])?;
+    ux.checked_mul(vx)?.checked_add(uy.checked_mul(vy)?)
+}
+
+/// `round(numerator / denominator)` for a positive `denominator`, exactly.
+///
+/// Ties go to the larger quotient. Which way ties break does not affect
+/// correctness — both choices leave `|⟨u,v⟩| ≤ ‖u‖²/2` — only which of two
+/// equally reduced bases comes back.
+fn round_div(numerator: i128, denominator: i128) -> Option<i128> {
+    debug_assert!(denominator > 0);
+    let doubled = numerator.checked_mul(2)?;
+    let shifted = doubled.checked_add(denominator)?;
+    Some(shifted.div_euclid(denominator.checked_mul(2)?))
+}
+
+/// Lagrange–Gauss reduction of a two-dimensional basis under the diagonal
+/// form `‖(x, y)‖² = (w₀·x)² + (w₁·y)²`, exactly, in machine integers.
+///
+/// Returns the two vectors in non-decreasing order of that norm. The first is
+/// a shortest non-zero vector of the lattice and the second is shortest among
+/// those independent of it — in two dimensions reduction is not a heuristic,
+/// as it is for [`lll_reduce`] in general dimension, but solves the shortest
+/// vector problem outright (Lagrange 1773; Gauss, *Disquisitiones
+/// Arithmeticae* 1801, art. 171; the modern analysis is Vallée, *Gauss'
+/// algorithm revisited*, J. Algorithms 12 (1991), 556–572).
+///
+/// The weights make the metric anisotropic, which is what a skewed lattice
+/// wants: a sieve measuring `(a/√s)² + (b·√s)²` for a skew `s` passes
+/// `weights = [1, s]`, since scaling a form by a positive constant changes no
+/// comparison and no rounding, and that scaling is exactly what clears the
+/// square roots. Reduction under a diagonal form is the general shape any
+/// anisotropic two-dimensional lattice problem needs.
+///
+/// Everything is integer, so there is no accuracy cliff: a floating-point
+/// metric loses the ordering once the weighted coordinates pass `2⁵³` and
+/// degrades quietly to a poor basis, which is the failure this signature
+/// exists to remove.
+///
+/// # Termination
+///
+/// Each iteration replaces the shorter vector with a strictly shorter one, so
+/// the sequence of squared norms is strictly decreasing in the positive
+/// integers and the loop runs at most `log` many times. No iteration cap is
+/// needed and none is imposed — a cap here could only turn a correct answer
+/// into a wrong one.
+///
+/// # Panics
+///
+/// Panics if the two vectors are linearly dependent (a zero determinant is
+/// not a basis), if either weight is not positive, or if the weighted norms
+/// overflow `i128`. The last is a real bound and not a formality: the norm
+/// squares the weighted coordinates, so each of `|w₀·x|` and `|w₁·y|` must
+/// stay below `2⁶³` for the sum of squares to be representable.
+#[must_use]
+pub fn gauss_reduce_weighted(basis: [[i128; 2]; 2], weights: [i128; 2]) -> [[i128; 2]; 2] {
+    assert!(
+        weights[0] > 0 && weights[1] > 0,
+        "a diagonal form needs positive weights"
+    );
+    let determinant = basis[0][0]
+        .checked_mul(basis[1][1])
+        .and_then(|a| {
+            basis[0][1]
+                .checked_mul(basis[1][0])
+                .and_then(|b| a.checked_sub(b))
+        })
+        .expect("the basis determinant overflowed i128");
+    assert!(
+        determinant != 0,
+        "a two-dimensional basis needs independent vectors"
+    );
+
+    let overflow = "the weighted norm overflowed i128";
+    let mut u = basis[0];
+    let mut v = basis[1];
+    let mut norm_u = weighted_norm_sq(u, weights).expect(overflow);
+    if norm_u > weighted_norm_sq(v, weights).expect(overflow) {
+        core::mem::swap(&mut u, &mut v);
+        norm_u = weighted_norm_sq(u, weights).expect(overflow);
+    }
+
+    loop {
+        // `norm_u > 0` throughout: the determinant is non-zero, so neither
+        // vector is zero, and the weights are positive.
+        let q = round_div(weighted_dot(u, v, weights).expect(overflow), norm_u).expect(overflow);
+        let r = [
+            v[0].checked_sub(q.checked_mul(u[0]).expect(overflow))
+                .expect(overflow),
+            v[1].checked_sub(q.checked_mul(u[1]).expect(overflow))
+                .expect(overflow),
+        ];
+        let norm_r = weighted_norm_sq(r, weights).expect(overflow);
+        if norm_r >= norm_u {
+            // `u` is a shortest vector; `r` is reduced against it.
+            return [u, r];
+        }
+        v = u;
+        u = r;
+        norm_u = norm_r;
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{lll_reduce, lll_reduce_delta};
+    use super::{gauss_reduce_weighted, lll_reduce, lll_reduce_delta, weighted_norm_sq};
     use crate::bigint::{BigInt, Sign};
+
+    fn det(basis: [[i128; 2]; 2]) -> i128 {
+        basis[0][0] * basis[1][1] - basis[0][1] * basis[1][0]
+    }
+
+    /// Is `v` an integer combination of `basis`? Cramer's rule, with the
+    /// solution required to be exact rather than merely close.
+    fn in_lattice(basis: [[i128; 2]; 2], v: [i128; 2]) -> bool {
+        let d = det(basis);
+        assert!(d != 0);
+        let a = v[0] * basis[1][1] - v[1] * basis[1][0];
+        let b = basis[0][0] * v[1] - basis[0][1] * v[0];
+        a % d == 0 && b % d == 0
+    }
+
+    /// Nothing in a small window around a *reduced* basis is shorter than its
+    /// first vector.
+    ///
+    /// This is the minimality check, and it is stated over the reduced basis
+    /// on purpose. Searching combinations of the *input* basis is not a valid
+    /// oracle: two nearly parallel generators need large coefficients to
+    /// express the short vectors, so a fixed window silently misses them and
+    /// the test then reports the reduction wrong when it is right. Over a
+    /// reduced basis no window is needed beyond ±2 — with `2|⟨u,v⟩| ≤ ‖u‖²`
+    /// and `‖u‖ ≤ ‖v‖`, the norm of `a·u + b·v` is at least
+    /// `(a² − |ab| + b²)‖u‖²`, and `a² − |ab| + b²` exceeds 1 for every
+    /// integer pair outside `{(±1,0), (0,±1), ±(1,1), ±(1,−1)}`. ±4 is taken
+    /// for margin.
+    fn nothing_shorter_nearby(reduced: [[i128; 2]; 2], weights: [i128; 2], best: i128) {
+        for a in -4i128..=4 {
+            for b in -4i128..=4 {
+                if a == 0 && b == 0 {
+                    continue;
+                }
+                let v = [
+                    a * reduced[0][0] + b * reduced[1][0],
+                    a * reduced[0][1] + b * reduced[1][1],
+                ];
+                if let Some(n) = weighted_norm_sq(v, weights) {
+                    assert!(
+                        n >= best,
+                        "combination ({a},{b}) of {reduced:?} is shorter: {n} < {best}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gauss_reduce_finds_the_shortest_vector_under_a_weighted_norm() {
+        let mut state = 0x1234_5678_9abc_def1u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((state >> 33) as i64) as i128
+        };
+        for weights in [[1i128, 1], [1, 2], [1, 7], [3, 5], [1, 1000], [64, 1]] {
+            for _ in 0..200 {
+                let basis = [
+                    [next() % 4096, next() % 4096],
+                    [next() % 4096, next() % 4096],
+                ];
+                if det(basis) == 0 {
+                    continue;
+                }
+                let reduced = gauss_reduce_weighted(basis, weights);
+
+                // The reduction returns a basis of the *same* lattice: the
+                // determinant is preserved up to sign.
+                assert_eq!(det(reduced).abs(), det(basis).abs(), "lattice changed");
+
+                // Both vectors come from the original lattice, and the equal
+                // determinant above rules out a proper sublattice.
+                assert!(in_lattice(basis, reduced[0]), "left the lattice");
+                assert!(in_lattice(basis, reduced[1]), "left the lattice");
+
+                let n0 = weighted_norm_sq(reduced[0], weights).expect("fits");
+                let n1 = weighted_norm_sq(reduced[1], weights).expect("fits");
+                assert!(n0 <= n1, "returned out of order: {n0} > {n1}");
+                nothing_shorter_nearby(reduced, weights, n0);
+
+                // Reduced means the projection is at most a half step: this
+                // is the defining property, independent of the search above.
+                let dot = super::weighted_dot(reduced[0], reduced[1], weights).expect("fits");
+                assert!(2 * dot.abs() <= n0, "not size-reduced");
+            }
+        }
+    }
+
+    /// The skewed metric a lattice sieve uses is `(x/√s)² + (y·√s)²`. Scaling
+    /// it by `s` gives `x² + (s·y)²`, which is `weights = [1, s]` — the same
+    /// comparisons and the same rounding, with the square roots cleared.
+    #[test]
+    fn gauss_reduce_weights_match_the_skewed_sieve_metric() {
+        let skew = 12i128;
+        for basis in [
+            [[1024i128, 0], [37, 1]],
+            [[100_000, 0], [7, 3]],
+            [[5, 9], [11, 2]],
+        ] {
+            let reduced = gauss_reduce_weighted(basis, [1, skew]);
+            let float_norm = |v: [i128; 2]| {
+                let s = skew as f64;
+                let a = v[0] as f64 / s.sqrt();
+                let b = v[1] as f64 * s.sqrt();
+                a * a + b * b
+            };
+            // The integer form orders vectors exactly as the float form does,
+            // which is what makes it a drop-in replacement.
+            assert!(float_norm(reduced[0]) <= float_norm(reduced[1]) + 1e-9);
+            assert_eq!(det(reduced).abs(), det(basis).abs());
+        }
+    }
+
+    #[test]
+    fn gauss_reduce_leaves_an_already_reduced_basis_alone() {
+        // The standard basis is reduced under any weights.
+        let basis = [[1i128, 0], [0, 1]];
+        assert_eq!(gauss_reduce_weighted(basis, [1, 1]), [[1, 0], [0, 1]]);
+        // Under a heavy y-weight the x-axis vector is the shorter one.
+        assert_eq!(gauss_reduce_weighted(basis, [1, 100]), [[1, 0], [0, 1]]);
+        // And under a heavy x-weight the order flips.
+        assert_eq!(gauss_reduce_weighted(basis, [100, 1]), [[0, 1], [1, 0]]);
+    }
+
+    #[test]
+    #[should_panic(expected = "independent vectors")]
+    fn gauss_reduce_refuses_a_dependent_pair() {
+        let _ = gauss_reduce_weighted([[2, 4], [1, 2]], [1, 1]);
+    }
+
+    #[test]
+    #[should_panic(expected = "positive weights")]
+    fn gauss_reduce_refuses_a_zero_weight() {
+        let _ = gauss_reduce_weighted([[1, 0], [0, 1]], [1, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "overflowed")]
+    fn gauss_reduce_refuses_an_unrepresentable_norm() {
+        // The weighted coordinate squares, so this is past the bound the
+        // documentation names rather than an arbitrary large value.
+        let big = 1i128 << 100;
+        let _ = gauss_reduce_weighted([[big, 0], [0, 1]], [1, 1]);
+    }
 
     fn rows(data: &[&[i64]]) -> Vec<Vec<BigInt>> {
         data.iter()

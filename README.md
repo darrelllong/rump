@@ -2,7 +2,7 @@
 
 **RU**st **M**ulti**P**recision: multiprecision integer arithmetic in Rust,
 implemented directly from the literature, with no dependencies and two
-audited `unsafe` exceptions (named under [Properties](#properties)) to an
+audited `unsafe` exceptions (listed under [Properties](#properties)) to an
 otherwise `#![deny(unsafe_code)]` crate. Extracted from
 [darrelllong/cryptography](https://github.com/darrelllong/cryptography) so the
 arithmetic can serve consumers beyond cryptography, with the crate boundary
