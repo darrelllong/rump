@@ -8,6 +8,11 @@ otherwise `#![deny(unsafe_code)]` crate. Extracted from
 arithmetic can serve consumers beyond cryptography, with the crate boundary
 enforcing a clean API.
 
+Public names and cross-repository ownership are governed by
+[`NAMES.md`](NAMES.md), paired with factoring's
+[`NAMES.md`](../factoring/NAMES.md). Names not present there are not added;
+the breaking API cut uses no compatibility shims or duplicate public paths.
+
 ## What it provides
 
 - **`BigUint`, `BigInt`** — unsigned and signed integers on little-endian
