@@ -235,6 +235,21 @@ Transfer state is maintained in both this file and the ownership rows in the
 | integer::WordReciprocal | six division sites | Rump canonical; consumer transfer |
 | number_theory::SmoothnessBase | relation confirmation | Rump canonical; consumer transfer |
 
+## Sibling revisions
+
+The two commits cannot be atomic across two repositories, so the recorded pair
+is the atomic unit: old/old and new/new are supported, old/new and new/old are
+not.
+
+| Repository | Revision | What it carries |
+|---|---|---|
+| rump | `4c5e6acd9cb0435680db65ef97d77d0b0983c540` | the 0.3.0 surface: canonical names, module topology, typed construction errors, `forbid(unsafe_code)`, portable checked sizing, `MontgomeryResidue` |
+| factoring | `dd024f87c6f5e9264607f40bce34289063207c31` | `rho.rs` on the residue API, and the ledger rows for it |
+
+Both repositories' gates are green at these revisions:
+`scripts/release_gate.sh` (eleven legs) in rump, and fmt / clippy
+`-D warnings` / tests / `git diff --check` in factoring.
+
 ## Frozen during the cut
 
 No new public export exists unless it is already canonical here. No new
