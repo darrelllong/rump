@@ -5,7 +5,7 @@
 //! [`PolyZ`] over the integers and [`PolyMod`] over a fixed modulus. They
 //! are the substrate the general number field sieve is built on (the
 //! algebraic side is a degree-5 or -6 polynomial over ℤ and its behaviour
-//! modulo small primes), and more broadly the polynomial layer a computer
+//! rem small primes), and more broadly the polynomial layer a computer
 //! algebra surface provides.
 //!
 //! Both store coefficients low-to-high (`coeffs[i]` multiplies `xⁱ`) and
@@ -301,7 +301,7 @@ fn karatsuba_square_products_estimate(len: usize, threshold: usize) -> usize {
 /// half at every leaf, so the two are compared without it.
 ///
 /// A square is where the omission bites hardest, because squaring is what
-/// [`PolyMod::pow_mod`] does at every step and the ladder's early values
+/// [`PolyMod::mod_pow`] does at every step and the ladder's early values
 /// are the sparsest there are — `x`, `x²`, `x⁴` — staying sparse until
 /// reduction densifies them. Splitting a two-term value of 1024
 /// coefficients measured 13× slower than the schoolbook square it
@@ -464,7 +464,7 @@ impl PolyZ {
         for i in 0..n {
             let a = self.coeffs.get(i).cloned().unwrap_or_else(BigInt::zero);
             let b = other.coeffs.get(i).cloned().unwrap_or_else(BigInt::zero);
-            coeffs.push(a.add_ref(&b));
+            coeffs.push(a.add(&b));
         }
         Self::new(coeffs)
     }
@@ -479,7 +479,7 @@ impl PolyZ {
         for i in 0..n {
             let a = self.coeffs.get(i).cloned().unwrap_or_else(BigInt::zero);
             let b = other.coeffs.get(i).cloned().unwrap_or_else(BigInt::zero);
-            coeffs.push(a.sub_ref(&b));
+            coeffs.push(a.sub(&b));
         }
         Self::new(coeffs)
     }
@@ -534,7 +534,7 @@ impl PolyZ {
         if c.sign() == Sign::Negative && c.magnitude().is_one() {
             return self.negated();
         }
-        Self::new(self.coeffs.iter().map(|a| a.mul_ref(c)).collect())
+        Self::new(self.coeffs.iter().map(|a| a.mul(c)).collect())
     }
 
     /// Evaluate at `x` by Horner's method: fold `acc ← acc·x + cᵢ` from the
@@ -545,7 +545,7 @@ impl PolyZ {
     pub fn evaluate(&self, x: &BigInt) -> BigInt {
         let mut acc = BigInt::zero();
         for coeff in self.coeffs.iter().rev() {
-            acc = acc.mul_ref(x).add_ref(coeff);
+            acc = acc.mul(x).add(coeff);
         }
         acc
     }
@@ -563,7 +563,7 @@ impl PolyZ {
         let coeffs = self.coeffs[1..]
             .iter()
             .enumerate()
-            .map(|(i, c)| c.mul_ref(&BigInt::from_i64(i as i64 + 1)))
+            .map(|(i, c)| c.mul(&BigInt::from_i64(i as i64 + 1)))
             .collect();
         Self::new(coeffs)
     }
@@ -648,24 +648,24 @@ impl PolyZ {
             if !lc_is_one {
                 for c in rem.iter_mut() {
                     if !c.is_zero() {
-                        *c = c.mul_ref(&lc);
+                        *c = c.mul(&lc);
                     }
                 }
                 for q in quotient.iter_mut() {
                     if !q.is_zero() {
-                        *q = q.mul_ref(&lc);
+                        *q = q.mul(&lc);
                     }
                 }
             }
             for (k, d) in divisor.coeffs.iter().enumerate() {
                 if !d.is_zero() {
-                    rem[shift + k] = rem[shift + k].sub_ref(&rem_lc.mul_ref(d));
+                    rem[shift + k] = rem[shift + k].sub(&rem_lc.mul(d));
                 }
             }
             debug_assert!(rem[top].is_zero(), "leading terms cancel by construction");
             // quotient accumulates rem_lc at the shift position, itself
             // scaled by lc (above) for the steps still to come.
-            quotient[shift] = quotient[shift].add_ref(&rem_lc);
+            quotient[shift] = quotient[shift].add(&rem_lc);
             steps += 1;
             // Step down to the next non-zero coefficient — the new degree —
             // and stop once it falls below the divisor's or the remainder
@@ -753,7 +753,7 @@ impl PolyZ {
             // exactly because the division above was exact.
             for (k, d) in divisor.coeffs.iter().enumerate() {
                 if !d.is_zero() {
-                    rem[shift + k] = rem[shift + k].sub_ref(&q_coeff.mul_ref(d));
+                    rem[shift + k] = rem[shift + k].sub(&q_coeff.mul(d));
                 }
             }
             debug_assert!(rem[top].is_zero(), "leading term cancels by construction");
@@ -872,8 +872,8 @@ impl PolyZ {
         let mut coeffs = Vec::with_capacity(degree + 1);
         let mut remaining = n.clone();
         for _ in 0..degree {
-            let digit = remaining.symmetric_remainder(base);
-            let carried = remaining.sub_ref(&digit);
+            let digit = remaining.symmetric_rem(base);
+            let carried = remaining.sub(&digit);
             let (quotient, check) = carried.div_rem(&signed_base);
             debug_assert!(
                 check.is_zero(),
@@ -886,7 +886,7 @@ impl PolyZ {
         Self::new(coeffs)
     }
 
-    /// The remainder of `self` modulo a monic `divisor`, without forming the
+    /// The remainder of `self` rem a monic `divisor`, without forming the
     /// quotient.
     ///
     /// Monicity is what makes this cheap. [`div_rem`](Self::div_rem) must ask
@@ -933,7 +933,7 @@ impl PolyZ {
             let shift = top - divisor_degree;
             for (k, d) in divisor.coeffs[..divisor_degree].iter().enumerate() {
                 if !d.is_zero() {
-                    rem[shift + k].sub_assign_ref(&factor.mul_ref(d));
+                    rem[shift + k].sub_assign_ref(&factor.mul(d));
                 }
             }
             rem[top] = BigInt::zero();
@@ -953,7 +953,7 @@ impl PolyZ {
     /// depth is logarithmic.
     ///
     /// Reducing at every level rather than once at the end is both sound and
-    /// the point: reduction modulo a monic polynomial is a ring homomorphism
+    /// the point: reduction rem a monic polynomial is a ring homomorphism
     /// (see [`rem_monic`](Self::rem_monic)), so the reduced product equals the
     /// reduction of the product, and holding every *reduced* intermediate to
     /// degree below `deg divisor` stops the degree growing with the number of
@@ -1032,23 +1032,23 @@ impl PolyZ {
         total
     }
 
-    /// Every root of `self` modulo `primeᵉ`, in increasing order, by Hensel
-    /// lifting from the roots modulo `prime`.
+    /// Every root of `self` rem `primeᵉ`, in increasing order, by Hensel
+    /// lifting from the roots rem `prime`.
     ///
-    /// A root `r` modulo `pᵏ` lifts to candidates `r + t·pᵏ`, and Taylor
-    /// truncated after one term is exact modulo `p^(k+1)`:
+    /// A root `r` rem `pᵏ` lifts to candidates `r + t·pᵏ`, and Taylor
+    /// truncated after one term is exact rem `p^(k+1)`:
     ///
     /// ```text
     /// f(r + t·pᵏ) ≡ f(r) + t·pᵏ·f′(r)   (mod p^(k+1)).
     /// ```
     ///
-    /// Write `f(r) = s·pᵏ`, which is legitimate because `r` is a root modulo
+    /// Write `f(r) = s·pᵏ`, which is legitimate because `r` is a root rem
     /// `pᵏ`. Where `f′(r) ≢ 0 (mod p)` the congruence is linear in `t` with an
     /// invertible coefficient, so there is exactly one lift, `t ≡ −s·f′(r)⁻¹`.
     /// Where `f′(r) ≡ 0 (mod p)` the `t` term vanishes and the congruence no
     /// longer mentions `t` at all: either `p^(k+1) | f(r)` and all `p` lifts
-    /// are roots, or none is. That branching is why the count of roots modulo
-    /// `pᵏ` is not in general the count modulo `p` — the multiple roots, the
+    /// are roots, or none is. That branching is why the count of roots rem
+    /// `pᵏ` is not in general the count rem `p` — the multiple roots, the
     /// ones that also kill the derivative, are where the tree widens, and they
     /// are exactly the ones lying over primes that divide `disc f`.
     ///
@@ -1060,7 +1060,7 @@ impl PolyZ {
     /// every coefficient, then `f(x) ≡ 0 (mod pᵉ)` says exactly
     /// `(f/pᵛ)(x) ≡ 0 (mod p^{e−v})`, so the roots are those of `f/pᵛ` to
     /// the reduced precision, each standing for the `pᵛ` residues congruent
-    /// to it modulo `p^{e−v}`. Only when `v ≥ e` does the condition become
+    /// to it rem `p^{e−v}`. Only when `v ≥ e` does the condition become
     /// vacuous and the root set really is everything.
     ///
     /// # Panics
@@ -1078,7 +1078,7 @@ impl PolyZ {
     /// rather than left to exhaust memory — though only the last two are
     /// refused *before* the work, since the base level has to be found before
     /// it can be counted. That bound is on the *level*, not on the
-    /// prime: a branching root modulo a 40-bit prime is refused even though
+    /// prime: a branching root rem a 40-bit prime is refused even though
     /// the prime is far below `2⁶⁴`, which is the case an earlier revision
     /// of this documentation got wrong.
     ///
@@ -1130,7 +1130,7 @@ impl PolyZ {
             !base.is_zero(),
             "dividing out the content leaves a polynomial not divisible by p"
         );
-        // The derivative is only ever consulted modulo p — the case split
+        // The derivative is only ever consulted rem p — the case split
         // above turns on `f′(r) mod p`, not on any higher power — so it is
         // reduced once here and evaluated per root.
         let derivative = PolyMod::from_poly_z(&target.derivative(), prime);
@@ -1143,39 +1143,39 @@ impl PolyZ {
         let mut modulus = prime.clone();
 
         for _ in 1..exponent {
-            let next_modulus = modulus.mul_ref(prime);
+            let next_modulus = modulus.mul(prime);
             let reduced = PolyMod::from_poly_z(target, &next_modulus);
             let mut next = Vec::with_capacity(level.len());
             for r in &level {
                 let value = reduced.evaluate(r);
-                let slope = derivative.evaluate(&r.modulo(prime));
+                let slope = derivative.evaluate(&r.rem(prime));
                 if slope.is_zero() {
                     if value.is_zero() {
                         let span = prime.to_u64().unwrap_or(u64::MAX);
                         check_root_level_width(next.len(), span, MAX_ENUMERATED_ROOTS);
                         for t in 0..span {
-                            next.push(r.add_ref(&BigUint::from_u64(t).mul_ref(&modulus)));
+                            next.push(r.add(&BigUint::from_u64(t).mul(&modulus)));
                         }
                     }
                     // Otherwise no lift of this root survives, and the branch
                     // dies here.
                 } else {
                     let (s, check) = value.div_rem(&modulus);
-                    debug_assert!(check.is_zero(), "a root modulo pᵏ has f(r) divisible by pᵏ");
+                    debug_assert!(check.is_zero(), "a root rem pᵏ has f(r) divisible by pᵏ");
                     let inverse = number_theory::mod_inverse(&slope, prime)
-                        .expect("a non-zero residue is invertible modulo a prime");
-                    let negated = BigUint::mod_sub(&BigUint::zero(), &s.modulo(prime), prime);
+                        .expect("a non-zero residue is invertible rem a prime");
+                    let negated = BigUint::mod_sub(&BigUint::zero(), &s.rem(prime), prime);
                     let t = BigUint::mod_mul(&negated, &inverse, prime);
                     check_root_level_width(next.len(), 1, MAX_ENUMERATED_ROOTS);
-                    next.push(r.add_ref(&t.mul_ref(&modulus)));
+                    next.push(r.add(&t.mul(&modulus)));
                 }
             }
             level = next;
             modulus = next_modulus;
         }
         if content_valuation > 0 {
-            // Each root modulo `p^{e−v}` stands for the `pᵛ` residues
-            // congruent to it modulo `p^{e−v}`; `modulus` is `p^{e−v}` here.
+            // Each root rem `p^{e−v}` stands for the `pᵛ` residues
+            // congruent to it rem `p^{e−v}`; `modulus` is `p^{e−v}` here.
             let span = prime
                 .pow_u64(content_valuation as u64)
                 .to_u64()
@@ -1185,7 +1185,7 @@ impl PolyZ {
             let mut expanded = Vec::with_capacity(level.len() * span as usize);
             for r in &level {
                 for t in 0..span {
-                    expanded.push(r.add_ref(&BigUint::from_u64(t).mul_ref(&modulus)));
+                    expanded.push(r.add(&BigUint::from_u64(t).mul(&modulus)));
                 }
             }
             level = expanded;
@@ -1273,7 +1273,7 @@ fn convolve_schoolbook_z(a: &[BigInt], b: &[BigInt]) -> Vec<BigInt> {
             continue;
         }
         for (j, y) in b.iter().enumerate() {
-            let term = x.mul_ref(y);
+            let term = x.mul(y);
             out[i + j].add_assign_ref(&term);
         }
     }
@@ -1307,7 +1307,7 @@ fn add_into_at_z(acc: &mut [BigInt], addend: &[BigInt], offset: usize) {
     }
 }
 
-/// The convolution `a ⋆ b` modulo `m`, returning `a.len() + b.len() - 1`
+/// The convolution `a ⋆ b` rem `m`, returning `a.len() + b.len() - 1`
 /// coefficients — the coefficient-vector core behind [`PolyMod::mul`].
 /// Shape and split rule are [`convolve_z`]'s, at
 /// [`POLY_KARATSUBA_THRESHOLD_MODP`] (far higher, for the reasons recorded
@@ -1352,7 +1352,7 @@ fn convolve_modp(a: &[BigUint], b: &[BigUint], m: &BigUint) -> Vec<BigUint> {
     out
 }
 
-/// The schoolbook convolution modulo `m`, with the reduction **deferred**:
+/// The schoolbook convolution rem `m`, with the reduction **deferred**:
 /// partial products accumulate as ordinary integers and each output
 /// coefficient is reduced once, at the end.
 ///
@@ -1381,17 +1381,17 @@ fn convolve_schoolbook_modp(a: &[BigUint], b: &[BigUint], m: &BigUint) -> Vec<Bi
             continue;
         }
         for (j, y) in b.iter().enumerate() {
-            let term = x.mul_ref(y);
+            let term = x.mul(y);
             acc[i + j].add_assign_ref(&term);
         }
     }
     for slot in &mut acc {
-        *slot = slot.modulo(m);
+        *slot = slot.rem(m);
     }
     acc
 }
 
-/// The convolution `a ⋆ a` modulo `m` — a squaring, which forms each
+/// The convolution `a ⋆ a` rem `m` — a squaring, which forms each
 /// distinct cross term once and doubles it rather than computing both
 /// orderings:
 ///
@@ -1459,18 +1459,18 @@ fn convolve_square_modp(a: &[BigUint], m: &BigUint) -> Vec<BigUint> {
         if a[i].is_zero() {
             continue;
         }
-        acc[2 * i].add_assign_ref(&a[i].square_ref());
+        acc[2 * i].add_assign_ref(&a[i].square());
         for j in (i + 1)..n {
             if a[j].is_zero() {
                 continue;
             }
-            let mut cross = a[i].mul_ref(&a[j]);
+            let mut cross = a[i].mul(&a[j]);
             cross.shl1();
             acc[i + j].add_assign_ref(&cross);
         }
     }
     for slot in &mut acc {
-        *slot = slot.modulo(m);
+        *slot = slot.rem(m);
     }
     acc
 }
@@ -1485,7 +1485,7 @@ fn add_coeffs_modp(a: &[BigUint], b: &[BigUint], m: &BigUint) -> Vec<BigUint> {
     out
 }
 
-/// `acc ← acc − sub` modulo `m`, coefficient-wise.
+/// `acc ← acc − sub` rem `m`, coefficient-wise.
 fn sub_assign_coeffs_modp(acc: &mut [BigUint], sub: &[BigUint], m: &BigUint) {
     debug_assert!(sub.len() <= acc.len(), "Karatsuba middle term dominates");
     for (slot, value) in acc.iter_mut().zip(sub) {
@@ -1493,7 +1493,7 @@ fn sub_assign_coeffs_modp(acc: &mut [BigUint], sub: &[BigUint], m: &BigUint) {
     }
 }
 
-/// `acc[offset..] += addend` modulo `m`, coefficient-wise.
+/// `acc[offset..] += addend` rem `m`, coefficient-wise.
 fn add_into_at_modp(acc: &mut [BigUint], addend: &[BigUint], offset: usize, m: &BigUint) {
     for (slot, value) in acc[offset..].iter_mut().zip(addend) {
         *slot = BigUint::mod_add(slot, value, m);
@@ -1563,8 +1563,8 @@ fn bareiss_determinant(mut matrix: Vec<Vec<BigInt>>) -> BigInt {
             for j in k + 1..n {
                 // matrix[i][j] ← (matrix[i][j]·pivot − matrix[i][k]·matrix[k][j]) / previous
                 let cross = matrix[i][j]
-                    .mul_ref(&pivot)
-                    .sub_ref(&matrix[i][k].mul_ref(&matrix[k][j]));
+                    .mul(&pivot)
+                    .sub(&matrix[i][k].mul(&matrix[k][j]));
                 matrix[i][j] = cross.div_exact(&previous);
             }
             matrix[i][k] = BigInt::zero();
@@ -1592,14 +1592,14 @@ fn bareiss_determinant(mut matrix: Vec<Vec<BigInt>>) -> BigInt {
 /// of the two moduli the receiver happened to hold. The check runs before
 /// any short-circuit, so mismatched zero operands panic too. Affected:
 /// [`Self::add`], [`Self::sub`], [`Self::mul`], [`Self::div_rem`],
-/// [`Self::rem`], [`Self::gcd`], and [`Self::pow_mod`].
+/// [`Self::rem`], [`Self::gcd`], and [`Self::mod_pow`].
 ///
 /// Addition, subtraction, multiplication, scaling, and evaluation work for
 /// any `m ≥ 2`. The division-based operations — [`Self::div_rem`],
 /// [`Self::rem`], [`Self::gcd`], [`Self::make_monic`], and
-/// [`Self::pow_mod`] — invert a leading coefficient modulo `m`, so they
+/// [`Self::mod_pow`] — invert a leading coefficient rem `m`, so they
 /// require `m` **prime** (precisely, the relevant leading coefficient
-/// invertible modulo `m`) and panic on a non-invertible pivot. This is the
+/// invertible rem `m`) and panic on a non-invertible pivot. This is the
 /// field ℤ/pℤ the factorization routines are built over.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolyMod {
@@ -1608,7 +1608,7 @@ pub struct PolyMod {
 }
 
 impl PolyMod {
-    /// Build from coefficients low-to-high, reducing each modulo `modulus`
+    /// Build from coefficients low-to-high, reducing each rem `modulus`
     /// and normalizing away trailing zeros. Both steps establish the type's
     /// invariants: coefficients are the least non-negative residues, so two
     /// representations of one residue class cannot compare unequal, and a
@@ -1625,7 +1625,7 @@ impl PolyMod {
             *modulus >= BigUint::from_u64(2),
             "polynomial modulus must be at least 2"
         );
-        let coeffs = coeffs.into_iter().map(|c| c.modulo(modulus)).collect();
+        let coeffs = coeffs.into_iter().map(|c| c.rem(modulus)).collect();
         let mut poly = Self {
             coeffs,
             modulus: modulus.clone(),
@@ -1645,9 +1645,9 @@ impl PolyMod {
         Self::new(Vec::new(), modulus)
     }
 
-    /// Reduce an integer polynomial modulo `modulus`, the ring homomorphism
+    /// Reduce an integer polynomial rem `modulus`, the ring homomorphism
     /// `ℤ[x] → (ℤ/mℤ)[x]`. Each coefficient goes through
-    /// [`BigInt::modulo_positive`], which maps a negative integer to its
+    /// [`BigInt::rem_euclid`], which maps a negative integer to its
     /// least non-negative residue rather than to a negative remainder, so
     /// the result satisfies this type's reduced-coefficient invariant.
     /// Reduction can lower the degree, when the leading coefficient is a
@@ -1661,13 +1661,13 @@ impl PolyMod {
         let coeffs = poly
             .coefficients()
             .iter()
-            .map(|c| c.modulo_positive(modulus))
+            .map(|c| c.rem_euclid(modulus))
             .collect();
         Self::new(coeffs, modulus)
     }
 
     /// Build from coefficients the caller guarantees are already reduced
-    /// modulo `modulus`, skipping the per-coefficient reduction that
+    /// rem `modulus`, skipping the per-coefficient reduction that
     /// [`Self::new`] pays. The trailing-zero invariant is still
     /// re-established here; the reduced-coefficient invariant is the
     /// caller's to uphold, which is why this is private — every internal
@@ -1836,7 +1836,7 @@ impl PolyMod {
     /// need not arrive in `[0, m)`.
     #[must_use]
     pub fn evaluate(&self, x: &BigUint) -> BigUint {
-        let x = x.modulo(&self.modulus);
+        let x = x.rem(&self.modulus);
         let mut acc = BigUint::zero();
         for coeff in self.coeffs.iter().rev() {
             acc = BigUint::mod_add(
@@ -1858,7 +1858,7 @@ impl PolyMod {
     ///
     /// # Panics
     ///
-    /// Panics if the leading coefficient is not invertible modulo `m`
+    /// Panics if the leading coefficient is not invertible rem `m`
     /// (always invertible when `m` is prime and the polynomial is
     /// non-zero).
     #[must_use]
@@ -1871,12 +1871,12 @@ impl PolyMod {
             return self.clone();
         }
         let inv = number_theory::mod_inverse(&lc, &self.modulus)
-            .expect("leading coefficient is invertible modulo a prime");
+            .expect("leading coefficient is invertible rem a prime");
         self.scale(&inv)
     }
 
     /// Division with remainder by a divisor whose leading coefficient is
-    /// invertible modulo `m`: `self = quotient·divisor + remainder` with
+    /// invertible rem `m`: `self = quotient·divisor + remainder` with
     /// `deg remainder < deg divisor`.
     ///
     /// Why the invertibility requirement, and why this is total where
@@ -1893,7 +1893,7 @@ impl PolyMod {
     ///
     /// Panics if the two moduli differ (see the type documentation), if
     /// `divisor` is zero, or if the divisor's leading coefficient is not
-    /// invertible modulo `m` *and there is anything to divide* — a dividend
+    /// invertible rem `m` *and there is anything to divide* — a dividend
     /// of lower degree returns `(0, self)` without touching the
     /// coefficient. For composite `m` the invertibility panic is reachable,
     /// not an internal invariant.
@@ -1913,7 +1913,7 @@ impl PolyMod {
     /// # Panics
     ///
     /// Panics exactly as [`Self::div_rem`] does: differing moduli, a zero
-    /// divisor, or a leading coefficient not invertible modulo `m` when
+    /// divisor, or a leading coefficient not invertible rem `m` when
     /// there is anything to divide (a dividend of lower degree comes back
     /// unchanged without touching the coefficient).
     #[must_use]
@@ -1972,7 +1972,7 @@ impl PolyMod {
         // Growth is bounded: a position lies inside the window for at most
         // `deg divisor + 1` steps, so it accumulates that many offsets
         // below `m²`, staying under `2·bits(m) + lg(deg divisor)` bits.
-        let modulus_squared = self.modulus.square_ref();
+        let modulus_squared = self.modulus.square();
         let mut rem = self.coeffs.clone();
         let mut quotient =
             want_quotient.then(|| vec![BigUint::zero(); self_degree - divisor_degree + 1]);
@@ -1982,7 +1982,7 @@ impl PolyMod {
             // (`div_rem` short-circuits below the divisor), and this is
             // simultaneously the cancellation test, since the step below
             // leaves a multiple of `m` behind rather than a literal zero.
-            rem[top] = rem[top].modulo(&self.modulus);
+            rem[top] = rem[top].rem(&self.modulus);
             if rem[top].is_zero() {
                 if top == 0 {
                     break;
@@ -2002,7 +2002,7 @@ impl PolyMod {
             // the congruent addition described above.
             for (k, d) in divisor.coeffs.iter().enumerate() {
                 if !d.is_zero() {
-                    let offset = modulus_squared.sub_ref(&factor.mul_ref(d));
+                    let offset = modulus_squared.sub(&factor.mul(d));
                     rem[shift + k].add_assign_ref(&offset);
                 }
             }
@@ -2015,7 +2015,7 @@ impl PolyMod {
             // *overwrite* the quotient coefficient it had already written,
             // then terminate normally with a silently wrong quotient.
             debug_assert!(
-                rem[top].modulo(&self.modulus).is_zero(),
+                rem[top].rem(&self.modulus).is_zero(),
                 "the leading term cancels by construction"
             );
             if let Some(q) = quotient.as_mut() {
@@ -2027,7 +2027,7 @@ impl PolyMod {
         // closing pass.
         let quotient = quotient.map(|q| Self::from_reduced(q, &self.modulus));
         for slot in &mut rem {
-            *slot = slot.modulo(&self.modulus);
+            *slot = slot.rem(&self.modulus);
         }
         (quotient, Self::from_reduced(rem, &self.modulus))
     }
@@ -2046,7 +2046,7 @@ impl PolyMod {
     ///
     /// Panics if the two moduli differ (see the type documentation), or if
     /// some remainder reached during the descent has a leading coefficient
-    /// that is not invertible modulo `m`. Over a prime modulus the latter
+    /// that is not invertible rem `m`. Over a prime modulus the latter
     /// cannot occur, since every non-zero residue is a unit.
     #[must_use]
     pub fn gcd(&self, other: &Self) -> Self {
@@ -2067,7 +2067,7 @@ impl PolyMod {
     ///
     /// Scanning the exponent from its top bit down, each step squares the
     /// accumulator and multiplies in the base when the bit is set, reducing
-    /// modulo `modulus_poly` after every product. Reducing at every step,
+    /// rem `modulus_poly` after every product. Reducing at every step,
     /// rather than at the end, is what keeps the degree bounded by
     /// `deg modulus_poly`: the exponent is `p^d` in the factorization
     /// routines, so the unreduced power is not representable.
@@ -2076,10 +2076,10 @@ impl PolyMod {
     ///
     /// Panics if the two moduli differ (see the type documentation), if
     /// `modulus_poly` is the zero polynomial, or if a leading coefficient
-    /// reached during reduction is not invertible modulo `m` (`m` prime
+    /// reached during reduction is not invertible rem `m` (`m` prime
     /// avoids the last).
     #[must_use]
-    pub fn pow_mod(&self, exponent: &BigUint, modulus_poly: &Self) -> Self {
+    pub fn mod_pow(&self, exponent: &BigUint, modulus_poly: &Self) -> Self {
         self.check_modulus(modulus_poly);
         if exponent.is_zero() {
             let one = Self::new(vec![BigUint::one()], &self.modulus);
@@ -2235,7 +2235,7 @@ impl PolyMod {
     }
 
     /// The formal derivative over 𝔽ₚ, `∑ i·cᵢ·xⁱ⁻¹` with the scaling done
-    /// modulo `m`. Unlike the ℤ case it can vanish on a non-constant
+    /// rem `m`. Unlike the ℤ case it can vanish on a non-constant
     /// polynomial: the scaling kills every term whose index is a multiple of
     /// the characteristic, so the derivative is zero exactly when the
     /// polynomial is `g(xᵖ) = g(x)ᵖ`. That vanishing is what drives the
@@ -2265,7 +2265,7 @@ impl PolyMod {
     /// captured block is divided out of `remaining` before the next round,
     /// so every proper divisor of `d` has already been removed. The
     /// Frobenius power is advanced in place, `x^(pᵈ) = (x^(pᵈ⁻¹))ᵖ`, one
-    /// [`Self::pow_mod`] per round rather than a fresh exponentiation.
+    /// [`Self::mod_pow`] per round rather than a fresh exponentiation.
     ///
     /// The loop stops once `deg remaining < 2(d+1)`: every irreducible factor
     /// still present has degree greater than `d`, so two of them would give
@@ -2288,10 +2288,10 @@ impl PolyMod {
         while remaining.degree().is_some_and(|r| r >= 2 * (d + 1)) {
             d += 1;
             // x^(pᵈ) = (x^(pᵈ⁻¹))ᵖ mod remaining.
-            xqi = xqi.pow_mod(&self.modulus, &remaining);
+            xqi = xqi.mod_pow(&self.modulus, &remaining);
             // The degree-d factors divide x^(pᵈ) − x; lower degrees dividing
             // d were captured and divided out in earlier rounds.
-            // pow_mod reduces after every product, so deg(xqi) < deg(remaining),
+            // mod_pow reduces after every product, so deg(xqi) < deg(remaining),
             // and the loop guard keeps deg(remaining) ≥ 2 ≥ deg(x) + 1. The
             // difference is therefore already reduced; a rem here would be a
             // full division that cannot change it.
@@ -2364,7 +2364,7 @@ impl PolyMod {
             // halving is a one-bit shift — no reason to spend a full
             // multiprecision division on it.
             let pd = self.modulus.pow_u64(u64::try_from(d).expect("d fits u64"));
-            let mut half = pd.sub_ref(&BigUint::one());
+            let mut half = pd.sub(&BigUint::one());
             half.shr1();
             Some(half)
         };
@@ -2398,7 +2398,7 @@ impl PolyMod {
                 let exponent = cz_exponent
                     .as_ref()
                     .expect("odd modulus takes the exponent branch");
-                let ae = a.pow_mod(exponent, self);
+                let ae = a.mod_pow(exponent, self);
                 let ae_minus_one = ae.sub(&one_poly);
                 self.gcd(&ae_minus_one)
             };
@@ -2464,7 +2464,7 @@ impl PolyMod {
     /// Panics on a non-invertible pivot during division. A prime modulus is
     /// required (see the type documentation): over a composite modulus the
     /// answer is unspecified and may be returned without a panic — `x² + 1`,
-    /// for one, is reported irreducible modulo 15.
+    /// for one, is reported irreducible rem 15.
     #[must_use]
     pub fn is_irreducible(&self) -> bool {
         let Some(degree) = self.degree() else {
@@ -2551,7 +2551,7 @@ impl PolyMod {
         let monic = self.make_monic();
         // x^p − x mod f, then gcd with f: the product of (x − r) over roots r.
         let x = Self::monomial_x(&self.modulus);
-        let xp = x.pow_mod(&self.modulus, &monic);
+        let xp = x.mod_pow(&self.modulus, &monic);
         let linear_product = monic.gcd(&xp.sub(&x));
         if linear_product.degree().is_none_or(|d| d == 0) {
             return Vec::new();
@@ -2592,16 +2592,16 @@ impl PolyMod {
         PolyZ::new(
             self.coeffs
                 .iter()
-                .map(|c| BigInt::from_biguint(c.clone()).symmetric_remainder(&self.modulus))
+                .map(|c| BigInt::from_biguint(c.clone()).symmetric_rem(&self.modulus))
                 .collect(),
         )
     }
 
-    /// The same coefficient *representatives*, read modulo a different
+    /// The same coefficient *representatives*, read rem a different
     /// modulus.
     ///
     /// It takes each class to its canonical representative in `[0, m)`, an
-    /// integer, and reduces that integer modulo the new modulus. Which of
+    /// integer, and reduces that integer rem the new modulus. Which of
     /// the two divisibility directions holds decides what survives, and
     /// they are not symmetric:
     ///
@@ -2615,7 +2615,7 @@ impl PolyMod {
     ///   equality survives — two elements equal before are equal after.
     ///
     /// Widening is nonetheless what this exists for. It re-reads a solution
-    /// modulo `m` as a starting point modulo `m′`, correct to the old
+    /// rem `m` as a starting point rem `m′`, correct to the old
     /// precision and arbitrary beyond it, which is the seeding step of a
     /// Newton lift: each round squares the modulus and the correction term
     /// repairs the newly exposed digits. The arithmetic that follows the
@@ -2624,7 +2624,7 @@ impl PolyMod {
     /// who assumes it does will get a silently wrong answer rather than a
     /// panic, which is why the direction is spelled out.
     #[must_use]
-    pub fn with_modulus(&self, modulus: &BigUint) -> Self {
+    pub fn change_modulus(&self, modulus: &BigUint) -> Self {
         Self::new(self.coeffs.clone(), modulus)
     }
 }
@@ -2682,9 +2682,7 @@ mod tests {
             let radix = BigUint::from_u64(1u64 << 32);
             let mut v = BigUint::zero();
             for _ in 0..2 * words {
-                v = v
-                    .mul_ref(&radix)
-                    .add_ref(&BigUint::from_u64(self.next_u64() >> 32));
+                v = v.mul(&radix).add(&BigUint::from_u64(self.next_u64() >> 32));
             }
             v
         }
@@ -2698,7 +2696,7 @@ mod tests {
         let mut coeffs = vec![BigInt::zero(); a.coefficients().len() + b.coefficients().len() - 1];
         for (i, x) in a.coefficients().iter().enumerate() {
             for (j, y) in b.coefficients().iter().enumerate() {
-                coeffs[i + j] = coeffs[i + j].add_ref(&x.mul_ref(y));
+                coeffs[i + j] = coeffs[i + j].add(&x.mul(y));
             }
         }
         PolyZ::new(coeffs)
@@ -2908,15 +2906,15 @@ mod tests {
         let small = BigUint::from_u64(1_000_003);
         let mut wide = BigUint::one();
         wide.shl_bits(255);
-        let wide = wide.add_ref(&BigUint::from_u64(235));
+        let wide = wide.add(&BigUint::from_u64(235));
         let draw_wide = |rng: &mut SplitMix64, m: &BigUint| {
             let mut v = BigUint::zero();
             for k in 0..4 {
                 let mut w = BigUint::from_u64(rng.next_u64());
                 w.shl_bits(64 * k);
-                v = v.add_ref(&w);
+                v = v.add(&w);
             }
-            v.modulo(m)
+            v.rem(m)
         };
 
         eprintln!("Karatsuba saving over schoolbook (positive = split wins)");
@@ -2997,18 +2995,18 @@ mod tests {
             if a[i].is_zero() {
                 continue;
             }
-            acc[2 * i].add_assign_ref(&a[i].square_ref());
+            acc[2 * i].add_assign_ref(&a[i].square());
             for j in (i + 1)..n {
                 if a[j].is_zero() {
                     continue;
                 }
-                let mut cross = a[i].mul_ref(&a[j]);
+                let mut cross = a[i].mul(&a[j]);
                 cross.shl1();
                 acc[i + j].add_assign_ref(&cross);
             }
         }
         for slot in &mut acc {
-            *slot = slot.modulo(m);
+            *slot = slot.rem(m);
         }
         acc
     }
@@ -3081,7 +3079,7 @@ mod tests {
             BigUint::from_u64(2),
             BigUint::from_u64(97),
             BigUint::from_u64(1_048_573),
-            BigUint::from_u64(2).pow_u64(200).sub_ref(&BigUint::one()),
+            BigUint::from_u64(2).pow_u64(200).sub(&BigUint::one()),
         ];
 
         let sparse_z = |len: usize, pct: usize, rng: &mut SplitMix64| -> Vec<BigInt> {
@@ -3133,7 +3131,7 @@ mod tests {
                         let a: Vec<BigUint> = (0..la)
                             .map(|i| {
                                 if i + 1 == la || (rng.next_u64() % 100) < pct as u64 {
-                                    BigUint::from_u64(rng.next_u64()).modulo(m)
+                                    BigUint::from_u64(rng.next_u64()).rem(m)
                                 } else {
                                     BigUint::zero()
                                 }
@@ -3142,7 +3140,7 @@ mod tests {
                         let b: Vec<BigUint> = (0..lb)
                             .map(|i| {
                                 if i + 1 == lb || (rng.next_u64() % 100) < pct as u64 {
-                                    BigUint::from_u64(rng.next_u64()).modulo(m)
+                                    BigUint::from_u64(rng.next_u64()).rem(m)
                                 } else {
                                     BigUint::zero()
                                 }
@@ -3362,7 +3360,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "divisible by p^e")]
     fn roots_mod_prime_power_rejects_a_content_divisible_by_the_whole_power() {
-        // 9x + 9 modulo 3²: every residue is a root, and the subtraction
+        // 9x + 9 rem 3²: every residue is a root, and the subtraction
         // `exponent - content_valuation` would wrap without this refusal —
         // release builds have overflow checks off, so the lift would then
         // run for about 2³² levels.
@@ -3416,8 +3414,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "widen past")]
     fn roots_mod_prime_power_refuses_an_expansion_too_wide_to_list() {
-        // Content 2⁴⁰ against exponent 41: one root modulo 2 expands into
-        // 2⁴⁰ residues modulo 2⁴¹.
+        // Content 2⁴⁰ against exponent 41: one root rem 2 expands into
+        // 2⁴⁰ residues rem 2⁴¹.
         let mut rng = SplitMix64 { state: 11 };
         let scale = BigInt::from_biguint(BigUint::from_u64(2).pow_u64(40));
         let f = PolyZ::from_i64_slice(&[1, 1]).scale(&scale);
@@ -3507,11 +3505,11 @@ mod tests {
                 let xv = BigInt::from_i64(x);
                 assert_eq!(
                     a.mul(&b).evaluate(&xv),
-                    a.evaluate(&xv).mul_ref(&b.evaluate(&xv))
+                    a.evaluate(&xv).mul(&b.evaluate(&xv))
                 );
                 assert_eq!(
                     a.add(&b).evaluate(&xv),
-                    a.evaluate(&xv).add_ref(&b.evaluate(&xv))
+                    a.evaluate(&xv).add(&b.evaluate(&xv))
                 );
             }
         }
@@ -3566,7 +3564,7 @@ mod tests {
                     let lc = b.leading_coefficient();
                     let mut lc_pow = BigInt::one();
                     for _ in 0..exp {
-                        lc_pow = lc_pow.mul_ref(&lc);
+                        lc_pow = lc_pow.mul(&lc);
                     }
                     assert_eq!(
                         a.scale(&lc_pow),
@@ -3679,10 +3677,10 @@ mod tests {
         // division-based results are unspecified and need not panic. This
         // test pins the *current* unspecified behaviour on the canonical
         // example so a later change cannot quietly promote it to a
-        // correctness claim: x² + 1 factors as (x+2)(x+3) modulo 5, so no
+        // correctness claim: x² + 1 factors as (x+2)(x+3) rem 5, so no
         // sound irreducibility test over ℤ/15ℤ could call it irreducible —
         // yet the Frobenius argument this routine leans on assumes a field,
-        // and modulo 15 it reports `true` without noticing. If this
+        // and rem 15 it reports `true` without noticing. If this
         // assertion ever fails, the behaviour changed: re-document it,
         // do not "fix" the test.
         let m = BigUint::from_u64(15);
@@ -3733,16 +3731,11 @@ mod tests {
         // Rationals as (num, den) BigInt pairs, den > 0.
         type Q = (BigInt, BigInt);
         let q = |v: BigInt| -> Q { (v, BigInt::one()) };
-        let qmul = |x: &Q, y: &Q| -> Q { (x.0.mul_ref(&y.0), x.1.mul_ref(&y.1)) };
-        let qsub = |x: &Q, y: &Q| -> Q {
-            (
-                x.0.mul_ref(&y.1).sub_ref(&y.0.mul_ref(&x.1)),
-                x.1.mul_ref(&y.1),
-            )
-        };
+        let qmul = |x: &Q, y: &Q| -> Q { (x.0.mul(&y.0), x.1.mul(&y.1)) };
+        let qsub = |x: &Q, y: &Q| -> Q { (x.0.mul(&y.1).sub(&y.0.mul(&x.1)), x.1.mul(&y.1)) };
         let qdiv = |x: &Q, y: &Q| -> Q {
-            let mut num = x.0.mul_ref(&y.1);
-            let mut den = x.1.mul_ref(&y.0);
+            let mut num = x.0.mul(&y.1);
+            let mut den = x.1.mul(&y.0);
             if den.sign() == Sign::Negative {
                 num = num.negated();
                 den = den.negated();
@@ -3848,7 +3841,7 @@ mod tests {
             // res(f, g·h) = res(f, g)·res(f, h).
             assert_eq!(
                 f.resultant(&g.mul(&h)),
-                f.resultant(&g).mul_ref(&f.resultant(&h)),
+                f.resultant(&g).mul(&f.resultant(&h)),
                 "resultant multiplicativity"
             );
         }
@@ -4142,12 +4135,12 @@ mod tests {
                 m
             };
             let e = rng.next_u64() % 20;
-            let by_pow = base.pow_mod(&BigUint::from_u64(e), &modulus);
+            let by_pow = base.mod_pow(&BigUint::from_u64(e), &modulus);
             let mut by_mul = PolyMod::new(vec![BigUint::one()], &p).rem(&modulus);
             for _ in 0..e {
                 by_mul = by_mul.mul(&base).rem(&modulus);
             }
-            assert_eq!(by_pow, by_mul, "pow_mod vs repeated multiply");
+            assert_eq!(by_pow, by_mul, "mod_pow vs repeated multiply");
         }
     }
 
@@ -4162,7 +4155,7 @@ mod tests {
         };
         for _ in 0..200 {
             let n = BigInt::from_biguint(rng.biguint(4));
-            let base = rng.biguint(1).add_ref(&BigUint::from_u64(2));
+            let base = rng.biguint(1).add(&BigUint::from_u64(2));
             let degree = 1 + (rng.next_u64() as usize % 6);
             let f = PolyZ::balanced_base_expansion(&n, &base, degree);
             assert_eq!(
@@ -4173,7 +4166,7 @@ mod tests {
             for c in f.coefficients().iter().take(degree) {
                 // |c| ≤ m/2, stated without division: 2|c| ≤ m.
                 assert!(
-                    c.abs().mul_ref(&BigUint::from_u64(2)) <= base,
+                    c.abs().mul(&BigUint::from_u64(2)) <= base,
                     "a digit below the top must be balanced"
                 );
             }
@@ -4206,7 +4199,7 @@ mod tests {
                     );
                     for c in f.coefficients().iter().take(degree) {
                         assert!(
-                            c.abs().mul_ref(&BigUint::from_u64(2)) <= m,
+                            c.abs().mul(&BigUint::from_u64(2)) <= m,
                             "digit out of range at n = {n}, base = {base}"
                         );
                     }
@@ -4366,19 +4359,19 @@ mod tests {
             let q = rng.coeff(12);
             let bconst = rng.coeff(12);
             if !bconst.is_zero() {
-                let aconst = q.mul_ref(&bconst);
+                let aconst = q.mul(&bconst);
                 let got = f.homogeneous_substitution(
                     &PolyZ::constant(aconst),
                     &PolyZ::constant(bconst.clone()),
                 );
                 let want = PolyZ::constant(
                     BigInt::from_biguint(bconst.abs().pow_u64(degree as u64))
-                        .mul_ref(&if degree % 2 == 1 && bconst.sign() == Sign::Negative {
+                        .mul(&if degree % 2 == 1 && bconst.sign() == Sign::Negative {
                             BigInt::from_i64(-1)
                         } else {
                             BigInt::one()
                         })
-                        .mul_ref(&f.evaluate(&q)),
+                        .mul(&f.evaluate(&q)),
                 );
                 assert_eq!(got, want, "Bᵈ·f(q) at A = q·B");
             }
@@ -4459,7 +4452,7 @@ mod tests {
 
     #[test]
     fn roots_mod_prime_power_lifts_a_known_branching_root() {
-        // x² modulo 3³: the lifts of the single root 0 mod 3 are the
+        // x² rem 3³: the lifts of the single root 0 mod 3 are the
         // multiples of 9, since 27 | x² needs 3 | x and then 3 | x/3.
         let mut rng = SplitMix64 {
             state: 0x2b2b_2b2b_0001,
@@ -4473,7 +4466,7 @@ mod tests {
             roots,
             vec![BigUint::zero(), BigUint::from_u64(9), BigUint::from_u64(18)]
         );
-        // A simple root lifts uniquely and stays alone: x² − 2 modulo 7³ has
+        // A simple root lifts uniquely and stays alone: x² − 2 rem 7³ has
         // the two roots ±√2, and no more.
         let roots = PolyZ::from_i64_slice(&[-2, 0, 1]).roots_mod_prime_power(
             &BigUint::from_u64(7),
@@ -4513,25 +4506,25 @@ mod tests {
             state: 0x3ec0_de11_0077,
         };
         let narrow = BigUint::from_u64(1_000_003);
-        let wide = narrow.mul_ref(&narrow);
+        let wide = narrow.mul(&narrow);
         for _ in 0..100 {
             let f = PolyMod::from_poly_z(&rng.poly_z(6, 10_000), &narrow);
-            let widened = f.with_modulus(&wide);
+            let widened = f.change_modulus(&wide);
             assert_eq!(widened.modulus(), &wide);
             // The representatives carried are the *canonical* ones, in
             // `[0, m)` — not the symmetric ones. Asserting the round trip
             // alone cannot tell the two apart, since both are sections of
             // the same projection and both round-trip; only the values do.
             assert_eq!(widened.coefficients(), f.coefficients());
-            assert_eq!(widened.with_modulus(&narrow), f);
+            assert_eq!(widened.change_modulus(&narrow), f);
         }
         // Concretely, and away from any polynomial the generator draws: 5
-        // and 4 modulo 7 widen to 5 and 4, not to 47 and 46.
+        // and 4 rem 7 widen to 5 and 4, not to 47 and 46.
         let small = BigUint::from_u64(7);
         let big = BigUint::from_u64(49);
         let f = PolyMod::new(vec![BigUint::from_u64(5), BigUint::from_u64(4)], &small);
         assert_eq!(
-            f.with_modulus(&big).coefficients(),
+            f.change_modulus(&big).coefficients(),
             &[BigUint::from_u64(5), BigUint::from_u64(4)]
         );
         // Narrowing is the ring projection and commutes with addition;
@@ -4540,17 +4533,17 @@ mod tests {
         let g = PolyMod::new(vec![BigUint::from_u64(4)], &small);
         let h = PolyMod::new(vec![BigUint::from_u64(5)], &small);
         assert_ne!(
-            g.add(&h).with_modulus(&big),
-            g.with_modulus(&big).add(&h.with_modulus(&big)),
+            g.add(&h).change_modulus(&big),
+            g.change_modulus(&big).add(&h.change_modulus(&big)),
             "widening is not additive"
         );
         let wide_g = PolyMod::new(vec![BigUint::from_u64(40)], &big);
         let wide_h = PolyMod::new(vec![BigUint::from_u64(45)], &big);
         assert_eq!(
-            wide_g.add(&wide_h).with_modulus(&small),
+            wide_g.add(&wide_h).change_modulus(&small),
             wide_g
-                .with_modulus(&small)
-                .add(&wide_h.with_modulus(&small)),
+                .change_modulus(&small)
+                .add(&wide_h.change_modulus(&small)),
             "narrowing is the projection, so it is additive"
         );
     }
@@ -4560,7 +4553,7 @@ mod tests {
         // What the downstream use actually needs: recover β from δ = β² in
         // ℤ[x]/(f) by lifting a square root out of 𝔽_q[x]/(f) with the
         // modulus squaring each round, then reading the answer back over ℤ.
-        // `with_modulus` seeds each round, `rem_monic` keeps the degree down
+        // `change_modulus` seeds each round, `rem_monic` keeps the degree down
         // and settles the check over ℤ, and `symmetric_lift` is what turns a
         // residue into the integer answer.
         let f = PolyZ::from_i64_slice(&[1, 0, 1]); // x² + 1, irreducible mod 7
@@ -4593,7 +4586,7 @@ mod tests {
         let mut inverse = two
             .mul(&current)
             .rem(&field)
-            .pow_mod(&order.sub_ref(&BigUint::from_u64(2)), &field);
+            .mod_pow(&order.sub(&BigUint::from_u64(2)), &field);
 
         for _ in 0..6 {
             if current.symmetric_lift().rem_monic(&f) == PolyZ::zero() {
@@ -4605,11 +4598,11 @@ mod tests {
                 return;
             }
             // Square the precision: q^k → q^{2k}.
-            let next = modulus.mul_ref(&modulus);
+            let next = modulus.mul(&modulus);
             let f_next = PolyMod::from_poly_z(&f, &next);
             let delta_next = PolyMod::from_poly_z(&delta, &next).rem(&f_next);
-            let mut b = current.with_modulus(&next);
-            let u = inverse.with_modulus(&next);
+            let mut b = current.change_modulus(&next);
+            let u = inverse.change_modulus(&next);
 
             // β ← β − (β² − δ)·u
             let error = b.mul(&b).rem(&f_next).sub(&delta_next);

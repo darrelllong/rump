@@ -14,7 +14,7 @@ fn gcd_naive(lhs: &BigUint, rhs: &BigUint) -> BigUint {
     let mut current = lhs.clone();
     let mut next = rhs.clone();
     while !next.is_zero() {
-        let remainder = current.modulo(&next);
+        let remainder = current.rem(&next);
         current = next;
         next = remainder;
     }
@@ -32,10 +32,10 @@ fn gcd_extended_naive(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
         let (quotient, remainder) = old_r.div_rem(&r);
         old_r = r;
         r = remainder;
-        let next_s = old_s.sub_ref(&s.mul_biguint_ref(&quotient));
+        let next_s = old_s.sub(&s.mul_biguint(&quotient));
         old_s = s;
         s = next_s;
-        let next_t = old_t.sub_ref(&t.mul_biguint_ref(&quotient));
+        let next_t = old_t.sub(&t.mul_biguint(&quotient));
         old_t = t;
         t = next_t;
     }
@@ -48,7 +48,7 @@ fn jacobi_naive(a: &BigUint, n: &BigUint) -> Option<i8> {
     if n.is_zero() || !n.is_odd() {
         return None;
     }
-    let mut a = a.modulo(n);
+    let mut a = a.rem(n);
     let mut n = n.clone();
     let mut sign = 1i8;
     while !a.is_zero() {
@@ -67,7 +67,7 @@ fn jacobi_naive(a: &BigUint, n: &BigUint) -> Option<i8> {
             sign = -sign;
         }
         core::mem::swap(&mut a, &mut n);
-        a = a.modulo(&n);
+        a = a.rem(&n);
     }
     if n.is_one() {
         Some(sign)
@@ -83,10 +83,10 @@ fn mod_inverse_naive(a: &BigUint, n: &BigUint) -> Option<BigUint> {
     let mut t = BigInt::zero();
     let mut next_t = BigInt::from_biguint(BigUint::one());
     let mut r = n.clone();
-    let mut next_r = a.modulo(n);
+    let mut next_r = a.rem(n);
     while !next_r.is_zero() {
         let (quotient, remainder) = r.div_rem(&next_r);
-        let coefficient = t.sub_ref(&next_t.mul_biguint_ref(&quotient));
+        let coefficient = t.sub(&next_t.mul_biguint(&quotient));
         t = next_t;
         next_t = coefficient;
         r = next_r;
@@ -95,7 +95,7 @@ fn mod_inverse_naive(a: &BigUint, n: &BigUint) -> Option<BigUint> {
     if !r.is_one() {
         return None;
     }
-    Some(t.modulo_positive(n))
+    Some(t.rem_euclid(n))
 }
 
 // ── a small deterministic RNG so failures reproduce ──
@@ -139,7 +139,7 @@ impl SplitMix64 {
 }
 
 fn bezout_holds(a: &BigUint, b: &BigUint, g: &BigUint, s: &BigInt, t: &BigInt) -> bool {
-    let lhs = s.mul_biguint_ref(a).add_ref(&t.mul_biguint_ref(b));
+    let lhs = s.mul_biguint(a).add(&t.mul_biguint(b));
     lhs == BigInt::from_biguint(g.clone())
 }
 
@@ -196,7 +196,7 @@ fn mod_inverse_matches_classical_over_random_sweep() {
             // Odd modulus of the target width; random residue below it.
             let mut n = rng.draw(bits);
             if !n.is_odd() {
-                n = n.add_ref(&BigUint::one());
+                n = n.add(&BigUint::one());
             }
             if n.is_zero() || n.is_one() {
                 continue;
@@ -209,7 +209,7 @@ fn mod_inverse_matches_classical_over_random_sweep() {
 
             if let Some(inv) = fast {
                 // Independent check: a·inv ≡ 1 (mod n).
-                let product = BigUint::mod_mul(&a.modulo(&n), &inv, &n);
+                let product = BigUint::mod_mul(&a.rem(&n), &inv, &n);
                 assert_eq!(product, BigUint::one(), "inverse does not invert");
                 checked_invertible += 1;
             }
@@ -228,7 +228,7 @@ fn jacobi_matches_division_based_over_random_sweep() {
             // Odd modulus of the target width; numerator up to the same width.
             let mut n = rng.draw(bits);
             if !n.is_odd() {
-                n = n.add_ref(&BigUint::one());
+                n = n.add(&BigUint::one());
             }
             if n.is_zero() {
                 continue;
@@ -268,7 +268,7 @@ fn gcd_family_handles_structured_corners() {
         v.shl_bits(1500);
         v
     };
-    let big_odd = big_pow2.sub_ref(&one); // 2^1500 - 1, odd
+    let big_odd = big_pow2.sub(&one); // 2^1500 - 1, odd
     assert_eq!(gcd(&big_pow2, &big_odd), one);
     assert_eq!(gcd(&big_pow2, &big_odd), gcd_naive(&big_pow2, &big_odd));
 
@@ -277,7 +277,7 @@ fn gcd_family_handles_structured_corners() {
     let mut prev = BigUint::from_u64(1);
     let mut curr = BigUint::from_u64(1);
     for _ in 0..400 {
-        let nextf = prev.add_ref(&curr);
+        let nextf = prev.add(&curr);
         prev = curr;
         curr = nextf;
     }
@@ -289,7 +289,7 @@ fn gcd_family_handles_structured_corners() {
     // Both operands equal and multi-limb: quotient is 1 then 0.
     let mut m = BigUint::from_u64(0x1234_5678_9ABC_DEF1);
     m.shl_bits(300);
-    m = m.add_ref(&BigUint::from_u64(0xFEDC_BA98_7654_3210));
+    m = m.add(&BigUint::from_u64(0xFEDC_BA98_7654_3210));
     assert_eq!(gcd(&m, &m), m);
     let (g, s, t) = gcd_extended(&m, &m);
     assert!(bezout_holds(&m, &m, &g, &s, &t));

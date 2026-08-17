@@ -18,11 +18,11 @@ rust-mp = "0.3"
 ```rust
 use rump::{
     crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
-    is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
+    miller_rabin_with_bases, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
     lll_reduce, miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow,
     primes_below, product_tree, random_below, random_coprime_below, random_nonzero_below,
     random_probable_prime, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
-    remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, BarrettContext, BigInt,
+    remove_factor, smooth_parts, mod_sqrt, mod_sqrt_prime_power, valuation, BarrettContext, BigInt,
     BigUint, Gf2m, MontgomeryContext, PolyMod, PolyZ, RandomSource, Sign,
 };
 use core::num::NonZeroU64;
@@ -149,13 +149,13 @@ assert_eq!(BigUint::zero().bits(), 0);
 
 ### Arithmetic
 
-`add_ref` / `sub_ref` / `mul_ref` return new values; `add_assign_ref` /
-`sub_assign_ref` work in place. `assign_add` / `assign_sub` are the
+`add` / `sub` / `mul` return new values; `add_assign_ref` /
+`sub_assign_ref` work in place. `add_into` / `sub_into` are the
 three-operand forms — the result written into `self`, whose buffer is
 reused: a long-lived output allocates only until its capacity covers the
 result, then never again (the shape of GMP's `mpz_add`).
 `Clone::clone_from` likewise copies a value into existing storage.
-`square_ref` squares, and `sqrt_floor` is the integer square root (largest
+`square` squares, and `sqrt_floor` is the integer square root (largest
 `r` with `r² ≤ self`). Subtraction panics on underflow — the type is
 unsigned; use
 [`BigInt`](#signed-integers-bigint-and-sign) when signs can go negative.
@@ -164,10 +164,10 @@ unsigned; use
 let a = BigUint::from_u64(1_000);
 let b = BigUint::from_u64(37);
 
-assert_eq!(a.add_ref(&b), BigUint::from_u64(1_037));
-assert_eq!(a.sub_ref(&b), BigUint::from_u64(963));
-assert_eq!(a.mul_ref(&b), BigUint::from_u64(37_000));
-assert_eq!(b.square_ref(), BigUint::from_u64(1_369));
+assert_eq!(a.add(&b), BigUint::from_u64(1_037));
+assert_eq!(a.sub(&b), BigUint::from_u64(963));
+assert_eq!(a.mul(&b), BigUint::from_u64(37_000));
+assert_eq!(b.square(), BigUint::from_u64(1_369));
 assert_eq!(BigUint::from_u64(17).sqrt_floor(), BigUint::from_u64(4));
 
 let mut acc = BigUint::from_u64(1_000);
@@ -177,9 +177,9 @@ assert_eq!(acc, a);
 
 // Three-operand form: `out`'s storage is reused across calls.
 let mut out = BigUint::zero();
-out.assign_add(&a, &b);
+out.add_into(&a, &b);
 assert_eq!(out, BigUint::from_u64(1_037));
-out.assign_sub(&a, &b);
+out.sub_into(&a, &b);
 assert_eq!(out, BigUint::from_u64(963));
 ```
 
@@ -213,7 +213,7 @@ assert_eq!(x, BigUint::from_u64(0b0110));
 ### Division and reduction
 
 `div_rem` returns quotient and remainder (Knuth Algorithm D under the hood);
-`modulo` keeps only the remainder; `rem_u64` reduces by a machine word;
+`rem` keeps only the remainder; `rem_u64` reduces by a machine word;
 `mod_mul` is one-shot modular multiplication. All panic on a zero divisor
 or modulus.
 
@@ -224,7 +224,7 @@ let d = BigUint::from_u64(7);
 let (q, r) = n.div_rem(&d);
 assert_eq!(q, BigUint::from_u64(142));
 assert_eq!(r, BigUint::from_u64(6));
-assert_eq!(n.modulo(&d), r);
+assert_eq!(n.rem(&d), r);
 assert_eq!(n.rem_u64(7), 6);
 
 let product = BigUint::mod_mul(
@@ -241,16 +241,16 @@ A `BigInt` is a `Sign` joined to a `BigUint` magnitude. Construct with
 `from_biguint` (non-negative), `from_parts`, `from_i64`, or `from_i128`
 (total over its range — `i128::MIN`'s magnitude `2^127` is an ordinary
 `u128`); read back with `sign()` and
-`magnitude()`; `negated` flips the sign. `add_ref` / `sub_ref` are signed,
+`magnitude()`; `negated` flips the sign. `add` / `sub` are signed,
 and `add_assign_ref` / `sub_assign_ref` are their in-place forms, reusing
 the magnitude's buffer in every sign combination (nothing panics — the
-sign follows the result); `mul_ref` is the full signed product, and
-`mul_biguint_ref` scales by an unsigned factor. `div_rem` divides with
+sign follows the result); `mul` is the full signed product, and
+`mul_biguint` scales by an unsigned factor. `div_rem` divides with
 remainder, **truncated toward zero** — the C and Rust `/` convention, the
 remainder taking the dividend's sign — and panics on a zero divisor;
 `abs` returns the magnitude as an owned `BigUint` (prefer `magnitude()`
 when a borrow suffices — it lends the same value without the copy).
-`modulo_positive` maps into the
+`rem_euclid` maps into the
 canonical range `[0, n)` — the floored remainder, and the piece extended
 Euclid needs.
 
@@ -269,19 +269,19 @@ assert_eq!(minus_three.sign(), Sign::Negative);
 assert_eq!(*minus_three.magnitude(), BigUint::from_u64(3));
 assert_eq!(minus_three.negated().sign(), Sign::Positive);
 
-assert_eq!(ten.add_ref(&minus_three), BigInt::from_biguint(BigUint::from_u64(7)));
+assert_eq!(ten.add(&minus_three), BigInt::from_biguint(BigUint::from_u64(7)));
 assert_eq!(
-    minus_three.sub_ref(&ten),
+    minus_three.sub(&ten),
     BigInt::from_parts(Sign::Negative, BigUint::from_u64(13))
 );
 assert_eq!(
-    minus_three.mul_biguint_ref(&BigUint::from_u64(4)),
+    minus_three.mul_biguint(&BigUint::from_u64(4)),
     BigInt::from_parts(Sign::Negative, BigUint::from_u64(12))
 );
 
 // The signed ring: full product, truncated division, absolute value.
 assert_eq!(
-    minus_three.mul_ref(&ten),
+    minus_three.mul(&ten),
     BigInt::from_parts(Sign::Negative, BigUint::from_u64(30))
 );
 // div_rem truncates toward zero; the remainder takes the dividend's sign:
@@ -295,7 +295,7 @@ assert_eq!(minus_seven.abs(), BigUint::from_u64(7));
 
 // −3 ≡ 8 (mod 11), in canonical range.
 assert_eq!(
-    minus_three.modulo_positive(&BigUint::from_u64(11)),
+    minus_three.rem_euclid(&BigUint::from_u64(11)),
     BigUint::from_u64(8)
 );
 
@@ -314,7 +314,7 @@ they read at a call site. Comparison uses the standard operators — `BigUint`
 and `BigInt` implement `Ord` (sign-aware for `BigInt`: negatives below zero,
 zero below positives), so `<`, `.max()`, and `slice::sort` all apply.
 Arithmetic never does: rump does not overload `+` or `*`, so every
-multiprecision operation is an explicit method call (`add_ref`, `mul_ref`,
+multiprecision operation is an explicit method call (`add`, `mul`,
 `negated`, …) and therefore visible in the code that pays for it. Values move
 without copying; `Clone` duplicates the limbs; every value volatile-wipes its
 live limbs on drop as defense in depth (see the scope note above).
@@ -341,7 +341,7 @@ let neg = |v: u64| big(v).negated();
 // One operand wider than any machine word: 2^100 + 7.
 let mut wide = BigUint::one();
 wide.shl_bits(100);
-let wide = BigInt::from_biguint(wide.add_ref(&BigUint::from_u64(7)));
+let wide = BigInt::from_biguint(wide.add(&BigUint::from_u64(7)));
 
 let mut values = vec![big(251), neg(40), big(0), wide.clone(), neg(3), big(17)];
 bubble_sort(&mut values);
@@ -537,7 +537,7 @@ assert_eq!(
 );
 
 let (g, s, t) = gcd_extended(&a, &b);
-let bezout = s.mul_biguint_ref(&a).add_ref(&t.mul_biguint_ref(&b));
+let bezout = s.mul_biguint(&a).add(&t.mul_biguint(&b));
 assert_eq!(bezout, BigInt::from_biguint(g));
 
 // The word-sized form answers without an allocation.
@@ -569,7 +569,7 @@ assert_eq!(kronecker(&BigUint::one(), &BigUint::zero()), 1); // (1/0) = 1
 
 `mod_pow` for any non-zero modulus (Montgomery when odd), `mod_inverse`
 (`None` when the gcd exceeds one; `mod_inverse_u64` is its word-sized
-companion), `sqrt_mod` by Tonelli–Shanks with a
+companion), `mod_sqrt` by Tonelli–Shanks with a
 dispatch to Cipolla's algorithm where the prime's 2-adic depth makes the
 descent quadratic (`None` for non-residues; the result is verified by
 squaring, so a composite modulus also yields `None`), and `crt_combine`
@@ -595,9 +595,9 @@ assert_eq!(mod_inverse(&BigUint::from_u64(2), &BigUint::from_u64(4)), None);
 assert_eq!(mod_inverse_u64(3, 7), Some(5));
 assert_eq!(mod_inverse_u64(2, 4), None); // shares a factor
 
-let root = sqrt_mod(&BigUint::from_u64(2), &p).expect("2 is a residue mod 41");
+let root = mod_sqrt(&BigUint::from_u64(2), &p).expect("2 is a residue mod 41");
 assert_eq!(BigUint::mod_mul(&root, &root, &p), BigUint::from_u64(2));
-assert_eq!(sqrt_mod(&BigUint::from_u64(3), &p), None); // non-residue
+assert_eq!(mod_sqrt(&BigUint::from_u64(3), &p), None); // non-residue
 
 // Sunzi's classic: 2 mod 3, 3 mod 5, 2 mod 7.
 let x = crt_combine(&[
@@ -666,7 +666,7 @@ assert_eq!(q, BigUint::from_u64(7));
 
 // Negative numerators carry their sign: −3/5 mod 1009.
 let five_inv = mod_inverse(&BigUint::from_u64(5), &m).expect("5 is invertible");
-let x = m.sub_ref(&BigUint::mod_mul(&BigUint::from_u64(3), &five_inv, &m));
+let x = m.sub(&BigUint::mod_mul(&BigUint::from_u64(3), &five_inv, &m));
 let (p, q) = rational_reconstruct(&x, &m).expect("-3/5 is within the bounds");
 assert_eq!(p, BigInt::from_parts(Sign::Negative, BigUint::from_u64(3)));
 assert_eq!(q, BigUint::from_u64(5));
@@ -752,14 +752,14 @@ assert_eq!(n.div_rem_reciprocal(&r).0, n.div_rem_u64(1_000_003).0);
 
 ### Prime-power square roots
 
-`sqrt_mod_prime_power(a, p, e)` returns every square root of `a` modulo
+`mod_sqrt_prime_power(a, p, e)` returns every square root of `a` rem
 `p^e`, ascending, empty for a non-residue — Hensel's lift for odd `p`, the
 mod-8 structure for `p = 2`, and the valuation reduction for `a` divisible
 by `p`.
 
 ```rust
 // 9 has four square roots mod 16: 3, 5, 11, 13.
-let roots = sqrt_mod_prime_power(&BigUint::from_u64(9), &BigUint::from_u64(2), 4);
+let roots = mod_sqrt_prime_power(&BigUint::from_u64(9), &BigUint::from_u64(2), 4);
 assert_eq!(roots, vec![
     BigUint::from_u64(3), BigUint::from_u64(5),
     BigUint::from_u64(11), BigUint::from_u64(13),
@@ -834,12 +834,12 @@ assert_eq!(residues, vec![
 ### Primality
 
 `is_probable_prime` runs trial division plus Miller-Rabin over the twelve
-fixed small-prime bases; `is_probable_prime_with_bases` takes an explicit
+fixed small-prime bases; `miller_rabin_with_bases` takes an explicit
 base set (after the same unconditional small-prime sieve, so it is a
 probable-prime predicate, not a way to run Miller-Rabin with exactly those
 bases and nothing else); `miller_rabin_witness` is the single-round
 primitive for callers with their own witness schedule. Each base it takes
-is reduced modulo the candidate and the trivial residues `{0, 1, n−1}` are
+is reduced rem the candidate and the trivial residues `{0, 1, n−1}` are
 discarded; a set with no effective round proves nothing and is not prime.
 The fixed bases are for candidates you generated yourself — an adversary
 can construct pseudoprimes against any fixed base set, so untrusted input
@@ -857,11 +857,11 @@ assert!(!miller_rabin_witness(&n, &BigUint::from_u64(2))); // 2 is not a witness
 assert!(miller_rabin_witness(&n, &BigUint::from_u64(3))); // 3 is
 assert!(!is_probable_prime(&n)); // the full test rejects it
 
-// with_bases reduces each base modulo n and discards {0, 1, n-1}; a set of
+// with_bases reduces each base rem n and discards {0, 1, n-1}; a set of
 // only trivial bases runs no effective round and is not reported prime.
 let composite = BigUint::from_u64(1_022_117); // 1009 × 1013, survives the sieve
-assert!(!is_probable_prime_with_bases(&composite, &[1])); // 1 never testifies
-assert!(!is_probable_prime_with_bases(&composite, &[2])); // 2 exposes it
+assert!(!miller_rabin_with_bases(&composite, &[1])); // 1 never testifies
+assert!(!miller_rabin_with_bases(&composite, &[2])); // 2 exposes it
 ```
 
 `is_probable_prime_bpsw` is the Baillie–PSW test: trial division, one
@@ -891,7 +891,7 @@ offers `add`/`sub`/`mul`, `evaluate` (Horner), `derivative`, `content` and
 `primitive_part`, `div_rem` (exact division over ℤ, `None` when it does not
 divide evenly), and `pseudo_div_rem` (the always-defined integer-preserving
 form). `PolyMod` adds `div_rem`/`rem`/`gcd`/`make_monic`/
-`pow_mod` — the division-based operations invert a leading coefficient, so
+`mod_pow` — the division-based operations invert a leading coefficient, so
 they require a prime modulus and panic on a non-invertible pivot.
 
 ```rust
@@ -991,7 +991,7 @@ assert!(fs.iter().all(|(_, e)| *e == 1));
 A further group serves computation in the quotient ring ℤ[x]/(f) with `f`
 monic, and the traffic between ℤ and ℤ/mℤ that such computation involves.
 
-`rem_monic` reduces modulo a monic divisor without forming the quotient.
+`rem_monic` reduces rem a monic divisor without forming the quotient.
 Division by a monic polynomial cannot fail, so unlike `div_rem` it returns
 a value rather than an `Option`, and each step is one multiply-subtract
 with no coefficient division at all. `product_mod_monic` multiplies many
@@ -1005,7 +1005,7 @@ cost, since no intermediate is ever allowed to exceed `deg f`.
 coefficients in (−m/2, m/2]. That is the lift to use when a modular
 computation was meant to recover an integer answer: a modulus wider than
 twice the height returns the true polynomial exactly, signs and all.
-`PolyMod::with_modulus` re-reads the same coefficient representatives at
+`PolyMod::change_modulus` re-reads the same coefficient representatives at
 a different modulus. Narrowing (the new modulus divides the old) is the
 ring projection and preserves sums and products; widening (the old divides
 the new) is its canonical section, which preserves only equality — it is
@@ -1017,8 +1017,8 @@ sieve's polynomial selection wants because it halves `max |cₖ|` at no
 cost. `homogeneous_substitution` evaluates the homogenization
 `F(X, Y) = Yᵈ f(X/Y)` at a pair of polynomials, which is how a norm
 `bᵈ f(a/b)` or a change of coordinates is taken without leaving ℤ[x].
-`roots_mod_prime_power` finds every root modulo `pᵉ` by Hensel lifting
-from the roots modulo `p`, branching where the derivative vanishes.
+`roots_mod_prime_power` finds every root rem `pᵉ` by Hensel lifting
+from the roots rem `p`, branching where the derivative vanishes.
 
 ```rust
 struct Lcg2(u64);
@@ -1032,7 +1032,7 @@ impl RandomSource for Lcg2 {
 }
 let mut rng = Lcg2(0x2024_1111);
 
-// Reduction modulo the monic x^2 + 1 is a ring homomorphism.
+// Reduction rem the monic x^2 + 1 is a ring homomorphism.
 let f = PolyZ::from_i64_slice(&[1, 0, 1]);
 let a = PolyZ::from_i64_slice(&[3, 2, 5]); // 5x^2 + 2x + 3
 let b = PolyZ::from_i64_slice(&[1, 7]); // 7x + 1
@@ -1065,7 +1065,7 @@ assert_eq!(
     PolyZ::from_i64_slice(&[9, 0, 4])
 );
 
-// Square roots of 2 modulo 7^3 = 343, lifted from ±3 modulo 7.
+// Square roots of 2 rem 7^3 = 343, lifted from ±3 rem 7.
 let sqrt2 = PolyZ::from_i64_slice(&[-2, 0, 1]).roots_mod_prime_power(
     &BigUint::from_u64(7),
     3,
@@ -1200,14 +1200,14 @@ recoverable conditions:
 
 | Call | Panics when |
 |---|---|
-| `sub_ref` / `sub_assign_ref` | the result would be negative |
-| `div_rem` / `div_rem_u64` / `modulo` / `rem_u64` | the divisor or modulus is zero |
+| `sub` / `sub_assign_ref` | the result would be negative |
+| `div_rem` / `div_rem_u64` / `rem` / `rem_u64` | the divisor or modulus is zero |
 | `BigUint::mod_mul` / `mod_pow` / `mod_add` / `mod_sub` | the modulus is zero |
 | `ln_approx` | the value is zero |
 | `digit_count` | the radix is below 2 |
 | `mod_inverse_u64` | the modulus is zero |
 | `nth_root_floor` | `k == 0` |
-| `sqrt_mod_prime_power` | `e == 0` or `p < 2` |
+| `mod_sqrt_prime_power` | `e == 0` or `p < 2` |
 | `valuation` / `remove_factor` | `n == 0` or `p < 2` |
 | `rational_reconstruct_bounded` | `2·N·D >= m` (the uniqueness contract) |
 | `from_str_radix` / `to_str_radix` | the radix is outside `2..=36` |

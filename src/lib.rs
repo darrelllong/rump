@@ -62,7 +62,7 @@
 //!
 //! // Fermat: a^(p-1) ≡ 1 (mod p) for prime p.
 //! let a = BigUint::from_u64(31_337);
-//! let e = p.sub_ref(&BigUint::one());
+//! let e = p.sub(&BigUint::one());
 //! assert!(mod_pow(&a, &e, &p).is_one());
 //!
 //! // Euler's criterion, read off the Jacobi symbol.
@@ -98,11 +98,11 @@ pub use gf2m::Gf2m;
 pub use lattice::{gauss_reduce_weighted, lll_reduce, lll_reduce_delta};
 pub use number_theory::{
     crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
-    is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker,
-    lcm, legendre, miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow,
-    primes_below, product_tree, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
-    remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, ProductTree,
-    SmoothnessBase,
+    is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker, lcm, legendre,
+    miller_rabin_with_bases, miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_inverse_u64,
+    mod_pow, mod_sqrt, mod_sqrt_prime_power, primes_below, product_tree, rational_reconstruct,
+    rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, valuation,
+    ProductTree, SmoothnessBase,
 };
 pub use poly::{PolyMod, PolyZ, MAX_ENUMERATED_ROOTS};
 pub use random::{

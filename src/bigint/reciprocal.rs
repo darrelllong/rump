@@ -104,7 +104,7 @@ impl WordReciprocal {
     /// `(u1·2⁶⁴ + u0) / normalized`, as (quotient, remainder).
     ///
     /// Möller–Granlund Algorithm 4. The additions and the product that forms
-    /// `r` are deliberately wrapping: the algorithm works modulo `2⁶⁴` and
+    /// `r` are deliberately wrapping: the algorithm works rem `2⁶⁴` and
     /// corrects afterwards, which is the whole trick.
     ///
     /// `u1 < self.normalized` is the precondition. It is not checkable at the

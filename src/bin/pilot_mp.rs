@@ -20,7 +20,7 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use rump::{
-    gcd, gcd_extended, is_probable_prime, jacobi, mod_inverse, mod_pow, sqrt_mod, BigUint, Gf2m,
+    gcd, gcd_extended, is_probable_prime, jacobi, mod_inverse, mod_pow, mod_sqrt, BigUint, Gf2m,
     MontgomeryContext,
 };
 
@@ -63,7 +63,7 @@ impl SplitMix64 {
     fn odd(&mut self, bits: usize) -> BigUint {
         let mut v = self.biguint(bits);
         if !v.is_odd() {
-            v = v.add_ref(&BigUint::one());
+            v = v.add(&BigUint::one());
         }
         v
     }
@@ -83,7 +83,7 @@ struct IntPool {
     /// scaling-sweep sizes (up to a million bits) would swamp a cheap op's
     /// measurement with pool construction.
     mont: Option<MontState>,
-    /// A guaranteed quadratic residue modulo the pool's prime, for the
+    /// A guaranteed quadratic residue rem the pool's prime, for the
     /// residue-class-conditioned square-root rows.
     residue: Option<BigUint>,
     /// A random probable prime, built only for the ops that read one
@@ -175,7 +175,7 @@ impl IntPool {
                 if class_ok && is_probable_prime(&candidate) {
                     break candidate;
                 }
-                candidate = candidate.add_ref(&BigUint::from_u64(2));
+                candidate = candidate.add(&BigUint::from_u64(2));
             }
         });
         // A guaranteed quadratic residue for the conditioned square-root
@@ -260,26 +260,26 @@ fn int_op(name: &str) -> Option<fn(&mut IntPool)> {
         // side's allocator.
         "add" => |p| {
             let IntPool { out, a, b, .. } = p;
-            out.assign_add(a, b);
+            out.add_into(a, b);
             black_box(out);
         },
         "sub" => |p| {
             let IntPool { out, a, b, .. } = p;
             let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
-            out.assign_sub(hi, lo);
+            out.sub_into(hi, lo);
             black_box(out);
         },
         "mul" => |p| {
-            black_box(p.a.mul_ref(&p.b));
+            black_box(p.a.mul(&p.b));
         },
         "sqr" => |p| {
-            black_box(p.a.square_ref());
+            black_box(p.a.square());
         },
         "divrem" => |p| {
             black_box(p.a.div_rem(&p.divisor));
         },
-        "modulo" => |p| {
-            black_box(p.a.modulo(&p.divisor));
+        "rem" => |p| {
+            black_box(p.a.rem(&p.divisor));
         },
         "modmul" => |p| {
             black_box(BigUint::mod_mul(&p.a, &p.b, &p.modulus));
@@ -317,11 +317,11 @@ fn int_op(name: &str) -> Option<fn(&mut IntPool)> {
             black_box(jacobi(&p.a, &p.modulus));
         },
         "sqrtmod" => |p| {
-            black_box(sqrt_mod(&p.a, p.prime()));
+            black_box(mod_sqrt(&p.a, p.prime()));
         },
         "sqrtmod_blum" | "sqrtmod_descent" => |p| {
             let residue = p.residue.as_ref().expect("op builds a residue");
-            black_box(sqrt_mod(residue, p.prime()));
+            black_box(mod_sqrt(residue, p.prime()));
         },
         "isprime" => |p| {
             black_box(is_probable_prime(&p.a));
@@ -365,7 +365,7 @@ const INT_OPS: &[&str] = &[
     "mul",
     "sqr",
     "divrem",
-    "modulo",
+    "rem",
     "modmul",
     "montsetup",
     "montmul",

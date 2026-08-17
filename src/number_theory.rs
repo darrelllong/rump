@@ -175,7 +175,7 @@ fn leading_pair(a: &BigUint, b: &BigUint) -> (i128, i128) {
 
 // The Lehmer transform is applied to the operands (and, for the extended
 // variants, to the Bézout cofactors) as `c0·x0 + c1·x1` with two-word signed
-// coefficients. Going through `mul_ref`/`add_ref` would allocate several
+// coefficients. Going through `mul`/`add` would allocate several
 // temporaries per application; the transform runs tens of times per gcd, so
 // these fused limb-level routines — accumulate `|c|·x` straight into a positive
 // or negative bucket by sign, then take the difference once — are what make the
@@ -311,8 +311,8 @@ fn combine_signed(c0: i128, x0: &BigInt, c1: i128, x1: &BigInt) -> BigInt {
 //
 // The Jacobi symbol can ride the same left-to-right quotient sequence as gcd:
 // Schönhage's identities give the symbol's change across one Euclidean step
-// r0 = q·r1 + r2 as a sign that depends only on r0 and r1 modulo 4 and on
-// q modulo 4 — never on the operands' high bits. Two rules cover everything:
+// r0 = q·r1 + r2 as a sign that depends only on r0 and r1 rem 4 and on
+// q rem 4 — never on the operands' high bits. Two rules cover everything:
 // for odd r0, r1, reciprocity charges a sign exactly when both are ≡ 3
 // (mod 4); for even r1 (the remainders of a quotient sequence are not kept
 // odd), the accumulated sign across the step is (−1)^((q(r0−1)/2 + r0(q−1)/2))
@@ -485,22 +485,10 @@ impl Mat2 {
     /// The matrix product `self · other`.
     fn compose(&self, other: &Self) -> Self {
         Self {
-            m00: self
-                .m00
-                .mul_ref(&other.m00)
-                .add_ref(&self.m01.mul_ref(&other.m10)),
-            m01: self
-                .m00
-                .mul_ref(&other.m01)
-                .add_ref(&self.m01.mul_ref(&other.m11)),
-            m10: self
-                .m10
-                .mul_ref(&other.m00)
-                .add_ref(&self.m11.mul_ref(&other.m10)),
-            m11: self
-                .m10
-                .mul_ref(&other.m01)
-                .add_ref(&self.m11.mul_ref(&other.m11)),
+            m00: self.m00.mul(&other.m00).add(&self.m01.mul(&other.m10)),
+            m01: self.m00.mul(&other.m01).add(&self.m01.mul(&other.m11)),
+            m10: self.m10.mul(&other.m00).add(&self.m11.mul(&other.m10)),
+            m11: self.m10.mul(&other.m01).add(&self.m11.mul(&other.m11)),
         }
     }
 
@@ -510,7 +498,7 @@ impl Mat2 {
     #[cfg(test)]
     fn apply(&self, a: &BigUint, b: &BigUint) -> (BigUint, BigUint) {
         let combine = |r: &BigInt, s: &BigInt| {
-            let sum = r.mul_biguint_ref(a).add_ref(&s.mul_biguint_ref(b));
+            let sum = r.mul_biguint(a).add(&s.mul_biguint(b));
             debug_assert!(
                 sum.sign() != Sign::Negative,
                 "Half-GCD transform keeps the pair non-negative"
@@ -524,8 +512,8 @@ impl Mat2 {
     /// left-multiply the transform by `[[1, −q], [0, 1]]`, i.e. `row0 −= q·row1`.
     fn reduce_top(&self, q: &BigUint) -> Self {
         Self {
-            m00: self.m00.sub_ref(&self.m10.mul_biguint_ref(q)),
-            m01: self.m01.sub_ref(&self.m11.mul_biguint_ref(q)),
+            m00: self.m00.sub(&self.m10.mul_biguint(q)),
+            m01: self.m01.sub(&self.m11.mul_biguint(q)),
             m10: self.m10.clone(),
             m11: self.m11.clone(),
         }
@@ -537,8 +525,8 @@ impl Mat2 {
         Self {
             m00: self.m00.clone(),
             m01: self.m01.clone(),
-            m10: self.m10.sub_ref(&self.m00.mul_biguint_ref(q)),
-            m11: self.m11.sub_ref(&self.m01.mul_biguint_ref(q)),
+            m10: self.m10.sub(&self.m00.mul_biguint(q)),
+            m11: self.m11.sub(&self.m01.mul_biguint(q)),
         }
     }
 
@@ -549,8 +537,8 @@ impl Mat2 {
         Self {
             m00: self.m10.clone(),
             m01: self.m11.clone(),
-            m10: self.m00.sub_ref(&self.m10.mul_biguint_ref(q)),
-            m11: self.m01.sub_ref(&self.m11.mul_biguint_ref(q)),
+            m10: self.m00.sub(&self.m10.mul_biguint(q)),
+            m11: self.m01.sub(&self.m11.mul_biguint(q)),
         }
     }
 
@@ -608,8 +596,8 @@ fn hgcd_adjust(
         let mut shifted = high.clone();
         shifted.shl_bits(p);
         let sum = BigInt::from_biguint(shifted)
-            .add_ref(&r.mul_biguint_ref(&a_low))
-            .add_ref(&s.mul_biguint_ref(&b_low));
+            .add(&r.mul_biguint(&a_low))
+            .add(&s.mul_biguint(&b_low));
         debug_assert!(
             sum.sign() == Sign::Positive,
             "adjusted pair stays positive (Möller Lemma 6)"
@@ -622,9 +610,9 @@ fn hgcd_adjust(
 /// `#(a − b)` — bit-size of the absolute difference.
 fn abs_diff_bits(a: &BigUint, b: &BigUint) -> usize {
     if a >= b {
-        a.sub_ref(b).bits()
+        a.sub(b).bits()
     } else {
-        b.sub_ref(a).bits()
+        b.sub(a).bits()
     }
 }
 
@@ -665,7 +653,7 @@ fn sdiv_step(
     if *hi < threshold {
         return false; // hi already sits at or below the boundary
     }
-    let (q, rem) = hi.sub_ref(&threshold).div_rem(lo);
+    let (q, rem) = hi.sub(&threshold).div_rem(lo);
     if q.is_zero() {
         return false; // reducing even once would cross the boundary
     }
@@ -933,7 +921,7 @@ fn gcd_via_hgcd(a: &BigUint, b: &BigUint) -> BigUint {
         // enough to close; otherwise one division step makes sharp progress
         // (an unbalanced pair collapses, a close pair drops to its difference).
         if bb.bits() <= s || abs_diff_bits(&aa, &bb) <= s {
-            let r = aa.modulo(&bb);
+            let r = aa.rem(&bb);
             aa = core::mem::replace(&mut bb, r);
             continue;
         }
@@ -979,8 +967,8 @@ fn gcd_extended_via_hgcd(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) 
         }
         if bb.limbs().len() < HGCD_EXT_THRESHOLD_LIMBS {
             let (g, s_top, t_top) = gcd_extended_lehmer(&aa, &bb);
-            let s = s_top.mul_ref(&acc.m00).add_ref(&t_top.mul_ref(&acc.m10));
-            let t = s_top.mul_ref(&acc.m01).add_ref(&t_top.mul_ref(&acc.m11));
+            let s = s_top.mul(&acc.m00).add(&t_top.mul(&acc.m10));
+            let t = s_top.mul(&acc.m01).add(&t_top.mul(&acc.m11));
             return (g, s, t);
         }
         let boundary = aa.bits() / 2 + 1;
@@ -1002,7 +990,7 @@ fn gcd_extended_via_hgcd(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) 
 }
 
 /// Reduce a valid Bézout pair for `(a, b)` to the classical one. The cofactor
-/// of `a` is unique modulo `b/g` — any two valid pairs differ by a multiple
+/// of `a` is unique rem `b/g` — any two valid pairs differ by a multiple
 /// of `(b/g, −a/g)` — and classical extended Euclid returns the
 /// representative of least absolute value. Select it, then recover the
 /// second cofactor exactly from the identity `t = (g − s·a)/b`.
@@ -1015,15 +1003,15 @@ fn canonicalize_bezout(a: &BigUint, b: &BigUint, g: &BigUint, s: &BigInt) -> (Bi
         // b divides a; classical Euclid ends in one step with (g, 0, 1).
         return (BigInt::zero(), BigInt::from_biguint(BigUint::one()));
     }
-    let residue = s.modulo_positive(&modulus); // s mod (b/g), in [0, b/g)
-    let twice = residue.add_ref(&residue);
+    let residue = s.rem_euclid(&modulus); // s mod (b/g), in [0, b/g)
+    let twice = residue.add(&residue);
     let s_min = if twice > modulus {
-        BigInt::from_parts(Sign::Negative, modulus.sub_ref(&residue))
+        BigInt::from_parts(Sign::Negative, modulus.sub(&residue))
     } else {
         BigInt::from_biguint(residue)
     };
     // t = (g − s·a)/b, an exact division by the Bézout identity.
-    let numerator = BigInt::from_biguint(g.clone()).sub_ref(&s_min.mul_biguint_ref(a));
+    let numerator = BigInt::from_biguint(g.clone()).sub(&s_min.mul_biguint(a));
     let (quotient, remainder) = numerator.magnitude().div_rem(b);
     debug_assert!(remainder.is_zero(), "g − s·a is divisible by b exactly");
     let t_min = BigInt::from_parts(numerator.sign(), quotient);
@@ -1064,7 +1052,7 @@ fn gcd_lehmer(lhs: &BigUint, rhs: &BigUint) -> BigUint {
         // ordinary step brings the operands level.
         let n = b.limbs().len();
         if a.limbs().len() != n {
-            let remainder = a.modulo(&b);
+            let remainder = a.rem(&b);
             a = b;
             b = remainder;
             continue;
@@ -1073,7 +1061,7 @@ fn gcd_lehmer(lhs: &BigUint, rhs: &BigUint) -> BigUint {
         let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, None);
         if m01 == 0 {
             // The leading digits pinned no step; take one full division step.
-            let remainder = a.modulo(&b);
+            let remainder = a.rem(&b);
             a = b;
             b = remainder;
         } else {
@@ -1114,7 +1102,7 @@ pub fn mod_inverse_u64(value: u64, modulus: u64) -> Option<u64> {
         (old_s, s) = (s, old_s - quotient * s);
     }
     (old_r == 1).then(|| {
-        u64::try_from(old_s.rem_euclid(modulus_signed)).expect("a residue modulo a u64 fits u64")
+        u64::try_from(old_s.rem_euclid(modulus_signed)).expect("a residue rem a u64 fits u64")
     })
 }
 
@@ -1141,7 +1129,7 @@ pub fn gcd(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 /// Algorithm X).
 ///
 /// Returns the classical triple — the one step-by-step extended Euclid would
-/// return, `s` the representative of least absolute value modulo `b/g` — by
+/// return, `s` the representative of least absolute value rem `b/g` — by
 /// whichever of two engines is cheaper at the operands' size. Below the
 /// crossover, Lehmer: both cofactor pairs ride the same leading-digit
 /// transform the remainder pair does, so the batching changes the cost and not
@@ -1149,7 +1137,7 @@ pub fn gcd(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 /// step off the true continued-fraction path near each boundary; the pair it
 /// returns satisfies the Bézout identity but may differ from the classical one
 /// by a multiple of `(b/g, −a/g)`, so a canonicalization step selects the
-/// least representative of `s` modulo `b/g` and recovers `t` exactly from
+/// least representative of `s` rem `b/g` and recovers `t` exactly from
 /// `t = (g − s·a)/b` before returning. Zero operands stay on the Lehmer path,
 /// which handles them directly.
 /// [`mod_inverse`] is the lean variant that keeps only one coefficient.
@@ -1160,7 +1148,7 @@ pub fn gcd(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 /// let (a, b) = (BigUint::from_u64(240), BigUint::from_u64(46));
 /// let (g, s, t) = gcd_extended(&a, &b);
 /// assert_eq!(g, BigUint::from_u64(2));
-/// let bezout = s.mul_biguint_ref(&a).add_ref(&t.mul_biguint_ref(&b));
+/// let bezout = s.mul_biguint(&a).add(&t.mul_biguint(&b));
 /// assert_eq!(bezout, BigInt::from_biguint(g));
 /// ```
 #[must_use]
@@ -1210,8 +1198,8 @@ fn gcd_extended_lehmer(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
         // One ordinary Euclid step: (r0, r1) → (r1, r0 mod r1), each cofactor
         // pair following the same quotient.
         let (quotient, remainder) = r0.div_rem(&r1);
-        let next_s1 = s0.sub_ref(&s1.mul_biguint_ref(&quotient));
-        let next_t1 = t0.sub_ref(&t1.mul_biguint_ref(&quotient));
+        let next_s1 = s0.sub(&s1.mul_biguint(&quotient));
+        let next_t1 = t0.sub(&t1.mul_biguint(&quotient));
         r0 = core::mem::replace(&mut r1, remainder);
         s0 = core::mem::replace(&mut s1, next_s1);
         t0 = core::mem::replace(&mut t1, next_t1);
@@ -1302,7 +1290,7 @@ pub fn product_tree(values: &[BigUint]) -> ProductTree {
         let mut i = 0;
         while i < below.len() {
             if i + 1 < below.len() {
-                up.push(below[i].mul_ref(&below[i + 1]));
+                up.push(below[i].mul(&below[i + 1]));
             } else {
                 up.push(below[i].clone());
             }
@@ -1330,7 +1318,7 @@ pub fn remainder_tree(tree: &ProductTree, modulus: &BigUint) -> Vec<BigUint> {
         return Vec::new();
     };
     // Remainders against the top level.
-    let mut remainders: Vec<BigUint> = root_level.iter().map(|v| modulus.modulo(v)).collect();
+    let mut remainders: Vec<BigUint> = root_level.iter().map(|v| modulus.rem(v)).collect();
     // Descend: level index from top−1 down to 0; a node's parent remainder
     // reduces against the node's own value. Every index below is in range
     // because the argument is a `ProductTree`, whose only constructor is
@@ -1339,7 +1327,7 @@ pub fn remainder_tree(tree: &ProductTree, modulus: &BigUint) -> Vec<BigUint> {
         let here = &levels[level];
         let mut next = Vec::with_capacity(here.len());
         for (j, value) in here.iter().enumerate() {
-            next.push(remainders[j / 2].modulo(value));
+            next.push(remainders[j / 2].rem(value));
         }
         remainders = next;
     }
@@ -1545,13 +1533,13 @@ pub fn rational_reconstruct_bounded(
     den_bound: &BigUint,
 ) -> Option<(BigInt, BigUint)> {
     assert!(
-        BigUint::from_u64(2).mul_ref(num_bound).mul_ref(den_bound) < *m,
+        BigUint::from_u64(2).mul(num_bound).mul(den_bound) < *m,
         "rational reconstruction requires 2·N·D < m"
     );
     if den_bound.is_zero() {
         return None;
     }
-    let x = x.modulo(m);
+    let x = x.rem(m);
     if x.is_zero() {
         return Some((BigInt::zero(), BigUint::one()));
     }
@@ -1582,7 +1570,7 @@ pub fn rational_reconstruct_bounded(
             }
         }
         let (quotient, remainder) = r0.div_rem(&r1);
-        let next_t1 = t0.sub_ref(&t1.mul_biguint_ref(&quotient));
+        let next_t1 = t0.sub(&t1.mul_biguint(&quotient));
         r0 = core::mem::replace(&mut r1, remainder);
         t0 = core::mem::replace(&mut t1, next_t1);
     }
@@ -1608,7 +1596,7 @@ pub fn rational_reconstruct_bounded(
 /// Rational reconstruction with the symmetric default bounds
 /// `N = D = ⌊√((m−1)/2)⌋`, under which `2·N·D < m` holds automatically —
 /// the standard choice when numerator and denominator are equally
-/// unknown, as in recovering a fraction from its image modulo a large
+/// unknown, as in recovering a fraction from its image rem a large
 /// modulus (CRT-lifted linear algebra, p-adic lifting).
 ///
 /// The bound is `⌊√((m−1)/2)⌋` taken by `sqrt_floor`'s Newton iteration,
@@ -1621,13 +1609,13 @@ pub fn rational_reconstruct_bounded(
 /// See [`rational_reconstruct_bounded`] for the contract and references.
 #[must_use]
 pub fn rational_reconstruct(x: &BigUint, m: &BigUint) -> Option<(BigInt, BigUint)> {
-    let mut half = m.sub_ref(&BigUint::one());
+    let mut half = m.sub(&BigUint::one());
     half.shr1();
     let bound = half.sqrt_floor();
     rational_reconstruct_bounded(x, m, &bound, &bound)
 }
 
-/// Above this ratio of `s²` to the modulus bit width, [`sqrt_mod`] leaves
+/// Above this ratio of `s²` to the modulus bit width, [`mod_sqrt`] leaves
 /// the Tonelli–Shanks descent for [`sqrt_mod_cipolla`]: the descent pays
 /// on the order of `s²` base-field multiplications while Cipolla's ladder
 /// is flat in `s`, so the crossover sits where `s²` reaches a fixed
@@ -1642,7 +1630,7 @@ pub fn rational_reconstruct(x: &BigUint, m: &BigUint) -> Option<(BigInt, BigUint
 const CIPOLLA_THRESHOLD_FACTOR: usize = 4;
 
 /// The Tonelli–Shanks descent for `p − 1 = q·2^s`, `a` a residue already
-/// reduced modulo the odd prime `p` (Cohen, *A Course in Computational
+/// reduced rem the odd prime `p` (Cohen, *A Course in Computational
 /// Algebraic Number Theory*, Algorithm 1.5.1). `q` and `s` are the caller's
 /// 2-adic split of `p − 1`, and `ctx` its Montgomery context.
 ///
@@ -1670,7 +1658,7 @@ const CIPOLLA_THRESHOLD_FACTOR: usize = 4;
 /// exhausts (an odd perfect square has no Jacobi non-residue at all, so the
 /// scan is what keeps this from looping forever), or the order search reaches
 /// `i == m`, meaning `t` has no order below the current bound and there is
-/// nothing left to descend. For a prime `p` neither occurs; [`sqrt_mod`]
+/// nothing left to descend. For a prime `p` neither occurs; [`mod_sqrt`]
 /// verifies the result by squaring regardless.
 fn sqrt_mod_descent(
     a: &BigUint,
@@ -1686,7 +1674,7 @@ fn sqrt_mod_descent(
     let mut z = BigUint::from_u64(2);
     let mut attempts = 0u32;
     while jacobi(&z, p) != Some(-1) {
-        z = z.add_ref(&one);
+        z = z.add(&one);
         attempts += 1;
         if attempts > NON_RESIDUE_SCAN_BOUND {
             return None;
@@ -1702,7 +1690,7 @@ fn sqrt_mod_descent(
     let mut c = ctx.encode(&ctx.pow(&z, q));
     let mut t = ctx.encode(&ctx.pow(a, q));
     let mut r = {
-        let mut half = q.add_ref(&one);
+        let mut half = q.add(&one);
         half.shr1();
         ctx.encode(&ctx.pow(a, &half))
     };
@@ -1741,7 +1729,7 @@ fn sqrt_mod_descent(
 const NON_RESIDUE_SCAN_BOUND: u32 = 128;
 
 /// Cipolla's modular square root, for an odd prime `p` and a quadratic
-/// residue `a` already reduced modulo `p`.
+/// residue `a` already reduced rem `p`.
 ///
 /// Choose `t` with `w = t² − a` a non-residue (each try succeeds with
 /// probability ~1/2; consecutive small `t` serve, the character being
@@ -1752,11 +1740,11 @@ const NON_RESIDUE_SCAN_BOUND: u32 = 128;
 /// left-to-right over `(p+1)/2` as Montgomery-domain pairs `(u, v)`
 /// standing for `u + v·x`: squaring is `(u² + w·v², 2uv)` and the
 /// multiply by the fixed base `t + x` is `(u·t + w·v, u + v·t)`. Cost is
-/// flat in `s = v₂(p−1)` — the property [`sqrt_mod`]'s dispatch buys —
+/// flat in `s = v₂(p−1)` — the property [`mod_sqrt`]'s dispatch buys —
 /// against the descent's `s²` growth.
 ///
 /// For composite `p` the returned value need not square to `a`;
-/// [`sqrt_mod`]'s final verification is the contract, exactly as for the
+/// [`mod_sqrt`]'s final verification is the contract, exactly as for the
 /// descent. `None` only when the bounded parameter search exhausts —
 /// impossible for a prime modulus in any observable sense, and exactly
 /// what an odd perfect-square modulus produces.
@@ -1776,7 +1764,7 @@ fn sqrt_mod_cipolla(a: &BigUint, p: &BigUint, ctx: &MontgomeryContext) -> Option
         if jacobi(&difference, p) == Some(-1) {
             break difference;
         }
-        t = t.add_ref(&one);
+        t = t.add(&one);
         attempts += 1;
         if attempts > NON_RESIDUE_SCAN_BOUND {
             return None;
@@ -1786,7 +1774,7 @@ fn sqrt_mod_cipolla(a: &BigUint, p: &BigUint, ctx: &MontgomeryContext) -> Option
     let w_mont = ctx.encode(&w);
     let t_mont = ctx.encode(&t);
     // (p + 1)/2, the exponent taking t + x to the root.
-    let mut exponent = p.add_ref(&one);
+    let mut exponent = p.add(&one);
     exponent.shr1();
 
     // Ladder state (u, v) = u + v·x, starting at the identity 1 + 0·x.
@@ -1850,7 +1838,7 @@ pub fn mod_inverse_batch(values: &[BigUint], modulus: &BigUint) -> Option<Vec<Bi
     }
     // Forward prefix products, each reduced.
     let mut prefixes = Vec::with_capacity(values.len());
-    let mut running = values[0].modulo(modulus);
+    let mut running = values[0].rem(modulus);
     prefixes.push(running.clone());
     for value in &values[1..] {
         running = BigUint::mod_mul(&running, value, modulus);
@@ -1929,7 +1917,7 @@ pub fn remove_factor(n: &BigUint, p: &BigUint) -> (BigUint, usize) {
         }
         cofactor = quotient;
         exponent += rung_exponent;
-        ladder.push(rung.square_ref());
+        ladder.push(rung.square());
         rung_exponent *= 2;
     }
     // Descend: each lower rung divides at most once, because the rung
@@ -1962,7 +1950,7 @@ pub fn remove_factor(n: &BigUint, p: &BigUint) -> (BigUint, usize) {
 /// RSA-specific note: this is the Carmichael-function building block the
 /// parent cryptography crate's key generation uses, `λ(n) = lcm(p−1, q−1)`
 /// rather than Euler's `φ(n) = (p−1)(q−1)`, because the private exponent need
-/// only invert the public exponent modulo the exponent group's cycle length,
+/// only invert the public exponent rem the exponent group's cycle length,
 /// and `λ` is that length.
 #[must_use]
 pub fn lcm(lhs: &BigUint, rhs: &BigUint) -> BigUint {
@@ -1973,7 +1961,7 @@ pub fn lcm(lhs: &BigUint, rhs: &BigUint) -> BigUint {
     let divisor = gcd(lhs, rhs);
     let (quotient, remainder) = lhs.div_rem(&divisor);
     debug_assert!(remainder.is_zero(), "gcd divides the left operand exactly");
-    quotient.mul_ref(rhs)
+    quotient.mul(rhs)
 }
 
 // ─── Quadratic-residue symbols ─────────────────────────────────────────────────
@@ -2061,7 +2049,7 @@ pub fn jacobi(a: &BigUint, n: &BigUint) -> Option<i8> {
     if n.is_zero() || !n.is_odd() {
         return None;
     }
-    let reduced = a.modulo(n);
+    let reduced = a.rem(n);
     let inner = n.limbs().len().min(reduced.limbs().len());
     if inner >= JACOBI_HGCD_THRESHOLD_LIMBS {
         return Some(jacobi_hgcd(reduced, n.clone()));
@@ -2083,7 +2071,7 @@ pub fn jacobi(a: &BigUint, n: &BigUint) -> Option<i8> {
 const JACOBI_LEHMER_THRESHOLD_LIMBS: usize = 64;
 
 /// [`jacobi`]'s below-crossover engine: binary quadratic reciprocity, taking
-/// `a` already reduced modulo the odd `n`.
+/// `a` already reduced rem the odd `n`.
 /// `value mod 2^k`, where `mask` is `2^k − 1` and `k ≤ 64`.
 ///
 /// Base 2⁶⁴ puts a factor of 2⁶⁴ on every limb above the first, so each of them
@@ -2142,7 +2130,7 @@ fn jacobi_binary(reduced: BigUint, n: BigUint) -> Option<i8> {
 
 /// [`jacobi`]'s above-crossover engine: the Euclidean quotient sequence with
 /// Lehmer batching, the [`JacobiState`] replaying each batch's applied
-/// quotients. Takes `x` already reduced modulo the odd `y`.
+/// quotients. Takes `x` already reduced rem the odd `y`.
 ///
 /// The state's two slots are fixed to `x` and `y`; nothing is ever swapped.
 /// A batch of `k` swapping remainder steps ends with the remainder pair
@@ -2233,7 +2221,7 @@ const JACOBI_HGCD_THRESHOLD_LIMBS: usize = 2048;
 
 /// [`jacobi`]'s subquadratic engine: the reduction of [`gcd_via_hgcd`] with
 /// the [`JacobiState`] threaded through every applied quotient. Takes `x`
-/// already reduced modulo the odd `y`.
+/// already reduced rem the odd `y`.
 ///
 /// The state's slots are fixed to `x` and `y`, and [`hgcd`] preserves slot
 /// order — its base case places each Lehmer batch's results by step parity,
@@ -2300,7 +2288,7 @@ fn jacobi_hgcd_engine(x: BigUint, y: BigUint, state: JacobiState, tail_limbs: us
     }
 }
 
-/// Every square root of `a` modulo `p^e` for a prime `p` and exponent
+/// Every square root of `a` rem `p^e` for a prime `p` and exponent
 /// `e ≥ 1`, ascending, empty when `a` is a non-residue.
 ///
 /// Sieving credits a prime power by the count of `x` with `x² ≡ kn`
@@ -2325,20 +2313,20 @@ fn jacobi_hgcd_engine(x: BigUint, y: BigUint, state: JacobiState, tail_limbs: us
 ///
 /// Primality of `p` is the caller's contract and is not checked. A
 /// composite `p` returns a value satisfying no useful guarantee: the set
-/// may be incomplete, and unlike [`sqrt_mod`] it is not verified by
+/// may be incomplete, and unlike [`mod_sqrt`] it is not verified by
 /// squaring.
 ///
 /// # Panics
 ///
 /// Panics when `e == 0` or `p < 2`. A composite `p` can also reach an
-/// internal inversion that panics (`2·root` must be a unit modulo `p^k`),
+/// internal inversion that panics (`2·root` must be a unit rem `p^k`),
 /// though a prime `p` never does.
 #[must_use]
-pub fn sqrt_mod_prime_power(a: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
+pub fn mod_sqrt_prime_power(a: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
     assert!(e >= 1, "prime-power exponent must be at least 1");
     assert!(*p >= BigUint::from_u64(2), "p must be a prime at least 2");
     let modulus = p.pow_u64(u64::from(e));
-    let a = a.modulo(&modulus);
+    let a = a.rem(&modulus);
 
     // Valuation of a with respect to p, capped at e (a ≡ 0 mod p^e beyond).
     let (unit, v) = if a.is_zero() {
@@ -2361,7 +2349,7 @@ pub fn sqrt_mod_prime_power(a: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
         let mut x = BigUint::zero();
         while x < modulus {
             roots.push(x.clone());
-            x = x.add_ref(&step);
+            x = x.add(&step);
         }
         return roots;
     }
@@ -2386,20 +2374,20 @@ pub fn sqrt_mod_prime_power(a: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
         let mut j = BigUint::zero();
         while j < fan_count {
             // x = scale · (t0 + j·fan_modulus)
-            let t = t0.add_ref(&j.mul_ref(&fan_modulus));
-            roots.push(scale.mul_ref(&t).modulo(&modulus));
-            j = j.add_ref(&BigUint::one());
+            let t = t0.add(&j.mul(&fan_modulus));
+            roots.push(scale.mul(&t).rem(&modulus));
+            j = j.add(&BigUint::one());
         }
     }
     roots.sort();
     roots
 }
 
-/// Square roots of a `p`-unit `u` modulo `p^e` — the [`sqrt_mod_prime_power`]
+/// Square roots of a `p`-unit `u` rem `p^e` — the [`mod_sqrt_prime_power`]
 /// core, assuming `gcd(u, p) = 1`.
 fn sqrt_mod_prime_power_unit(u: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
     let modulus = p.pow_u64(u64::from(e));
-    let u = u.modulo(&modulus);
+    let u = u.rem(&modulus);
     let two = BigUint::from_u64(2);
 
     if *p == two {
@@ -2429,8 +2417,8 @@ fn sqrt_mod_prime_power_unit(u: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
                     // bit is wrong, flip it.
                     k += 1;
                     let modk = p.pow_u64(u64::from(k));
-                    let sq = root.mul_ref(&root).modulo(&modk);
-                    if sq != u.modulo(&modk) {
+                    let sq = root.mul(&root).rem(&modk);
+                    if sq != u.rem(&modk) {
                         // Lifting a root from mod 2^(k−1) to mod 2^k: the
                         // discrepancy is at bit k−1, and adding 2^(k−2)
                         // flips exactly it, since (r + 2^(k−2))² differs
@@ -2438,14 +2426,14 @@ fn sqrt_mod_prime_power_unit(u: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
                         // 2^(2k−4) term that vanishes mod 2^k for k ≥ 4.
                         let mut fix = BigUint::zero();
                         fix.set_bit((k - 2) as usize);
-                        root = root.add_ref(&fix).modulo(&modk);
+                        root = root.add(&fix).rem(&modk);
                     }
                 }
-                let neg = modulus.sub_ref(&root);
+                let neg = modulus.sub(&root);
                 let mut half = BigUint::zero();
                 half.set_bit((e - 1) as usize);
-                let alt = root.add_ref(&half).modulo(&modulus);
-                let alt_neg = modulus.sub_ref(&alt);
+                let alt = root.add(&half).rem(&modulus);
+                let alt_neg = modulus.sub(&alt);
                 let mut roots = vec![root, neg, alt, alt_neg];
                 roots.sort();
                 roots.dedup();
@@ -2456,7 +2444,7 @@ fn sqrt_mod_prime_power_unit(u: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
 
     // Odd p: one base root mod p, Hensel-lifted to mod p^e; the two roots
     // are r and p^e − r.
-    let Some(base) = sqrt_mod(&u, p) else {
+    let Some(base) = mod_sqrt(&u, p) else {
         return Vec::new();
     };
     let mut root = base;
@@ -2469,18 +2457,18 @@ fn sqrt_mod_prime_power_unit(u: &BigUint, p: &BigUint, e: u32) -> Vec<BigUint> {
         let modk = p.pow_u64(u64::from(next));
         // Newton: root ← root − f(root)/f'(root), f = x² − u, f' = 2x.
         let f = root
-            .mul_ref(&root)
-            .modulo(&modk)
-            .add_ref(&modk)
-            .sub_ref(&u.modulo(&modk))
-            .modulo(&modk);
-        let two_root = two.mul_ref(&root).modulo(&modk);
+            .mul(&root)
+            .rem(&modk)
+            .add(&modk)
+            .sub(&u.rem(&modk))
+            .rem(&modk);
+        let two_root = two.mul(&root).rem(&modk);
         let inv = mod_inverse(&two_root, &modk).expect("2·root is a unit mod p^k");
-        let correction = f.mul_ref(&inv).modulo(&modk);
-        root = root.add_ref(&modk).sub_ref(&correction).modulo(&modk);
+        let correction = f.mul(&inv).rem(&modk);
+        root = root.add(&modk).sub(&correction).rem(&modk);
         k = next;
     }
-    let other = modulus.sub_ref(&root);
+    let other = modulus.sub(&root);
     let mut roots = vec![root, other];
     roots.sort();
     roots.dedup();
@@ -2570,7 +2558,7 @@ pub fn mod_pow(base: &BigUint, exponent: &BigUint, modulus: &BigUint) -> BigUint
     // answer: measured, building it first made `mod_pow(base, 0, n)` 209×
     // slower at 8192 bits than the empty ladder it replaced.
     if exponent.is_zero() {
-        return BigUint::one().modulo(modulus);
+        return BigUint::one().rem(modulus);
     }
 
     // Even modulus: Montgomery cannot operate, so the ladder runs over a
@@ -2591,7 +2579,7 @@ pub fn mod_pow(base: &BigUint, exponent: &BigUint, modulus: &BigUint) -> BigUint
 /// Cryptography*, Algorithm 2.142), reduced into `[0, n)`.
 ///
 /// Extended Euclid on `(n, a mod n)` carrying one cofactor sequence instead of
-/// two: modulo `n` the modulus term contributes nothing, so the invariant
+/// two: rem `n` the modulus term contributes nothing, so the invariant
 /// `r0 ≡ u0·(a mod n) (mod n)` holds throughout and `u0` is the inverse the
 /// moment `r0` reaches `1`. Dropping the second sequence halves the signed
 /// bookkeeping [`gcd_extended`] pays — worth having where inversion is the
@@ -2615,7 +2603,7 @@ pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
         return None;
     }
 
-    let reduced = a.modulo(n);
+    let reduced = a.rem(n);
 
     // Above the crossover, ride the Half-GCD driver: the inverse is the
     // cofactor of `a mod n` in the Bézout identity for (n, a mod n), and
@@ -2626,11 +2614,11 @@ pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
         if !g.is_one() {
             return None;
         }
-        return Some(t.modulo_positive(n));
+        return Some(t.rem_euclid(n));
     }
 
     // Extended Euclid on (n, a mod n) over the shared Lehmer engine, tracking
-    // only the coefficient of `a mod n`: modulo n the modulus contributes
+    // only the coefficient of `a mod n`: rem n the modulus contributes
     // nothing, so r0 ≡ u0·(a mod n) (mod n), and when r0 reaches gcd = 1 the
     // coefficient u0 is the inverse.
     let (mut r0, mut r1) = (n.clone(), reduced);
@@ -2653,7 +2641,7 @@ pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
             }
         }
         let (quotient, remainder) = r0.div_rem(&r1);
-        let next_u1 = u0.sub_ref(&u1.mul_biguint_ref(&quotient));
+        let next_u1 = u0.sub(&u1.mul_biguint(&quotient));
         r0 = core::mem::replace(&mut r1, remainder);
         u0 = core::mem::replace(&mut u1, next_u1);
     }
@@ -2661,13 +2649,13 @@ pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
     if !r0.is_one() {
         return None;
     }
-    Some(u0.modulo_positive(n))
+    Some(u0.rem_euclid(n))
 }
 
 /// Write `n - 1 = d * 2^s` with `d` odd: the 2-adic split shared by the
 /// Miller-Rabin witness test and the Tonelli–Shanks descent.
 fn decompose_n_minus_one(n: &BigUint) -> (BigUint, usize) {
-    let mut odd_factor = n.sub_ref(&BigUint::one());
+    let mut odd_factor = n.sub(&BigUint::one());
     let two_adic_exponent = odd_factor.trailing_zeros().expect("n exceeds one");
     odd_factor.shr_bits(two_adic_exponent);
     (odd_factor, two_adic_exponent)
@@ -2696,31 +2684,31 @@ fn decompose_n_minus_one(n: &BigUint) -> (BigUint, usize) {
 /// the return is never a value that fails its own check, and the non-residue
 /// scan is bounded, so the call always terminates — odd perfect squares
 /// included, which admit no non-residue-by-Jacobi at all. On a composite `p`
-/// the result is therefore either `None` or a genuine root modulo that
-/// composite; it is not a primality verdict. For example `sqrt_mod(1, 15)`
-/// returns `Some(1)` (a true root of 1 mod 15), while `sqrt_mod(1, 9)`
+/// the result is therefore either `None` or a genuine root rem that
+/// composite; it is not a primality verdict. For example `mod_sqrt(1, 15)`
+/// returns `Some(1)` (a true root of 1 mod 15), while `mod_sqrt(1, 9)`
 /// returns `None` (the bounded scan finds no non-residue mod the square 9).
 /// A residue that genuinely is a square can still return `None` this way:
-/// `sqrt_mod(4, 9)` is `None` even though `4 = 2² (mod 9)`, because the
+/// `mod_sqrt(4, 9)` is `None` even though `4 = 2² (mod 9)`, because the
 /// descent needs a non-residue that a square modulus does not have. For roots
-/// modulo a prime power, use [`sqrt_mod_prime_power`], which lifts by Hensel
+/// rem a prime power, use [`mod_sqrt_prime_power`], which lifts by Hensel
 /// instead of searching for a non-residue.
 ///
 /// ```
-/// use rump::{sqrt_mod, BigUint};
+/// use rump::{mod_sqrt, BigUint};
 ///
 /// let p = BigUint::from_u64(41); // 41 ≡ 1 (mod 8): the general descent
 /// let two = BigUint::from_u64(2);
-/// let root = sqrt_mod(&two, &p).expect("2 is a residue mod 41");
+/// let root = mod_sqrt(&two, &p).expect("2 is a residue mod 41");
 /// assert_eq!(BigUint::mod_mul(&root, &root, &p), two);
-/// assert_eq!(sqrt_mod(&BigUint::from_u64(3), &p), None); // non-residue
+/// assert_eq!(mod_sqrt(&BigUint::from_u64(3), &p), None); // non-residue
 /// ```
 #[must_use]
-pub fn sqrt_mod(a: &BigUint, p: &BigUint) -> Option<BigUint> {
+pub fn mod_sqrt(a: &BigUint, p: &BigUint) -> Option<BigUint> {
     if p.is_zero() {
         return None;
     }
-    let a = a.modulo(p);
+    let a = a.rem(p);
     if !p.is_odd() {
         // The only even prime: 0 and 1 are their own square roots mod 2.
         return if p == &BigUint::from_u64(2) {
@@ -2742,7 +2730,7 @@ pub fn sqrt_mod(a: &BigUint, p: &BigUint) -> Option<BigUint> {
     let candidate = if low_bits_mod_pow2(p, 3) == 3 {
         // a^((p+1)/4): squaring it gives a^((p+1)/2) = a · a^((p-1)/2) = a
         // by Euler's criterion.
-        let mut exponent = p.add_ref(&one);
+        let mut exponent = p.add(&one);
         exponent.shr_bits(2);
         ctx.pow(&a, &exponent)
     } else {
@@ -2772,11 +2760,11 @@ pub fn sqrt_mod(a: &BigUint, p: &BigUint) -> Option<BigUint> {
 /// pairwise coprime (or the input is empty or contains a zero modulus).
 ///
 /// Incremental Garner recombination (*Handbook of Applied Cryptography*,
-/// Algorithm 14.71): hold a solution `x` modulo the running product `M` of the
+/// Algorithm 14.71): hold a solution `x` rem the running product `M` of the
 /// moduli folded so far, and absorb the next congruence by solving
 /// `x + M·k ≡ rᵢ (mod mᵢ)` for `k`, then setting `x ← x + M·k`. The correction
 /// is a multiple of `M`, so every earlier congruence survives it untouched,
-/// and `k` is found by one inversion modulo `mᵢ` alone — the arithmetic stays
+/// and `k` is found by one inversion rem `mᵢ` alone — the arithmetic stays
 /// at the width of a single modulus rather than the full product, which is
 /// what distinguishes Garner's form from the classical `Σ rᵢ·Mᵢ·(Mᵢ⁻¹ mod mᵢ)`
 /// sum.
@@ -2807,7 +2795,7 @@ pub fn crt_combine(congruences: &[(BigUint, BigUint)]) -> Option<BigUint> {
         return None;
     }
 
-    let mut solution = first_residue.modulo(first_modulus);
+    let mut solution = first_residue.rem(first_modulus);
     let mut product = first_modulus.clone();
 
     for (residue, modulus) in &congruences[1..] {
@@ -2817,13 +2805,13 @@ pub fn crt_combine(congruences: &[(BigUint, BigUint)]) -> Option<BigUint> {
         // k = (residue - solution) · product⁻¹ (mod modulus); a missing
         // inverse is exactly the non-coprime case.
         let inverse = mod_inverse(&product, modulus)?;
-        let residue = residue.modulo(modulus);
+        let residue = residue.rem(modulus);
         // The bias by `modulus` keeps the subtraction in range; mod_mul
         // reduces the product, so no further reduction is needed here.
-        let difference = residue.add_ref(modulus).sub_ref(&solution.modulo(modulus));
+        let difference = residue.add(modulus).sub(&solution.rem(modulus));
         let k = BigUint::mod_mul(&difference, &inverse, modulus);
-        solution = solution.add_ref(&product.mul_ref(&k));
-        product = product.mul_ref(modulus);
+        solution = solution.add(&product.mul(&k));
+        product = product.mul(modulus);
     }
 
     Some(solution)
@@ -2904,7 +2892,7 @@ fn is_witness(
     // R mod n is precomputed in the context, and (n−1)·R ≡ −R ≡ n − (R mod n),
     // so both domain constants come out without a Montgomery multiplication.
     let one_mont = ctx.one_mont().clone();
-    let n_minus_one_mont = ctx.modulus().sub_ref(&one_mont);
+    let n_minus_one_mont = ctx.modulus().sub(&one_mont);
     let mut value = ctx.encode(&ctx.pow(base, odd_factor));
 
     // One workspace for the whole squaring chain: v₂(n−1) squarings per
@@ -3009,7 +2997,7 @@ pub fn is_probable_prime(n: &BigUint) -> bool {
 /// strength of a witness schedule should account for the screen deciding the
 /// small cases before any base is consulted.
 ///
-/// Each base is reduced modulo `candidate` before use, since an unreduced
+/// Each base is reduced rem `candidate` before use, since an unreduced
 /// `u64` can be larger than `candidate` and still reduce to a residue that
 /// testifies. A base whose residue is `0`, `1`, or `candidate − 1` is the
 /// trivial `±1` case: it satisfies the strong test for every modulus, proves
@@ -3020,7 +3008,7 @@ pub fn is_probable_prime(n: &BigUint) -> bool {
 /// Callers wanting a guaranteed-nontrivial schedule should draw bases in
 /// `[2, candidate − 1)`.
 #[must_use]
-pub fn is_probable_prime_with_bases(candidate: &BigUint, bases: &[u64]) -> bool {
+pub fn miller_rabin_with_bases(candidate: &BigUint, bases: &[u64]) -> bool {
     mr_probable_prime(candidate, bases)
 }
 
@@ -3033,7 +3021,7 @@ pub fn is_probable_prime_with_bases(candidate: &BigUint, bases: &[u64]) -> bool 
 /// is the whole contract: `true` means proven composite, `false` means this
 /// witness proved nothing, never that the candidate is prime.
 ///
-/// The witness is reduced modulo `candidate` first, since an unreduced value
+/// The witness is reduced rem `candidate` first, since an unreduced value
 /// may still reduce to one that testifies. A residue of `0`, `1`, or
 /// `candidate − 1` satisfies the strong test for every modulus and so yields
 /// `false`.
@@ -3061,8 +3049,8 @@ pub fn miller_rabin_witness(candidate: &BigUint, witness: &BigUint) -> bool {
         return true;
     }
 
-    let n_minus_one = candidate.sub_ref(&BigUint::one());
-    let witness = witness.modulo(candidate);
+    let n_minus_one = candidate.sub(&BigUint::one());
+    let witness = witness.rem(candidate);
     if witness <= BigUint::one() || witness == n_minus_one {
         return false;
     }
@@ -3106,7 +3094,7 @@ fn small_prime_screen(candidate: &BigUint) -> Option<bool> {
 }
 
 /// The shared body of [`is_probable_prime`] and
-/// [`is_probable_prime_with_bases`]: trial division, then one Miller-Rabin
+/// [`miller_rabin_with_bases`]: trial division, then one Miller-Rabin
 /// round per effective base.
 ///
 /// The two stages are sequential and independent. [`small_prime_screen`] runs
@@ -3140,11 +3128,11 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
     let Some(ctx) = MontgomeryContext::new(candidate) else {
         return false;
     };
-    let n_minus_one = candidate.sub_ref(&BigUint::one());
+    let n_minus_one = candidate.sub(&BigUint::one());
     let (odd_factor, two_adic_exponent) = decompose_n_minus_one(candidate);
 
     // Count the rounds that could actually testify. A base reducing to 0, 1,
-    // or n − 1 modulo the candidate is the trivial ±1 case and proves
+    // or n − 1 rem the candidate is the trivial ±1 case and proves
     // nothing; skipping it must not be mistaken for passing it.
     let mut effective_rounds = 0usize;
     for &base in bases {
@@ -3152,7 +3140,7 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
         // n − 1 may still reduce to a non-trivial residue that testifies, so
         // classifying the raw value would drop real witnesses — and, with
         // every base dropped that way, would report a composite as prime.
-        let witness = BigUint::from_u64(base).modulo(candidate);
+        let witness = BigUint::from_u64(base).rem(candidate);
         if witness <= BigUint::one() || witness == n_minus_one {
             continue;
         }
@@ -3180,7 +3168,7 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
 /// This is the one deliberately uncapped search in the crate, and its
 /// termination is a theorem: the candidates are the integers
 /// `D ≡ 1 (mod 4)` with `|D| ≥ 5`, ordered by `|D|`, and for odd `n` those
-/// meet every residue class modulo `n` (`D = 1 + 4k` with `k` sweeping a
+/// meet every residue class rem `n` (`D = 1 + 4k` with `k` sweeping a
 /// full residue system; dropping `1` and `-3` removes nothing from the
 /// coverage). Once the perfect-square exclusion has run, `D ↦ (D/n)` is a
 /// non-principal character on `(ℤ/nℤ)*`, `-1` on half the coprime classes,
@@ -3198,7 +3186,7 @@ fn selfridge_discriminant(n: &BigUint) -> Option<i64> {
     let mut attempts = 0u32;
     loop {
         let signed = i64::try_from(d_abs).expect("discriminant search stays far below i64::MAX");
-        let residue = BigInt::from_i64(if positive { signed } else { -signed }).modulo_positive(n);
+        let residue = BigInt::from_i64(if positive { signed } else { -signed }).rem_euclid(n);
         match jacobi(&residue, n) {
             Some(-1) => {
                 let magnitude =
@@ -3215,7 +3203,7 @@ fn selfridge_discriminant(n: &BigUint) -> Option<i64> {
         attempts += 1;
         if attempts == 3 {
             let root = n.sqrt_floor();
-            if root.square_ref() == *n {
+            if root.square() == *n {
                 return None;
             }
         }
@@ -3235,15 +3223,15 @@ fn selfridge_discriminant(n: &BigUint) -> Option<i64> {
 /// `(U_k, V_k, Q^k)`, all as Montgomery residues: doubling by
 /// `U_{2k} = U_k·V_k`, `V_{2k} = V_k² - 2Q^k`, `Q^{2k} = (Q^k)²`, and
 /// stepping by the `P = 1` forms `U_{k+1} = (U_k + V_k)/2`,
-/// `V_{k+1} = (D·U_k + V_k)/2`. The halving is exact modulo odd `n`
+/// `V_{k+1} = (D·U_k + V_k)/2`. The halving is exact rem odd `n`
 /// (add `n` first when the residue is odd), and commutes with the
 /// Montgomery encoding because dividing by two is multiplication by the
 /// constant `2⁻¹ mod n`.
 fn strong_lucas_core(n: &BigUint, ctx: &MontgomeryContext, discriminant: i64) -> bool {
-    let to_residue = |value: i64| -> BigUint { BigInt::from_i64(value).modulo_positive(n) };
+    let to_residue = |value: i64| -> BigUint { BigInt::from_i64(value).rem_euclid(n) };
     let half_mod = |value: &BigUint| -> BigUint {
         let mut halved = if value.is_odd() {
-            value.add_ref(n)
+            value.add(n)
         } else {
             value.clone()
         };
@@ -3256,7 +3244,7 @@ fn strong_lucas_core(n: &BigUint, ctx: &MontgomeryContext, discriminant: i64) ->
 
     // n + 1 = 2^s · d with d odd; s ≥ 1 since n is odd. One pass over the
     // limbs rather than a shift per bit.
-    let mut d = n.add_ref(&BigUint::one());
+    let mut d = n.add(&BigUint::one());
     let s = d.trailing_zeros().expect("n + 1 is non-zero");
     d.shr_bits(s);
 
@@ -3407,7 +3395,7 @@ mod tests {
         let _ = mod_inverse_u64(3, 0);
     }
     use super::{
-        gcd, is_probable_prime, is_probable_prime_with_bases, jacobi, lcm, miller_rabin_witness,
+        gcd, is_probable_prime, jacobi, lcm, miller_rabin_with_bases, miller_rabin_witness,
         mod_inverse, mod_pow,
     };
     use crate::bigint::BigUint;
@@ -3436,7 +3424,7 @@ mod tests {
             for _ in 0..words {
                 bytes.extend_from_slice(&rng.next_u64().to_be_bytes());
             }
-            let candidate = BigUint::from_be_bytes(&bytes).modulo(upper);
+            let candidate = BigUint::from_be_bytes(&bytes).rem(upper);
             if !candidate.is_zero() {
                 return candidate;
             }
@@ -3446,7 +3434,7 @@ mod tests {
     fn mersenne(exponent: usize) -> BigUint {
         let mut value = BigUint::zero();
         value.set_bit(exponent);
-        value.sub_ref(&BigUint::one())
+        value.sub(&BigUint::one())
     }
 
     fn pow2(bits: usize) -> BigUint {
@@ -3463,7 +3451,7 @@ mod tests {
         if n.is_zero() || !n.is_odd() {
             return None;
         }
-        let mut x = a.modulo(n); // the state's `a` slot
+        let mut x = a.rem(n); // the state's `a` slot
         let mut y = n.clone(); // the state's `b` slot; odd at initialization
         if x.is_zero() {
             return Some(i8::from(y.is_one()));
@@ -3502,9 +3490,9 @@ mod tests {
             let mut n = draw_below(&mut rng, &pow2(bits));
             n.set_bit(bits - 1);
             if !n.is_odd() {
-                n = n.add_ref(&BigUint::one());
+                n = n.add(&BigUint::one());
             }
-            let a = draw_below(&mut rng, &pow2(bits)).modulo(&n);
+            let a = draw_below(&mut rng, &pow2(bits)).rem(&n);
             let reps = (512 / limbs).max(2);
             let time = |f: &dyn Fn()| {
                 let mut best = f64::INFINITY;
@@ -3558,7 +3546,7 @@ mod tests {
         if n.is_zero() || !n.is_odd() {
             return None;
         }
-        super::jacobi_binary(a.modulo(n), n.clone())
+        super::jacobi_binary(a.rem(n), n.clone())
     }
 
     #[test]
@@ -3591,7 +3579,7 @@ mod tests {
             for _ in 0..30 {
                 let mut n = draw_below(&mut rng, &pow2(bits));
                 if !n.is_odd() {
-                    n = n.add_ref(&BigUint::one());
+                    n = n.add(&BigUint::one());
                 }
                 let a = draw_below(&mut rng, &pow2(bits));
                 let oracle = jacobi_binary_oracle(&a, &n);
@@ -3701,7 +3689,7 @@ mod tests {
             "unbalanced fallback diverged"
         );
         let y = full_width_odd(&mut rng, JACOBI_HGCD_THRESHOLD_LIMBS + 52);
-        let x = y.sub_ref(&BigUint::from_u64(2));
+        let x = y.sub(&BigUint::from_u64(2));
         assert_eq!(
             jacobi_hgcd(x.clone(), y.clone()),
             jacobi_lehmer(x, y),
@@ -3904,7 +3892,7 @@ mod tests {
                 // the Lehmer batches in the base case are products of swapping
                 // Euclid steps (det −1 each), so an odd-length batch flips it.
                 assert_eq!(gcd_lehmer(&ra, &rb), gcd_lehmer(&a, &b));
-                let det = t.m00.mul_ref(&t.m11).sub_ref(&t.m01.mul_ref(&t.m10));
+                let det = t.m00.mul(&t.m11).sub(&t.m01.mul(&t.m10));
                 assert_eq!(
                     det.magnitude(),
                     one.magnitude(),
@@ -3940,11 +3928,11 @@ mod tests {
         }
         // Structured: 2^2000 against 2^2000 − 1 (coprime), and a shared factor.
         let big = pow2(2000);
-        let odd = big.sub_ref(&BigUint::one());
+        let odd = big.sub(&BigUint::one());
         assert_eq!(gcd_via_hgcd(&big, &odd), gcd_lehmer(&big, &odd));
         let m = mersenne(1279);
-        let shared = m.mul_ref(&BigUint::from_u64(6));
-        let other = m.mul_ref(&BigUint::from_u64(10));
+        let shared = m.mul(&BigUint::from_u64(6));
+        let other = m.mul(&BigUint::from_u64(10));
         assert_eq!(gcd_via_hgcd(&shared, &other), gcd_lehmer(&shared, &other));
 
         // Above the dispatch thresholds the public functions take the
@@ -3969,13 +3957,13 @@ mod tests {
         );
         let mut n = p.clone();
         if !n.is_odd() {
-            n = n.add_ref(&BigUint::one());
+            n = n.add(&BigUint::one());
         }
         match mod_inverse(&q, &n) {
             Some(inverse) => {
                 // The inverse is unique mod n; the identity is a complete check.
                 assert_eq!(
-                    BigUint::mod_mul(&q.modulo(&n), &inverse, &n),
+                    BigUint::mod_mul(&q.rem(&n), &inverse, &n),
                     BigUint::one(),
                     "public mod_inverse dispatch returned a non-inverse"
                 );
@@ -4171,7 +4159,7 @@ mod tests {
         primes.push(mersenne(127));
 
         for p in &primes {
-            let exponent = p.sub_ref(&BigUint::one());
+            let exponent = p.sub(&BigUint::one());
             let mut half = exponent.clone();
             half.shr_bits(1);
             for _ in 0..12 {
@@ -4179,7 +4167,7 @@ mod tests {
                 let euler = mod_pow(&a, &half, p);
                 let expected = if euler.is_one() {
                     1
-                } else if euler == p.sub_ref(&BigUint::one()) {
+                } else if euler == p.sub(&BigUint::one()) {
                     -1
                 } else {
                     assert!(euler.is_zero(), "Euler criterion out of range");
@@ -4198,26 +4186,26 @@ mod tests {
             let mut n1 = draw_below(&mut rng, &bound);
             let mut n2 = draw_below(&mut rng, &bound);
             if !n1.is_odd() {
-                n1 = n1.add_ref(&BigUint::one());
+                n1 = n1.add(&BigUint::one());
             }
             if !n2.is_odd() {
-                n2 = n2.add_ref(&BigUint::one());
+                n2 = n2.add(&BigUint::one());
             }
             let a = draw_below(&mut rng, &n1);
             let b = draw_below(&mut rng, &n1);
 
             // Multiplicative in the top argument: (ab/n) = (a/n)(b/n).
             assert_eq!(
-                jacobi(&a.mul_ref(&b), &n1).unwrap(),
+                jacobi(&a.mul(&b), &n1).unwrap(),
                 jacobi(&a, &n1).unwrap() * jacobi(&b, &n1).unwrap()
             );
             // Multiplicative in the bottom: (a/n1n2) = (a/n1)(a/n2).
             assert_eq!(
-                jacobi(&a, &n1.mul_ref(&n2)).unwrap(),
+                jacobi(&a, &n1.mul(&n2)).unwrap(),
                 jacobi(&a, &n1).unwrap() * jacobi(&a, &n2).unwrap()
             );
             // Periodic in the top argument: (a + n / n) = (a/n).
-            assert_eq!(jacobi(&a.add_ref(&n1), &n1), jacobi(&a, &n1));
+            assert_eq!(jacobi(&a.add(&n1), &n1), jacobi(&a, &n1));
         }
     }
 
@@ -4399,7 +4387,7 @@ mod tests {
             let a = draw_below(&mut rng, &bound);
             let mut n_odd = draw_below(&mut rng, &bound);
             if !n_odd.is_odd() {
-                n_odd = n_odd.add_ref(&BigUint::one());
+                n_odd = n_odd.add(&BigUint::one());
             }
             // On odd moduli the Kronecker symbol IS the Jacobi symbol.
             assert_eq!(super::kronecker(&a, &n_odd), jacobi(&a, &n_odd).unwrap());
@@ -4410,7 +4398,7 @@ mod tests {
                 continue;
             }
             assert_eq!(
-                super::kronecker(&a, &n_odd.mul_ref(&n2)),
+                super::kronecker(&a, &n_odd.mul(&n2)),
                 super::kronecker(&a, &n_odd) * super::kronecker(&a, &n2)
             );
         }
@@ -4461,7 +4449,7 @@ mod tests {
             for _ in 0..8 {
                 let x = draw_below(&mut rng, p);
                 let square = BigUint::mod_mul(&x, &x, p);
-                let root = super::sqrt_mod(&square, p).expect("squares have roots");
+                let root = super::mod_sqrt(&square, p).expect("squares have roots");
                 assert_eq!(
                     BigUint::mod_mul(&root, &root, p),
                     square,
@@ -4469,7 +4457,7 @@ mod tests {
                 );
                 // The root is x or p - x.
                 assert!(
-                    root == x || root == p.sub_ref(&x).modulo(p),
+                    root == x || root == p.sub(&x).rem(p),
                     "root is neither ±x for p={p:?}"
                 );
             }
@@ -4478,23 +4466,23 @@ mod tests {
             if p > &BigUint::from_u64(2) {
                 let mut z = BigUint::from_u64(2);
                 while jacobi(&z, p) != Some(-1) {
-                    z = z.add_ref(&BigUint::one());
+                    z = z.add(&BigUint::one());
                 }
-                assert_eq!(super::sqrt_mod(&z, p), None);
+                assert_eq!(super::mod_sqrt(&z, p), None);
             }
-            assert_eq!(super::sqrt_mod(&BigUint::zero(), p), Some(BigUint::zero()));
+            assert_eq!(super::mod_sqrt(&BigUint::zero(), p), Some(BigUint::zero()));
         }
 
         // p = 2 and invalid moduli.
         let two = BigUint::from_u64(2);
         assert_eq!(
-            super::sqrt_mod(&BigUint::from_u64(5), &two),
+            super::mod_sqrt(&BigUint::from_u64(5), &two),
             Some(BigUint::one())
         );
-        assert_eq!(super::sqrt_mod(&BigUint::one(), &BigUint::zero()), None);
+        assert_eq!(super::mod_sqrt(&BigUint::one(), &BigUint::zero()), None);
         // Composite p: the final verification refuses to lie.
         assert_eq!(
-            super::sqrt_mod(&BigUint::from_u64(2), &BigUint::from_u64(15)),
+            super::mod_sqrt(&BigUint::from_u64(2), &BigUint::from_u64(15)),
             None
         );
     }
@@ -4510,7 +4498,7 @@ mod tests {
             let (g, s, t) = super::gcd_extended(&a, &b);
             assert_eq!(g, gcd(&a, &b), "g disagrees with plain gcd");
             // a·s + b·t = g, in signed arithmetic.
-            let lhs = s.mul_biguint_ref(&a).add_ref(&t.mul_biguint_ref(&b));
+            let lhs = s.mul_biguint(&a).add(&t.mul_biguint(&b));
             assert_eq!(lhs, BigInt::from_biguint(g), "Bezout identity fails");
         }
 
@@ -4530,12 +4518,12 @@ mod tests {
             mersenne(89),
             mersenne(107),
         ];
-        let product = moduli.iter().fold(BigUint::one(), |acc, m| acc.mul_ref(m));
+        let product = moduli.iter().fold(BigUint::one(), |acc, m| acc.mul(m));
 
         for _ in 0..12 {
             let x = draw_below(&mut rng, &product);
             let congruences: Vec<(BigUint, BigUint)> =
-                moduli.iter().map(|m| (x.modulo(m), m.clone())).collect();
+                moduli.iter().map(|m| (x.rem(m), m.clone())).collect();
             assert_eq!(super::crt_combine(&congruences), Some(x.clone()));
 
             // Order must not matter.
@@ -4607,13 +4595,13 @@ mod tests {
             // The root is the product of all values.
             let mut product = BigUint::one();
             for v in &values {
-                product = product.mul_ref(v);
+                product = product.mul(v);
             }
             assert_eq!(*tree.root().unwrap(), product, "root is the product");
             // Each leaf remainder equals a direct reduction.
             let batched = remainder_tree(&tree, &modulus);
             for (v, r) in values.iter().zip(&batched) {
-                assert_eq!(*r, modulus.modulo(v), "batched vs direct reduction");
+                assert_eq!(*r, modulus.rem(v), "batched vs direct reduction");
             }
         }
         let empty = product_tree(&[]);
@@ -4681,7 +4669,7 @@ mod tests {
                         break;
                     }
                     rest = q;
-                    part = part.mul_ref(&pv);
+                    part = part.mul(&pv);
                 }
             }
             part
@@ -4697,7 +4685,7 @@ mod tests {
             let mut v = BigUint::one();
             for _ in 0..6 {
                 let p = primes[(rng.next_u64() as usize) % primes.len()];
-                v = v.mul_ref(&BigUint::from_u64(p));
+                v = v.mul(&BigUint::from_u64(p));
             }
             values.push(v);
         }
@@ -4706,15 +4694,15 @@ mod tests {
             let mut core = BigUint::one();
             for _ in 0..4 {
                 let p = primes[(rng.next_u64() as usize) % primes.len()];
-                core = core.mul_ref(&BigUint::from_u64(p));
+                core = core.mul(&BigUint::from_u64(p));
             }
             let mut big = draw_below(&mut rng, &pow2(80));
             big.set_bit(79);
             big.set_bit(0);
             while !is_probable_prime(&big) {
-                big = big.add_ref(&BigUint::from_u64(2));
+                big = big.add(&BigUint::from_u64(2));
             }
-            values.push(core.mul_ref(&big));
+            values.push(core.mul(&big));
         }
         // Random values.
         for _ in 0..8 {
@@ -4726,7 +4714,7 @@ mod tests {
         for (v, part) in values.iter().zip(&parts) {
             assert_eq!(*part, smooth_part_naive(v), "smooth part of a value");
             // The smooth part divides the value.
-            assert!(v.modulo(part).is_zero(), "smooth part divides the value");
+            assert!(v.rem(part).is_zero(), "smooth part divides the value");
         }
 
         // The context is the same algorithm with the product hoisted, so it
@@ -4792,7 +4780,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "prime-power exponent must be at least 1")]
     fn sqrt_mod_prime_power_rejects_zero_exponent() {
-        let _ = super::sqrt_mod_prime_power(&BigUint::one(), &BigUint::from_u64(7), 0);
+        let _ = super::mod_sqrt_prime_power(&BigUint::one(), &BigUint::from_u64(7), 0);
     }
 
     #[test]
@@ -4832,7 +4820,7 @@ mod tests {
 
     #[test]
     fn sqrt_mod_prime_power_exhaustive_small() {
-        use super::sqrt_mod_prime_power;
+        use super::mod_sqrt_prime_power;
         for &p in &[2u64, 3, 5, 7, 11] {
             let max_e = if p == 2 { 7 } else { 4 };
             for e in 1u32..=max_e {
@@ -4840,7 +4828,7 @@ mod tests {
                 for a in 0..m {
                     let expected: Vec<u64> = (0..m).filter(|x| (x * x) % m == a).collect();
                     let got: Vec<u64> =
-                        sqrt_mod_prime_power(&BigUint::from_u64(a), &BigUint::from_u64(p), e)
+                        mod_sqrt_prime_power(&BigUint::from_u64(a), &BigUint::from_u64(p), e)
                             .iter()
                             .map(|r| r.to_u64().expect("root below p^e fits u64"))
                             .collect();
@@ -4852,7 +4840,7 @@ mod tests {
 
     #[test]
     fn sqrt_mod_prime_power_wide() {
-        use super::sqrt_mod_prime_power;
+        use super::mod_sqrt_prime_power;
         let mut rng = SplitMix64 {
             state: 0x5170_0007_0000_0001,
         };
@@ -4860,13 +4848,13 @@ mod tests {
         p.set_bit(127);
         p.set_bit(0);
         while !is_probable_prime(&p) {
-            p = p.add_ref(&BigUint::from_u64(2));
+            p = p.add(&BigUint::from_u64(2));
         }
         let e = 3u32;
         let modulus = p.pow_u64(u64::from(e));
         let x = draw_below(&mut rng, &modulus);
         let a = BigUint::mod_mul(&x, &x, &modulus);
-        let roots = sqrt_mod_prime_power(&a, &p, e);
+        let roots = mod_sqrt_prime_power(&a, &p, e);
         assert_eq!(
             roots.len(),
             2,
@@ -4875,7 +4863,7 @@ mod tests {
         for r in &roots {
             assert_eq!(BigUint::mod_mul(r, r, &modulus), a, "root squares to a");
         }
-        assert!(roots.contains(&x) || roots.contains(&modulus.sub_ref(&x)));
+        assert!(roots.contains(&x) || roots.contains(&modulus.sub(&x)));
     }
 
     #[test]
@@ -4984,7 +4972,7 @@ mod tests {
         p.set_bit(255);
         p.set_bit(0);
         while !is_probable_prime(&p) {
-            p = p.add_ref(&BigUint::from_u64(2));
+            p = p.add(&BigUint::from_u64(2));
         }
         assert!(is_strong_lucas_probable_prime(&p));
         // Wrapper edges the composed test never routes here.
@@ -5003,7 +4991,7 @@ mod tests {
         den_bound: &BigUint,
     ) -> Option<(crate::bigint::BigInt, BigUint)> {
         use crate::bigint::{BigInt, Sign};
-        let x = x.modulo(m);
+        let x = x.rem(m);
         if den_bound.is_zero() {
             return None;
         }
@@ -5014,7 +5002,7 @@ mod tests {
         let (mut t0, mut t1) = (BigInt::zero(), BigInt::from_biguint(BigUint::one()));
         while r1 > *num_bound {
             let (quotient, remainder) = r0.div_rem(&r1);
-            let next_t1 = t0.sub_ref(&t1.mul_biguint_ref(&quotient));
+            let next_t1 = t0.sub(&t1.mul_biguint(&quotient));
             r0 = core::mem::replace(&mut r1, remainder);
             t0 = core::mem::replace(&mut t1, next_t1);
         }
@@ -5038,7 +5026,7 @@ mod tests {
             k.set_bit(bits - s - 1);
             let mut p = k;
             p.shl_bits(s);
-            p = p.add_ref(&BigUint::one());
+            p = p.add(&BigUint::one());
             // A word-sized trial screen rejects most candidates for a few
             // remainders each, keeping the constructor off the suite's
             // critical path.
@@ -5056,7 +5044,7 @@ mod tests {
 
     #[test]
     fn cipolla_agrees_with_the_descent() {
-        use super::{sqrt_mod, sqrt_mod_cipolla};
+        use super::{mod_sqrt, sqrt_mod_cipolla};
         use crate::bigint::MontgomeryContext;
         let mut rng = SplitMix64 {
             state: 0xc1b0_11a0_0000_0001,
@@ -5070,12 +5058,12 @@ mod tests {
             if a.is_zero() {
                 continue;
             }
-            let descent_root = sqrt_mod(&a, &p).expect("a is a residue by construction");
+            let descent_root = mod_sqrt(&a, &p).expect("a is a residue by construction");
             let ctx = MontgomeryContext::new(&p).expect("odd prime");
             let cipolla_root =
                 sqrt_mod_cipolla(&a, &p, &ctx).expect("prime modulus never exhausts the scan");
             assert!(
-                cipolla_root == descent_root || cipolla_root == p.sub_ref(&descent_root),
+                cipolla_root == descent_root || cipolla_root == p.sub(&descent_root),
                 "engines disagree at {bits} bits, s = {s}"
             );
             assert!(BigUint::mod_mul(&cipolla_root, &cipolla_root, &p) == a);
@@ -5094,7 +5082,7 @@ mod tests {
             if a.is_zero() {
                 continue;
             }
-            let root = sqrt_mod(&a, &p).expect("a is a residue by construction");
+            let root = mod_sqrt(&a, &p).expect("a is a residue by construction");
             assert_eq!(
                 BigUint::mod_mul(&root, &root, &p),
                 a,
@@ -5105,20 +5093,20 @@ mod tests {
         let p = prime_with_two_adic_valuation(512, 128, &mut rng);
         let mut z = BigUint::from_u64(2);
         while super::jacobi(&z, &p) != Some(-1) {
-            z = z.add_ref(&BigUint::one());
+            z = z.add(&BigUint::one());
         }
-        assert_eq!(sqrt_mod(&z, &p), None);
+        assert_eq!(mod_sqrt(&z, &p), None);
         // The trivial residues, through both engines.
         for &(bits, s) in &[(256usize, 2usize), (512, 128)] {
             let p = prime_with_two_adic_valuation(bits, s, &mut rng);
             // Either square root of one is a correct answer.
-            let root_of_one = sqrt_mod(&BigUint::one(), &p).expect("1 is a residue");
+            let root_of_one = mod_sqrt(&BigUint::one(), &p).expect("1 is a residue");
             assert!(
-                root_of_one.is_one() || root_of_one == p.sub_ref(&BigUint::one()),
+                root_of_one.is_one() || root_of_one == p.sub(&BigUint::one()),
                 "the root of 1 is ±1"
             );
-            let minus_one = p.sub_ref(&BigUint::one());
-            let root = sqrt_mod(&minus_one, &p);
+            let minus_one = p.sub(&BigUint::one());
+            let root = mod_sqrt(&minus_one, &p);
             // −1 is a residue exactly when p ≡ 1 (mod 4) — true for every
             // constructed prime with s ≥ 2 — and the root must verify.
             let r = root.expect("-1 is a residue for p = 1 mod 4");
@@ -5128,57 +5116,57 @@ mod tests {
 
     #[test]
     fn sqrt_mod_terminates_on_odd_square_modulus() {
-        use super::sqrt_mod;
+        use super::mod_sqrt;
         // An odd perfect square has no Jacobi non-residue, so both engines'
         // parameter scans would once run forever; the bound turns the
         // pathology into None. 4097² routes to the descent's scan; a
         // high-valuation square would route to Cipolla's.
-        let square = BigUint::from_u64(4097).square_ref();
-        assert_eq!(sqrt_mod(&BigUint::from_u64(4), &square), None);
+        let square = BigUint::from_u64(4097).square();
+        assert_eq!(mod_sqrt(&BigUint::from_u64(4), &square), None);
     }
 
     #[test]
     fn sqrt_mod_terminates_on_small_odd_squares() {
-        use super::sqrt_mod;
+        use super::mod_sqrt;
         // The first odd composite squares. Every odd square is ≡ 1 (mod 4),
         // so each enters the non-residue scan rather than the ≡ 3 shortcut;
         // the bounded scan returns None instead of looping. 169 = 13² is a
         // p ≡ 1 (mod 4) square with a deeper structure.
         for m in [9u64, 25, 49, 169] {
             assert_eq!(
-                sqrt_mod(&BigUint::from_u64(1), &BigUint::from_u64(m)),
+                mod_sqrt(&BigUint::from_u64(1), &BigUint::from_u64(m)),
                 None,
-                "sqrt_mod(1, {m}) must terminate as None"
+                "mod_sqrt(1, {m}) must terminate as None"
             );
         }
         // Sharpened: an *actual* square residue hangs the unbounded scan too —
         // 4 ≡ 2² ≡ 7² (mod 9), jacobi(4, 9) = 1. Tonelli needs a non-residue,
         // which an odd square modulus does not have, so the bounded scan
         // returns None (no root over a non-prime modulus) rather than looping.
-        // Use sqrt_mod_prime_power for roots modulo a prime power.
+        // Use mod_sqrt_prime_power for roots rem a prime power.
         assert_eq!(
-            sqrt_mod(&BigUint::from_u64(4), &BigUint::from_u64(9)),
+            mod_sqrt(&BigUint::from_u64(4), &BigUint::from_u64(9)),
             None,
-            "sqrt_mod(4, 9) must terminate"
+            "mod_sqrt(4, 9) must terminate"
         );
         // a ≡ 0 exits before the scan and is the one residue that resolves.
         assert_eq!(
-            sqrt_mod(&BigUint::from_u64(0), &BigUint::from_u64(9)),
+            mod_sqrt(&BigUint::from_u64(0), &BigUint::from_u64(9)),
             Some(BigUint::zero())
         );
         // Even non-prime moduli: the even branch declines before any scan, so
         // these terminate as None even though 0 and 1 are squares mod 4.
-        assert_eq!(sqrt_mod(&BigUint::from_u64(0), &BigUint::from_u64(4)), None);
-        assert_eq!(sqrt_mod(&BigUint::from_u64(1), &BigUint::from_u64(4)), None);
+        assert_eq!(mod_sqrt(&BigUint::from_u64(0), &BigUint::from_u64(4)), None);
+        assert_eq!(mod_sqrt(&BigUint::from_u64(1), &BigUint::from_u64(4)), None);
     }
 
     #[test]
     fn sqrt_mod_on_composite_may_return_a_genuine_root() {
-        use super::sqrt_mod;
+        use super::mod_sqrt;
         // The contract is verification, not primality: for a composite modulus
         // the function returns None or a value that genuinely squares to `a`.
         // 15 ≡ 3 (mod 4) takes the shortcut and 1 is a true root of 1 mod 15.
-        let root = sqrt_mod(&BigUint::from_u64(1), &BigUint::from_u64(15));
+        let root = mod_sqrt(&BigUint::from_u64(1), &BigUint::from_u64(15));
         assert_eq!(root, Some(BigUint::one()));
         let r = root.expect("a verified root");
         assert_eq!(
@@ -5336,7 +5324,7 @@ mod tests {
             state: 0x0dd5_0006_0006_0006,
         };
         let p = draw_below(&mut rng, &pow2(200));
-        let p = p.add_ref(&BigUint::from_u64(3)); // any value ≥ 2 serves
+        let p = p.add(&BigUint::from_u64(3)); // any value ≥ 2 serves
         for &e in &[1usize, 2, 3, 4, 7, 8, 9, 12, 31, 32, 33, 100] {
             let mut m = draw_below(&mut rng, &pow2(150));
             loop {
@@ -5344,9 +5332,9 @@ mod tests {
                 if !r.is_zero() {
                     break;
                 }
-                m = m.add_ref(&BigUint::one());
+                m = m.add(&BigUint::one());
             }
-            let planted = p.pow_u64(u64::try_from(e).expect("small")).mul_ref(&m);
+            let planted = p.pow_u64(u64::try_from(e).expect("small")).mul(&m);
             let (cofactor, exponent) = remove_factor(&planted, &p);
             assert_eq!(exponent, e, "planted exponent {e}");
             assert_eq!(cofactor, m, "planted cofactor at exponent {e}");
@@ -5377,7 +5365,7 @@ mod tests {
         // is unique, so the search finding one pins the function exactly.
         for m_small in 3u64..=120 {
             let m = BigUint::from_u64(m_small);
-            let mut half = m.sub_ref(&BigUint::one());
+            let mut half = m.sub(&BigUint::one());
             half.shr1();
             let bound = half.sqrt_floor();
             let b = bound.limbs().first().copied().unwrap_or(0);
@@ -5502,7 +5490,7 @@ mod tests {
                     m.set_bit(0);
                     m
                 };
-                let mut half = m.sub_ref(&BigUint::one());
+                let mut half = m.sub(&BigUint::one());
                 half.shr1();
                 let bound = half.sqrt_floor();
                 let p_abs = draw_below(&mut rng, &bound);
@@ -5517,7 +5505,7 @@ mod tests {
                 // x = ±p·q⁻¹ mod m.
                 let mut x = BigUint::mod_mul(&p_abs, &q_inv, &m);
                 if negative && !x.is_zero() {
-                    x = m.sub_ref(&x);
+                    x = m.sub(&x);
                 }
                 let sign = if negative && !p_abs.is_zero() {
                     Sign::Negative
@@ -5537,7 +5525,7 @@ mod tests {
             let mut m = draw_below(&mut rng, &pow2(bits));
             m.set_bit(bits - 1);
             m.set_bit(0);
-            let mut half = m.sub_ref(&BigUint::one());
+            let mut half = m.sub(&BigUint::one());
             half.shr1();
             let bound = half.sqrt_floor();
             assert_eq!(
@@ -5571,7 +5559,7 @@ mod tests {
                 let mut m = draw_below(&mut rng, &pow2(bits));
                 m.set_bit(bits - 1);
                 let x = draw_below(&mut rng, &m);
-                let mut half = m.sub_ref(&BigUint::one());
+                let mut half = m.sub(&BigUint::one());
                 half.shr1();
                 let bound = half.sqrt_floor();
                 assert_eq!(
@@ -5633,11 +5621,11 @@ mod tests {
         // Perfect squares: the Selfridge search rules them out directly.
         for square_root in [3u64, 5, 101, 1009, 65537] {
             let root = BigUint::from_u64(square_root);
-            assert!(!is_probable_prime_bpsw(&root.square_ref()));
-            assert!(!is_strong_lucas_probable_prime(&root.square_ref()));
+            assert!(!is_probable_prime_bpsw(&root.square()));
+            assert!(!is_strong_lucas_probable_prime(&root.square()));
         }
         let big_root = mersenne(89); // 2^89 − 1, prime
-        assert!(!is_probable_prime_bpsw(&big_root.square_ref()));
+        assert!(!is_probable_prime_bpsw(&big_root.square()));
         // Mersenne primes and their composite neighbours at width.
         for exponent in [61usize, 89, 107, 127] {
             assert!(
@@ -5660,17 +5648,17 @@ mod tests {
             p.set_bit(bits - 1);
             p.set_bit(0);
             while !is_probable_prime(&p) {
-                p = p.add_ref(&BigUint::from_u64(2));
+                p = p.add(&BigUint::from_u64(2));
             }
             assert!(is_probable_prime_bpsw(&p), "random prime at {bits} bits");
             let mut q = draw_below(&mut rng, &pow2(bits));
             q.set_bit(bits - 1);
             q.set_bit(0);
             while !is_probable_prime(&q) {
-                q = q.add_ref(&BigUint::from_u64(2));
+                q = q.add(&BigUint::from_u64(2));
             }
             assert!(
-                !is_probable_prime_bpsw(&p.mul_ref(&q)),
+                !is_probable_prime_bpsw(&p.mul(&q)),
                 "semiprime at {} bits",
                 2 * bits
             );
@@ -5795,37 +5783,34 @@ mod tests {
 
     #[test]
     fn miller_rabin_rejects_empty_witness_sets() {
-        assert!(!is_probable_prime_with_bases(
-            &BigUint::from_u64(65_537),
-            &[]
-        ));
+        assert!(!miller_rabin_with_bases(&BigUint::from_u64(65_537), &[]));
     }
 
     #[test]
     fn miller_rabin_rejects_all_trivial_witness_sets() {
         // 1_022_117 = 1009 × 1013 clears the trial sieve (no prime factor
-        // ≤ 997). Each base is reduced modulo n before it is classified: one
+        // ≤ 997). Each base is reduced rem n before it is classified: one
         // reducing to 0, 1, or n − 1 is the trivial ±1 case and testifies to
         // nothing. A non-empty set of only such bases runs zero effective
         // rounds, and the composite must not then be reported prime — that is
         // the effective-rounds guard, which the all-trivial cases below cover
         // (replacing `effective_rounds > 0` with `true` fails them).
         let n = BigUint::from_u64(1_022_117);
-        assert!(!is_probable_prime_with_bases(&n, &[1_022_116])); // ≡ n − 1
-        assert!(!is_probable_prime_with_bases(&n, &[1_022_117])); // ≡ 0
-        assert!(!is_probable_prime_with_bases(&n, &[1, 1_022_116])); // 1 and n − 1
-                                                                     // By contrast, a large *unreduced* base that reduces to a genuine
-                                                                     // witness (u64::MAX ≡ 807_583) must still expose the composite — the
-                                                                     // bug the reduce-first change fixed, where such bases were dropped.
-        assert!(!is_probable_prime_with_bases(&n, &[u64::MAX]));
-        assert!(!is_probable_prime_with_bases(&n, &[2]));
+        assert!(!miller_rabin_with_bases(&n, &[1_022_116])); // ≡ n − 1
+        assert!(!miller_rabin_with_bases(&n, &[1_022_117])); // ≡ 0
+        assert!(!miller_rabin_with_bases(&n, &[1, 1_022_116])); // 1 and n − 1
+                                                                // By contrast, a large *unreduced* base that reduces to a genuine
+                                                                // witness (u64::MAX ≡ 807_583) must still expose the composite — the
+                                                                // bug the reduce-first change fixed, where such bases were dropped.
+        assert!(!miller_rabin_with_bases(&n, &[u64::MAX]));
+        assert!(!miller_rabin_with_bases(&n, &[2]));
         assert!(!is_probable_prime(&n));
     }
 
     #[test]
     fn miller_rabin_wrapper_agrees_with_single_round_on_trivial_bases() {
         // Second-pass §2.3: the batch wrapper and the single-round primitive
-        // share one trivial-base rule — reduce modulo n, discard {0, 1, n−1}.
+        // share one trivial-base rule — reduce rem n, discard {0, 1, n−1}.
         let prime = BigUint::from_u64(1_000_000_007); // large, reaches MR
         let composite = BigUint::from_u64(1_022_117); // 1009 × 1013, sieve-surviving
 
@@ -5834,14 +5819,14 @@ mod tests {
         assert!(!miller_rabin_witness(&prime, &BigUint::from_u64(1)));
         // A leading 0 must not stamp a prime composite (the old bug), and a
         // valid base alongside it still decides.
-        assert!(!is_probable_prime_with_bases(&prime, &[0])); // 0 effective rounds
-        assert!(is_probable_prime_with_bases(&prime, &[0, 2])); // 0 discarded, 2 decides
-        assert!(is_probable_prime_with_bases(&prime, &[2]));
+        assert!(!miller_rabin_with_bases(&prime, &[0])); // 0 effective rounds
+        assert!(miller_rabin_with_bases(&prime, &[0, 2])); // 0 discarded, 2 decides
+        assert!(miller_rabin_with_bases(&prime, &[2]));
         // 1 never testifies: it must not stamp a composite prime.
-        assert!(!is_probable_prime_with_bases(&composite, &[1]));
+        assert!(!miller_rabin_with_bases(&composite, &[1]));
         // Genuine bases decide correctly on both sides.
         assert!(miller_rabin_witness(&composite, &BigUint::from_u64(2))); // 2 exposes it
-        assert!(!is_probable_prime_with_bases(&composite, &[2]));
+        assert!(!miller_rabin_with_bases(&composite, &[2]));
     }
 
     #[test]

@@ -93,7 +93,7 @@ pub trait RandomSource {
 /// `upper_exclusive` is zero and the range is empty.
 ///
 /// Uniformity by rejection rather than by reduction: taking a wide draw
-/// modulo `upper_exclusive` would over-represent the low residues whenever
+/// rem `upper_exclusive` would over-represent the low residues whenever
 /// the bound is not a power of two, so the sample is instead drawn from the
 /// enclosing power-of-two range `[0, 2^bits)` — `bits` being the bit length
 /// of the bound — and any draw at or above the bound is discarded (Knuth,
@@ -191,7 +191,7 @@ pub fn random_nonzero_below<R: RandomSource + ?Sized>(
 /// Draw a random integer in `[1, upper_exclusive)` that is coprime to
 /// `coprime_to`, uniformly over that set.
 ///
-/// This is the shape needed to draw a fresh random unit modulo `n`: pass
+/// This is the shape needed to draw a fresh random unit rem `n`: pass
 /// `n` as both bound and modulus and the result is a uniform element of
 /// `(Z/nZ)*`. Rejection-sample in `[1, upper_exclusive)` — each candidate
 /// uniform by [`random_nonzero_below`] — and keep the first whose gcd with
@@ -415,7 +415,7 @@ mod tests {
         for bound_bits in [1usize, 7, 63, 64, 65, 200] {
             let mut bound = BigUint::zero();
             bound.set_bit(bound_bits);
-            bound = bound.sub_ref(&BigUint::one());
+            bound = bound.sub(&BigUint::one());
             if bound.is_zero() {
                 continue;
             }

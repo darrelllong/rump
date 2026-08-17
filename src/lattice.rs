@@ -113,7 +113,7 @@ pub fn lll_reduce_delta(basis: &mut [Vec<BigInt>], delta_num: u64, delta_den: u6
                 let mut u = dot(&basis[k - 1], &basis[j - 1]);
                 for i in 1..j {
                     // u ← (d_i · u − λ_{k,i} · λ_{j,i}) / d_{i-1}, exact.
-                    let num = d[i].mul_ref(&u).sub_ref(&lam[k][i].mul_ref(&lam[j][i]));
+                    let num = d[i].mul(&u).sub(&lam[k][i].mul(&lam[j][i]));
                     u = num.div_exact(&d[i - 1]);
                 }
                 if j < k {
@@ -140,11 +140,9 @@ pub fn lll_reduce_delta(basis: &mut [Vec<BigInt>], delta_num: u64, delta_den: u6
             // integers: substitute ‖b*_i‖² = d_i/d_{i-1} and μ = λ/d_{k-1},
             // then clear the positive denominators d_{k-1}·d_{k-2} and q.
             // Swap iff q·d_k·d_{k-2} < p·d_{k-1}² − q·λ_{k,k-1}²  (δ = p/q).
-            let lhs = q.mul_ref(&d[k].mul_ref(&d[k - 2]));
-            let lam_sq = lam[k][k - 1].mul_ref(&lam[k][k - 1]);
-            let rhs = p
-                .mul_ref(&d[k - 1].mul_ref(&d[k - 1]))
-                .sub_ref(&q.mul_ref(&lam_sq));
+            let lhs = q.mul(&d[k].mul(&d[k - 2]));
+            let lam_sq = lam[k][k - 1].mul(&lam[k][k - 1]);
+            let rhs = p.mul(&d[k - 1].mul(&d[k - 1])).sub(&q.mul(&lam_sq));
 
             if lhs < rhs {
                 // The swap replaces d_{k-1} by a strictly smaller positive
@@ -174,7 +172,7 @@ pub fn lll_reduce_delta(basis: &mut [Vec<BigInt>], delta_num: u64, delta_den: u6
 fn dot(u: &[BigInt], v: &[BigInt]) -> BigInt {
     let mut acc = BigInt::zero();
     for (a, b) in u.iter().zip(v.iter()) {
-        acc = acc.add_ref(&a.mul_ref(b));
+        acc = acc.add(&a.mul(b));
     }
     acc
 }
@@ -194,8 +192,8 @@ fn big_u64(x: u64) -> BigInt {
 /// because `b` is always a Gram determinant `d_l`, which is positive for an
 /// independent basis.
 fn nearest_int(a: &BigInt, b: &BigInt) -> BigInt {
-    let two_a_plus_b = a.add_ref(a).add_ref(b);
-    let two_b = b.add_ref(b);
+    let two_a_plus_b = a.add(a).add(b);
+    let two_b = b.add(b);
     floor_div(&two_a_plus_b, &two_b)
 }
 
@@ -225,7 +223,7 @@ fn floor_div(num: &BigInt, den: &BigInt) -> BigInt {
     } else if remainder.is_zero() {
         BigInt::from_biguint(quotient).negated()
     } else {
-        BigInt::from_biguint(quotient.add_ref(&BigUint::from_u64(1))).negated()
+        BigInt::from_biguint(quotient.add(&BigUint::from_u64(1))).negated()
     }
 }
 
@@ -242,7 +240,7 @@ fn floor_div(num: &BigInt, den: &BigInt) -> BigInt {
 fn red(basis: &mut [Vec<BigInt>], lam: &mut [Vec<BigInt>], d: &[BigInt], k: usize, l: usize) {
     // Nothing to do when |2·λ_{k,l}| ≤ d_l, i.e. |μ_{k,l}| ≤ 1/2: d_l > 0, so
     // the magnitude comparison is the comparison of the values.
-    let two_lam = lam[k][l].add_ref(&lam[k][l]);
+    let two_lam = lam[k][l].add(&lam[k][l]);
     if *two_lam.magnitude() <= *d[l].magnitude() {
         return;
     }
@@ -254,16 +252,16 @@ fn red(basis: &mut [Vec<BigInt>], lam: &mut [Vec<BigInt>], d: &[BigInt], k: usiz
     let bl = &left[l - 1];
     let bk = &mut right[0];
     for c in 0..bk.len() {
-        bk[c] = bk[c].sub_ref(&qnt.mul_ref(&bl[c]));
+        bk[c] = bk[c].sub(&qnt.mul(&bl[c]));
     }
 
     // λ_{k,l} ← λ_{k,l} − q·d_l; λ_{k,i} ← λ_{k,i} − q·λ_{l,i} for i < l.
     let (lleft, lright) = lam.split_at_mut(k);
     let lam_l = &lleft[l];
     let lam_k = &mut lright[0];
-    lam_k[l] = lam_k[l].sub_ref(&qnt.mul_ref(&d[l]));
+    lam_k[l] = lam_k[l].sub(&qnt.mul(&d[l]));
     for i in 1..l {
-        lam_k[i] = lam_k[i].sub_ref(&qnt.mul_ref(&lam_l[i]));
+        lam_k[i] = lam_k[i].sub(&qnt.mul(&lam_l[i]));
     }
 }
 
@@ -309,22 +307,19 @@ fn swap_step(
     // B < δ·d_{k-1} < d_{k-1}: the strict decrease that bounds the number of
     // swaps. B > 0 because d_{k-2} and d_k are.
     let b_new = d[k - 2]
-        .mul_ref(&d[k])
-        .add_ref(&lambda.mul_ref(&lambda))
+        .mul(&d[k])
+        .add(&lambda.mul(&lambda))
         .div_exact(&d[k - 1]);
 
     for row in lam.iter_mut().take(k_max + 1).skip(k + 1) {
         let t = row[k].clone();
         // λ_{i,k} ← (d_k·λ_{i,k-1} − λ·t) / d_{k-1}.
         row[k] = d[k]
-            .mul_ref(&row[k - 1])
-            .sub_ref(&lambda.mul_ref(&t))
+            .mul(&row[k - 1])
+            .sub(&lambda.mul(&t))
             .div_exact(&d[k - 1]);
         // λ_{i,k-1} ← (B·t + λ·λ_{i,k}) / d_k, using the updated λ_{i,k}.
-        row[k - 1] = b_new
-            .mul_ref(&t)
-            .add_ref(&lambda.mul_ref(&row[k]))
-            .div_exact(&d[k]);
+        row[k - 1] = b_new.mul(&t).add(&lambda.mul(&row[k])).div_exact(&d[k]);
     }
     d[k - 1] = b_new;
 }
@@ -686,31 +681,25 @@ mod tests {
             }
         }
         fn add(&self, o: &Self) -> Self {
-            Self::reduced(
-                self.n.mul_ref(&o.d).add_ref(&o.n.mul_ref(&self.d)),
-                self.d.mul_ref(&o.d),
-            )
+            Self::reduced(self.n.mul(&o.d).add(&o.n.mul(&self.d)), self.d.mul(&o.d))
         }
         fn sub(&self, o: &Self) -> Self {
-            Self::reduced(
-                self.n.mul_ref(&o.d).sub_ref(&o.n.mul_ref(&self.d)),
-                self.d.mul_ref(&o.d),
-            )
+            Self::reduced(self.n.mul(&o.d).sub(&o.n.mul(&self.d)), self.d.mul(&o.d))
         }
         fn mul(&self, o: &Self) -> Self {
-            Self::reduced(self.n.mul_ref(&o.n), self.d.mul_ref(&o.d))
+            Self::reduced(self.n.mul(&o.n), self.d.mul(&o.d))
         }
         fn div(&self, o: &Self) -> Self {
             assert!(!o.n.is_zero(), "division by zero fraction");
-            Self::reduced(self.n.mul_ref(&o.d), self.d.mul_ref(&o.n))
+            Self::reduced(self.n.mul(&o.d), self.d.mul(&o.n))
         }
         // self ≥ o, both denominators positive.
         fn ge(&self, o: &Self) -> bool {
-            self.n.mul_ref(&o.d) >= o.n.mul_ref(&self.d)
+            self.n.mul(&o.d) >= o.n.mul(&self.d)
         }
         // |self| ≤ 1/2  ⟺  2|n| ≤ d.
         fn abs_le_half(&self) -> bool {
-            let two_n = self.n.add_ref(&self.n);
+            let two_n = self.n.add(&self.n);
             *two_n.magnitude() <= *self.d.magnitude()
         }
     }
@@ -782,7 +771,7 @@ mod tests {
                     .map(|j| {
                         let mut s = BigInt::zero();
                         for (a, b) in basis[i].iter().zip(&basis[j]) {
-                            s = s.add_ref(&a.mul_ref(b));
+                            s = s.add(&a.mul(b));
                         }
                         s
                     })
@@ -804,9 +793,7 @@ mod tests {
             }
             for r in (kk + 1)..n {
                 for c in (kk + 1)..n {
-                    let num = g[kk][kk]
-                        .mul_ref(&g[r][c])
-                        .sub_ref(&g[r][kk].mul_ref(&g[kk][c]));
+                    let num = g[kk][kk].mul(&g[r][c]).sub(&g[r][kk].mul(&g[kk][c]));
                     g[r][c] = num.div_exact(&prev);
                 }
                 g[r][kk] = BigInt::zero();

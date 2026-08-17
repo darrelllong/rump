@@ -84,7 +84,7 @@ const SQR_SCHOOLBOOK_MIN_LIMBS: usize = 8;
 //
 // Measured against `mul_toom3_ref` on the same operands
 // (`squaring_crossover_timing`, run with `--ignored`), quoting only widths
-// at which `mul_ref` would actually reach Toom-3 — below its own 128-limb
+// at which `mul` would actually reach Toom-3 — below its own 128-limb
 // threshold that comparison measures a kernel production never calls:
 // as the range observed rather than a single figure, because the spread
 // between runs is wider than the precision a single figure implies. Across
@@ -104,12 +104,12 @@ const SQR_SCHOOLBOOK_MIN_LIMBS: usize = 8;
 // squaring is consistently ahead at rather than a crossing point read off
 // a curve. Raising it from an earlier, wrongly-signed reading of 256 was
 // confirmed end to end against a build of the previous revision, six
-// passes alternating order: public `square_ref` is 6.5% faster at 288
+// passes alternating order: public `square` is 6.5% faster at 288
 // limbs, 23% at 384, 25% at 447, and at parity at 512 where the handoff
 // takes effect.
 const SQR_KARATSUBA_MAX_LIMBS: usize = 448;
 
-/// Bitset of the 44 quadratic residues modulo 256, one bit per residue
+/// Bitset of the 44 quadratic residues rem 256, one bit per residue
 /// across four words, derived by enumeration.
 const SQUARES_MOD_256: [u64; 4] = [
     0x0202_0212_0203_0213,
@@ -599,7 +599,7 @@ impl BigUint {
             } else {
                 u64::from(radix).pow(u32::try_from(take).expect("group fits u32"))
             };
-            value = value.mul_ref(&Self::from_u64(base));
+            value = value.mul(&Self::from_u64(base));
             value.add_assign_ref(&Self::from_u64(group));
             index += take;
         }
@@ -616,7 +616,7 @@ impl BigUint {
         let mut ladder = vec![Self::from_u64(big_base)];
         let mut span = chunk;
         while span * 2 < digit_count {
-            let top = ladder.last().expect("ladder starts non-empty").square_ref();
+            let top = ladder.last().expect("ladder starts non-empty").square();
             ladder.push(top);
             span *= 2;
         }
@@ -630,7 +630,7 @@ impl BigUint {
         let (big_base, chunk) = Self::limb_radix_power(radix);
         let mut ladder = vec![Self::from_u64(big_base)];
         while ladder.last().expect("non-empty").bits() * 2 < bit_width {
-            let top = ladder.last().expect("non-empty").square_ref();
+            let top = ladder.last().expect("non-empty").square();
             ladder.push(top);
         }
         (ladder, chunk)
@@ -679,7 +679,7 @@ impl BigUint {
         let split = digits.len() - span;
         let high = Self::from_digits_ladder(&digits[..split], radix, ladder, chunk, base_digits);
         let low = Self::from_digits_ladder(&digits[split..], radix, ladder, chunk, base_digits);
-        let mut value = high.mul_ref(&ladder[index]);
+        let mut value = high.mul(&ladder[index]);
         value.add_assign_ref(&low);
         value
     }
@@ -883,7 +883,7 @@ impl BigUint {
     /// The low `k` bits as a fresh value — `self mod 2^k`, splitting at any
     /// bit boundary, limb-aligned or not. Truncation to `⌈k/64⌉` limbs
     /// handles the whole-limb part; a mask clears the surplus bits of the
-    /// boundary limb when `k` is not a multiple of 64. Reduction modulo a
+    /// boundary limb when `k` is not a multiple of 64. Reduction rem a
     /// power of two is a truncation, not a division, which is why
     /// [`BarrettContext::reduce`] can take its `mod b^{k+1}` windows this way.
     #[must_use]
@@ -979,8 +979,8 @@ impl BigUint {
             return (self.clone(), Self::zero());
         }
         let root = self.sqrt_newton();
-        let square = root.square_ref();
-        (root, self.sub_ref(&square))
+        let square = root.square();
+        (root, self.sub(&square))
     }
 
     /// The Newton core shared by [`Self::sqrt_floor`] and
@@ -996,11 +996,11 @@ impl BigUint {
         loop {
             // next = (current + self/current) / 2
             let (quotient, _) = self.div_rem(&current);
-            let mut next = current.add_ref(&quotient);
+            let mut next = current.add(&quotient);
             next.shr1();
             if next >= current {
                 debug_assert!(
-                    current.square_ref() <= *self,
+                    current.square() <= *self,
                     "certified root is not above the value"
                 );
                 return current;
@@ -1040,11 +1040,11 @@ impl BigUint {
         let mut remaining = exponent;
         while remaining > 0 {
             if remaining & 1 == 1 {
-                result = result.mul_ref(&base);
+                result = result.mul(&base);
             }
             remaining >>= 1;
             if remaining > 0 {
-                base = base.square_ref();
+                base = base.square();
             }
         }
         result
@@ -1082,7 +1082,7 @@ impl BigUint {
         );
         loop {
             let (quotient, _) = self.div_rem(&current.pow_u64(k - 1));
-            let mut next = current.mul_ref(&k_minus_one);
+            let mut next = current.mul(&k_minus_one);
             next.add_assign_ref(&quotient);
             let (next, _) = next.div_rem(&k_value);
             if next >= current {
@@ -1098,7 +1098,7 @@ impl BigUint {
 
     /// Whether the value is a perfect square, by residue filters and one
     /// certified square root. The filters reject most non-squares without
-    /// arithmetic: squares occupy 44 of 256 residues modulo 256, and the
+    /// arithmetic: squares occupy 44 of 256 residues rem 256, and the
     /// modulus 9·5·7·13·17 = 69 615 folds five more character tests into a
     /// single word remainder (the classical filter set, as in GMP's
     /// `mpz_perfect_square_p`).
@@ -1253,10 +1253,10 @@ impl BigUint {
 
     /// Return `self + other`, leaving both operands intact: a clone of `self`
     /// followed by [`Self::add_assign_ref`]. The clone is the price of the
-    /// functional form; [`Self::assign_add`] avoids it when the caller
+    /// functional form; [`Self::add_into`] avoids it when the caller
     /// already owns a destination buffer.
     #[must_use]
-    pub fn add_ref(&self, other: &Self) -> Self {
+    pub fn add(&self, other: &Self) -> Self {
         let mut out = self.clone();
         out.add_assign_ref(other);
         out
@@ -1274,7 +1274,7 @@ impl BigUint {
     /// Does not panic in normal use; an internal `expect` guards the
     /// limb-packing invariant (a `u128` accumulator splitting back into `u64`
     /// limbs) and would trip only on a logic error.
-    pub fn assign_add(&mut self, lhs: &Self, rhs: &Self) {
+    pub fn add_into(&mut self, lhs: &Self, rhs: &Self) {
         debug_assert!(
             lhs.limbs.last() != Some(&0) && rhs.limbs.last() != Some(&0),
             "operands arrive canonical; the result's canonical form relies on it"
@@ -1313,7 +1313,7 @@ impl BigUint {
     }
 
     /// Write `lhs - rhs` into `self`, reusing its limb buffer — the
-    /// three-operand counterpart of [`Self::assign_add`]. One borrow pass;
+    /// three-operand counterpart of [`Self::add_into`]. One borrow pass;
     /// no allocation once the buffer's capacity covers the result.
     /// Contrast [`Self::sub_assign_ref`], which subtracts *from* `self`;
     /// this form replaces it.
@@ -1321,9 +1321,9 @@ impl BigUint {
     /// # Panics
     ///
     /// Panics if `lhs < rhs`.
-    pub fn assign_sub(&mut self, lhs: &Self, rhs: &Self) {
+    pub fn sub_into(&mut self, lhs: &Self, rhs: &Self) {
         assert!(lhs.cmp(rhs) != Ordering::Less, "BigUint underflow");
-        // Shape the buffer as in `assign_add`, scrubbing any abandoned
+        // Shape the buffer as in `add_into`, scrubbing any abandoned
         // tail before it shrinks. The normalize below pops only zeros, so
         // the shrink it performs strands nothing.
         let n = lhs.limbs.len();
@@ -1417,7 +1417,7 @@ impl BigUint {
     /// Panics if `self < other`, for the reason given on
     /// [`Self::sub_assign_ref`].
     #[must_use]
-    pub fn sub_ref(&self, other: &Self) -> Self {
+    pub fn sub(&self, other: &Self) -> Self {
         let mut out = self.clone();
         out.sub_assign_ref(other);
         out
@@ -1443,7 +1443,7 @@ impl BigUint {
     /// invariant (`u128` accumulators splitting back into `u64` limbs) and can
     /// trip only on a logic error in a kernel.
     #[must_use]
-    pub fn mul_ref(&self, other: &Self) -> Self {
+    pub fn mul(&self, other: &Self) -> Self {
         if self.is_zero() || other.is_zero() {
             return Self::zero();
         }
@@ -1473,12 +1473,12 @@ impl BigUint {
     /// Three regimes, each measured against the kernel it displaces rather
     /// than against a proxy. Below `SQR_SCHOOLBOOK_MIN_LIMBS` (8) the
     /// specialized passes do not repay themselves and this is
-    /// [`Self::mul_ref`]. From there to the Karatsuba crossover it is
+    /// [`Self::mul`]. From there to the Karatsuba crossover it is
     /// `sqr_schoolbook_ref`, forming each cross term once. From there to
     /// `SQR_KARATSUBA_MAX_LIMBS` (448) it is `sqr_karatsuba_ref`, the same
     /// split with all three sub-products squarings, measured ahead of the
     /// Toom-3 multiplication it would otherwise defer to. At 448 limbs and
-    /// above Toom wins and this hands back to [`Self::mul_ref`].
+    /// above Toom wins and this hands back to [`Self::mul`].
     ///
     /// End to end, against the multiplication a caller would otherwise
     /// write: +12% at 8 limbs, +36% at 16, +32% at 32, +27% at 64, +26% at
@@ -1492,7 +1492,7 @@ impl BigUint {
     /// ([`MontgomeryContext::square_mont`]), which fuses the reduction and is
     /// not reached from here.
     #[must_use]
-    pub fn square_ref(&self) -> Self {
+    pub fn square(&self) -> Self {
         // Zero needs no special case: its width is below every threshold,
         // so it takes the multiplication, which short-circuits it.
         // Ordered so the narrowest operands — the commonest, and the ones
@@ -1503,7 +1503,7 @@ impl BigUint {
             // Too narrow for the specialized kernel's three passes to repay
             // themselves. (Zero lands here too, and the multiplication
             // short-circuits it.)
-            return self.mul_ref(self);
+            return self.mul(self);
         }
         if width < KARATSUBA_THRESHOLD_LIMBS {
             return Self::sqr_schoolbook_ref(self);
@@ -1511,7 +1511,7 @@ impl BigUint {
         if width >= SQR_KARATSUBA_MAX_LIMBS {
             // Wide enough that the multiplication ladder's Toom kernels
             // beat a Karatsuba square outright.
-            return self.mul_ref(self);
+            return self.mul(self);
         }
         self.sqr_karatsuba_ref()
     }
@@ -1601,7 +1601,7 @@ impl BigUint {
     /// The subtractions cannot underflow: `(a₀+a₁)²` dominates both squares
     /// removed from it, their cross term being non-negative.
     fn sqr_karatsuba_ref(&self) -> Self {
-        // Unreachable from `square_ref`, which only routes widths of at
+        // Unreachable from `square`, which only routes widths of at
         // least `KARATSUBA_THRESHOLD_LIMBS` here, so `split >= 16`; kept
         // because the function is meaningful on its own terms and a zero
         // split would recurse forever.
@@ -1621,10 +1621,10 @@ impl BigUint {
             "a normalized operand split at half its own width has a non-zero high half"
         );
 
-        let z0 = low.square_ref();
-        let z2 = high.square_ref();
-        let sum = low.add_ref(&high);
-        let mut z1 = sum.square_ref();
+        let z0 = low.square();
+        let z2 = high.square();
+        let sum = low.add(&high);
+        let mut z1 = sum.square();
         z1.sub_assign_ref(&z0);
         z1.sub_assign_ref(&z2);
 
@@ -1688,7 +1688,7 @@ impl BigUint {
     /// operand into base-`B = 2^{64k}` digits of the shorter one's length
     /// `k`, so that `long · short = Σᵢ digitᵢ·short·Bⁱ` — a sum of balanced
     /// `k × k` products, each accumulated into the output at its limb
-    /// offset. Each digit product re-enters [`Self::mul_ref`] and lands on
+    /// offset. Each digit product re-enters [`Self::mul`] and lands on
     /// a balanced sub-quadratic kernel; a long × short product previously
     /// failed every balanced ratio test and ran schoolbook at full width.
     ///
@@ -1716,7 +1716,7 @@ impl BigUint {
             if digit.is_zero() {
                 continue;
             }
-            let part = digit.mul_ref(short);
+            let part = digit.mul(short);
             // The window fits: this digit spans limbs [i·k, i·k + d) of
             // `long` with d = digit_limbs.len(), so the product has at most
             // d + k limbs and i·k + d + k ≤ long.len() + k = out.len().
@@ -1757,7 +1757,7 @@ impl BigUint {
     /// `z0 = a0·b0`, `z2 = a1·b1`, and
     /// `z1 = (a0+a1)(b0+b1) − z0 − z2 = a0·b1 + a1·b0`. Recomposition is
     /// `z2·B² + z1·B + z0`, and both shifts are limb-aligned. The three
-    /// sub-products recurse through [`Self::mul_ref`], so a large operand
+    /// sub-products recurse through [`Self::mul`], so a large operand
     /// re-enters the dispatch and may take a different kernel on the way down.
     ///
     /// The subtractions cannot underflow: `z1`'s product dominates both terms
@@ -1776,12 +1776,12 @@ impl BigUint {
             return Self::mul_schoolbook_ref(self, other);
         }
 
-        let z0 = a0.mul_ref(&b0);
-        let z2 = a1.mul_ref(&b1);
+        let z0 = a0.mul(&b0);
+        let z2 = a1.mul(&b1);
 
-        let a_sum = a0.add_ref(&a1);
-        let b_sum = b0.add_ref(&b1);
-        let mut z1 = a_sum.mul_ref(&b_sum);
+        let a_sum = a0.add(&a1);
+        let b_sum = b0.add(&b1);
+        let mut z1 = a_sum.mul(&b_sum);
         z1.sub_assign_ref(&z0);
         z1.sub_assign_ref(&z2);
 
@@ -1844,25 +1844,25 @@ impl BigUint {
         // Evaluate a and b at 0, 1, -1, 2, ∞. The value at -1 can go negative,
         // so those points live in signed arithmetic.
         let eval = |c0: &Self, c1: &Self, c2: &Self| {
-            let even = c0.add_ref(c2); // c0 + c2
-            let at_1 = even.add_ref(c1); // c(1)
-            let at_m1 = BigInt::from_biguint(even).sub_ref(&BigInt::from_biguint(c1.clone()));
+            let even = c0.add(c2); // c0 + c2
+            let at_1 = even.add(c1); // c(1)
+            let at_m1 = BigInt::from_biguint(even).sub(&BigInt::from_biguint(c1.clone()));
             let mut twice_c1 = c1.clone();
             twice_c1.shl_bits(1);
             let mut four_c2 = c2.clone();
             four_c2.shl_bits(2);
-            let at_2 = c0.add_ref(&twice_c1).add_ref(&four_c2); // c(2)
+            let at_2 = c0.add(&twice_c1).add(&four_c2); // c(2)
             (at_1, at_m1, at_2)
         };
         let (a_1, a_m1, a_2) = eval(&a0, &a1, &a2);
         let (b_1, b_m1, b_2) = eval(&b0, &b1, &b2);
 
         // Pointwise products (each a recursive multiplication).
-        let v0 = BigInt::from_biguint(a0.mul_ref(&b0)); // W(0)
-        let v_inf = BigInt::from_biguint(a2.mul_ref(&b2)); // W(∞)
-        let v1 = BigInt::from_biguint(a_1.mul_ref(&b_1)); // W(1)
+        let v0 = BigInt::from_biguint(a0.mul(&b0)); // W(0)
+        let v_inf = BigInt::from_biguint(a2.mul(&b2)); // W(∞)
+        let v1 = BigInt::from_biguint(a_1.mul(&b_1)); // W(1)
         let vm1 = bigint_mul(&a_m1, &b_m1); // W(-1)
-        let v2 = BigInt::from_biguint(a_2.mul_ref(&b_2)); // W(2)
+        let v2 = BigInt::from_biguint(a_2.mul(&b_2)); // W(2)
 
         // Interpolate the product digits c0..c4. Derivation: with
         // W(x) = Σ cᵢ xⁱ, the points give c0 = W(0), c4 = W(∞), and
@@ -1872,14 +1872,14 @@ impl BigUint {
         // is exact.
         let c0 = v0;
         let c4 = v_inf;
-        let s = bigint_div_exact(&v1.add_ref(&vm1), 2);
-        let t = bigint_div_exact(&v1.sub_ref(&vm1), 2);
-        let c2 = s.sub_ref(&c0).sub_ref(&c4);
+        let s = bigint_div_exact(&v1.add(&vm1), 2);
+        let t = bigint_div_exact(&v1.sub(&vm1), 2);
+        let c2 = s.sub(&c0).sub(&c4);
         let four_c2 = bigint_shl_exact(&c2, 2);
         let sixteen_c4 = bigint_shl_exact(&c4, 4);
-        let u = bigint_div_exact(&v2.sub_ref(&c0).sub_ref(&four_c2).sub_ref(&sixteen_c4), 2);
-        let c3 = bigint_div_exact(&u.sub_ref(&t), 3);
-        let c1 = t.sub_ref(&c3);
+        let u = bigint_div_exact(&v2.sub(&c0).sub(&four_c2).sub(&sixteen_c4), 2);
+        let c3 = bigint_div_exact(&u.sub(&t), 3);
+        let c1 = t.sub(&c3);
 
         // Recompose Σ cᵢ·B^{ik} by Horner. The product's digits are all
         // non-negative, so this returns to unsigned.
@@ -1951,22 +1951,22 @@ impl BigUint {
             let mut eight_c3 = c3.clone();
             eight_c3.shl_bits(3);
 
-            let at_1 = c0.add_ref(c1).add_ref(c2).add_ref(c3); // c(1)
-            let even = c0.add_ref(c2); // c0 + c2
-            let odd = c1.add_ref(c3); // c1 + c3
-            let at_m1 = BigInt::from_biguint(even).sub_ref(&BigInt::from_biguint(odd)); // c(-1)
-            let at_2 = c0.add_ref(&two_c1).add_ref(&four_c2).add_ref(&eight_c3); // c(2)
-            let even2 = c0.add_ref(&four_c2); // c0 + 4c2
-            let odd2 = two_c1.add_ref(&eight_c3); // 2c1 + 8c3
-            let at_m2 = BigInt::from_biguint(even2).sub_ref(&BigInt::from_biguint(odd2)); // c(-2)
+            let at_1 = c0.add(c1).add(c2).add(c3); // c(1)
+            let even = c0.add(c2); // c0 + c2
+            let odd = c1.add(c3); // c1 + c3
+            let at_m1 = BigInt::from_biguint(even).sub(&BigInt::from_biguint(odd)); // c(-1)
+            let at_2 = c0.add(&two_c1).add(&four_c2).add(&eight_c3); // c(2)
+            let even2 = c0.add(&four_c2); // c0 + 4c2
+            let odd2 = two_c1.add(&eight_c3); // 2c1 + 8c3
+            let at_m2 = BigInt::from_biguint(even2).sub(&BigInt::from_biguint(odd2)); // c(-2)
 
             // c(3) = c0 + 3c1 + 9c2 + 27c3, by Horner at x = 3.
             let three = BigUint::from_u64(3);
-            let mut at_3 = c3.mul_ref(&three);
+            let mut at_3 = c3.mul(&three);
             at_3.add_assign_ref(c2);
-            at_3 = at_3.mul_ref(&three);
+            at_3 = at_3.mul(&three);
             at_3.add_assign_ref(c1);
-            at_3 = at_3.mul_ref(&three);
+            at_3 = at_3.mul(&three);
             at_3.add_assign_ref(c0);
             (at_1, at_m1, at_2, at_m2, at_3)
         };
@@ -1974,13 +1974,13 @@ impl BigUint {
         let (b_1, b_m1, b_2, b_m2, b_3) = eval4(&b0, &b1, &b2, &b3);
 
         // Seven pointwise products (each a recursive multiplication).
-        let w0 = BigInt::from_biguint(a0.mul_ref(&b0)); // W(0)
-        let w1 = BigInt::from_biguint(a_1.mul_ref(&b_1)); // W(1)
+        let w0 = BigInt::from_biguint(a0.mul(&b0)); // W(0)
+        let w1 = BigInt::from_biguint(a_1.mul(&b_1)); // W(1)
         let w2 = bigint_mul(&a_m1, &b_m1); // W(-1)
-        let w3 = BigInt::from_biguint(a_2.mul_ref(&b_2)); // W(2)
+        let w3 = BigInt::from_biguint(a_2.mul(&b_2)); // W(2)
         let w4 = bigint_mul(&a_m2, &b_m2); // W(-2)
-        let w5 = BigInt::from_biguint(a_3.mul_ref(&b_3)); // W(3)
-        let w6 = BigInt::from_biguint(a3.mul_ref(&b3)); // W(∞)
+        let w5 = BigInt::from_biguint(a_3.mul(&b_3)); // W(3)
+        let w6 = BigInt::from_biguint(a3.mul(&b3)); // W(∞)
 
         // Powers of two shift; the odd weights (9, 81, 729, 5, 3) go through
         // the general multiply.
@@ -1988,35 +1988,35 @@ impl BigUint {
             if m.is_power_of_two() {
                 bigint_shl_exact(x, m.trailing_zeros() as usize)
             } else {
-                x.mul_biguint_ref(&BigUint::from_u64(m))
+                x.mul_biguint(&BigUint::from_u64(m))
             }
         };
         let c0 = w0;
         let c6 = w6;
 
         // Even coefficients c2, c4 from the symmetric sums.
-        let e1 = bigint_div_exact(&w1.add_ref(&w2), 2); // c2 + c4 + c0 + c6
-        let e2 = bigint_div_exact(&w3.add_ref(&w4), 2); // 4c2 + 16c4 + c0 + 64c6
-        let sum24 = e1.sub_ref(&c0).sub_ref(&c6); // c2 + c4
-        let weighted24 = e2.sub_ref(&c0).sub_ref(&scale(&c6, 64)); // 4c2 + 16c4
-        let c4 = bigint_div_exact(&weighted24.sub_ref(&scale(&sum24, 4)), 12);
-        let c2 = sum24.sub_ref(&c4);
+        let e1 = bigint_div_exact(&w1.add(&w2), 2); // c2 + c4 + c0 + c6
+        let e2 = bigint_div_exact(&w3.add(&w4), 2); // 4c2 + 16c4 + c0 + 64c6
+        let sum24 = e1.sub(&c0).sub(&c6); // c2 + c4
+        let weighted24 = e2.sub(&c0).sub(&scale(&c6, 64)); // 4c2 + 16c4
+        let c4 = bigint_div_exact(&weighted24.sub(&scale(&sum24, 4)), 12);
+        let c2 = sum24.sub(&c4);
 
         // Odd coefficients c1, c3, c5 from the antisymmetric sums and W(3).
-        let o1 = bigint_div_exact(&w1.sub_ref(&w2), 2); // c1 + c3 + c5
-        let o2 = bigint_div_exact(&w3.sub_ref(&w4), 4); // c1 + 4c3 + 16c5
+        let o1 = bigint_div_exact(&w1.sub(&w2), 2); // c1 + c3 + c5
+        let o2 = bigint_div_exact(&w3.sub(&w4), 4); // c1 + 4c3 + 16c5
         let o3 = bigint_div_exact(
-            &w5.sub_ref(&c0)
-                .sub_ref(&scale(&c2, 9))
-                .sub_ref(&scale(&c4, 81))
-                .sub_ref(&scale(&c6, 729)),
+            &w5.sub(&c0)
+                .sub(&scale(&c2, 9))
+                .sub(&scale(&c4, 81))
+                .sub(&scale(&c6, 729)),
             3,
         ); // c1 + 9c3 + 81c5
-        let p = bigint_div_exact(&o2.sub_ref(&o1), 3); // c3 + 5c5
-        let q = bigint_div_exact(&o3.sub_ref(&o1), 8); // c3 + 10c5
-        let c5 = bigint_div_exact(&q.sub_ref(&p), 5);
-        let c3 = p.sub_ref(&scale(&c5, 5));
-        let c1 = o1.sub_ref(&c3).sub_ref(&c5);
+        let p = bigint_div_exact(&o2.sub(&o1), 3); // c3 + 5c5
+        let q = bigint_div_exact(&o3.sub(&o1), 8); // c3 + 10c5
+        let c5 = bigint_div_exact(&q.sub(&p), 5);
+        let c3 = p.sub(&scale(&c5, 5));
+        let c1 = o1.sub(&c3).sub(&c5);
 
         // Recompose Σ cᵢ·B^{ik}; the product digits are all non-negative.
         let shift = 64 * k;
@@ -2032,7 +2032,7 @@ impl BigUint {
         acc
     }
 
-    /// The low `limit` limbs of `lhs · rhs` — the product modulo
+    /// The low `limit` limbs of `lhs · rhs` — the product rem
     /// `2^{64·limit}`, computed without forming the rest of it.
     ///
     /// Every partial product lands at a fixed position, so one whose
@@ -2265,7 +2265,7 @@ impl BigUint {
     ///
     /// Panics if `modulus == 0`.
     #[must_use]
-    pub fn modulo(&self, modulus: &Self) -> Self {
+    pub fn rem(&self, modulus: &Self) -> Self {
         let (_, remainder) = self.div_rem(modulus);
         remainder
     }
@@ -2298,7 +2298,7 @@ impl BigUint {
         }
     }
 
-    /// Compute the remainder modulo a machine word.
+    /// Compute the remainder rem a machine word.
     ///
     /// # Panics
     ///
@@ -2319,7 +2319,7 @@ impl BigUint {
             remainder = acc % u128::from(modulus);
         }
 
-        u64::try_from(remainder).expect("remainder modulo u64 fits into u64")
+        u64::try_from(remainder).expect("remainder rem u64 fits into u64")
     }
 
     /// Compute `(lhs * rhs) mod modulus`.
@@ -2345,7 +2345,7 @@ impl BigUint {
         if modulus.is_one() {
             return Self::zero();
         }
-        lhs.mul_ref(rhs).modulo(modulus)
+        lhs.mul(rhs).rem(modulus)
     }
 
     /// One-shot modular addition, on [`Self::mod_mul`]'s contract: any
@@ -2362,16 +2362,16 @@ impl BigUint {
         let lhs = if lhs < modulus {
             lhs.clone()
         } else {
-            lhs.modulo(modulus)
+            lhs.rem(modulus)
         };
         let rhs = if rhs < modulus {
             rhs.clone()
         } else {
-            rhs.modulo(modulus)
+            rhs.rem(modulus)
         };
-        let sum = lhs.add_ref(&rhs);
+        let sum = lhs.add(&rhs);
         if sum >= *modulus {
-            sum.sub_ref(modulus)
+            sum.sub(modulus)
         } else {
             sum
         }
@@ -2389,17 +2389,17 @@ impl BigUint {
         let lhs = if lhs < modulus {
             lhs.clone()
         } else {
-            lhs.modulo(modulus)
+            lhs.rem(modulus)
         };
         let rhs = if rhs < modulus {
             rhs.clone()
         } else {
-            rhs.modulo(modulus)
+            rhs.rem(modulus)
         };
         if lhs >= rhs {
-            lhs.sub_ref(&rhs)
+            lhs.sub(&rhs)
         } else {
-            modulus.add_ref(&lhs).sub_ref(&rhs)
+            modulus.add(&lhs).sub(&rhs)
         }
     }
 
@@ -2850,7 +2850,7 @@ fn shr_limbs(value: &[u64], shift: u32) -> Vec<u64> {
 /// the points `−1` and `−2` makes those pointwise multiplications signed,
 /// even though the multiplicands and the final product are not.
 fn bigint_mul(a: &BigInt, b: &BigInt) -> BigInt {
-    a.mul_ref(b)
+    a.mul(b)
 }
 
 /// `x / divisor` where `divisor` is known to divide `x` — the interpolation
@@ -2890,7 +2890,7 @@ fn bigint_div_exact(x: &BigInt, divisor: u64) -> BigInt {
 
 /// Multiply by `2^shift`, for the interpolation's power-of-two weights.
 ///
-/// The general path, `mul_biguint_ref(&BigUint::from_u64(1 << shift))`,
+/// The general path, `mul_biguint(&BigUint::from_u64(1 << shift))`,
 /// allocates a constant and enters the full multiplication dispatch to apply a
 /// weight that is one shift of the limb buffer.
 fn bigint_shl_exact(x: &BigInt, shift: usize) -> BigInt {
@@ -3006,7 +3006,7 @@ impl BigInt {
     /// Return `self + other`: a clone of `self` followed by
     /// [`Self::add_assign_ref`].
     #[must_use]
-    pub fn add_ref(&self, other: &Self) -> Self {
+    pub fn add(&self, other: &Self) -> Self {
         let mut out = self.clone();
         out.add_assign_ref(other);
         out
@@ -3020,9 +3020,9 @@ impl BigInt {
     }
 
     /// Return `self - other`: a clone of `self` followed by
-    /// [`Self::sub_assign_ref`]. Total on ℤ, unlike [`BigUint::sub_ref`].
+    /// [`Self::sub_assign_ref`]. Total on ℤ, unlike [`BigUint::sub`].
     #[must_use]
-    pub fn sub_ref(&self, other: &Self) -> Self {
+    pub fn sub(&self, other: &Self) -> Self {
         let mut out = self.clone();
         out.sub_assign_ref(other);
         out
@@ -3089,12 +3089,12 @@ impl BigInt {
     /// coefficient by a small positive constant, since the constant then
     /// needs no sign of its own.
     #[must_use]
-    pub fn mul_biguint_ref(&self, factor: &BigUint) -> Self {
+    pub fn mul_biguint(&self, factor: &BigUint) -> Self {
         if factor.is_zero() || self.sign == Sign::Zero {
             return Self::zero();
         }
 
-        Self::from_parts(self.sign, self.magnitude.mul_ref(factor))
+        Self::from_parts(self.sign, self.magnitude.mul(factor))
     }
 
     /// Parse from a digit string with an optional leading `-`, in the given
@@ -3135,20 +3135,20 @@ impl BigInt {
     }
 
     /// Signed product `self · other`: the magnitudes multiply through the
-    /// full [`BigUint::mul_ref`] kernel ladder and the sign follows the
+    /// full [`BigUint::mul`] kernel ladder and the sign follows the
     /// usual rule (like signs positive, unlike negative, zero absorbing).
     /// Inside the crate this is the Half-GCD matrix arithmetic and the
     /// `PolyZ` coefficient ring; outside it, one third of the signed ring
     /// the number field sieve's balanced base-`m` expansion works in,
     /// together with [`Self::div_rem`] and [`Self::abs`].
     #[must_use]
-    pub fn mul_ref(&self, other: &Self) -> Self {
+    pub fn mul(&self, other: &Self) -> Self {
         let sign = match (self.sign, other.sign) {
             (Sign::Zero, _) | (_, Sign::Zero) => Sign::Zero,
             (lhs, rhs) if lhs == rhs => Sign::Positive,
             _ => Sign::Negative,
         };
-        Self::from_parts(sign, self.magnitude.mul_ref(&other.magnitude))
+        Self::from_parts(sign, self.magnitude.mul(&other.magnitude))
     }
 
     /// Signed division with remainder, **truncated toward zero** — the
@@ -3162,7 +3162,7 @@ impl BigInt {
     ///
     /// Concretely, `(-7).div_rem(2) = (-3, -1)` where the floored
     /// convention would give `(-4, 1)`. A caller who wants the least
-    /// non-negative residue instead uses [`Self::modulo_positive`], which
+    /// non-negative residue instead uses [`Self::rem_euclid`], which
     /// is the floored remainder against an unsigned modulus.
     ///
     /// # Panics
@@ -3278,7 +3278,7 @@ impl BigInt {
         Self::from_parts(sign, magnitude)
     }
 
-    /// Reduce modulo a positive modulus and return the least non-negative
+    /// Reduce rem a positive modulus and return the least non-negative
     /// residue, in `[0, modulus)`.
     ///
     /// Rust's `%` on the primitive integers truncates toward zero and gives
@@ -3292,26 +3292,26 @@ impl BigInt {
     ///
     /// Panics if `modulus == 0`.
     #[must_use]
-    pub fn modulo_positive(&self, modulus: &BigUint) -> BigUint {
+    pub fn rem_euclid(&self, modulus: &BigUint) -> BigUint {
         assert!(!modulus.is_zero(), "modulus must be non-zero");
         match self.sign {
             Sign::Zero => BigUint::zero(),
-            Sign::Positive => self.magnitude.modulo(modulus),
+            Sign::Positive => self.magnitude.rem(modulus),
             Sign::Negative => {
-                let rem = self.magnitude.modulo(modulus);
+                let rem = self.magnitude.rem(modulus);
                 if rem.is_zero() {
                     BigUint::zero()
                 } else {
-                    modulus.sub_ref(&rem)
+                    modulus.sub(&rem)
                 }
             }
         }
     }
 
-    /// The representative of `self` modulo `modulus` in the *symmetric* range
+    /// The representative of `self` rem `modulus` in the *symmetric* range
     /// `(−modulus/2, modulus/2]`.
     ///
-    /// [`Self::modulo_positive`]'s companion, and the other canonical choice
+    /// [`Self::rem_euclid`]'s companion, and the other canonical choice
     /// of representative. Where that one is what residue arithmetic wants,
     /// this is what *size* wants: it is the smallest representative in
     /// absolute value, which halves the magnitude of a reduced coefficient and
@@ -3328,20 +3328,20 @@ impl BigInt {
     /// use rump::{BigInt, BigUint};
     ///
     /// let ten = BigUint::from_u64(10);
-    /// let reduced = |value: i64| BigInt::from_i64(value).symmetric_remainder(&ten);
+    /// let reduced = |value: i64| BigInt::from_i64(value).symmetric_rem(&ten);
     /// assert_eq!(reduced(7), BigInt::from_i64(-3));
     /// assert_eq!(reduced(-7), BigInt::from_i64(3));
     /// assert_eq!(reduced(5), BigInt::from_i64(5));
     /// ```
     #[must_use]
-    pub fn symmetric_remainder(&self, modulus: &BigUint) -> BigInt {
+    pub fn symmetric_rem(&self, modulus: &BigUint) -> BigInt {
         assert!(!modulus.is_zero(), "modulus must be non-zero");
-        let reduced = self.modulo_positive(modulus);
+        let reduced = self.rem_euclid(modulus);
         // reduced ∈ [0, modulus). Anything strictly above the midpoint belongs
         // on the negative side: subtracting the modulus lands it in
         // (−modulus/2, 0).
-        if reduced.mul_ref(&BigUint::from_u64(2)) > *modulus {
-            BigInt::from_biguint(reduced).sub_ref(&BigInt::from_biguint(modulus.clone()))
+        if reduced.mul(&BigUint::from_u64(2)) > *modulus {
+            BigInt::from_biguint(reduced).sub(&BigInt::from_biguint(modulus.clone()))
         } else {
             BigInt::from_biguint(reduced)
         }
@@ -3355,21 +3355,21 @@ mod tests {
     fn symmetric_remainder_is_congruent_and_smallest() {
         // The two properties that define it, checked against the other
         // representative rather than against a table: the result is congruent
-        // to `modulo_positive`, and no other representative of the class is
+        // to `rem_euclid`, and no other representative of the class is
         // smaller in absolute value.
         for m in [1u64, 2, 7, 8, 97, 1_000, 1_001] {
             let modulus = BigUint::from_u64(m);
             for value in -60i64..=60 {
                 let signed = BigInt::from_i64(value);
-                let symmetric = signed.symmetric_remainder(&modulus);
+                let symmetric = signed.symmetric_rem(&modulus);
                 assert_eq!(
-                    symmetric.modulo_positive(&modulus),
-                    signed.modulo_positive(&modulus),
+                    symmetric.rem_euclid(&modulus),
+                    signed.rem_euclid(&modulus),
                     "value {value} mod {m}: not the same residue"
                 );
                 // (−m/2, m/2]: doubled magnitude at most m, and equal only on
                 // the positive side.
-                let doubled = symmetric.magnitude().mul_ref(&BigUint::from_u64(2));
+                let doubled = symmetric.magnitude().mul(&BigUint::from_u64(2));
                 assert!(doubled <= modulus, "value {value} mod {m}: not reduced");
                 if doubled == modulus {
                     assert!(
@@ -3403,9 +3403,9 @@ mod tests {
             for exponent in 0..40u64 {
                 let power = base.pow_u64(exponent);
                 check(&power, radix);
-                check(&power.add_ref(&BigUint::one()), radix);
+                check(&power.add(&BigUint::one()), radix);
                 if exponent > 0 {
-                    check(&power.sub_ref(&BigUint::one()), radix);
+                    check(&power.sub(&BigUint::one()), radix);
                 }
             }
         }
@@ -3616,29 +3616,29 @@ mod tests {
     fn add_sub_mul_small_values() {
         let a = BigUint::from_u128(1_000_000_000_000);
         let b = BigUint::from_u128(777_777_777_777);
-        assert_eq!(a.add_ref(&b), BigUint::from_u128(1_777_777_777_777));
+        assert_eq!(a.add(&b), BigUint::from_u128(1_777_777_777_777));
         assert_eq!(
-            a.sub_ref(&BigUint::from_u64(1)),
+            a.sub(&BigUint::from_u64(1)),
             BigUint::from_u128(999_999_999_999)
         );
         assert_eq!(
-            a.mul_ref(&b),
+            a.mul(&b),
             BigUint::from_u128(777_777_777_777_000_000_000_000)
         );
     }
 
     /// The specification for the signed in-place operations: the flattened
-    /// composition of the previous `add_ref`/`sub_ref` case analysis over
+    /// composition of the previous `add`/`sub` case analysis over
     /// the unsigned primitives, retained as a structural oracle.
     fn signed_add_oracle(a: &BigInt, b: &BigInt) -> BigInt {
         use core::cmp::Ordering;
         match (a.sign(), b.sign()) {
             (Sign::Zero, _) => b.clone(),
             (_, Sign::Zero) => a.clone(),
-            (sa, sb) if sa == sb => BigInt::from_parts(sa, a.magnitude().add_ref(b.magnitude())),
+            (sa, sb) if sa == sb => BigInt::from_parts(sa, a.magnitude().add(b.magnitude())),
             (sa, sb) => match a.magnitude().cmp(b.magnitude()) {
-                Ordering::Greater => BigInt::from_parts(sa, a.magnitude().sub_ref(b.magnitude())),
-                Ordering::Less => BigInt::from_parts(sb, b.magnitude().sub_ref(a.magnitude())),
+                Ordering::Greater => BigInt::from_parts(sa, a.magnitude().sub(b.magnitude())),
+                Ordering::Less => BigInt::from_parts(sb, b.magnitude().sub(a.magnitude())),
                 Ordering::Equal => BigInt::zero(),
             },
         }
@@ -3653,10 +3653,10 @@ mod tests {
         let mut low = BigUint::one();
         let mut high = BigUint::zero();
         high.set_bit(n.bits().div_ceil(2));
-        while low.add_ref(&BigUint::one()) < high {
-            let mut middle = low.add_ref(&high);
+        while low.add(&BigUint::one()) < high {
+            let mut middle = low.add(&high);
             middle.shr1();
-            if middle.square_ref() <= *n {
+            if middle.square() <= *n {
                 low = middle;
             } else {
                 high = middle;
@@ -3719,11 +3719,7 @@ mod tests {
             assert_eq!(q, q_ref, "quotient");
             assert_eq!(BigUint::from_u64(r), r_ref, "remainder");
             // The defining identity.
-            assert_eq!(
-                q.mul_ref(&BigUint::from_u64(d))
-                    .add_ref(&BigUint::from_u64(r)),
-                n
-            );
+            assert_eq!(q.mul(&BigUint::from_u64(d)).add(&BigUint::from_u64(r)), n);
         }
         assert_eq!(
             BigUint::from_u64(100).div_rem_u64(7),
@@ -3793,11 +3789,11 @@ mod tests {
         );
         // from_i64 round-trips both signs into the canonical range.
         assert_eq!(
-            BigInt::from_i64(-3).modulo_positive(&BigUint::from_u64(11)),
+            BigInt::from_i64(-3).rem_euclid(&BigUint::from_u64(11)),
             BigUint::from_u64(8)
         );
         assert_eq!(
-            BigInt::from_i64(3).modulo_positive(&BigUint::from_u64(11)),
+            BigInt::from_i64(3).rem_euclid(&BigUint::from_u64(11)),
             BigUint::from_u64(3)
         );
         assert_eq!(BigInt::from_i64(0), BigInt::zero());
@@ -3816,23 +3812,19 @@ mod tests {
             n.limbs[0] |= 1;
             let ctx = MontgomeryContext::new(&n).expect("odd modulus");
             for _ in 0..16 {
-                let a = seeded_biguint(words, &mut seed).modulo(&n);
-                let b = seeded_biguint(words, &mut seed).modulo(&n);
+                let a = seeded_biguint(words, &mut seed).rem(&n);
+                let b = seeded_biguint(words, &mut seed).rem(&n);
                 let (am, bm) = (ctx.encode(&a), ctx.encode(&b));
                 // Linearity: the domain sum decodes to the plain sum.
-                let sum = a.add_ref(&b).modulo(&n);
+                let sum = a.add(&b).rem(&n);
                 assert_eq!(ctx.decode(&ctx.add_mont(&am, &bm)), sum);
-                let diff = if a >= b {
-                    a.sub_ref(&b)
-                } else {
-                    n.add_ref(&a).sub_ref(&b)
-                };
+                let diff = if a >= b { a.sub(&b) } else { n.add(&a).sub(&b) };
                 assert_eq!(ctx.decode(&ctx.sub_mont(&am, &bm)), diff);
             }
             // Boundaries: zero, self-cancellation, both identities, the
             // wrap, and the add correction's own boundary x + (n − x) = n.
             let zero = BigUint::zero();
-            let top = ctx.encode(&n.sub_ref(&BigUint::one()));
+            let top = ctx.encode(&n.sub(&BigUint::one()));
             assert_eq!(ctx.sub_mont(&top, &top), zero);
             assert_eq!(ctx.add_mont(&top, &zero), top);
             assert_eq!(ctx.sub_mont(&top, &zero), top);
@@ -3842,7 +3834,7 @@ mod tests {
             );
             assert_eq!(
                 ctx.decode(&ctx.add_mont(&top, &top)),
-                n.sub_ref(&BigUint::from_u64(2)),
+                n.sub(&BigUint::from_u64(2)),
                 "(n-1) + (n-1) wraps to n-2"
             );
             assert_eq!(
@@ -3871,22 +3863,22 @@ mod tests {
                 let ctx = BarrettContext::new(&n).expect("modulus is at least 2");
                 for _ in 0..8 {
                     // Products of reduced values — the advertised domain.
-                    let a = seeded_biguint(words, &mut seed).modulo(&n);
-                    let b = seeded_biguint(words, &mut seed).modulo(&n);
-                    let wide = a.mul_ref(&b);
-                    assert_eq!(ctx.reduce(&wide), wide.modulo(&n));
+                    let a = seeded_biguint(words, &mut seed).rem(&n);
+                    let b = seeded_biguint(words, &mut seed).rem(&n);
+                    let wide = a.mul(&b);
+                    assert_eq!(ctx.reduce(&wide), wide.rem(&n));
                     assert_eq!(ctx.mod_mul(&a, &b), BigUint::mod_mul(&a, &b, &n));
                     assert_eq!(ctx.mod_square(&a), BigUint::mod_mul(&a, &a, &n));
                 }
                 // The full-width boundary of the contract: b^2k − 1.
                 let mut edge = BigUint::zero();
                 edge.set_bit(128 * words);
-                let edge = edge.sub_ref(&BigUint::one());
-                assert_eq!(ctx.reduce(&edge), edge.modulo(&n));
+                let edge = edge.sub(&BigUint::one());
+                assert_eq!(ctx.reduce(&edge), edge.rem(&n));
                 // Beyond the contract the fallback still answers.
                 let mut wide = seeded_biguint(3 * words, &mut seed);
                 wide.set_bit(3 * words * 64 - 1);
-                assert_eq!(ctx.reduce(&wide), wide.modulo(&n));
+                assert_eq!(ctx.reduce(&wide), wide.rem(&n));
                 assert_eq!(ctx.reduce(&BigUint::zero()), BigUint::zero());
             }
         }
@@ -3904,8 +3896,8 @@ mod tests {
             .into_iter()
             .flatten()
             {
-                let x2 = BigUint::from_u64(x).square_ref();
-                assert_eq!(ctx.reduce(&x2), x2.modulo(&n), "n = {n_small}, x = {x}");
+                let x2 = BigUint::from_u64(x).square();
+                assert_eq!(ctx.reduce(&x2), x2.rem(&n), "n = {n_small}, x = {x}");
             }
         }
         assert!(BarrettContext::new(&BigUint::one()).is_none());
@@ -3922,20 +3914,20 @@ mod tests {
                 {
                     let mut v = BigUint::zero();
                     v.set_bit(64 * (k - 1));
-                    v.add_ref(&BigUint::one())
+                    v.add(&BigUint::one())
                 },
                 {
                     let mut v = BigUint::zero();
                     v.set_bit(64 * k);
-                    v.sub_ref(&BigUint::one())
+                    v.sub(&BigUint::one())
                 },
             ] {
                 let ctx = BarrettContext::new(&n).expect("at least 2");
                 let mut seed2 = 0x0b0b_0b0b_0000_0001 ^ (k as u64);
                 for _ in 0..6 {
-                    let a = seeded_biguint(k, &mut seed2).modulo(&n);
-                    let wide = a.square_ref();
-                    assert_eq!(ctx.reduce(&wide), wide.modulo(&n), "edge modulus, k = {k}");
+                    let a = seeded_biguint(k, &mut seed2).rem(&n);
+                    let wide = a.square();
+                    assert_eq!(ctx.reduce(&wide), wide.rem(&n), "edge modulus, k = {k}");
                 }
             }
         }
@@ -3984,32 +3976,32 @@ mod tests {
             shapes.push(("top limb 1", small_top));
             let mut ones = BigUint::zero();
             ones.set_bit(64 * k);
-            shapes.push(("all ones", ones.sub_ref(&BigUint::one())));
+            shapes.push(("all ones", ones.sub(&BigUint::one())));
 
             for (label, n) in shapes {
                 assert_eq!(n.bits().div_ceil(64), k, "{label}: k = {k} as intended");
                 let ctx = BarrettContext::new(&n).expect("a modulus of at least 2");
                 for _ in 0..2 {
-                    let a = seeded_biguint(k, &mut seed).modulo(&n);
-                    let b = seeded_biguint(k, &mut seed).modulo(&n);
-                    let wide = a.mul_ref(&b);
-                    assert_eq!(ctx.reduce(&wide), wide.modulo(&n), "{label}, k = {k}");
+                    let a = seeded_biguint(k, &mut seed).rem(&n);
+                    let b = seeded_biguint(k, &mut seed).rem(&n);
+                    let wide = a.mul(&b);
+                    assert_eq!(ctx.reduce(&wide), wide.rem(&n), "{label}, k = {k}");
                 }
                 // The ends of the range, where an off-by-one in the
                 // correction loop shows up: 0, n − 1, n itself, the largest
                 // square, and the top of the accepted input range.
                 assert!(ctx.reduce(&BigUint::zero()).is_zero(), "{label}, zero");
-                let below = n.sub_ref(&BigUint::one());
+                let below = n.sub(&BigUint::one());
                 assert_eq!(ctx.reduce(&below), below, "{label}, n - 1");
                 assert!(ctx.reduce(&n).is_zero(), "{label}, n");
-                let square = below.square_ref();
-                assert_eq!(ctx.reduce(&square), square.modulo(&n), "{label}, (n-1)^2");
+                let square = below.square();
+                assert_eq!(ctx.reduce(&square), square.rem(&n), "{label}, (n-1)^2");
                 let mut widest = BigUint::zero();
                 widest.set_bit(128 * k);
-                let widest = widest.sub_ref(&BigUint::one());
+                let widest = widest.sub(&BigUint::one());
                 assert_eq!(
                     ctx.reduce(&widest),
-                    widest.modulo(&n),
+                    widest.rem(&n),
                     "{label}, the widest accepted input"
                 );
             }
@@ -4028,11 +4020,11 @@ mod tests {
             for d in [1u64, 3, 5, 7, 9, 17, 33, 65, 257, 1025] {
                 let mut n = BigUint::zero();
                 n.set_bit(64 * (k - 1));
-                shapes.push((format!("b^{}+{d}", k - 1), n.add_ref(&BigUint::from_u64(d))));
+                shapes.push((format!("b^{}+{d}", k - 1), n.add(&BigUint::from_u64(d))));
                 let mut m = BigUint::zero();
                 m.set_bit(64 * k);
-                shapes.push((format!("b^{k}-{d}"), m.sub_ref(&BigUint::from_u64(d))));
-                shapes.push((format!("b^{k}+{d}"), m.add_ref(&BigUint::from_u64(d))));
+                shapes.push((format!("b^{k}-{d}"), m.sub(&BigUint::from_u64(d))));
+                shapes.push((format!("b^{k}+{d}"), m.add(&BigUint::from_u64(d))));
             }
             for _ in 0..40 {
                 let mut r = seeded_biguint(k, &mut seed);
@@ -4047,14 +4039,14 @@ mod tests {
                 let kk = n.bits().div_ceil(64);
                 let mut top = BigUint::zero();
                 top.set_bit(128 * kk);
-                let top = top.sub_ref(&BigUint::one());
+                let top = top.sub(&BigUint::one());
                 for _ in 0..600 {
                     let x = match seed % 3 {
-                        0 => seeded_biguint(2 * kk, &mut seed).modulo(&top),
-                        1 => top.sub_ref(&seeded_biguint(kk, &mut seed).modulo(&top)),
-                        _ => n.mul_ref(&seeded_biguint(kk, &mut seed)).modulo(&top),
+                        0 => seeded_biguint(2 * kk, &mut seed).rem(&top),
+                        1 => top.sub(&seeded_biguint(kk, &mut seed).rem(&top)),
+                        _ => n.mul(&seeded_biguint(kk, &mut seed)).rem(&top),
                     };
-                    assert_eq!(ctx.reduce(&x), x.modulo(&n));
+                    assert_eq!(ctx.reduce(&x), x.rem(&n));
                     let t = BarrettContext::last_corrections() as usize;
                     seen[t.min(3)] += 1;
                     if t == 2 && witness.is_none() {
@@ -4104,7 +4096,7 @@ mod tests {
             for d in [1u64, 3, 5, 17, 257] {
                 let mut n = BigUint::zero();
                 n.set_bit(64 * (k - 1));
-                shapes.push(n.add_ref(&BigUint::from_u64(d)));
+                shapes.push(n.add(&BigUint::from_u64(d)));
             }
             let mut random = seeded_biguint(k, &mut seed);
             random.set_bit(64 * k - 1);
@@ -4118,16 +4110,16 @@ mod tests {
                 let ctx = BarrettContext::new(&n).expect("a modulus of at least 2");
                 let mut top = BigUint::zero();
                 top.set_bit(128 * width);
-                let top = top.sub_ref(&BigUint::one());
+                let top = top.sub(&BigUint::one());
                 for step in 0..250u64 {
                     // Uniform over the accepted range, and multiples of `n`
                     // near it — the two draws the witnesses come from.
                     let x = if step % 2 == 0 {
-                        seeded_biguint(2 * width, &mut seed).modulo(&top)
+                        seeded_biguint(2 * width, &mut seed).rem(&top)
                     } else {
-                        n.mul_ref(&seeded_biguint(width, &mut seed)).modulo(&top)
+                        n.mul(&seeded_biguint(width, &mut seed)).rem(&top)
                     };
-                    assert_eq!(ctx.reduce(&x), x.modulo(&n), "k = {k}, step {step}");
+                    assert_eq!(ctx.reduce(&x), x.rem(&n), "k = {k}, step {step}");
                     let taken = BarrettContext::last_corrections();
                     assert!(taken <= 2, "k = {k}: {taken} corrections exceeds the bound");
                     seen[taken as usize] += 1;
@@ -4157,13 +4149,13 @@ mod tests {
             if modulus.is_one() {
                 return BigUint::zero();
             }
-            let mut result = BigUint::one().modulo(modulus);
-            let mut power = base.modulo(modulus);
+            let mut result = BigUint::one().rem(modulus);
+            let mut power = base.rem(modulus);
             for bit in 0..exponent.bits() {
                 if exponent.bit(bit) {
-                    result = result.mul_ref(&power).modulo(modulus);
+                    result = result.mul(&power).rem(modulus);
                 }
-                power = power.mul_ref(&power).modulo(modulus);
+                power = power.mul(&power).rem(modulus);
             }
             result
         }
@@ -4195,10 +4187,7 @@ mod tests {
                     expected,
                     "mod_pow at {words} words, even = {parity_even}"
                 );
-                assert_eq!(
-                    ctx.mod_pow(&base, &BigUint::zero()),
-                    BigUint::one().modulo(&n)
-                );
+                assert_eq!(ctx.mod_pow(&base, &BigUint::zero()), BigUint::one().rem(&n));
             }
         }
 
@@ -4209,10 +4198,10 @@ mod tests {
         // than the modulus.
         let mut wide = BigUint::one();
         wide.shl_bits(300);
-        let wide_even = wide.add_ref(&BigUint::from_u64(2));
+        let wide_even = wide.add(&BigUint::from_u64(2));
         let mut base_wider = BigUint::one();
         base_wider.shl_bits(700);
-        base_wider = base_wider.add_ref(&BigUint::from_u64(12_345));
+        base_wider = base_wider.add(&BigUint::from_u64(12_345));
         for modulus in [
             BigUint::from_u64(2),
             BigUint::from_u64(4),
@@ -4263,21 +4252,18 @@ mod tests {
                     sqrt_floor_bisection(&n),
                     "root diverged at {words} words"
                 );
-                assert_eq!(remainder, n.sub_ref(&root.square_ref()));
-                assert!(
-                    root.add_ref(&BigUint::one()).square_ref() > n,
-                    "floor certificate"
-                );
+                assert_eq!(remainder, n.sub(&root.square()));
+                assert!(root.add(&BigUint::one()).square() > n, "floor certificate");
             }
         }
         // Exact squares and their neighbours.
         let mut seed2 = 0x0bad_cafe_0000_0007;
         for &words in &[2usize, 16, 64] {
             let r = seeded_biguint(words, &mut seed2);
-            let square = r.square_ref();
+            let square = r.square();
             assert_eq!(square.sqrt_rem(), (r.clone(), BigUint::zero()));
-            let below = square.sub_ref(&BigUint::one());
-            let r_minus_one = r.sub_ref(&BigUint::one());
+            let below = square.sub(&BigUint::one());
+            let r_minus_one = r.sub(&BigUint::one());
             assert_eq!(
                 below.sqrt_rem().0,
                 r_minus_one,
@@ -4348,7 +4334,7 @@ mod tests {
             let power = m.pow_u64(k);
             assert_eq!(power.nth_root_floor(k), m, "exact {k}-th root");
             assert!(power.is_perfect_power());
-            let bumped = power.add_ref(&BigUint::one());
+            let bumped = power.add(&BigUint::one());
             // m^k + 1 is a perfect power only at 8, 9: Catalan's
             // conjecture, proved by Mihăilescu (J. reine angew. Math. 572,
             // 2004) — the only consecutive perfect powers are 8 and 9 —
@@ -4358,7 +4344,7 @@ mod tests {
         }
         // A square of a square: detected through either exponent route.
         let base = seeded_biguint(6, &mut seed);
-        assert!(base.square_ref().square_ref().is_perfect_power());
+        assert!(base.square().square().is_perfect_power());
     }
 
     #[test]
@@ -4608,12 +4594,12 @@ mod tests {
             for _ in 0..12 {
                 let a = seeded_biguint(wa, &mut seed);
                 let b = seeded_biguint(wb, &mut seed);
-                out.assign_add(&a, &b);
-                assert_eq!(out, a.add_ref(&b));
+                out.add_into(&a, &b);
+                assert_eq!(out, a.add(&b));
                 assert!(out.limbs.last() != Some(&0), "canonical form");
                 let (hi, lo) = if a >= b { (&a, &b) } else { (&b, &a) };
-                out.assign_sub(hi, lo);
-                assert_eq!(out, hi.sub_ref(lo));
+                out.sub_into(hi, lo);
+                assert_eq!(out, hi.sub(lo));
                 assert!(out.limbs.last() != Some(&0), "canonical form");
             }
         }
@@ -4622,12 +4608,12 @@ mod tests {
             limbs: vec![u64::MAX; 5],
         };
         let one = BigUint::from_u64(1);
-        out.assign_add(&ones, &one);
+        out.add_into(&ones, &one);
         let mut expect = BigUint::zero();
         expect.set_bit(320);
         assert_eq!(out, expect);
         // And the borrow ripple back down.
-        out.assign_sub(&expect, &one);
+        out.sub_into(&expect, &one);
         assert_eq!(out, ones);
     }
 
@@ -4639,13 +4625,13 @@ mod tests {
         // The first call may grow the buffer once (the result width plus the
         // carry slot); from then on the no-allocation contract holds.
         let mut out = BigUint::zero();
-        out.assign_add(&a, &b);
+        out.add_into(&a, &b);
         let ptr = out.limbs.as_ptr();
         for _ in 0..8 {
-            out.assign_add(&a, &b);
-            assert_eq!(out.limbs.as_ptr(), ptr, "assign_add must not reallocate");
-            out.assign_sub(&a, &b.sub_ref(&b)); // a - 0 = a, exercising short rhs
-            assert_eq!(out.limbs.as_ptr(), ptr, "assign_sub must not reallocate");
+            out.add_into(&a, &b);
+            assert_eq!(out.limbs.as_ptr(), ptr, "add_into must not reallocate");
+            out.sub_into(&a, &b.sub(&b)); // a - 0 = a, exercising short rhs
+            assert_eq!(out.limbs.as_ptr(), ptr, "sub_into must not reallocate");
         }
     }
 
@@ -4653,7 +4639,7 @@ mod tests {
     #[should_panic(expected = "BigUint underflow")]
     fn assign_sub_panics_on_underflow() {
         let mut out = BigUint::zero();
-        out.assign_sub(&BigUint::from_u64(3), &BigUint::from_u64(5));
+        out.sub_into(&BigUint::from_u64(3), &BigUint::from_u64(5));
     }
 
     /// The verification counterpart of the crate's audited scrub
@@ -4683,20 +4669,20 @@ mod tests {
 
         let mut out = wide.clone();
         let p = out.limbs.as_ptr();
-        out.assign_add(&narrow, &narrow);
-        assert_eq!(out.limbs.as_ptr(), p, "assign_add reuses the buffer");
+        out.add_into(&narrow, &narrow);
+        assert_eq!(out.limbs.as_ptr(), p, "add_into reuses the buffer");
         assert!(
             read8(p)[1..].iter().all(|&w| w == 0),
-            "assign_add stranded live limbs"
+            "add_into stranded live limbs"
         );
 
         let mut out2 = wide.clone();
         let p = out2.limbs.as_ptr();
-        out2.assign_sub(&narrow, &narrow);
-        assert_eq!(out2.limbs.as_ptr(), p, "assign_sub reuses the buffer");
+        out2.sub_into(&narrow, &narrow);
+        assert_eq!(out2.limbs.as_ptr(), p, "sub_into reuses the buffer");
         assert!(
             read8(p).iter().all(|&w| w == 0),
-            "assign_sub stranded live limbs"
+            "sub_into stranded live limbs"
         );
 
         let a = BigInt::from_parts(Sign::Positive, wide.clone());
@@ -4723,10 +4709,10 @@ mod tests {
         x.clone_from(&narrow);
         assert_eq!(x, narrow);
         let mut out = wide.clone();
-        out.assign_add(&narrow, &narrow);
-        assert_eq!(out, narrow.add_ref(&narrow));
+        out.add_into(&narrow, &narrow);
+        assert_eq!(out, narrow.add(&narrow));
         let mut out2 = wide.clone();
-        out2.assign_sub(&narrow, &narrow);
+        out2.sub_into(&narrow, &narrow);
         assert!(out2.is_zero());
         assert!(out2.limbs.last() != Some(&0), "canonical zero is empty");
         // Cancellation clears to canonical zero with capacity kept.
@@ -4850,7 +4836,7 @@ mod tests {
 
     #[test]
     fn signed_ring_matches_i128() {
-        // The public signed ring (mul_ref, div_rem, abs) against i128, with
+        // The public signed ring (mul, div_rem, abs) against i128, with
         // the division convention pinned: truncated toward zero, remainder
         // taking the dividend's sign — i128's own convention, so the oracle
         // is the primitive operators.
@@ -4877,7 +4863,7 @@ mod tests {
             let b = lcg_next(&mut seed) as i64 >> 34;
             let (ba, bb) = (to_bigint(a), to_bigint(b));
             assert_eq!(
-                to_i128(&ba.mul_ref(&bb)),
+                to_i128(&ba.mul(&bb)),
                 i128::from(a) * i128::from(b),
                 "mul {a} * {b}"
             );
@@ -4937,14 +4923,14 @@ mod tests {
             for _ in 0..4 {
                 let value = seeded_biguint(words, &mut seed);
                 assert_eq!(
-                    value.square_ref(),
-                    value.mul_ref(&value),
+                    value.square(),
+                    value.mul(&value),
                     "square != mul at {words} limbs"
                 );
                 // And against the schoolbook kernel directly, so a defect
                 // shared by both dispatched paths cannot hide.
                 assert_eq!(
-                    value.square_ref(),
+                    value.square(),
                     BigUint::mul_schoolbook_ref(&value, &value),
                     "square != schoolbook at {words} limbs"
                 );
@@ -4960,20 +4946,20 @@ mod tests {
         }
         limbs[0] |= 1;
         let holed = BigUint::from_limbs(limbs);
-        assert_eq!(holed.square_ref(), holed.mul_ref(&holed));
+        assert_eq!(holed.square(), holed.mul(&holed));
         // All-ones operands: the worst case for every carry chain in the
         // three passes, and the shape that would expose a doubling that
         // overflowed its buffer.
         for words in [1usize, 2, 8, k, k + 1, 2 * k] {
             let ones = BigUint::from_limbs(vec![u64::MAX; words]);
             assert_eq!(
-                ones.square_ref(),
+                ones.square(),
                 BigUint::mul_schoolbook_ref(&ones, &ones),
                 "all-ones square at {words} limbs"
             );
         }
-        assert!(BigUint::zero().square_ref().is_zero());
-        assert_eq!(BigUint::one().square_ref(), BigUint::one());
+        assert!(BigUint::zero().square().is_zero());
+        assert_eq!(BigUint::one().square(), BigUint::one());
     }
 
     #[test]
@@ -4983,7 +4969,7 @@ mod tests {
             for _ in 0..6 {
                 let lhs = seeded_biguint(words, &mut seed);
                 let rhs = seeded_biguint(words, &mut seed);
-                let dispatched = lhs.mul_ref(&rhs);
+                let dispatched = lhs.mul(&rhs);
                 let schoolbook = BigUint::mul_schoolbook_ref(&lhs, &rhs);
                 assert_eq!(dispatched, schoolbook);
             }
@@ -5018,8 +5004,8 @@ mod tests {
             for _ in 0..4 {
                 let a = seeded_biguint(words, &mut seed);
                 let b = seeded_biguint(words, &mut seed);
-                assert_eq!(a.mul_ref(&b), BigUint::mul_schoolbook_ref(&a, &b));
-                assert_eq!(a.square_ref(), BigUint::mul_schoolbook_ref(&a, &a));
+                assert_eq!(a.mul(&b), BigUint::mul_schoolbook_ref(&a, &b));
+                assert_eq!(a.square(), BigUint::mul_schoolbook_ref(&a, &a));
             }
         }
     }
@@ -5050,8 +5036,8 @@ mod tests {
             for _ in 0..3 {
                 let a = seeded_biguint(words, &mut seed);
                 let b = seeded_biguint(words, &mut seed);
-                assert_eq!(a.mul_ref(&b), BigUint::mul_schoolbook_ref(&a, &b));
-                assert_eq!(a.square_ref(), BigUint::mul_schoolbook_ref(&a, &a));
+                assert_eq!(a.mul(&b), BigUint::mul_schoolbook_ref(&a, &b));
+                assert_eq!(a.square(), BigUint::mul_schoolbook_ref(&a, &a));
             }
         }
     }
@@ -5082,7 +5068,7 @@ mod tests {
                     "unbalanced != schoolbook for {la}x{lb} words"
                 );
                 // Commutativity of the dispatch: the same pair in either order.
-                assert_eq!(b.mul_ref(&a), BigUint::mul_schoolbook_ref(&a, &b));
+                assert_eq!(b.mul(&a), BigUint::mul_schoolbook_ref(&a, &b));
             }
         }
         // The dispatch boundary, table-driven around the threshold: the
@@ -5110,7 +5096,7 @@ mod tests {
                 kara,
                 "karatsuba admission at {long_len}x{short_len}"
             );
-            assert_eq!(a.mul_ref(&b), BigUint::mul_schoolbook_ref(&a, &b));
+            assert_eq!(a.mul(&b), BigUint::mul_schoolbook_ref(&a, &b));
         }
         // A longer operand containing an all-zero digit block, which the
         // kernel skips: build it by clearing the middle limbs.
@@ -5321,7 +5307,7 @@ mod tests {
         for &(la, lb) in &[(1usize, 1usize), (2, 3), (4, 4), (8, 5), (17, 16), (32, 32)] {
             let a = seeded_biguint(la, &mut seed);
             let b = seeded_biguint(lb, &mut seed);
-            let full = a.mul_ref(&b);
+            let full = a.mul(&b);
             for limit in 0..=(la + lb + 1) {
                 let expected = if limit == 0 {
                     BigUint::zero()
@@ -5473,14 +5459,14 @@ mod tests {
                     chunk,
                     k % 2 == 1,
                     &mut || {
-                        black_box(black_box(&v).mul_ref(black_box(&v)));
+                        black_box(black_box(&v).mul(black_box(&v)));
                     },
                     &mut || {
-                        black_box(black_box(&v).square_ref());
+                        black_box(black_box(&v).square());
                     },
                 );
             }
-            report("square_ref vs mul_ref", w, p);
+            report("square vs mul", w, p);
         }
     }
 
@@ -5631,7 +5617,7 @@ mod tests {
         let (q, r) = dividend.div_rem(&divisor);
         assert_eq!(q, BigUint::from_u128(33_366_699_733_066_399));
         assert_eq!(r, BigUint::from_u64(26));
-        assert_eq!(q.mul_ref(&divisor).add_ref(&r), dividend);
+        assert_eq!(q.mul(&divisor).add(&r), dividend);
     }
 
     /// `(q, r)` with `dividend = q * divisor + r` and `r < divisor` is unique,
@@ -5641,10 +5627,10 @@ mod tests {
         let (quotient, remainder) = dividend.div_rem(divisor);
         assert!(
             remainder < *divisor,
-            "remainder {remainder:?} not reduced modulo {divisor:?}"
+            "remainder {remainder:?} not reduced rem {divisor:?}"
         );
         assert_eq!(
-            quotient.mul_ref(divisor).add_ref(&remainder),
+            quotient.mul(divisor).add(&remainder),
             *dividend,
             "q * d + r != n for {dividend:?} / {divisor:?}"
         );
@@ -5715,14 +5701,14 @@ mod tests {
                 // A D1 shift of zero keeps the construction exact.
                 divisor.limbs[divisor_words - 1] |= 1 << 63;
 
-                let scale = BigUint::from_u64(q).add_ref(&BigUint::one());
-                let dividend = scale.mul_ref(&divisor).sub_ref(&BigUint::one());
+                let scale = BigUint::from_u64(q).add(&BigUint::one());
+                let dividend = scale.mul(&divisor).sub(&BigUint::one());
 
                 assert_div_rem_invariant(&dividend, &divisor);
                 // `(q + 1) * d - 1 = q * d + (d - 1)`, so the answer is exact.
                 let (quotient, remainder) = dividend.div_rem(&divisor);
                 assert_eq!(quotient, BigUint::from_u64(q));
-                assert_eq!(remainder, divisor.sub_ref(&BigUint::one()));
+                assert_eq!(remainder, divisor.sub(&BigUint::one()));
             }
         }
     }
@@ -5824,14 +5810,14 @@ mod tests {
     fn bigint_add_sub_and_modulo() {
         let a = BigInt::from_biguint(BigUint::from_u64(10));
         let b = BigInt::from_parts(Sign::Negative, BigUint::from_u64(3));
-        assert_eq!(a.add_ref(&b), BigInt::from_biguint(BigUint::from_u64(7)));
+        assert_eq!(a.add(&b), BigInt::from_biguint(BigUint::from_u64(7)));
         assert_eq!(
-            b.sub_ref(&a),
+            b.sub(&a),
             BigInt::from_parts(Sign::Negative, BigUint::from_u64(13))
         );
         assert_eq!(
             BigInt::from_parts(Sign::Negative, BigUint::from_u64(3))
-                .modulo_positive(&BigUint::from_u64(11)),
+                .rem_euclid(&BigUint::from_u64(11)),
             BigUint::from_u64(8)
         );
     }

@@ -106,7 +106,7 @@ impl BarrettContext {
     /// subtractions instead of a division, which is the whole point of the
     /// precomputation.
     ///
-    /// `None` for a modulus below 2: zero has no residues, and modulo one
+    /// `None` for a modulus below 2: zero has no residues, and rem one
     /// every residue is zero — neither needs a context.
     #[must_use]
     pub fn new(modulus: &BigUint) -> Option<Self> {
@@ -137,7 +137,7 @@ impl BarrettContext {
     pub fn reduce(&self, x: &BigUint) -> BigUint {
         let k = self.limb_count;
         if x.bits() > 128 * k {
-            return x.modulo(&self.modulus);
+            return x.rem(&self.modulus);
         }
         if *x < self.modulus {
             return x.clone();
@@ -145,7 +145,7 @@ impl BarrettContext {
         // q̂ = ⌊⌊x/b^(k−1)⌋·μ/b^(k+1)⌋ — the two shifts are limb-aligned.
         let mut q = x.clone();
         q.shr_bits(64 * (k - 1));
-        q = q.mul_ref(&self.mu);
+        q = q.mul(&self.mu);
         q.shr_bits(64 * (k + 1));
         // r = (x − q̂·n) mod b^(k+1); the difference of the two low windows,
         // lifted by b^(k+1) when it wraps.
@@ -164,19 +164,19 @@ impl BarrettContext {
         let qn_low = if k <= BARRETT_HALF_PRODUCT_MAX_LIMBS {
             BigUint::mul_low_ref(&q, &self.modulus, k + 1)
         } else {
-            q.mul_ref(&self.modulus).low_bits(window)
+            q.mul(&self.modulus).low_bits(window)
         };
         let mut r = if x_low >= qn_low {
-            x_low.sub_ref(&qn_low)
+            x_low.sub(&qn_low)
         } else {
             let mut lift = BigUint::zero();
             lift.set_bit(window);
-            lift.add_ref(&x_low).sub_ref(&qn_low)
+            lift.add(&x_low).sub(&qn_low)
         };
         // The estimate is short by at most two.
         let mut corrections = 0u32;
         while r >= self.modulus {
-            r = r.sub_ref(&self.modulus);
+            r = r.sub(&self.modulus);
             corrections += 1;
             debug_assert!(corrections <= 2, "HAC Note 14.44 bounds the corrections");
         }
@@ -210,10 +210,10 @@ impl BarrettContext {
     pub fn mod_mul(&self, a: &BigUint, b: &BigUint) -> BigUint {
         let a = self.reduce(a);
         let b = self.reduce(b);
-        self.reduce(&a.mul_ref(&b))
+        self.reduce(&a.mul(&b))
     }
 
-    /// `a² mod n`. The square comes from [`BigUint::square_ref`], whose
+    /// `a² mod n`. The square comes from [`BigUint::square`], whose
     /// specialized kernels form each cross term once between 8 and 256
     /// limbs, so this costs a squaring plus one Barrett reduction. The
     /// Montgomery domain's [`MontgomeryContext::square_mont`](super::MontgomeryContext::square_mont) goes further
@@ -221,7 +221,7 @@ impl BarrettContext {
     #[must_use]
     pub fn mod_square(&self, a: &BigUint) -> BigUint {
         let a = self.reduce(a);
-        self.reduce(&a.square_ref())
+        self.reduce(&a.square())
     }
 
     /// `base^exponent mod n` by left-to-right binary exponentiation (Knuth,
@@ -247,9 +247,9 @@ impl BarrettContext {
         // arriving at the same state.
         let mut result = base.clone();
         for bit in (0..exponent.bits() - 1).rev() {
-            result = self.reduce(&result.square_ref());
+            result = self.reduce(&result.square());
             if exponent.bit(bit) {
-                result = self.reduce(&result.mul_ref(&base));
+                result = self.reduce(&result.mul(&base));
             }
         }
         result

@@ -141,13 +141,13 @@ rust-mp = "0.3"
 \begin{lstlisting}
 use rump::{
     crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime,
-    is_probable_prime_bpsw, is_probable_prime_with_bases,
+    is_probable_prime_bpsw, miller_rabin_with_bases,
     is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
     miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_inverse_u64,
     mod_pow, primes_below, product_tree, random_below,
     random_coprime_below, random_nonzero_below, random_probable_prime,
     rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
-    remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation,
+    remove_factor, smooth_parts, mod_sqrt, mod_sqrt_prime_power, valuation,
     SmoothnessBase,
     gauss_reduce_weighted, lll_reduce, lll_reduce_delta,
     BarrettContext, BigInt, BigUint, Gf2m, MontgomeryContext, PolyMod, PolyZ, WordReciprocal,
@@ -237,12 +237,12 @@ programming error --- use \code{BigInt} where signs can go negative.
 \begin{lstlisting}
 let a = BigUint::from_u64(1_000);
 let b = BigUint::from_u64(37);
-assert_eq!(a.add_ref(&b), BigUint::from_u64(1_037));
-assert_eq!(a.sub_ref(&b), BigUint::from_u64(963));
+assert_eq!(a.add(&b), BigUint::from_u64(1_037));
+assert_eq!(a.sub(&b), BigUint::from_u64(963));
 
 // Three-operand form: `out`'s storage is reused across calls.
 let mut out = BigUint::zero();
-out.assign_add(&a, &b);
+out.add_into(&a, &b);
 assert_eq!(out, BigUint::from_u64(1_037));
 \end{lstlisting}
 
@@ -299,8 +299,8 @@ the crossover the lopsided shapes stay schoolbook, which measurement
 favors there.
 
 \begin{lstlisting}
-assert_eq!(a.mul_ref(&b), BigUint::from_u64(37_000));
-assert_eq!(b.square_ref(), BigUint::from_u64(1_369));
+assert_eq!(a.mul(&b), BigUint::from_u64(37_000));
+assert_eq!(b.square(), BigUint::from_u64(1_369));
 \end{lstlisting}
 
 \subsection{Squaring}
@@ -341,7 +341,7 @@ running remainder against the top limb of the divisor,
 \beta - 1\right),
 \end{equation}
 which after the standard two-limb refinement is off by at most one, and the
-multiply-subtract step's borrow corrects that final case. \code{modulo}
+multiply-subtract step's borrow corrects that final case. \code{rem}
 keeps only the remainder; \code{div\_rem\_u64} and \code{rem\_u64} divide by
 a machine word with no heap-allocated divisor; \code{mod\_mul} is one-shot
 modular multiplication. All panic on a zero divisor or modulus.
@@ -388,7 +388,7 @@ x_{j+1} \;=\; \left\lfloor
 \end{equation}
 
 \code{is\_square} answers by residue filters --- squares occupy 44 of the
-256 residues modulo 256, and the single word modulus
+256 residues rem 256, and the single word modulus
 $9 \cdot 5 \cdot 7 \cdot 13 \cdot 17 = 69\,615$ folds five more character
 tests into one remainder --- then one certified root for survivors.
 \code{is\_perfect\_power} tests $a = b^p$ for each prime $p \le \lg a$ with
@@ -491,7 +491,7 @@ a \;=\; q\,d + r,
 \qquad \operatorname{sign}(r) \in \{\operatorname{sign}(a), 0\},
 \end{equation}
 so $(-7).\code{div\_rem}(2) = (-3, -1)$ where floored division would give
-$(-4, 1)$. It panics on a zero divisor. \code{modulo\_positive} is the
+$(-4, 1)$. It panics on a zero divisor. \code{rem\_positive} is the
 floored counterpart against an unsigned modulus, mapping into the
 canonical range $[0, n)$:
 \begin{equation}
@@ -503,11 +503,11 @@ representative would poison a Montgomery encoding).
 \begin{lstlisting}
 let ten = BigInt::from_biguint(BigUint::from_u64(10));
 let minus_three = BigInt::from_parts(Sign::Negative, BigUint::from_u64(3));
-assert_eq!(ten.add_ref(&minus_three), BigInt::from_biguint(BigUint::from_u64(7)));
+assert_eq!(ten.add(&minus_three), BigInt::from_biguint(BigUint::from_u64(7)));
 
 // The signed ring: full product, truncated division, absolute value.
 assert_eq!(
-    minus_three.mul_ref(&ten),
+    minus_three.mul(&ten),
     BigInt::from_parts(Sign::Negative, BigUint::from_u64(30))
 );
 let minus_seven = BigInt::from_parts(Sign::Negative, BigUint::from_u64(7));
@@ -518,7 +518,7 @@ assert_eq!(r, BigInt::from_parts(Sign::Negative, BigUint::one()));
 assert_eq!(minus_seven.abs(), BigUint::from_u64(7));
 
 // -3 = 8 (mod 11), in canonical range.
-assert_eq!(minus_three.modulo_positive(&BigUint::from_u64(11)), BigUint::from_u64(8));
+assert_eq!(minus_three.rem_euclid(&BigUint::from_u64(11)), BigUint::from_u64(8));
 \end{lstlisting}
 \section{Barrett reduction: \code{BarrettContext}}
 \label{sec:barrett}
@@ -832,7 +832,7 @@ assert_eq!(
 );
 
 let (g, s, t) = gcd_extended(&a, &b);
-let bezout = s.mul_biguint_ref(&a).add_ref(&t.mul_biguint_ref(&b));
+let bezout = s.mul_biguint(&a).add(&t.mul_biguint(&b));
 assert_eq!(bezout, BigInt::from_biguint(g));
 
 // The word-sized form answers without an allocation.
@@ -941,10 +941,10 @@ for (inv, v) in inverses.iter().zip(&values) {
 }
 \end{lstlisting}
 
-\subsection{Square roots modulo a prime}
+\subsection{Square roots rem a prime}
 \label{sec:sqrtmod}
 
-\code{sqrt\_mod(a, p)} returns a square root of $a$ modulo an odd prime
+\code{sqrt\_mod(a, p)} returns a square root of $a$ rem an odd prime
 $p$, or \code{None} for a non-residue. Write $p - 1 = 2^s q$ with $q$ odd.
 Three engines serve the call, chosen by the 2-adic depth $s$.
 
@@ -984,21 +984,21 @@ r \;=\; (t + \omega)^{(p+1)/2},
 which lands in $\F_p$ and squares to $a$. Every path verifies its result
 by squaring before returning it, so on a composite modulus --- for which
 the internal reasoning is unsound --- the answer is either \code{None} or
-a genuine square root modulo that composite, never a silently wrong value.
+a genuine square root rem that composite, never a silently wrong value.
 \code{None} is \emph{not} a compositeness certificate, and \code{Some} is
 not a primality one: $\code{sqrt\_mod}(1, 15)$ returns \code{Some(1)}.
 
 \begin{lstlisting}
 let p = BigUint::from_u64(41);
-let root = sqrt_mod(&BigUint::from_u64(2), &p).expect("2 is a residue mod 41");
+let root = mod_sqrt(&BigUint::from_u64(2), &p).expect("2 is a residue mod 41");
 assert_eq!(BigUint::mod_mul(&root, &root, &p), BigUint::from_u64(2));
-assert_eq!(sqrt_mod(&BigUint::from_u64(3), &p), None); // non-residue
+assert_eq!(mod_sqrt(&BigUint::from_u64(3), &p), None); // non-residue
 \end{lstlisting}
 
-\subsection{Square roots modulo a prime power}
+\subsection{Square roots rem a prime power}
 
 \code{sqrt\_mod\_prime\_power(a, p, e)} returns \emph{every} square root of
-$a$ modulo $p^e$, ascending, empty for a non-residue. For odd $p$ and
+$a$ rem $p^e$, ascending, empty for a non-residue. For odd $p$ and
 $p \nmid a$, a root mod $p$ lifts uniquely along Hensel's construction:
 given $r_k^2 \equiv a \pmod{p^k}$,
 \begin{equation}
@@ -1007,7 +1007,7 @@ r_{k+1} \;=\; r_k + t\,p^k,
 t \;=\; \frac{a - r_k^2}{p^k} \cdot (2 r_k)^{-1} \bmod p,
 \end{equation}
 and the two roots mod $p$ give the two mod $p^e$. For $p = 2$ the
-structure is governed by the residue of $a$ modulo 8 (one root mod 2, two
+structure is governed by the residue of $a$ rem 8 (one root mod 2, two
 mod 4, and four mod $2^e$ for $e \ge 3$ when $a \equiv 1 \bmod 8$). For
 $p \mid a$, factor out the largest even power $p^{2j}$ dividing $a$ and
 recurse on the cofactor, multiplying the roots back by $p^j$ and expanding
@@ -1015,7 +1015,7 @@ the residual multiplicity. Panics when $e = 0$ or $p < 2$.
 
 \begin{lstlisting}
 // 9 has four square roots mod 16: 3, 5, 11, 13.
-let roots = sqrt_mod_prime_power(&BigUint::from_u64(9), &BigUint::from_u64(2), 4);
+let roots = mod_sqrt_prime_power(&BigUint::from_u64(9), &BigUint::from_u64(2), 4);
 assert_eq!(roots, vec![
     BigUint::from_u64(3), BigUint::from_u64(5),
     BigUint::from_u64(11), BigUint::from_u64(13),
@@ -1202,7 +1202,7 @@ deterministic proof below $\psi_{12} \approx 3.19 \times 10^{23}$
 a thirteenth base) and a strong probable-prime test above.
 \code{is\_probable\_prime\_with\_bases} takes an
 explicit base set after the same unconditional sieve; each base is reduced
-modulo the candidate, trivial residues $\{0, 1, n-1\}$ are discarded, and
+rem the candidate, trivial residues $\{0, 1, n-1\}$ are discarded, and
 a set with no effective round proves nothing and reports composite. Fixed
 bases are for candidates you generated yourself: an adversary can
 construct pseudoprimes against any fixed base set, so untrusted input
@@ -1224,7 +1224,7 @@ U_{k+1} = P\,U_k - Q\,U_{k-1},
 \quad
 V_{k+1} = P\,V_k - Q\,V_{k-1},
 \end{equation}
-are computed modulo $n$ by the doubling and stepping identities
+are computed rem $n$ by the doubling and stepping identities
 \begin{equation}
 U_{2k} = U_k V_k,
 \quad
@@ -1234,7 +1234,7 @@ U_{k+1} = \tfrac{P U_k + V_k}{2},
 \quad
 V_{k+1} = \tfrac{D U_k + P V_k}{2},
 \end{equation}
-the halvings exact modulo odd $n$. Writing $n + 1 = 2^s d$ with $d$ odd,
+the halvings exact rem odd $n$. Writing $n + 1 = 2^s d$ with $d$ odd,
 $n$ is a \emph{strong Lucas probable prime} when
 \begin{equation}
 U_d \equiv 0 \pmod{n}
@@ -1260,11 +1260,11 @@ let n = BigUint::from_u64(2_047);
 assert!(!miller_rabin_witness(&n, &BigUint::from_u64(2))); // 2 is fooled
 assert!(miller_rabin_witness(&n, &BigUint::from_u64(3)));  // 3 is a witness
 
-// with_bases reduces each base modulo n and discards {0, 1, n-1}; a set
+// with_bases reduces each base rem n and discards {0, 1, n-1}; a set
 // of only trivial bases runs no effective round and is not reported prime.
 let composite = BigUint::from_u64(1_022_117); // 1009 x 1013, survives the sieve
-assert!(!is_probable_prime_with_bases(&composite, &[1])); // 1 never testifies
-assert!(!is_probable_prime_with_bases(&composite, &[2])); // 2 exposes it
+assert!(!miller_rabin_with_bases(&composite, &[1])); // 1 never testifies
+assert!(!miller_rabin_with_bases(&composite, &[2])); // 2 exposes it
 
 // BPSW: the stages reject disjoint composites.
 assert!(!is_probable_prime_bpsw(&BigUint::from_u64(2_047))); // Lucas rejects
@@ -1430,7 +1430,7 @@ for a uniform random $h$ with $\deg h < \deg f$ and odd $p$,
 \gcd\!\left(h^{(p^d - 1)/2} - 1,\; f\right)
 \end{equation}
 is a proper factor with probability at least $\tfrac12$ per pair of
-factors, because modulo each irreducible factor $h$ lands in
+factors, because rem each irreducible factor $h$ lands in
 $\F_{p^d}^{\times}$ and $h^{(p^d-1)/2} = \pm 1$ independently, each sign
 with probability near $\tfrac12$. For $p = 2$, where $(p^d-1)/2$ is not an
 integer, the splitter is the trace map
@@ -1530,20 +1530,20 @@ coordinates into $f$ is this at linear $a$ and $b$. Both power ladders are
 built once, so the cost is $2d$ multiplications to build and $d + 1$ to
 combine rather than repeated powering, and zero coefficients are skipped.
 
-\code{roots\_mod\_prime\_power} returns every root of $f$ modulo $p^e$ by
+\code{roots\_mod\_prime\_power} returns every root of $f$ rem $p^e$ by
 Hensel lifting. Taylor truncated after one term is exact one level up,
 \[
   f(r + t p^k) \equiv f(r) + t\,p^k f'(r) \pmod{p^{k+1}},
 \]
-and writing $f(r) = s\,p^k$ --- legitimate because $r$ is a root modulo
+and writing $f(r) = s\,p^k$ --- legitimate because $r$ is a root rem
 $p^k$ --- the congruence is linear in $t$. Where
 $f'(r) \not\equiv 0 \pmod p$ the coefficient is invertible and there is
 exactly one lift, $t \equiv -s\,f'(r)^{-1}$; where $f'(r) \equiv 0$ the $t$
 term vanishes and the congruence no longer mentions $t$, so either
 $p^{k+1} \mid f(r)$ and all $p$ lifts are roots or none is. The simple case
 is Hensel's lemma (Cohen, \S1.6); the branching case is what a general
-root-finder must add to it, and it is why the number of roots modulo $p^e$
-is not in general the number modulo $p$ --- the multiple roots, those lying
+root-finder must add to it, and it is why the number of roots rem $p^e$
+is not in general the number rem $p$ --- the multiple roots, those lying
 over primes dividing $\disc f$, are where the tree widens.
 
 Two lifts move between $\Z/m\Z$ and $\Z$. \code{symmetric\_lift} takes each
@@ -1574,7 +1574,7 @@ impl RandomSource for Lcg2 {
 }
 let mut rng = Lcg2(0x2024_1111);
 
-// Reduction modulo the monic x^2 + 1 is a ring homomorphism.
+// Reduction rem the monic x^2 + 1 is a ring homomorphism.
 let f = PolyZ::from_i64_slice(&[1, 0, 1]);
 let a = PolyZ::from_i64_slice(&[3, 2, 5]); // 5x^2 + 2x + 3
 let b = PolyZ::from_i64_slice(&[1, 7]);    // 7x + 1
@@ -1607,7 +1607,7 @@ assert_eq!(
     PolyZ::from_i64_slice(&[9, 0, 4])
 );
 
-// Square roots of 2 modulo 7^3 = 343, lifted from +-3 modulo 7.
+// Square roots of 2 rem 7^3 = 343, lifted from +-3 rem 7.
 let sqrt2 = PolyZ::from_i64_slice(&[-2, 0, 1])
     .roots_mod_prime_power(&BigUint::from_u64(7), 3, &mut rng);
 assert_eq!(sqrt2, vec![BigUint::from_u64(108), BigUint::from_u64(235)]);
@@ -1722,7 +1722,7 @@ and the output is exactly as good as that source --- cryptographic callers
 must supply a CSPRNG.
 
 Every sampler is a \emph{rejection} sampler, which buys exact uniformity:
-reducing a wide draw modulo the bound would over-represent the low
+reducing a wide draw rem the bound would over-represent the low
 residues whenever the bound is not a power of two. \code{random\_below}
 draws uniformly from the enclosing power-of-two range $[0, 2^{\,b})$, $b$
 the bound's bit length, and rejects draws at or above the bound; since the
@@ -1825,7 +1825,7 @@ returns \code{Option} instead.
 \textbf{Call} & \textbf{Panics when} \\
 \midrule
 \code{sub\_ref} / \code{sub\_assign\_ref} & the result would be negative \\
-\code{div\_rem} / \code{div\_rem\_u64} / \code{modulo} / \code{rem\_u64} & the divisor or modulus is zero \\
+\code{div\_rem} / \code{div\_rem\_u64} / \code{rem} / \code{rem\_u64} & the divisor or modulus is zero \\
 \code{mod\_mul} / \code{mod\_pow} / \code{mod\_add} / \code{mod\_sub} & the modulus is zero \\
 \code{ln\_approx} & the value is zero \\
 \code{digit\_count} & the radix is below 2 \\

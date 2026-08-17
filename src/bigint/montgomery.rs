@@ -262,7 +262,7 @@ impl MontgomeryContext {
         // `value * R mod n`, the Montgomery form. The reduction also brings
         // an unreduced `value` into range first.
         BigUint::montgomery_mul_odd_with_workspace(
-            &value.modulo(&self.modulus),
+            &value.rem(&self.modulus),
             &self.r2_mod,
             &self.modulus,
             self.n0_inv,
@@ -456,7 +456,7 @@ impl MontgomeryContext {
     /// and REDC requires `R` and the modulus to be coprime; since `R` is a
     /// power of two, that holds exactly when the modulus is odd. An even (or
     /// zero) modulus has no Montgomery form, hence the `None` — reach for
-    /// [`BarrettContext`](super::BarrettContext), which reduces modulo either parity. Construction also
+    /// [`BarrettContext`](super::BarrettContext), which reduces rem either parity. Construction also
     /// precomputes the inverse `−n⁻¹ mod 2⁶⁴` (Hensel lifting) and `R² mod n`
     /// once, so later encode/multiply steps do not repeat that work.
     #[must_use]
@@ -473,7 +473,7 @@ impl MontgomeryContext {
         // Montgomery encoding of the ordinary residue `a`.
         let mut r2 = BigUint::zero();
         r2.set_bit(modulus.limbs.len() * 128);
-        let r2_mod = r2.modulo(modulus);
+        let r2_mod = r2.rem(modulus);
 
         // `R mod n`, the Montgomery encoding of 1, seeds exponentiation
         // accumulators. One REDC derives it from the constant above —
@@ -503,9 +503,9 @@ impl MontgomeryContext {
     /// Convert an ordinary residue into Montgomery form (the inverse of
     /// [`Self::decode`]).
     ///
-    /// Encoding is multiplication by `R = 2^(64·limbs)` modulo `n`, done as one
+    /// Encoding is multiplication by `R = 2^(64·limbs)` rem `n`, done as one
     /// Montgomery multiplication by the precomputed `R² mod n`: REDC of
-    /// `value · R²` returns `value · R mod n`. The argument is reduced modulo
+    /// `value · R²` returns `value · R mod n`. The argument is reduced rem
     /// `n` first, so any representative is accepted.
     #[must_use]
     pub fn encode(&self, value: &BigUint) -> BigUint {
@@ -525,7 +525,7 @@ impl MontgomeryContext {
     #[must_use]
     pub fn decode(&self, value: &BigUint) -> BigUint {
         let reduced = if value >= &self.modulus {
-            value.modulo(&self.modulus)
+            value.rem(&self.modulus)
         } else {
             value.clone()
         };
@@ -535,7 +535,7 @@ impl MontgomeryContext {
         result
     }
 
-    /// Multiply two ordinary residues modulo the context modulus — the
+    /// Multiply two ordinary residues rem the context modulus — the
     /// one-shot encode → multiply → decode round trip.
     ///
     /// Convenient for a single product. Callers doing many operations should
@@ -559,7 +559,7 @@ impl MontgomeryContext {
         result
     }
 
-    /// Square one ordinary residue modulo the context modulus — the one-shot
+    /// Square one ordinary residue rem the context modulus — the one-shot
     /// encode → square → decode round trip.
     ///
     /// Unlike [`Self::mul`] the in-domain step is the dedicated squaring kernel
@@ -720,9 +720,9 @@ impl MontgomeryContext {
             lhs < &self.modulus && rhs < &self.modulus,
             "domain operands arrive reduced"
         );
-        let sum = lhs.add_ref(rhs);
+        let sum = lhs.add(rhs);
         if sum >= self.modulus {
-            sum.sub_ref(&self.modulus)
+            sum.sub(&self.modulus)
         } else {
             sum
         }
@@ -740,9 +740,9 @@ impl MontgomeryContext {
             "domain operands arrive reduced"
         );
         if lhs >= rhs {
-            lhs.sub_ref(rhs)
+            lhs.sub(rhs)
         } else {
-            self.modulus.add_ref(lhs).sub_ref(rhs)
+            self.modulus.add(lhs).sub(rhs)
         }
     }
 
@@ -813,7 +813,7 @@ impl MontgomeryContext {
 /// reduction was introduced).
 fn montgomery_n0_inv(n0: u64) -> u64 {
     debug_assert!(n0 & 1 == 1, "Montgomery path requires an odd modulus");
-    // Newton/Hensel iteration in Z_(2^64): `inv = 1` inverts `n0` modulo 2
+    // Newton/Hensel iteration in Z_(2^64): `inv = 1` inverts `n0` rem 2
     // (both are odd), and each step doubles the correct low bits —
     // 1, 2, 4, 8, 16, 32, 64 — so six steps reach the full word. Montgomery
     // reduction wants the negation.

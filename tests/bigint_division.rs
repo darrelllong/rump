@@ -93,13 +93,13 @@ fn check(dividend: &BigUint, divisor: &BigUint) {
         "remainder not reduced\n  n = {dividend:?}\n  d = {divisor:?}"
     );
     assert_eq!(
-        quotient.mul_ref(divisor).add_ref(&remainder),
+        quotient.mul(divisor).add(&remainder),
         *dividend,
         "q * d + r != n\n  n = {dividend:?}\n  d = {divisor:?}"
     );
 
-    // `modulo` must agree with the remainder half of `div_rem`.
-    assert_eq!(dividend.modulo(divisor), remainder);
+    // `rem` must agree with the remainder half of `div_rem`.
+    assert_eq!(dividend.rem(divisor), remainder);
 }
 
 fn trials(default: usize) -> usize {
@@ -203,11 +203,11 @@ fn div_rem_boundary_relationships() {
                     continue;
                 }
 
-                let exact = multiplier.mul_ref(&divisor);
+                let exact = multiplier.mul(&divisor);
                 check(&exact, &divisor);
-                check(&exact.add_ref(&BigUint::one()), &divisor);
+                check(&exact.add(&BigUint::one()), &divisor);
                 // `k * d - 1` is the add-back case for multi-limb divisors.
-                check(&exact.sub_ref(&BigUint::one()), &divisor);
+                check(&exact.sub(&BigUint::one()), &divisor);
             }
         }
     }
@@ -292,10 +292,10 @@ fn div_rem_worst_case_quotient_estimates() {
 
                     // `(d << 64k) - 1`, `- 2`, and the exact multiple: the
                     // boundary either side of the hardest quotient limb.
-                    check(&dividend.sub_ref(&BigUint::one()), &divisor);
-                    check(&dividend.sub_ref(&BigUint::from_u64(2)), &divisor);
+                    check(&dividend.sub(&BigUint::one()), &divisor);
+                    check(&dividend.sub(&BigUint::from_u64(2)), &divisor);
                     check(&dividend, &divisor);
-                    check(&dividend.add_ref(&BigUint::one()), &divisor);
+                    check(&dividend.add(&BigUint::one()), &divisor);
 
                     // Same shape with the divisor shifted off normalization, so
                     // the D1 shift is non-zero and the estimate is recomputed
@@ -310,7 +310,7 @@ fn div_rem_worst_case_quotient_estimates() {
                         }
                         let mut scaled = unnormalized.clone();
                         scaled.shl_bits(64 * shift_limbs);
-                        check(&scaled.sub_ref(&BigUint::one()), &unnormalized);
+                        check(&scaled.sub(&BigUint::one()), &unnormalized);
                     }
                 }
             }
@@ -350,10 +350,10 @@ fn div_rem_estimate_overshoot_by_two() {
                 let mut limbs = vec![d; words];
                 limbs[0] = v0;
                 let divisor = from_limbs(&limbs);
-                let r = divisor.sub_ref(&BigUint::one());
+                let r = divisor.sub(&BigUint::one());
 
                 for u0 in [BigUint::zero(), BigUint::one(), BigUint::from_u64(u64::MAX)] {
-                    let dividend = divisor.add_ref(&r).mul_ref(&b).add_ref(&u0);
+                    let dividend = divisor.add(&r).mul(&b).add(&u0);
                     check(&dividend, &divisor);
                 }
             }
@@ -374,9 +374,9 @@ fn div_rem_powers_of_two() {
             check(&dividend, &divisor);
 
             // And the same shifted off the boundary in both directions.
-            check(&dividend.add_ref(&BigUint::one()), &divisor);
+            check(&dividend.add(&BigUint::one()), &divisor);
             if divisor_bit > 0 {
-                check(&dividend, &divisor.sub_ref(&BigUint::one()));
+                check(&dividend, &divisor.sub(&BigUint::one()));
             }
         }
     }
@@ -392,8 +392,8 @@ fn div_rem_degenerate_inputs() {
     check(&one, &one);
     check(&big, &one);
     check(&big, &big);
-    check(&big, &big.sub_ref(&one));
-    check(&big.sub_ref(&one), &big);
+    check(&big, &big.sub(&one));
+    check(&big.sub(&one), &big);
 
     // Divisor above dividend takes the early exit; quotient must be zero and
     // the remainder must be the dividend untouched.
@@ -426,7 +426,7 @@ fn mod_mul_matches_reference_and_montgomery() {
             }
 
             let product = BigUint::mod_mul(&lhs, &rhs, &modulus);
-            let (_, expected) = div_rem_bitwise(&lhs.mul_ref(&rhs), &modulus);
+            let (_, expected) = div_rem_bitwise(&lhs.mul(&rhs), &modulus);
             assert_eq!(product, expected, "mod_mul disagrees with reference");
             assert!(product < modulus);
 

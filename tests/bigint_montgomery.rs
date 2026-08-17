@@ -48,7 +48,7 @@ fn pow_reference(base: &BigUint, exponent: &BigUint, modulus: &BigUint) -> BigUi
     }
 
     let mut result = BigUint::one();
-    let mut power = base.modulo(modulus);
+    let mut power = base.rem(modulus);
     for bit in 0..exponent.bits() {
         if exponent.bit(bit) {
             result = BigUint::mod_mul(&result, &power, modulus);
@@ -118,7 +118,7 @@ fn check_pow(ctx: &MontgomeryContext, base: &BigUint, exponent: &BigUint) {
     );
     assert!(actual < *modulus || modulus.is_one());
 
-    let encoded = ctx.encode(&base.modulo(modulus));
+    let encoded = ctx.encode(&base.rem(modulus));
     assert_eq!(
         ctx.pow_encoded(&encoded, exponent),
         expected,
@@ -171,7 +171,7 @@ fn pow_exponent_boundaries() {
     for bit in [63usize, 64, 65, 66, 127, 128, 129] {
         let mut power_of_two = BigUint::zero();
         power_of_two.set_bit(bit);
-        exponents.push(power_of_two.sub_ref(&BigUint::one()));
+        exponents.push(power_of_two.sub(&BigUint::one()));
         exponents.push(power_of_two);
     }
     // A long exponent whose middle is a full 64-bit run of zeros: sixteen
@@ -194,9 +194,9 @@ fn pow_base_edge_cases() {
     let modulus = structured_odd_modulus(4, &mut rng);
     let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
 
-    let n_minus_1 = modulus.sub_ref(&BigUint::one());
-    let n_plus_1 = modulus.add_ref(&BigUint::one());
-    let twice_n = modulus.add_ref(&modulus);
+    let n_minus_1 = modulus.sub(&BigUint::one());
+    let n_plus_1 = modulus.add(&BigUint::one());
+    let twice_n = modulus.add(&modulus);
     let bases = [
         BigUint::zero(),
         BigUint::one(),
@@ -204,7 +204,7 @@ fn pow_base_edge_cases() {
         n_minus_1,
         modulus.clone(), // congruent to zero
         n_plus_1,        // congruent to one
-        twice_n.add_ref(&BigUint::from_u64(3)),
+        twice_n.add(&BigUint::from_u64(3)),
     ];
     let exponents = [
         BigUint::zero(),
@@ -266,7 +266,7 @@ fn encode_decode_and_context_constants() {
             assert_eq!(ctx.decode(ctx.one_mont()), BigUint::one());
 
             for _ in 0..8 {
-                let value = structured_biguint(modulus_words, &mut rng).modulo(&modulus);
+                let value = structured_biguint(modulus_words, &mut rng).rem(&modulus);
                 let encoded = ctx.encode(&value);
                 assert!(encoded < modulus);
                 assert_eq!(ctx.decode(&encoded), value, "decode∘encode != id");
@@ -287,14 +287,14 @@ fn mul_and_square_match_division_reference() {
             let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
 
             for _ in 0..8 {
-                let a = structured_biguint(modulus_words, &mut rng).modulo(&modulus);
-                let b = structured_biguint(modulus_words, &mut rng).modulo(&modulus);
+                let a = structured_biguint(modulus_words, &mut rng).rem(&modulus);
+                let b = structured_biguint(modulus_words, &mut rng).rem(&modulus);
 
-                let expected = a.mul_ref(&b).modulo(&modulus);
+                let expected = a.mul(&b).rem(&modulus);
                 assert_eq!(ctx.mul(&a, &b), expected, "ctx.mul disagrees");
                 assert_eq!(
                     ctx.square(&a),
-                    a.mul_ref(&a).modulo(&modulus),
+                    a.mul(&a).rem(&modulus),
                     "ctx.square disagrees"
                 );
 
@@ -332,11 +332,11 @@ fn squaring_kernel_stresses_carry_chains() {
         let mut values = vec![
             BigUint::zero(),
             BigUint::one(),
-            modulus.sub_ref(&BigUint::one()),
-            from_limbs(&vec![u64::MAX; modulus_words]).modulo(&modulus),
+            modulus.sub(&BigUint::one()),
+            from_limbs(&vec![u64::MAX; modulus_words]).rem(&modulus),
         ];
         for _ in 0..6 {
-            values.push(structured_biguint(modulus_words, &mut rng).modulo(&modulus));
+            values.push(structured_biguint(modulus_words, &mut rng).rem(&modulus));
         }
 
         for value in &values {

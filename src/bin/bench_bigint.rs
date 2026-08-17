@@ -93,7 +93,7 @@ fn random_biguint(rng: &mut SplitMix64, bits: usize) -> BigUint {
 fn random_odd_biguint(rng: &mut SplitMix64, bits: usize) -> BigUint {
     let mut value = random_biguint(rng, bits);
     if !value.is_odd() {
-        value = value.add_ref(&BigUint::one());
+        value = value.add(&BigUint::one());
     }
     value
 }
@@ -123,7 +123,7 @@ fn run_for_bits(rng: &mut SplitMix64, bits: usize) {
     // so the timing says almost nothing about the quotient loop, and whenever
     // the draw lands above the dividend `div_rem` returns through its
     // `self < divisor` early exit and times a clone instead of a division.
-    let divisor = random_biguint(rng, bits / 2).add_ref(&BigUint::one());
+    let divisor = random_biguint(rng, bits / 2).add(&BigUint::one());
     assert!(
         lhs >= divisor,
         "divisor must not trip the div_rem fast path"
@@ -138,11 +138,11 @@ fn run_for_bits(rng: &mut SplitMix64, bits: usize) {
 
     let (iters, ns) = bench_ns_per_op(
         || {
-            black_box(lhs.mul_ref(&rhs));
+            black_box(lhs.mul(&rhs));
         },
         2,
     );
-    println!("| mul_ref | {:.1} | {} |", ns, iters);
+    println!("| mul | {:.1} | {} |", ns, iters);
 
     let (iters, ns) = bench_ns_per_op(
         || {
@@ -178,11 +178,11 @@ fn run_for_bits(rng: &mut SplitMix64, bits: usize) {
 
     let (iters, ns) = bench_ns_per_op(
         || {
-            black_box(lhs.modulo(&divisor));
+            black_box(lhs.rem(&divisor));
         },
         1,
     );
-    println!("| modulo | {:.1} | {} |", ns, iters);
+    println!("| rem | {:.1} | {} |", ns, iters);
 }
 
 fn main() {
