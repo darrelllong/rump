@@ -88,7 +88,7 @@ primary values. Every other export has one module path:
 | number_theory | gcd/lcm, symbols, primality, CRT, reconstruction, valuations, product trees, smoothness, SmoothnessBaseError | done |
 | polynomial | PolyZ, PolyMod, polynomial limits and errors | done |
 | finite_field | Gf2m | done |
-| gf2 | dense null space, singleton pruning, Block Lanczos | blocked — consumer transfer |
+| gf2 | dense null space, singleton pruning, Block Lanczos, PrunedMatrix | pending |
 | lattice | LLL, weighted Gauss reduction, ReductionError | done |
 | random | RandomSource and random-value functions | done |
 
@@ -179,7 +179,15 @@ valid, so neither the type nor its message calls the offending value
 | MAX_ROOT_LEVEL | polynomial::MAX_ENUMERATED_ROOTS | done | names resource limit, not algorithm level |
 | Gf2m | finite_field::Gf2m | done | conventional field notation |
 | Rng | random::RandomSource | done | trait supplies bytes; it chooses no entropy source |
-| factoring real-root solver | PolyZ::real_roots | blocked — consumer transfer | only generic root finding moves; NormModel stays downstream |
+| factoring real-root solver | polynomial::PolyZ::real_roots | pending | `Result<Vec<f64>, RealRootError>`; only generic root finding moves, `NormModel` and acceptance policy stay downstream |
+| no public real-root error | polynomial::RealRootError | pending | an empty vector must not mean both "no real roots" and "a coefficient does not fit `f64`" |
+
+`real_roots` returns `Result` because the current downstream version conflates
+two outcomes in one empty vector: a polynomial with no real roots, and a
+polynomial whose coefficients cannot be represented in `f64`. The first is an
+answer and the second is a refusal. Repeated roots are part of the contract
+and are returned with multiplicity rather than deduplicated, which the
+downstream version does not decide deliberately.
 
 PolyZ balanced_base_expansion, rem_monic, product_mod_monic,
 homogeneous_substitution, and roots_mod_prime_power retain their leaf names.
@@ -196,9 +204,24 @@ prime-field promise.
 | weights: [i128; 2] | weights: [NonZeroU64; 2] | done | encodes positivity and removes no previously successful input |
 | gauss_reduce_weighted returning Option | return Result<_, ReductionError> | done | invalid basis/range is bad input |
 | no public lattice reduction error | lattice::ReductionError { DependentBasis, OutOfRange } | done | no weight variant after NonZeroU64 |
-| factoring dense null space | gf2::dense_null_space | blocked — consumer transfer |
-| factoring singleton peel | gf2::prune_singletons | blocked — consumer transfer |
-| factoring Block Lanczos | gf2::block_lanczos_dependencies | blocked — consumer transfer |
+| factoring dense null space | gf2::dense_null_space | pending | `(rows, columns) -> Vec<Vec<usize>>`; rows bit-packed little-endian, `u64` per word |
+| factoring singleton peel | gf2::prune_singletons | pending | returns `PrunedMatrix` |
+| factoring `Reduced` | gf2::PrunedMatrix | pending | the result type the transfer needs; fields private behind `rows()`, `columns()`, `original()` |
+| factoring Block Lanczos | gf2::block_lanczos_dependencies | pending | takes `&mut R: RandomSource` rather than a `u64` seed — rump chooses no entropy source |
+
+`PrunedMatrix`'s three parts must agree: one original index per surviving row,
+every row sized for the surviving column count. As public fields they were a
+writable suggestion, so they are private with accessors, as `ProductTree`'s
+levels are.
+
+`block_lanczos_dependencies` returns `Option`: failing to find a dependency is
+a legitimate outcome of a randomized method on a given matrix, not invalid
+input, so it is an absence rather than an error.
+
+Bit-packing is the contract, not an implementation detail: a row is
+`&[u64]` with column `c` at bit `c % 64` of word `c / 64`. It is stated here
+because both the caller and the solver must agree on it and no type enforces
+it.
 
 ReductionError is a non-exhaustive Copy enum implementing Display and
 std::error::Error. NonZeroU64 is sufficient for every successful call under
@@ -230,8 +253,8 @@ Transfer state is maintained in both this file and the ownership rows in the
 | polynomial::PolyZ::homogeneous_substitution | gnfs/lattice.rs | Rump canonical; consumer transfer |
 | polynomial::PolyMod symmetric_lift/change_modulus | gnfs/algebraic_square_root.rs | Rump canonical; consumer transfer |
 | lattice::gauss_reduce_weighted | gnfs/lattice.rs | Rump canonical; consumer transfer |
-| gf2 dense/sparse solvers | qs/linalg.rs and qs/lanczos.rs | not yet landed in Rump |
-| polynomial::PolyZ::real_roots | gnfs/norm_model.rs | not yet landed in Rump |
+| gf2 dense/sparse solvers | qs/linalg.rs and qs/lanczos.rs | vocabulary ledgered; Rump implementation next |
+| polynomial::PolyZ::real_roots | gnfs/norm_model.rs | contract ledgered; Rump implementation next |
 | integer::WordReciprocal | six division sites | Rump canonical; consumer transfer |
 | number_theory::SmoothnessBase | relation confirmation | Rump canonical; consumer transfer |
 
