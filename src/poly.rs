@@ -1132,6 +1132,19 @@ impl PolyZ {
         // reduced once here and evaluated per root.
         let derivative = PolyModP::from_poly_z(&target.derivative(), prime);
         let mut level = base.roots(rng);
+        // The base level is subject to the same bound as every level above
+        // it. `roots` can return up to `min(deg f, p)` of them, so a
+        // sufficiently high-degree polynomial reaches the cap before any lift
+        // guard runs — and at `exponent == 1` the loop below never runs at
+        // all, which would let the base level out as the answer unchecked.
+        //
+        // Unlike the three call sites in the lift, this one cannot be
+        // exercised end-to-end at the shipped `MAX_ROOT_LEVEL`: reaching it
+        // needs a polynomial of degree above 2²⁰ *and* a prime above 2²⁰, and
+        // the base root-finder would have to factor that polynomial first.
+        // The guard itself is tested at small widths, which is why it takes
+        // its limit as a parameter.
+        check_root_level_width(0, level.len() as u64, MAX_ROOT_LEVEL);
         let mut modulus = prime.clone();
 
         for _ in 1..exponent {

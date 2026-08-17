@@ -17,9 +17,13 @@ enforcing a clean API.
 - **`MontgomeryCtx`** — a public Montgomery domain (Montgomery 1985; the
   separated-operand-scanning shape from Koç, Acar & Kaliski, IEEE Micro 1996):
   encode once, compute in-domain (`mul_mont`, `square_mont`, their
-  `_with_workspace` forms for allocation-free loops, `add_mont`,
-  `sub_mont`, `pow`, `pow_encoded`), convert at the boundary. Fixed 4-bit
-  window exponentiation.
+  `_with_workspace` forms for loops that reuse one scratch buffer,
+  `add_mont`, `sub_mont`, `pow`, `pow_encoded`), convert at the boundary.
+  Fixed 4-bit window exponentiation. The `_with_workspace` forms remove the
+  *scratch* allocation, not every allocation: each still returns an owned
+  `BigUint` and so allocates its result, and rebinding a loop variable drops
+  the previous one, which volatile-wipes its limbs. An earlier version of this
+  line said "allocation-free loops", which overstated it.
 - **Number theory** — `gcd`, `lcm`, and `gcd_extended` (Bézout
   coefficients); the quadratic-residue symbols `jacobi` (binary reciprocity,
   HAC Algorithm 2.149), `legendre`, and `kronecker` (Cohen Algorithm

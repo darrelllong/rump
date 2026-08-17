@@ -150,6 +150,139 @@ lattice problem needs.
 
 ---
 
+### Division by a fixed `u64` divisor, precomputed once
+
+The sieve's inner loops divide by the same small divisor millions of times.
+Every one of those divisors is a factor-base modulus: chosen when the base is
+built and constant for the entire run. The hardware divider is 20–40 cycles
+and does not care that the divisor has not changed; a precomputed reciprocal
+turns each into a multiply and a shift.
+
+This is the one classical integer-arithmetic primitive rump does not have.
+`BarrettCtx` covers a fixed `BigUint` modulus (`src/bigint/barrett.rs`), and
+`div_rem_u64` / `rem_u64` cover a word divisor used once. The gap is a word
+divisor used *many* times.
+
+Wanted, roughly:
+
+```text
+Reciprocal::new(divisor: u64) -> Reciprocal          // divisor >= 1
+Reciprocal::divisor(&self) -> u64
+Reciprocal::rem_u64(&self, value: u64) -> u64
+Reciprocal::div_rem_u64(&self, value: u64) -> (u64, u64)
+Reciprocal::rem_euclid_i64(&self, value: i64) -> u64 // non-negative residue
+
+BigUint::rem_reciprocal(&self, r: &Reciprocal) -> u64
+BigUint::div_rem_reciprocal(&self, r: &Reciprocal) -> (BigUint, u64)
+```
+
+Granlund–Montgomery (PLDI 1994) for the exact quotient form, Möller–Granlund
+(IEEE ToC 2011) for the improved variant, Lemire–Kaser–Kurz (2019) for the
+remainder-only "fastmod" that is enough where no quotient is wanted — which is
+most of the calls below.
+
+**What the consumer does today.** Ordinary hardware division, once per call:
+
+| Site | Call |
+|---|---|
+| `src/qs/sieve.rs:504` | `(root as i64 - low).rem_euclid(modulus)` — the sieve walk's start, per root per block |
+| `src/qs/sieve.rs:598` | `x.rem_euclid(prime as i64)` — the confirmation probe, per base prime per report |
+| `src/qs/sieve.rs:612`, `955` | `magnitude.div_rem_u64(prime)` — the exponent ladder |
+| `src/gnfs/sieve.rs:492` | `(target - low).rem_euclid(modulus)` — the same walk on the GNFS side |
+| `src/gnfs/sieve.rs:706`, `850` | `value.div_rem_u64(prime)` |
+| `src/gnfs/lattice.rs:489-542` | lattice `rem_euclid(p)`, several per special-`q` |
+
+**What the workaround costs.** Counted, not estimated, on balanced semiprimes
+with the quadratic sieve on twelve cores:
+
+| | 40 digits | 46 digits |
+|---|---|---|
+| sieve-walk `rem_euclid` | 3 716 800 | 34 061 160 |
+| confirmation probes | 4 516 279 | ~7.7 M |
+| exponent-ladder divisions | 77 408 | — |
+
+So roughly 8 million fixed-divisor divisions at 40 digits and 42 million at 46,
+split about evenly between the two halves of the sieve at the smaller size and
+dominated by the walk at the larger. Confirmation is 45–49% of sieve time, and
+within `examine` the base walk is the bulk of it: evaluating `g(x)` exactly is
+only 14%, and there are 58 probes for every division the probes find.
+
+Three things a mover should keep, because the consumer got them wrong first or
+would have:
+
+- **`rem_euclid_i64` is the shape actually wanted**, not `%`. Sieve positions
+  are signed and the residue must be non-negative. Every consumer that has to
+  re-derive that from a truncating remainder gets a chance to be wrong.
+- **The precompute must amortise, and here it does completely.** One
+  `Reciprocal` per factor-base entry, built once when the base is built, reused
+  across ~1 600 blocks and thousands of reports. A `new` that costs a division
+  is fine; one that costs more than a few is still fine.
+- **A remainder-only fast path is worth having separately.** The probe at
+  `src/qs/sieve.rs:598` throws the quotient away, and that is the single
+  hottest of these sites.
+
+---
+
+### A reusable batch-smoothness context
+
+`smooth_parts` (`src/number_theory.rs`) already implements Bernstein's 2004
+batch algorithm, and it is exactly the right tool for deciding which sieve
+reports are worth full trial division. The consumer does not use it, and the
+reason is an API one rather than an algorithmic one: the function rebuilds its
+prime product `z` on every call.
+
+```rust
+let prime_values: Vec<BigUint> = primes.iter().map(|&p| BigUint::from_u64(p)).collect();
+let z = product_tree(&prime_values).root()...
+```
+
+For a factor base to 20 000 that product is about 13 500 bits, built by a
+product tree over ~1 100 primes. Paying for it once per run is nothing; paying
+per batch decides how the caller may batch, and the natural batch here is one
+block — about three reports. So the primitive as it stands can only be used in
+one enormous batch at the end of a run, which is not how relation collection
+works: the run stops as soon as it has enough.
+
+Wanted, roughly:
+
+```text
+SmoothBase::new(primes: &[u64]) -> SmoothBase   // builds z once
+SmoothBase::primes(&self) -> &[u64]
+SmoothBase::smooth_parts(&self, values: &[BigUint]) -> Vec<BigUint>
+```
+
+with the existing free function kept as the one-shot convenience form,
+implemented over the context so there is one algorithm and not two.
+
+**What the consumer does today.** Nothing — it never calls `smooth_parts`.
+`examine` (`src/qs/sieve.rs:581`) walks the whole factor base per report,
+probing each prime for a root-class match. About 70% of reports are not smooth
+(`conf/rep` is 0.299 at 40 digits, 0.473 at 46), and a report that is not
+smooth never terminates early: `magnitude` never reaches one, so it pays the
+entire base.
+
+**What the workaround costs.** The 4 516 279 probes above, of which the
+overwhelming majority are spent proving that values which are not smooth are
+not smooth. A batched pre-filter would leave the base walk to be paid only by
+the ~30% that go on to become relations.
+
+Two notes for a mover:
+
+- The consumer's need is a **predicate**, not a factorisation: it wants to know
+  whether `smooth_part == |value|`, and only then does it want exponents. It is
+  fine for the context to return smooth parts exactly as the free function
+  does.
+- The caller obligations already documented on `smooth_parts` — entries at
+  least two, the panic on a smaller one — should move onto `SmoothBase::new`,
+  where they can be checked once instead of per batch.
+
+Both entries above were staged in the consumer as `REQUESTS-TO-RUMP.md` and
+merged here 2026-08-16, measured on the quadratic sieve at 40 and 46 digits.
+That staging file was deleted in the same change: it said so itself, and two
+ledgers is the failure this file's legend exists to prevent.
+
+---
+
 ## Landed in rump, consumer migration pending
 
 Implemented here and documented in `MANUAL.md` and `manual.tex`, cited in
@@ -254,6 +387,14 @@ that it only needs to within a bit.
 
 For the record, so the boundary stays where it is:
 
+- **What the consumer owes on the two entries merged 2026-08-16**, carried over
+  from the staging file so the boundary stays honest in both directions.
+  Neither is rump's work: adopting `smooth_parts` at all once the
+  `SmoothBase` context exists — the primitive has been available and unused,
+  which is a downstream omission rather than an upstream gap — and deciding
+  *where* the pre-filter sits in confirmation, then re-measuring the
+  sieve/confirmation split afterwards, since that split moves with the bar,
+  the floor, and the large-prime variation.
 - Sieving, factor bases, smoothness bounds, the Knuth–Schroeppel multiplier,
   Brent's cycle detection, the *policy* of base-`m` polynomial selection, the
   bar and tolerance machinery — all of these know they are factoring, and all
