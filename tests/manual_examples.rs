@@ -11,7 +11,7 @@ use rump::{
     primes_below, product_tree, random_below, random_coprime_below, random_nonzero_below,
     random_probable_prime, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
     remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, BarrettCtx, BigInt,
-    BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Rng, Sign,
+    BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Reciprocal, Rng, Sign,
 };
 
 #[test]
@@ -461,6 +461,26 @@ fn manual_bulk_primes_word_division_estimates() {
     assert_eq!(BigUint::from_u64(999).digit_count(10), 3);
     assert_eq!(BigUint::from_u64(255).digit_count(16), 2); // "ff"
     assert_eq!(BigUint::zero().digit_count(10), 1); // written "0"
+}
+
+#[test]
+fn manual_division_by_an_invariant_divisor() {
+    let r = Reciprocal::new(1_000_003);
+    assert_eq!(r.divisor(), 1_000_003);
+
+    // The same answers as the hardware-division path.
+    assert_eq!(r.div_rem_u64(2_000_007), (2, 1));
+    assert_eq!(r.rem_u64(2_000_006), 0);
+
+    // Non-negative residues for signed positions.
+    assert_eq!(r.rem_euclid_i64(1_000_005), 2);
+    assert_eq!(r.rem_euclid_i64(-1), 1_000_002);
+    assert_eq!(r.rem_euclid_i64(-1_000_003), 0);
+
+    // Multi-limb dividends go through the same kernel.
+    let n = BigUint::from_u128(340_282_366_920_938_463_463_374_607_431_768_211_455);
+    assert_eq!(n.rem_reciprocal(&r), n.rem_u64(1_000_003));
+    assert_eq!(n.div_rem_reciprocal(&r).0, n.div_rem_u64(1_000_003).0);
 }
 
 #[test]

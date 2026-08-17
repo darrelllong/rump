@@ -150,6 +150,88 @@ lattice problem needs.
 
 ---
 
+### A reusable batch-smoothness context
+
+`smooth_parts` (`src/number_theory.rs`) already implements Bernstein's 2004
+batch algorithm, and it is exactly the right tool for deciding which sieve
+reports are worth full trial division. The consumer does not use it, and the
+reason is an API one rather than an algorithmic one: the function rebuilds its
+prime product `z` on every call.
+
+```rust
+let prime_values: Vec<BigUint> = primes.iter().map(|&p| BigUint::from_u64(p)).collect();
+let z = product_tree(&prime_values).root()...
+```
+
+For a factor base to 20 000 that product is about 13 500 bits, built by a
+product tree over ~1 100 primes. Paying for it once per run is nothing; paying
+per batch decides how the caller may batch, and the natural batch here is one
+block — about three reports. So the primitive as it stands can only be used in
+one enormous batch at the end of a run, which is not how relation collection
+works: the run stops as soon as it has enough.
+
+Wanted, roughly:
+
+```text
+SmoothBase::new(primes: &[u64]) -> SmoothBase   // builds z once
+SmoothBase::primes(&self) -> &[u64]
+SmoothBase::smooth_parts(&self, values: &[BigUint]) -> Vec<BigUint>
+```
+
+with the existing free function kept as the one-shot convenience form,
+implemented over the context so there is one algorithm and not two.
+
+**What the consumer does today.** Nothing — it never calls `smooth_parts`.
+`examine` (`src/qs/sieve.rs:581`) walks the whole factor base per report,
+probing each prime for a root-class match. About 70% of reports are not smooth
+(`conf/rep` is 0.299 at 40 digits, 0.473 at 46), and a report that is not
+smooth never terminates early: `magnitude` never reaches one, so it pays the
+entire base.
+
+**What the workaround costs.** The 4 516 279 probes above, of which the
+overwhelming majority are spent proving that values which are not smooth are
+not smooth. A batched pre-filter would leave the base walk to be paid only by
+the ~30% that go on to become relations.
+
+Two notes for a mover:
+
+- The consumer's need is a **predicate**, not a factorisation: it wants to know
+  whether `smooth_part == |value|`, and only then does it want exponents. It is
+  fine for the context to return smooth parts exactly as the free function
+  does.
+- The caller obligations already documented on `smooth_parts` — entries at
+  least two, the panic on a smaller one — should move onto `SmoothBase::new`,
+  where they can be checked once instead of per batch.
+
+Both entries above were staged in the consumer as `REQUESTS-TO-RUMP.md` and
+merged here 2026-08-16, measured on the quadratic sieve at 40 and 46 digits.
+That staging file was deleted in the same change: it said so itself, and two
+ledgers is the failure this file's legend exists to prevent.
+
+---
+
+## Landed in rump, consumer migration pending
+
+**Delivered 2026-08-16: division by a fixed `u64` divisor.** `Reciprocal`
+is in `src/bigint/reciprocal.rs`, exported from the crate root, documented
+in `MANUAL.md` and `manual.tex` and cited in `CITATIONS.md`. It carries
+`new`, `divisor`, `rem_u64`, `div_rem_u64` and `rem_euclid_i64`, with
+`BigUint::rem_reciprocal` and `BigUint::div_rem_reciprocal` for multi-limb
+dividends. Möller–Granlund Algorithm 4 over their Algorithm 2 reciprocal,
+normalized internally so a 14-bit factor-base prime works as well as a
+full-width divisor. One kernel serves both the word and the multi-limb
+paths, because dividing by a word is Horner's recurrence whose every step
+is a two-word-by-one-word division. Verified against the existing
+hardware-division path — `div_rem_u64` / `rem_u64` as oracle — over
+seventeen corner divisors plus thirty-two random ones, at widths from one
+limb to sixty-four, and `rem_euclid_i64` against `i64::rem_euclid` wherever
+the divisor fits a positive `i64`, `i64::MIN` included.
+
+The consumer has not adopted it yet: the six sites listed below still call
+`rem_euclid` and `div_rem_u64` directly.
+
+The request as filed, kept for its measurements and its site list:
+
 ### Division by a fixed `u64` divisor, precomputed once
 
 The sieve's inner loops divide by the same small divisor millions of times.
@@ -223,67 +305,8 @@ would have:
 
 ---
 
-### A reusable batch-smoothness context
-
-`smooth_parts` (`src/number_theory.rs`) already implements Bernstein's 2004
-batch algorithm, and it is exactly the right tool for deciding which sieve
-reports are worth full trial division. The consumer does not use it, and the
-reason is an API one rather than an algorithmic one: the function rebuilds its
-prime product `z` on every call.
-
-```rust
-let prime_values: Vec<BigUint> = primes.iter().map(|&p| BigUint::from_u64(p)).collect();
-let z = product_tree(&prime_values).root()...
-```
-
-For a factor base to 20 000 that product is about 13 500 bits, built by a
-product tree over ~1 100 primes. Paying for it once per run is nothing; paying
-per batch decides how the caller may batch, and the natural batch here is one
-block — about three reports. So the primitive as it stands can only be used in
-one enormous batch at the end of a run, which is not how relation collection
-works: the run stops as soon as it has enough.
-
-Wanted, roughly:
-
-```text
-SmoothBase::new(primes: &[u64]) -> SmoothBase   // builds z once
-SmoothBase::primes(&self) -> &[u64]
-SmoothBase::smooth_parts(&self, values: &[BigUint]) -> Vec<BigUint>
-```
-
-with the existing free function kept as the one-shot convenience form,
-implemented over the context so there is one algorithm and not two.
-
-**What the consumer does today.** Nothing — it never calls `smooth_parts`.
-`examine` (`src/qs/sieve.rs:581`) walks the whole factor base per report,
-probing each prime for a root-class match. About 70% of reports are not smooth
-(`conf/rep` is 0.299 at 40 digits, 0.473 at 46), and a report that is not
-smooth never terminates early: `magnitude` never reaches one, so it pays the
-entire base.
-
-**What the workaround costs.** The 4 516 279 probes above, of which the
-overwhelming majority are spent proving that values which are not smooth are
-not smooth. A batched pre-filter would leave the base walk to be paid only by
-the ~30% that go on to become relations.
-
-Two notes for a mover:
-
-- The consumer's need is a **predicate**, not a factorisation: it wants to know
-  whether `smooth_part == |value|`, and only then does it want exponents. It is
-  fine for the context to return smooth parts exactly as the free function
-  does.
-- The caller obligations already documented on `smooth_parts` — entries at
-  least two, the panic on a smaller one — should move onto `SmoothBase::new`,
-  where they can be checked once instead of per batch.
-
-Both entries above were staged in the consumer as `REQUESTS-TO-RUMP.md` and
-merged here 2026-08-16, measured on the quadratic sieve at 40 and 46 digits.
-That staging file was deleted in the same change: it said so itself, and two
-ledgers is the failure this file's legend exists to prevent.
-
 ---
 
-## Landed in rump, consumer migration pending
 
 Implemented here and documented in `MANUAL.md` and `manual.tex`, cited in
 `CITATIONS.md` — but the consumer still runs its own copy of each. Until

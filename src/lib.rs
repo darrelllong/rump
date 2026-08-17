@@ -91,7 +91,7 @@ mod poly;
 mod random;
 mod scrub;
 
-pub use bigint::{BarrettCtx, BigInt, BigUint, MontgomeryCtx, ParseBigIntError, Sign};
+pub use bigint::{BarrettCtx, BigInt, BigUint, MontgomeryCtx, ParseBigIntError, Reciprocal, Sign};
 pub use gf2m::Gf2m;
 pub use lattice::{lll_reduce, lll_reduce_delta};
 pub use number_theory::{

@@ -24,8 +24,10 @@ pub use montgomery::MontgomeryCtx;
 use montgomery::{copy_padded, mont_mul, mont_scratch_limbs, mont_sqr};
 
 mod barrett;
+mod reciprocal;
 
 pub use barrett::BarrettCtx;
+pub use reciprocal::Reciprocal;
 // Only the test module reads the threshold from here now — the dispatch that
 // acts on it moved into `barrett` with the code it gates.
 #[cfg(test)]
@@ -3448,6 +3450,136 @@ mod tests {
     fn lcg_next(state: &mut u64) -> u64 {
         *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         *state
+    }
+
+    /// Divisors that exercise every branch of the normalization: already
+    /// normalized, one below a power of two, one above, the extremes, and the
+    /// small primes a factor base is actually made of.
+    fn reciprocal_divisor_corners() -> Vec<u64> {
+        let mut divisors = vec![
+            1,
+            2,
+            3,
+            7,
+            (1 << 16) - 1,
+            1 << 16,
+            (1 << 16) + 1,
+            20_011,
+            1_000_003,
+            (1 << 32) - 1,
+            1 << 32,
+            (1 << 32) + 1,
+            (1 << 63) - 1,
+            1 << 63,
+            (1 << 63) + 1,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        let mut state = 0x5eed_1234_u64;
+        for _ in 0..32 {
+            divisors.push(lcg_next(&mut state) | 1);
+        }
+        divisors
+    }
+
+    /// The reciprocal path must agree with the hardware-division path on
+    /// every input, for both the quotient and the remainder. `div_rem_u64`
+    /// and `rem_u64` are the oracle: they are the existing implementation and
+    /// are independently tested, so a disagreement is this kernel's fault.
+    #[test]
+    fn reciprocal_agrees_with_hardware_division_on_words() {
+        let mut state = 0xabcd_ef01_u64;
+        for divisor in reciprocal_divisor_corners() {
+            let r = super::Reciprocal::new(divisor);
+            assert_eq!(r.divisor(), divisor);
+            let mut values = vec![0u64, 1, divisor.wrapping_sub(1), divisor, u64::MAX];
+            if let Some(next) = divisor.checked_add(1) {
+                values.push(next);
+            }
+            for _ in 0..64 {
+                values.push(lcg_next(&mut state));
+            }
+            for value in values {
+                let oracle = BigUint::from_u64(value);
+                let (expected_q, expected_r) = oracle.div_rem_u64(divisor);
+                assert_eq!(
+                    r.div_rem_u64(value),
+                    (expected_q.to_u64().expect("word quotient fits"), expected_r),
+                    "div_rem_u64({value}) by {divisor}"
+                );
+                assert_eq!(
+                    r.rem_u64(value),
+                    expected_r,
+                    "rem_u64({value}) by {divisor}"
+                );
+            }
+        }
+    }
+
+    /// The multi-limb path is the same kernel driven by Horner's recurrence,
+    /// so it is checked against the same oracle across widths — including one
+    /// limb, where the normalization's top word is the only carry.
+    #[test]
+    fn reciprocal_agrees_with_hardware_division_on_bignums() {
+        let mut state = 0x1357_9bdf_u64;
+        for divisor in reciprocal_divisor_corners() {
+            let r = super::Reciprocal::new(divisor);
+            for words in [1usize, 2, 3, 5, 8, 17, 64] {
+                for _ in 0..4 {
+                    let value = seeded_biguint(words, &mut state);
+                    let (expected_q, expected_r) = value.div_rem_u64(divisor);
+                    let (got_q, got_r) = value.div_rem_reciprocal(&r);
+                    assert_eq!(got_q, expected_q, "quotient at {words} words by {divisor}");
+                    assert_eq!(got_r, expected_r, "remainder at {words} words by {divisor}");
+                    assert_eq!(value.rem_reciprocal(&r), expected_r);
+                }
+            }
+            assert_eq!(BigUint::zero().rem_reciprocal(&r), 0);
+            assert_eq!(BigUint::zero().div_rem_reciprocal(&r).0, BigUint::zero());
+        }
+    }
+
+    /// `rem_euclid_i64` must land in `0..divisor` for negative inputs too,
+    /// which is the whole reason it exists. `i64::rem_euclid` is the oracle
+    /// wherever the divisor fits a positive `i64`; `i64::MIN` is included
+    /// because its magnitude is not representable as a positive `i64`.
+    #[test]
+    fn reciprocal_rem_euclid_matches_the_signed_oracle() {
+        let mut state = 0x2468_ace0_u64;
+        for divisor in reciprocal_divisor_corners() {
+            let r = super::Reciprocal::new(divisor);
+            let mut values = vec![0i64, 1, -1, i64::MAX, i64::MIN];
+            for _ in 0..64 {
+                values.push(lcg_next(&mut state) as i64);
+            }
+            for value in values {
+                let got = r.rem_euclid_i64(value);
+                assert!(got < divisor, "residue {got} not below {divisor}");
+                if let Ok(signed) = i64::try_from(divisor) {
+                    assert_eq!(
+                        got,
+                        value.rem_euclid(signed) as u64,
+                        "rem_euclid_i64({value}) by {divisor}"
+                    );
+                }
+                // Independent of the oracle: the residue must differ from the
+                // value by a multiple of the divisor.
+                let magnitude = BigUint::from_u64(value.unsigned_abs());
+                let residue = magnitude.rem_u64(divisor);
+                let expected = if value < 0 && residue != 0 {
+                    divisor - residue
+                } else {
+                    residue
+                };
+                assert_eq!(got, expected);
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "division by zero")]
+    fn reciprocal_refuses_a_zero_divisor() {
+        let _ = super::Reciprocal::new(0);
     }
 
     fn seeded_biguint(words: usize, state: &mut u64) -> BigUint {

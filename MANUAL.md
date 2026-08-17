@@ -713,6 +713,39 @@ assert_eq!(BigUint::from_u64(255).digit_count(16), 2); // "ff"
 assert_eq!(BigUint::zero().digit_count(10), 1); // written "0"
 ```
 
+### Division by a divisor that does not change
+
+`Reciprocal::new(d)` precomputes the reciprocal of a `u64` divisor once, so
+that later divisions by `d` cost a multiplication and a correction instead of
+a hardware divide (Möller & Granlund, IEEE ToC 60 (2011), Algorithm 4). It
+answers exactly what `div_rem_u64` and `rem_u64` answer; the difference is
+only where the cost sits. Build one per divisor and keep it — a table built
+once and consulted for a whole run is the shape it is for. Construction panics
+on a zero divisor.
+
+`rem_euclid_i64` is the signed entry point, returning the *non-negative*
+residue in `0..d`, which is what an index into a table wants and what a
+truncating `%` does not give.
+
+```rust
+let r = Reciprocal::new(1_000_003);
+assert_eq!(r.divisor(), 1_000_003);
+
+// The same answers as the hardware-division path.
+assert_eq!(r.div_rem_u64(2_000_007), (2, 1));
+assert_eq!(r.rem_u64(2_000_006), 0);
+
+// Non-negative residues for signed positions.
+assert_eq!(r.rem_euclid_i64(1_000_005), 2);
+assert_eq!(r.rem_euclid_i64(-1), 1_000_002);
+assert_eq!(r.rem_euclid_i64(-1_000_003), 0);
+
+// Multi-limb dividends go through the same kernel.
+let n = BigUint::from_u128(340_282_366_920_938_463_463_374_607_431_768_211_455);
+assert_eq!(n.rem_reciprocal(&r), n.rem_u64(1_000_003));
+assert_eq!(n.div_rem_reciprocal(&r).0, n.div_rem_u64(1_000_003).0);
+```
+
 ### Prime-power square roots
 
 `sqrt_mod_prime_power(a, p, e)` returns every square root of `a` modulo

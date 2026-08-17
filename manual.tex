@@ -149,7 +149,8 @@ use rump::{
     rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
     remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation,
     lll_reduce, lll_reduce_delta,
-    BarrettCtx, BigInt, BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Rng, Sign,
+    BarrettCtx, BigInt, BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Reciprocal,
+    Rng, Sign,
 };
 \end{lstlisting}
 
@@ -424,6 +425,45 @@ assert_eq!(BigUint::from_u64(1_000).digit_count(10), 4);
 assert_eq!(BigUint::from_u64(999).digit_count(10), 3);
 assert_eq!(BigUint::from_u64(255).digit_count(16), 2); // "ff"
 assert_eq!(BigUint::zero().digit_count(10), 1); // written "0"
+\end{lstlisting}
+
+\subsection{Division by an invariant divisor}
+
+\code{Reciprocal::new(d)} precomputes, for a fixed non-zero $d$, the
+normalized divisor $d' = d \cdot 2^{s}$ with $s = \operatorname{clz}(d)$ and
+the word
+\begin{equation}
+v \;=\; \left\lfloor \frac{2^{128} - 1}{d'} \right\rfloor - 2^{64},
+\end{equation}
+which fits a word exactly because $d' \ge 2^{63}$ places the quotient in
+$[2^{64}, 2^{65})$. A later division by $d$ then costs a multiplication by
+$v$ and a correction instead of a hardware divide (Möller \& Granlund, IEEE
+Transactions on Computers 60 (2011), Algorithm 4). The answers are those of
+\code{div\_rem\_u64} and \code{rem\_u64}; only the cost moves. Construction
+panics for $d = 0$.
+
+Dividing a multi-limb value by a word is Horner's recurrence in base
+$2^{64}$, and each step of it is a two-word-by-one-word division, so
+\code{rem\_reciprocal} and \code{div\_rem\_reciprocal} use the same kernel.
+Scaling both operands by $2^{s}$ leaves the quotient unchanged and
+multiplies the remainder by $2^{s}$, so the remainder is shifted back and
+the quotient needs no correction.
+
+\code{rem\_euclid\_i64} is the signed entry point, returning the
+non-negative residue in $[0, d)$ --- what an index into a table requires,
+and what a truncating remainder does not give.
+
+\begin{lstlisting}
+let r = Reciprocal::new(1_000_003);
+assert_eq!(r.divisor(), 1_000_003);
+assert_eq!(r.div_rem_u64(2_000_007), (2, 1));
+assert_eq!(r.rem_u64(2_000_006), 0);
+
+assert_eq!(r.rem_euclid_i64(-1), 1_000_002);
+assert_eq!(r.rem_euclid_i64(-1_000_003), 0);
+
+let n = BigUint::from_u128(1u128 << 127);
+assert_eq!(n.rem_reciprocal(&r), n.rem_u64(1_000_003));
 \end{lstlisting}
 
 \section{Signed integers: \code{BigInt} and \code{Sign}}
