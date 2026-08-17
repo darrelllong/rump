@@ -149,8 +149,8 @@ assert_eq!(BigUint::zero().bits(), 0);
 
 ### Arithmetic
 
-`add` / `sub` / `mul` return new values; `add_assign_ref` /
-`sub_assign_ref` work in place. `add_into` / `sub_into` are the
+`add` / `sub` / `mul` return new values; `+=` and `-=` on a borrowed
+right-hand side work in place. `add_into` / `sub_into` are the
 three-operand forms — the result written into `self`, whose buffer is
 reused: a long-lived output allocates only until its capacity covers the
 result, then never again (the shape of GMP's `mpz_add`).
@@ -171,8 +171,8 @@ assert_eq!(b.square(), BigUint::from_u64(1_369));
 assert_eq!(BigUint::from_u64(17).sqrt_floor(), BigUint::from_u64(4));
 
 let mut acc = BigUint::from_u64(1_000);
-acc.add_assign_ref(&b);
-acc.sub_assign_ref(&b);
+acc += &b;
+acc -= &b;
 assert_eq!(acc, a);
 
 // Three-operand form: `out`'s storage is reused across calls.
@@ -242,7 +242,7 @@ A `BigInt` is a `Sign` joined to a `BigUint` magnitude. Construct with
 (total over its range — `i128::MIN`'s magnitude `2^127` is an ordinary
 `u128`); read back with `sign()` and
 `magnitude()`; `negated` flips the sign. `add` / `sub` are signed,
-and `add_assign_ref` / `sub_assign_ref` are their in-place forms, reusing
+and `+=` / `-=` on a borrowed right-hand side are their in-place forms, reusing
 the magnitude's buffer in every sign combination (nothing panics — the
 sign follows the result); `mul` is the full signed product, and
 `mul_biguint` scales by an unsigned factor. `div_rem` divides with
@@ -1200,7 +1200,7 @@ recoverable conditions:
 
 | Call | Panics when |
 |---|---|
-| `sub` / `sub_assign_ref` | the result would be negative |
+| `sub` / `-=` | the result would be negative |
 | `div_rem` / `div_rem_u64` / `rem` / `rem_u64` | the divisor or modulus is zero |
 | `BigUint::mod_mul` / `mod_pow` / `mod_add` / `mod_sub` | the modulus is zero |
 | `ln_approx` | the value is zero |

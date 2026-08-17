@@ -58,7 +58,7 @@ fn div_rem_bitwise(dividend: &BigUint, divisor: &BigUint) -> (BigUint, BigUint) 
             remainder.set_bit(0);
         }
         if remainder >= *divisor {
-            remainder.sub_assign_ref(divisor);
+            remainder -= divisor;
             quotient.set_bit(bit);
         }
     }

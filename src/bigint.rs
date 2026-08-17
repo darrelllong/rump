@@ -1221,7 +1221,7 @@ impl BigUint {
     /// Does not panic in normal use; an internal `expect` guards the
     /// limb-packing invariant (a `u128` accumulator splitting back into `u64`
     /// limbs) and would trip only on a logic error.
-    pub fn add_assign_ref(&mut self, other: &Self) {
+    pub(crate) fn add_assign_ref(&mut self, other: &Self) {
         if other.is_zero() {
             return;
         }
@@ -1252,7 +1252,7 @@ impl BigUint {
     }
 
     /// Return `self + other`, leaving both operands intact: a clone of `self`
-    /// followed by [`Self::add_assign_ref`]. The clone is the price of the
+    /// followed by `+=`. The clone is the price of the
     /// functional form; [`Self::add_into`] avoids it when the caller
     /// already owns a destination buffer.
     #[must_use]
@@ -1266,7 +1266,7 @@ impl BigUint {
     /// three-operand form (the shape of GMP's `mpz_add`) for callers that
     /// hold the result's storage across calls. One carry pass over the
     /// operands; no allocation once the buffer's capacity covers the result.
-    /// Contrast [`Self::add_assign_ref`], which *accumulates* into `self`;
+    /// Contrast `+=`, which *accumulates* into `self`;
     /// this form replaces it.
     ///
     /// # Panics
@@ -1315,7 +1315,7 @@ impl BigUint {
     /// Write `lhs - rhs` into `self`, reusing its limb buffer — the
     /// three-operand counterpart of [`Self::add_into`]. One borrow pass;
     /// no allocation once the buffer's capacity covers the result.
-    /// Contrast [`Self::sub_assign_ref`], which subtracts *from* `self`;
+    /// Contrast `-=`, which subtracts *from* `self`;
     /// this form replaces it.
     ///
     /// # Panics
@@ -1380,8 +1380,8 @@ impl BigUint {
     ///
     /// Panics if `self < other`. ℕ is closed under addition but not under
     /// subtraction, and this type has no sign in which to record a negative
-    /// difference; [`BigInt::sub_assign_ref`] is the total operation.
-    pub fn sub_assign_ref(&mut self, other: &Self) {
+    /// difference; `BigInt`'s `-=` is the total operation.
+    pub(crate) fn sub_assign_ref(&mut self, other: &Self) {
         assert!((*self).cmp(other) != Ordering::Less, "BigUint underflow");
         if other.is_zero() {
             return;
@@ -1410,12 +1410,12 @@ impl BigUint {
     }
 
     /// Return `self - other`: a clone of `self` followed by
-    /// [`Self::sub_assign_ref`].
+    /// `-=`.
     ///
     /// # Panics
     ///
     /// Panics if `self < other`, for the reason given on
-    /// [`Self::sub_assign_ref`].
+    /// `-=`.
     #[must_use]
     pub fn sub(&self, other: &Self) -> Self {
         let mut out = self.clone();
@@ -2780,6 +2780,49 @@ impl core::str::FromStr for BigInt {
     }
 }
 
+// ─── In-place operators ────────────────────────────────────────────────────
+//
+// Receiver mutation is spelled with the operator traits rather than an
+// inherent `add_assign_ref`: `x += &y` is the idiom a Rust caller reaches for
+// first, and one spelling is the rule. The right-hand side is borrowed, so a
+// long-lived accumulator reuses its limb buffer across a whole loop exactly as
+// the inherent form did — these forward to it, and it is now crate-private.
+
+impl core::ops::AddAssign<&BigUint> for BigUint {
+    /// `self += other`, reusing `self`'s limb buffer.
+    fn add_assign(&mut self, other: &BigUint) {
+        self.add_assign_ref(other);
+    }
+}
+
+impl core::ops::SubAssign<&BigUint> for BigUint {
+    /// `self -= other`, reusing `self`'s limb buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self < other`: ℕ has no sign in which to record a negative
+    /// difference. `BigInt`'s implementation is total.
+    fn sub_assign(&mut self, other: &BigUint) {
+        self.sub_assign_ref(other);
+    }
+}
+
+impl core::ops::AddAssign<&BigInt> for BigInt {
+    /// `self += other`, reusing the magnitude's limb buffer in every sign
+    /// combination.
+    fn add_assign(&mut self, other: &BigInt) {
+        self.add_assign_ref(other);
+    }
+}
+
+impl core::ops::SubAssign<&BigInt> for BigInt {
+    /// `self -= other`, reusing the magnitude's limb buffer in every sign
+    /// combination. Total: the sign follows the result.
+    fn sub_assign(&mut self, other: &BigInt) {
+        self.sub_assign_ref(other);
+    }
+}
+
 impl Drop for BigUint {
     fn drop(&mut self) {
         // BigUint values may hold secrets — private exponents, prime
@@ -3004,7 +3047,7 @@ impl BigInt {
     }
 
     /// Return `self + other`: a clone of `self` followed by
-    /// [`Self::add_assign_ref`].
+    /// `+=`.
     #[must_use]
     pub fn add(&self, other: &Self) -> Self {
         let mut out = self.clone();
@@ -3015,12 +3058,12 @@ impl BigInt {
     /// Add another integer in place, reusing the magnitude's limb buffer in
     /// every sign combination. The sign case analysis is `combine_assign`,
     /// which this enters with `other`'s own sign.
-    pub fn add_assign_ref(&mut self, other: &Self) {
+    pub(crate) fn add_assign_ref(&mut self, other: &Self) {
         self.combine_assign(other.sign, &other.magnitude);
     }
 
     /// Return `self - other`: a clone of `self` followed by
-    /// [`Self::sub_assign_ref`]. Total on ℤ, unlike [`BigUint::sub`].
+    /// `-=`. Total on ℤ, unlike [`BigUint::sub`].
     #[must_use]
     pub fn sub(&self, other: &Self) -> Self {
         let mut out = self.clone();
@@ -3031,8 +3074,8 @@ impl BigInt {
     /// Subtract another integer in place, reusing the magnitude's limb
     /// buffer in every sign combination. Full signed semantics — the sign
     /// follows the result, and nothing panics — unlike
-    /// [`BigUint::sub_assign_ref`], whose domain has no negative values.
-    pub fn sub_assign_ref(&mut self, other: &Self) {
+    /// `BigUint`'s `-=`, whose domain has no negative values.
+    pub(crate) fn sub_assign_ref(&mut self, other: &Self) {
         let negated = match other.sign {
             Sign::Positive => Sign::Negative,
             Sign::Negative => Sign::Positive,

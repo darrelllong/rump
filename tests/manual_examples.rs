@@ -140,8 +140,8 @@ fn manual_biguint_arithmetic() {
     assert_eq!(BigUint::from_u64(17).sqrt_floor(), BigUint::from_u64(4));
 
     let mut acc = BigUint::from_u64(1_000);
-    acc.add_assign_ref(&b);
-    acc.sub_assign_ref(&b);
+    acc += &b;
+    acc -= &b;
     assert_eq!(acc, a);
 
     // Three-operand form: `out`'s storage is reused across calls.
