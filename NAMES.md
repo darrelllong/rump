@@ -243,8 +243,8 @@ not.
 
 | Repository | Revision | What it carries |
 |---|---|---|
-| rump | `4c5e6acd9cb0435680db65ef97d77d0b0983c540` | the 0.3.0 surface: canonical names, module topology, typed construction errors, `forbid(unsafe_code)`, portable checked sizing, `MontgomeryResidue` |
-| factoring | `dd024f87c6f5e9264607f40bce34289063207c31` | `rho.rs` on the residue API, and the ledger rows for it |
+| rump | `c8fe2e661330a48e22ffadb0e9a2879601fc3cc5` | the 0.3.0 surface: canonical names, module topology, typed construction errors, `forbid(unsafe_code)`, portable checked sizing, `MontgomeryResidue` with collision-free `Arc` context identity |
+| factoring | `16231df83c2a27006ef1ef242b3fc064dfa548ec` | `rho.rs` on the residue API, and the ledger rows for it |
 
 Both repositories' gates are green at these revisions:
 `scripts/release_gate.sh` (eleven legs) in rump, and fmt / clippy
