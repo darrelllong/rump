@@ -5,20 +5,14 @@
 //! here follows HAC Algorithm 14.42 with Note 14.44's bound of two on the
 //! corrections.
 //!
-//! Split out of `bigint.rs` alongside the Montgomery domain. The two are
-//! separate reduction methods with separate preconditions — Montgomery needs
-//! an odd modulus, Barrett takes either parity, which is the whole reason this
-//! one exists — so they get separate files rather than the single
-//! `montgomery.rs` the original split plan suggested.
+//! Separate from `montgomery` because the preconditions differ: Montgomery
+//! requires an odd modulus, Barrett takes either parity, which is the reason
+//! this context exists at all.
 //!
-//! The test module stays in the parent, where it reaches `BarrettCtx`, the
-//! threshold constant, and `last_corrections`.
+//! The test module lives in the parent, which is why the threshold constant
+//! and `last_corrections` are visible there.
 
-// `MontgomeryCtx` is imported for the intra-doc link below, not for code: it
-// is the odd-modulus counterpart this context is the complement to.
 use super::BigUint;
-#[allow(unused_imports)]
-use super::MontgomeryCtx;
 
 // Modulus width up to which Barrett's second multiplication is taken as a
 // schoolbook half-product rather than a dispatched full product. The half
@@ -31,7 +25,8 @@ use super::MontgomeryCtx;
 pub(super) const BARRETT_HALF_PRODUCT_MAX_LIMBS: usize = 512;
 
 /// Barrett reduction context for a fixed modulus of either parity — the
-/// complement to [`MontgomeryCtx`], which requires an odd modulus.
+/// complement to [`MontgomeryCtx`](super::MontgomeryCtx), which requires an odd
+/// modulus.
 ///
 /// Precomputes `μ = ⌊b^{2k} / n⌋` for `b = 2⁶⁴` and `k` the modulus's limb
 /// count; each reduction then costs two multiplications of roughly the
@@ -238,7 +233,7 @@ impl BarrettCtx {
     /// `a² mod n`. The square comes from [`BigUint::square_ref`], whose
     /// specialized kernels form each cross term once between 8 and 256
     /// limbs, so this costs a squaring plus one Barrett reduction. The
-    /// Montgomery domain's [`MontgomeryCtx::square_mont`] goes further
+    /// Montgomery domain's [`MontgomeryCtx::square_mont`](super::MontgomeryCtx::square_mont) goes further
     /// still, fusing the reduction into the kernel.
     #[must_use]
     pub fn square_mod(&self, a: &BigUint) -> BigUint {
@@ -253,7 +248,7 @@ impl BarrettCtx {
     /// (as the Montgomery ladder in this file does), so the cost is one
     /// squaring per remaining exponent bit and one multiplication per
     /// remaining set bit; there is no window table here, unlike
-    /// [`MontgomeryCtx::pow`]. `0^0 = 1` by the usual convention.
+    /// [`MontgomeryCtx::pow`](super::MontgomeryCtx::pow). `0^0 = 1` by the usual convention.
     ///
     /// Variable-time, like the rest of the crate: a clear exponent bit skips
     /// its multiplication.

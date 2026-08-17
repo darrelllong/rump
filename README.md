@@ -20,10 +20,8 @@ enforcing a clean API.
   `_with_workspace` forms for loops that reuse one scratch buffer,
   `add_mont`, `sub_mont`, `pow`, `pow_encoded`), convert at the boundary.
   Fixed 4-bit window exponentiation. The `_with_workspace` forms remove the
-  *scratch* allocation, not every allocation: each still returns an owned
-  `BigUint` and so allocates its result, and rebinding a loop variable drops
-  the previous one, which volatile-wipes its limbs. An earlier version of this
-  line said "allocation-free loops", which overstated it.
+  *scratch* allocation, not every allocation: each returns an owned `BigUint`
+  and so allocates its result.
 - **Number theory** — `gcd`, `lcm`, and `gcd_extended` (Bézout
   coefficients); the quadratic-residue symbols `jacobi` (binary reciprocity,
   HAC Algorithm 2.149), `legendre`, and `kronecker` (Cohen Algorithm
@@ -76,12 +74,10 @@ inputs. Adversarially hardened primality testing lives with its consumer
 
 - `#![deny(unsafe_code)]`; the audited exceptions are a six-line
   volatile-write scrub helper and the test probe that verifies the scrub
-  by reading the raw buffer tail back. `deny` rather than `forbid`
-  deliberately: `forbid` cannot be lifted by an inner `allow`, which is
-  exactly what those two sites need, so the crate cannot use it while it
-  keeps the scrub. The trade is real and is stated here rather than
-  implied — `deny` is a default an inner item can override, not a
-  boundary the compiler enforces against the crate's own code.
+  by reading the raw buffer tail back. `deny` rather than `forbid` because
+  those two sites lift it with an inner `allow`, which `forbid` does not
+  permit — so the guarantee is a default the crate's own code can override,
+  not a boundary the compiler enforces.
 - **Variable-time, for non-secret data.** Operations take data-dependent
   paths. Do not use this crate where timing must not leak secrets.
 - **Not a secret-scrubbing or constant-time type, and does not pretend to be.**

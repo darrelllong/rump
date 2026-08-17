@@ -55,14 +55,13 @@ and the LaTeX manual. Four word-and-size primitives the consumer had grown
 locally (`BigUint::digit_count`, `BigInt::from_i128`, `gcd_u64`,
 `mod_inverse_u64`) followed at `61cbcef`.
 
-`REQUESTS.md` is **not** cleared — an earlier version of this note said it was,
-and that went stale the moment `9f583d1` and `4d74efb` filed new requests. Four
-entries are outstanding (real roots and real factorisation; sparse `GF(2)`
+`REQUESTS.md` is **not** cleared, whatever earlier versions of this note said.
+Six entries are outstanding — real roots and real factorisation; sparse `GF(2)`
 linear algebra; the `ℤ[x]/(f, q^k)` Newton-lift square root; two-dimensional
-reduction under a weighted norm) and five more have landed here but still have
-a live copy in the consumer. The file was restructured 2026-08-16 so each entry
-sits in exactly one of four states and the document cannot claim to be empty
-while listing work; read its legend before adding to it.
+reduction under a weighted norm; a precomputed `Reciprocal` for fixed `u64`
+divisors; a reusable `SmoothBase` batch-smoothness context — and five more have
+landed here but still have a live copy in the consumer. Each entry sits in
+exactly one of four states; read the legend at the top before adding to it.
 
 ## The external review
 
@@ -122,19 +121,13 @@ assume the name means the same pass. Dispositions, 2026-08-16:
 Their findings 8, 9 and 10 restate this repository's 1, 2 and 7. Their 3, 5, 6
 and 7 are consumer-side work.
 
-**Why finding 4's checked sizing is retired rather than deferred.** The
-unchecked products are `bits()` (`limbs.len() * 64`), the `R²` constant
-(`limbs.len() * 128`), and the Karatsuba/Toom recompositions (`shl_bits(split *
-64)`, `shl_bits(split * 128)`). Each turns a limb count into a bit index. On a
-32-bit `usize` they wrap at 2²⁶ and 2²⁵ limbs — operands of about 537 MB and
-268 MB, genuinely reachable, which is what the finding is about. On a 64-bit
-`usize` they wrap at 2⁵⁸ and 2⁵⁷ limbs, operands of 2 EiB and 1 EiB; `Vec`
-aborts on capacity overflow long before either product can form, so the wrap is
-unreachable by construction. The finding offered two remedies — make the sizing
-portable and add a 32-bit job, *or* fail at compile time — and they are
-alternatives. Taking the gate means hardening against an overflow no accepted
-target can reach. If the 64-bit gate is ever lifted, this comes back with it;
-until then it is not outstanding work and should not be listed as such.
+**Finding 4's checked sizing is retired, not deferred.** Its two remedies —
+portable sizing plus a 32-bit job, or a compile-time refusal — are
+alternatives, and the gate is the one taken. The unchecked limb-count-to-bit
+products wrap at 2²⁶ and 2²⁵ limbs on a 32-bit `usize` (operands of ~537 MB and
+~268 MB, reachable), but at 2⁵⁸ and 2⁵⁷ on a 64-bit one, where `Vec` aborts on
+capacity overflow long before the product can form. Do not re-list it unless
+the gate is lifted.
 
 ## The measurement story — read this before touching benchmarks
 
@@ -398,20 +391,17 @@ is correct. Check before you correct.
   build finish before believing its result.
 - **Never mutation-test a resource guard without a timeout.** Deleting a guard
   does not make its test *fail*; it makes the test do the unbounded thing the
-  guard existed to prevent. Removing the branching-push
-  `check_root_level_width` call turns
-  `roots_mod_prime_power_refuses_a_branch_too_wide_to_list` — a `should_panic`
-  test over a 40-bit prime — into a 1.1×10¹² iteration allocation loop. An
-  unbounded `cargo test` against that mutation reached 6.6 GB RSS and was still
-  climbing when killed, with the machine down to 168 MB free. **This is what
-  crashed the machine on 2026-08-16**, and the crash left the mutation in the
-  working tree, where it read as ordinary uncommitted work. Build untimed
-  (a slow build must not read as a hang), then run the covering tests under
-  `timeout`, and score `124` as CAUGHT alongside any other non-zero status.
-  Note `ulimit -v` is *not* enforced on Darwin, so the timeout is the only real
-  bound. Under that harness all five mutations of that guard — its three call
-  sites and two mutations of its body — are CAUGHT: two of the three call sites
-  by hang, one by assertion.
+  guard existed to prevent. Dropping the branching-push
+  `check_root_level_width` call turns a `should_panic` test over a 40-bit prime
+  into a 1.1×10¹² iteration allocation loop: 6.6 GB RSS and still climbing when
+  killed, the machine down to 168 MB free. **That crashed this machine on
+  2026-08-16**, and the crash left the mutation in the tree looking like
+  ordinary uncommitted work. Build untimed (a slow build must not read as a
+  hang), run the covering tests under `timeout`, and score `124` as CAUGHT
+  alongside any other non-zero status; `ulimit -v` is not enforced on Darwin,
+  so the timeout is the only real bound. Under that harness all five mutations
+  of the guard are CAUGHT — two of its three call sites by hang, not by
+  assertion, which is the reason the bound is needed.
 - Stage files explicitly (never `git add -A`) — concurrent work has been in
   flight in this repository more than once.
 - The MANUAL's code blocks are mirrored verbatim in `tests/manual_examples.rs`

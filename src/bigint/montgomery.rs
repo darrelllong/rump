@@ -5,17 +5,12 @@
 //! Acar & Kaliski, *Analyzing and Comparing Montgomery Multiplication
 //! Algorithms*, IEEE Micro 16 (1996).
 //!
-//! Split out of `bigint.rs` so the domain's invariant — that a value is either
-//! an ordinary residue or an encoded one, never both — is reviewable in one
-//! place. The kernels operate on `&[u64]` slices rather than `BigUint` so the
+//! The kernels take `&[u64]` slices rather than `BigUint` so the
 //! exponentiation ladder can reuse one workspace across a whole computation.
 //!
-//! The test module stays in the parent, where it reaches these and much else.
+//! The test module lives in the parent, which is why four of the kernels are
+//! `pub(super)` rather than private.
 
-// `BarrettCtx` is imported for the intra-doc link below, not for code: it is
-// the even-modulus counterpart this domain refers the reader to.
-#[allow(unused_imports)]
-use super::BarrettCtx;
 use super::{low_u64, BigUint};
 use core::cmp::Ordering;
 
@@ -461,7 +456,7 @@ impl MontgomeryCtx {
     /// and REDC requires `R` and the modulus to be coprime; since `R` is a
     /// power of two, that holds exactly when the modulus is odd. An even (or
     /// zero) modulus has no Montgomery form, hence the `None` — reach for
-    /// [`BarrettCtx`], which reduces modulo either parity. Construction also
+    /// [`BarrettCtx`](super::BarrettCtx), which reduces modulo either parity. Construction also
     /// precomputes the inverse `−n⁻¹ mod 2⁶⁴` (Hensel lifting) and `R² mod n`
     /// once, so later encode/multiply steps do not repeat that work.
     #[must_use]
