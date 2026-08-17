@@ -1,7 +1,9 @@
 # rump
 
-**RU**st **M**ulti**P**recision: multiprecision integer arithmetic in pure,
-safe Rust, implemented directly from the literature. Extracted from
+**RU**st **M**ulti**P**recision: multiprecision integer arithmetic in Rust,
+implemented directly from the literature, with no dependencies and two
+audited `unsafe` exceptions (named under [Properties](#properties)) to an
+otherwise `#![deny(unsafe_code)]` crate. Extracted from
 [darrelllong/cryptography](https://github.com/darrelllong/cryptography) so the
 arithmetic can serve consumers beyond cryptography, with the crate boundary
 enforcing a clean API.
@@ -70,7 +72,12 @@ inputs. Adversarially hardened primality testing lives with its consumer
 
 - `#![deny(unsafe_code)]`; the audited exceptions are a six-line
   volatile-write scrub helper and the test probe that verifies the scrub
-  by reading the raw buffer tail back.
+  by reading the raw buffer tail back. `deny` rather than `forbid`
+  deliberately: `forbid` cannot be lifted by an inner `allow`, which is
+  exactly what those two sites need, so the crate cannot use it while it
+  keeps the scrub. The trade is real and is stated here rather than
+  implied — `deny` is a default an inner item can override, not a
+  boundary the compiler enforces against the crate's own code.
 - **Variable-time, for non-secret data.** Operations take data-dependent
   paths. Do not use this crate where timing must not leak secrets.
 - **Not a secret-scrubbing or constant-time type, and does not pretend to be.**

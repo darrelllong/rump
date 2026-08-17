@@ -89,6 +89,69 @@ bounded** names the items that are intrinsically expensive — exponential or
 subexponential by nature, enumeration-shaped, or research-grade engineering —
 proposed for exclusion or for an explicitly bounded scope.
 
+## The volatile drop scrub: measured, and kept (2026-08-16)
+
+The second review (`SECOND-REVIEWER.md`, finding 1) would block a release until
+the volatile scrub, the production `unsafe`, and the raw read-back test probe
+are all removed and the crate adopts `#![forbid(unsafe_code)]`. Two of its
+three sub-claims are correct as stated and one is an empirical question it
+raised without answering; the disposition is to keep the scrub, correct the
+documentation, and record the cost.
+
+**Correct, and fixed.** `README.md` opened by calling the crate "pure, safe
+Rust" while its own Properties section, sixty lines down, listed two audited
+`unsafe` exceptions. The headline now names them.
+
+**Correct, and stated rather than fixed.** `deny(unsafe_code)` is a default an
+inner `allow` can override, not a boundary the compiler enforces against the
+crate's own code; `forbid` is the enforcing form. The crate cannot use `forbid`
+while it keeps a volatile scrub, because a volatile store requires a raw
+pointer. That is a genuine trade and it is now written down in README rather
+than left for a reader to discover.
+
+**The empirical claim, now measured.** The review argues the scrub "charges all
+arithmetic consumers ... for volatile writes on every temporary" and that
+"multiprecision algorithms manufacture many temporaries, so this is exactly
+where an unconditional extra memory pass is least welcome". Directionally right,
+but it is not a uniform tax: the cost tracks the number of `BigUint` drops per
+unit of arithmetic, and that ratio varies by two orders of magnitude across the
+crate's own workloads.
+
+A/B against the same tree with `Drop for BigUint` emptied, aarch64 (M4), release
+build. Reduction is by **minimum** over 60 readings per arm, taken as four
+alternating A/B rounds of 15 — not a mean: an initial A/B/A run showed 14% drift
+between two *identical* A arms, which is the size of the effect being measured,
+so a mean over that data would report the machine. The p25 column is given
+because a single minimum is one reading; where the two disagree, the number is
+not trustworthy.
+
+| Workload | Scrub cost (min) | (p25) |
+|---|---|---|
+| 2000 short-lived 512-bit temporaries | +16.8% | +18.8% |
+| product tree + remainder tree, 256 values | +10.9% | +8.9% |
+| `mod_inverse_batch`, 512 values | +5.0% | +1.3% |
+| `gcd`, 4096 bits | +2.1% | +2.1% |
+| `mod_pow`, 2048 bits | +1.4% | +1.0% |
+| `PolyZ::mul`, degree 64 | −1.1% | +0.1% |
+
+So: on compute-bound work — modular exponentiation, gcd, polynomial
+multiplication, which is what the crate is mostly asked to do — the scrub is at
+or below the noise floor. On allocation-dominated shapes it is 9–19%. The
+`mod_inverse_batch` row is the one to distrust: minimum and p25 disagree by a
+factor of four, so it is somewhere in 1–5% and this run cannot say where.
+
+One caution on the first attempt, recorded because it nearly produced a wrong
+number: an initial run reported the 2048-bit `mod_pow` arm 16–22% faster without
+the scrub. That was warmup, not scrub cost — the readings within each A series
+declined monotonically from 5.96 ms to 3.32 ms. Alternating the arms and taking
+minima put the same figure at 1.4%.
+
+The scrub stays. It is documented as defense in depth rather than a security
+property, the crate already says cryptographic hygiene belongs at the consumer,
+and the measured cost on the operations this crate exists to perform does not
+justify removing a hygiene measure the parent crate audited. Revisit if a
+consumer's profile is dominated by temporary churn.
+
 ## 1. Arbitrary-precision integers
 
 **Efficient — all of it.** Core ops (`add` … `trailing_zeros`), integer

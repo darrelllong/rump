@@ -1,16 +1,24 @@
 # HANDOFF — picking rump up on another machine
 
-State as of commit `7a52dd4` on `origin/main`, tag `v0.2.2`, crate version
-`0.2.2` (post-tag work sits on `main` above the tag, as it did for 0.2.1).
-Everything below is in the repository unless marked otherwise.
+State as of `8f12bc5` on `main`, tag `v0.2.2` (at `cf2d1dc`), crate version
+**`0.3.0`** — bumped 2026-08-16 because `main` above the tag changes
+`product_tree`/`remainder_tree` signatures and was still calling itself
+`0.2.2`; see `CHANGELOG.md`. Post-tag work sits on `main` above the tag, as it
+did for 0.2.1. Everything below is in the repository unless marked otherwise.
 
 ```sh
 git clone git@github.com:darrelllong/rump.git && cd rump
-cargo test && cargo test --release      # 178 lib tests green + 10 ignored timing probes
+cargo test && cargo test --release      # 212 lib tests green + 13 ignored timing probes
 cargo clippy --release --all-targets    # warning-clean
 cargo fmt --check                       # clean
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --lib   # clean
 ```
+
+One environment trap: on this machine `cargo`/`rustc` on `PATH` are
+Homebrew's (1.97.1), while `rustup`'s default toolchain is 1.93.1. They do not
+share installed targets, so `rustup target add …` followed by a bare
+`cargo check --target …` fails with a misleading `can't find crate for std`.
+Use `rustup run <toolchain> cargo …` for cross-target checks.
 
 If those five commands are green you have the same tree this note describes.
 
@@ -45,8 +53,16 @@ truncated `div_rem`, `abs`), the external reviewer's standing #1 — landed
 2026-08-15, differentially tested against `i128` and documented in MANUAL.md
 and the LaTeX manual. Four word-and-size primitives the consumer had grown
 locally (`BigUint::digit_count`, `BigInt::from_i128`, `gcd_u64`,
-`mod_inverse_u64`) followed at `61cbcef`. `REQUESTS.md` records the whole
-list as cleared.
+`mod_inverse_u64`) followed at `61cbcef`.
+
+`REQUESTS.md` is **not** cleared — an earlier version of this note said it was,
+and that went stale the moment `9f583d1` and `4d74efb` filed new requests. Four
+entries are outstanding (real roots and real factorisation; sparse `GF(2)`
+linear algebra; the `ℤ[x]/(f, q^k)` Newton-lift square root; two-dimensional
+reduction under a weighted norm) and five more have landed here but still have
+a live copy in the consumer. The file was restructured 2026-08-16 so each entry
+sits in exactly one of four states and the document cannot claim to be empty
+while listing work; read its legend before adding to it.
 
 ## The external review
 
@@ -64,10 +80,44 @@ Bezout/Jacobi HGCD transform as a standing item.
 
 The current pass does **not** re-list the file split. The demand came from
 the earlier passes (against 0.1.1 and v0.2.1, which said it would stay
-listed until done); the files remain monolithic — `src/bigint.rs`
-~5.8 kLOC, `src/number_theory.rs` ~5.5 kLOC — so the split stays on the
-outstanding-work list below on its own merits, not on the current
-reviewer's.
+listed until done), and `SECOND-REVIEWER.md` finding 7 raises it again and
+independently. The files remain monolithic and have *grown* since that
+sentence was last written: `src/bigint.rs` 6,737 lines, `src/number_theory.rs`
+5,743, and `src/poly.rs` 4,617, which no earlier pass listed and which the
+split plan below did not cover.
+
+## The second review
+
+`SECOND-REVIEWER.md` is an independent pass against `4d74efb` plus the
+then-uncommitted tree. Disposition of its seven findings, 2026-08-16:
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | Crate is not pure safe Rust; remove the scrub and `forbid` | **Partly accepted.** README headline corrected; the `deny`-vs-`forbid` trade written down. Scrub kept and its cost measured — see ROADMAP, "The volatile drop scrub". |
+| 2 | `ProductTree` breaks the public API at 0.2.2 | **Accepted, fixed.** Confirmed against the tag: `v0.2.2` exports `Vec<Vec<BigUint>>`, `main` exports `ProductTree`. Version bumped to 0.3.0 with a `CHANGELOG.md` entry. Git-only; the owner still holds any crates.io release. |
+| 3 | Finish the ownership migration | **Accepted, recorded.** Mostly concerns the `factoring` repository, which is not on this machine. The five landed-but-unmigrated polynomial pieces and their consumer locations are now a state in `REQUESTS.md`. |
+| 4 | Portability contract contradicts the project rule | **Closed.** A `compile_error!` now enforces the documented 64-bit-only contract; verified firing under `--target i686-unknown-linux-gnu` and silent under `aarch64-apple-darwin`. The finding's other remedy — checked sizing on `len * 64` / `len * 128` — is the *alternative* to this one, not a second half of it, and is deliberately not done; see below. |
+| 5 | Thresholds justified on one machine | **Open, already tracked.** Same fleet task as the re-measurement owed below. |
+| 6 | Documentation describes mutually exclusive states | **Accepted, fixed** for `REQUESTS.md` (now a four-state ledger) and README. The Barrett threshold-drift half was already **stale**: `square_mod` no longer says "8 through 256", it quotes `BARRETT_HALF_PRODUCT_MAX_LIMBS`. |
+| 7 | Files beyond reviewable size | **Open.** Item 2 below, now including `src/poly.rs`. |
+
+Its "Validation performed" section is sound and reproduced here, with one
+caveat worth carrying: it reports 196 unit tests where the tree now has 212,
+because work landed between its base commit and now.
+
+**Why finding 4's checked sizing is retired rather than deferred.** The
+unchecked products are `bits()` (`limbs.len() * 64`), the `R²` constant
+(`limbs.len() * 128`), and the Karatsuba/Toom recompositions (`shl_bits(split *
+64)`, `shl_bits(split * 128)`). Each turns a limb count into a bit index. On a
+32-bit `usize` they wrap at 2²⁶ and 2²⁵ limbs — operands of about 537 MB and
+268 MB, genuinely reachable, which is what the finding is about. On a 64-bit
+`usize` they wrap at 2⁵⁸ and 2⁵⁷ limbs, operands of 2 EiB and 1 EiB; `Vec`
+aborts on capacity overflow long before either product can form, so the wrap is
+unreachable by construction. The finding offered two remedies — make the sizing
+portable and add a 32-bit job, *or* fail at compile time — and they are
+alternatives. Taking the gate means hardening against an overflow no accepted
+target can reach. If the 64-bit gate is ever lifted, this comes back with it;
+until then it is not outstanding work and should not be listed as such.
 
 ## The measurement story — read this before touching benchmarks
 
@@ -157,14 +207,21 @@ operand generation dominates. If a cell cannot clear it, leave it marked
    (schoolbook, Karatsuba, Toom-3, Toom-4 and the thresholds), `bigint/div.rs`
    (Algorithm D and the Horner path); `number_theory/gcd.rs` (Lehmer, Half-GCD,
    Bézout, inverses), `number_theory/symbols.rs` (Jacobi, Legendre, Kronecker),
-   `number_theory/prime.rs` (Miller–Rabin, BPSW, the square roots, CRT). Leave
+   `number_theory/prime.rs` (Miller–Rabin, BPSW, the square roots, CRT); and —
+   added 2026-08-16 on the second reviewer's finding 7, which this plan had
+   omitted — `poly/z.rs` and `poly/modp.rs` for the two coefficient rings,
+   `poly/convolution.rs` for the dispatch, `poly/factor.rs` for
+   squarefree/distinct-degree/Cantor–Zassenhaus, and `poly/lift.rs` for the
+   Hensel machinery and its width guard. Leave
    the test modules in the roots initially — they reach many private items, and
    splitting code without moving tests is still the win. Expect no test edits;
    if a test needs changing, the move changed behaviour — stop.
 
 (The former item 3, cutting 0.2.2, was done 2026-08-15: `Cargo.toml` and the
-lock are bumped, `v0.2.2` is tagged and pushed, git-only. **Do not publish to
-crates.io** — the owner holds that release explicitly, as with `v0.2.1`.)
+lock are bumped, `v0.2.2` is tagged and pushed, git-only. The crate version is
+now `0.3.0` for the `ProductTree` break — see `CHANGELOG.md` — and **0.3.0 is
+not yet tagged**. **Do not publish to crates.io** — the owner holds that
+release explicitly, as with `v0.2.1`.)
 
 ## Deferred defects: resolved 2026-08-15
 
@@ -345,9 +402,11 @@ is correct. Check before you correct.
 | `MANUAL.md` / `tests/manual_examples.rs` | documented API, mirrored as tests |
 | `manual.tex` / `manual.pdf` | the LaTeX reference manual, with the defining equations per primitive; `scripts/check_manual_tex.sh` extracts every listing and executes it against the crate, and a rebuild (`pdflatex manual.tex`, twice) is gated on that passing |
 | `CITATIONS.md` | primary sources |
-| `REQUESTS.md` | the consumer's list, cleared |
-| `ROADMAP.md` | proposed scope, pending triage |
+| `REQUESTS.md` | the consumer's ownership ledger — four states, four entries outstanding; read the legend at the top before editing |
+| `ROADMAP.md` | proposed scope, pending triage; also carries the drop-scrub measurement and the decision to keep it |
 | `REVIEW.md` | the external reviewer's current pass (against v0.2.2), tracked since `7a52dd4`; two observations superseded — see "The external review" |
+| `SECOND-REVIEWER.md` | a second, independent pass against `4d74efb` plus the then-uncommitted tree; disposition of all seven findings under "The second review" |
+| `CHANGELOG.md` | what a consumer must change per release; git tags only, nothing published to crates.io |
 
 `PERFORMANCE.md` is **generated**. Edit
 `scripts/build_performance.sh` and regenerate; edits to the document are lost.

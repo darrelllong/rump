@@ -78,7 +78,7 @@
 \newcommand{\jac}[2]{\left(\frac{#1}{#2}\right)}
 
 \title{\textbf{rump}\\[0.4ex]\large A Reference Manual for the Multiprecision
-Arithmetic Crate\\[0.4ex]\normalsize version 0.2.2}
+Arithmetic Crate\\[0.4ex]\normalsize version 0.3.0}
 \author{}
 \date{August 2026}
 
@@ -122,7 +122,11 @@ must add cryptographic memory hygiene at its own layer.
 \end{contract}
 
 The crate is supported on 64-bit targets only: the limb layout and the index
-arithmetic that sizes it assume a 64-bit \code{usize}.
+arithmetic that sizes it assume a 64-bit \code{usize}. This is enforced rather
+than merely documented --- a \code{compile\_error!} rejects any target whose
+pointer width is not 64, so a 32-bit build fails with a diagnostic naming the
+reason instead of compiling and misindexing at run time on an operand large
+enough to overflow the product.
 
 \subsection{Imports and naming}
 
@@ -131,7 +135,7 @@ so code always says \code{use rump::...}:
 
 \begin{lstlisting}
 [dependencies]
-rust-mp = "0.2"
+rust-mp = "0.3"
 \end{lstlisting}
 
 \begin{lstlisting}
@@ -149,8 +153,12 @@ use rump::{
 };
 \end{lstlisting}
 
-This manual tracks the development tree (version 0.2.2 and the work on
-\code{main} above that tag). Behaviours new since 0.2.1 and absent from
+This manual tracks the development tree (version 0.3.0, untagged, on
+\code{main} above the \code{v0.2.2} tag). The one breaking change since
+0.2.2 is that \code{product\_tree} returns a \code{ProductTree} and
+\code{remainder\_tree} takes one, in place of the former
+\code{Vec<Vec<BigUint>{>}}; \code{CHANGELOG.md} carries the migration note.
+Behaviours new since 0.2.1 and absent from
 earlier releases include the samplers' stall guards
 (\S\ref{sec:random}), the unbalanced multiplication kernel
 (\S\ref{sec:mul}), the public signed ring, and the word-and-size

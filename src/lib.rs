@@ -46,7 +46,12 @@
 //! and the `R²`/Karatsuba bit shifts that scale a limb count by 128 — assume a
 //! 64-bit `usize`. rump is developed and tested on 64-bit hosts and is not
 //! supported on 32-bit targets, where a multi-hundred-megabyte operand could
-//! overflow a `usize` index and land a shift in the wrong place.
+//! overflow a `usize` index and land a shift in the wrong place. That
+//! restriction is enforced by a [`compile_error!`] on any target whose pointer
+//! width is not 64, rather than left to the prose: a documented restriction
+//! that still compiles produces silent misbehaviour at run time on an operand
+//! large enough to reach it, and refusing to build is the diagnosis the caller
+//! can act on.
 //!
 //! Minimum supported Rust version: 1.87, the release that stabilized
 //! `u64::is_multiple_of` and `usize::is_multiple_of`, which the kernels use
@@ -69,6 +74,17 @@
 
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
+
+// The 64-bit assumption stated in the crate documentation above, enforced.
+// `bits()` scales a limb count by 64 and the `R²` and Karatsuba paths scale
+// one by 128; on a 32-bit `usize` those products overflow for operands in the
+// hundreds of megabytes, which indexes and shifts wrongly rather than failing.
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!(
+    "rump requires a 64-bit target: limb indexing and the R²/Karatsuba bit \
+     shifts scale a limb count by 64 and 128 and assume those products fit a \
+     `usize`. 32-bit and 16-bit targets are not supported."
+);
 
 mod bigint;
 mod gf2m;

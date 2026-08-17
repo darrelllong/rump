@@ -15,9 +15,26 @@ Written 2026-08-14 against rump 0.2.0, after implementing Pollard's rho and
 the classical quadratic sieve; revised the same day against 0.2.1, while
 starting the number field sieve.
 
+Every entry sits in exactly one of four states, and the section it appears
+under *is* that state:
+
+- **Outstanding** — asked for, not yet in rump.
+- **Landed in rump, consumer migration pending** — implemented here, but the
+  consumer still runs its own copy. Two correctness surfaces until it does
+  not, so a later fix lands in only one of them.
+- **Fully migrated** — in rump, and the consumer's copy is deleted.
+- **Deliberately downstream** — considered and left with the consumer, with
+  the reason it stays there.
+
+An entry moves when the *code* moves, not when the prose is next edited. This
+file is the cross-repository ownership ledger; a second reviewer found it
+carrying an outstanding list and the sentence "every entry this file has ever
+carried is closed" at the same time, which is the failure this legend exists
+to prevent.
+
 ---
 
-## Tier 1 — outstanding
+## Outstanding
 
 Every entry names the file and line where the consumer's implementation
 sits, so a mover can read the working version rather than start from the
@@ -99,10 +116,60 @@ ideal — and hand over only the bits.
 
 ---
 
-### Polynomial pieces that ended up downstream — five of six delivered
+### The square root in `ℤ[x]/(f, q^k)` by Newton lifting
 
-Delivered 2026-08-16 in `src/poly.rs`, documented in `MANUAL.md` and
-`manual.tex`, cited in `CITATIONS.md`:
+The last of six polynomial pieces that ended up downstream. The other
+five landed 2026-08-16 and have moved to *Landed in rump, consumer
+migration pending*, below.
+
+Its two building blocks are delivered — `PolyModP::symmetric_lift` and
+`PolyModP::with_modulus`, with a test showing they compose into the lift —
+but the lift itself is not, because the consumer's version is inseparable
+from its stopping rule. `lift_target_bits` and `MAX_LIFTS` decide when a
+failing check becomes a verdict, and they are calibrated on the measured
+`H(β)/H(δ)` ratio of number-field-sieve dependencies. A general version needs
+the caller to name a target precision instead, which is a different signature
+from the one the consumer uses; filing it that way is the next step rather
+than a port. Note also that `with_modulus`'s two divisibility directions
+behave differently — narrowing is the ring projection, widening is only a
+section — which the consumer's `widen` relies on without saying so.
+
+---
+
+### Two-dimensional lattice reduction under a weighted norm
+
+**Consumer's code:** `src/gnfs/lattice.rs:352` (`gauss_reduce`, with `norm_sq`
+and `dot` beside it).
+
+Lagrange–Gauss reduction of a two-dimensional basis, but under a *skewed* norm
+`(x/√s)² + (y·√s)²` rather than the Euclidean one, in `i128` throughout. rump
+has `lll_reduce` over `BigInt` for general dimension; the two-dimensional case
+is exact, terminates in `O(log)` steps, and wants no bignums. The weight is
+the general part — reduction under a diagonal form is what any anisotropic
+lattice problem needs.
+
+---
+
+## Landed in rump, consumer migration pending
+
+Implemented here and documented in `MANUAL.md` and `manual.tex`, cited in
+`CITATIONS.md` — but the consumer still runs its own copy of each. Until
+those are deleted there are two implementations of the same algebra, and a
+later fix lands in only one of them. The second reviewer raised this as a
+standing risk rather than a defect, and supplied the locations.
+
+Retire, in one integration change against a versioned rump:
+
+| rump API | consumer copy to delete |
+|---|---|
+| `PolyZ::roots_mod_prime_power` | `factoring/src/gnfs/select.rs:321` (lifting/counting around it) |
+| `PolyZ::balanced_base_expansion` | `factoring/src/gnfs/select.rs:393` |
+| `PolyZ::rem_monic` | `factoring/src/gnfs/sqrt.rs:234` |
+| `PolyZ::product_mod_monic` | `factoring/src/gnfs/sqrt.rs:186` |
+| `PolyZ::homogeneous_substitution` | `factoring/src/gnfs/lattice.rs:313` |
+| `PolyModP::symmetric_lift` / `with_modulus` | `factoring/src/gnfs/sqrt.rs:401-418` |
+
+Delivered 2026-08-16 in `src/poly.rs`:
 
 - **Roots modulo a prime power, by Hensel lifting.**
   `PolyZ::roots_mod_prime_power(prime, exponent, rng)`. The branching case is
@@ -135,38 +202,16 @@ Delivered 2026-08-16 in `src/poly.rs`, documented in `MANUAL.md` and
   consumer's `Option` and its monic-degree check were selection *policy* and
   stayed downstream.
 
-**Still outstanding: the square root in `ℤ[x]/(f, q^k)` by Newton lifting.**
-Its two building blocks are delivered — `PolyModP::symmetric_lift` and
-`PolyModP::with_modulus`, with a test showing they compose into the lift —
-but the lift itself is not, because the consumer's version is inseparable
-from its stopping rule. `lift_target_bits` and `MAX_LIFTS` decide when a
-failing check becomes a verdict, and they are calibrated on the measured
-`H(β)/H(δ)` ratio of number-field-sieve dependencies. A general version needs
-the caller to name a target precision instead, which is a different signature
-from the one the consumer uses; filing it that way is the next step rather
-than a port. Note also that `with_modulus`'s two divisibility directions
-behave differently — narrowing is the ring projection, widening is only a
-section — which the consumer's `widen` relies on without saying so.
-
 ---
 
-### Two-dimensional lattice reduction under a weighted norm
+## Fully migrated
 
-**Consumer's code:** `src/gnfs/lattice.rs:352` (`gauss_reduce`, with `norm_sq`
-and `dot` beside it).
+In rump, and the consumer's copy is deleted. This section is the
+already-migrated tail; it is not a claim that the ledger is empty, which the
+*Outstanding* section above settles.
 
-Lagrange–Gauss reduction of a two-dimensional basis, but under a *skewed* norm
-`(x/√s)² + (y·√s)²` rather than the Euclidean one, in `i128` throughout. rump
-has `lll_reduce` over `BigInt` for general dimension; the two-dimensional case
-is exact, terminates in `O(log)` steps, and wants no bignums. The weight is
-the general part — reduction under a diagonal form is what any anisotropic
-lattice problem needs.
-
----
-
-## Tier 1 — cleared
-
-Nothing else outstanding.
+**The `BigInt` signed ring.** Delivered after 0.2.1 (recorded under *Delivered
+earlier* below); `src/gnfs/arith.rs` in the consumer is deleted.
 
 **Implemented directly, 2026-08-16, by the consumer rather than requested.**
 Four primitives the factoring crate had grown local copies of. Each is
@@ -205,14 +250,7 @@ that it only needs to within a bit.
 
 ---
 
-## Cleared
-
-The `BigInt` signed ring was delivered after 0.2.1 (see below);
-`src/gnfs/arith.rs` in the consumer can now be retired.
-
----
-
-## Not requested, deliberately
+## Deliberately downstream
 
 For the record, so the boundary stays where it is:
 
@@ -241,10 +279,11 @@ For the record, so the boundary stays where it is:
 
 ---
 
-## Delivered
+## Delivered earlier — historical record
 
-Every entry this file has ever carried is closed. Kept as a record, so the
-boundary that worked stays visible.
+Closed entries from previous rounds, kept so the boundary that worked stays
+visible. This section is a record of what shipped; it is **not** a statement
+about the current ledger, which begins with *Outstanding* above.
 
 **Post-0.2.1 — `BigInt::symmetric_remainder`.**
 
