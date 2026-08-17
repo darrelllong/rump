@@ -106,7 +106,7 @@ Algorithm M.
 | Rational reconstruction | `rational_reconstruct`, `_bounded` | von zur Gathen and Gerhard, *Modern Computer Algebra*, 3rd ed. (2013), §5.10; technique of Wang, *A p-adic algorithm for univariate partial fractions*, SYMSAC '81, 212–217 (rational-number statement: Wang, Guy and Davenport, SIGSAM Bulletin 16(2) (1982), 2–3); accelerated variants Collins and Encarnación, *Efficient rational number reconstruction*, J. Symbolic Comput. 20(3) (1995), 287–297. |
 | Batch modular inversion | `mod_inverse_batch` | Montgomery, *Speeding the Pollard and elliptic curve methods of factorization*, Math. Comp. 48 (1987), 243–264 (simultaneous-inversion trick). |
 | p-adic valuation / remove factor | `valuation`, `remove_factor` | squared-power ladder (shape of GMP's `mpz_remove`); `valuation` accepts any `p ≥ 2`, PARI's `valuation` convention. |
-| Batch smoothness (product/remainder trees) | `product_tree`, `remainder_tree`, `smooth_parts` | Bernstein, *How to find smooth parts of integers* (2004). |
+| Batch smoothness (product/remainder trees) | `product_tree`, `remainder_tree`, `smooth_parts`, and `SmoothBase` (the same algorithm with the primes' product retained across batches) | Bernstein, *How to find smooth parts of integers* (2004). |
 
 ## Polynomials (`src/poly.rs`)
 

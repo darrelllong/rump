@@ -780,6 +780,31 @@ assert_eq!(parts[0], BigUint::from_u64(360));
 assert_eq!(parts[1], BigUint::from_u64(2));
 ```
 
+`SmoothBase::new(primes)` is the same algorithm with the primes' product
+built once and kept, for a caller that wants to choose its own batch size.
+The free function above rebuilds that product on every call, which for a base
+of a few thousand primes is a product of tens of thousands of bits: paid once
+per run it is nothing, but paid per batch it dictates how the caller may
+batch. The context lifts that constraint — batches may be as small as the
+caller likes, and the answers do not depend on how they are grouped. The
+obligation that every entry is at least two is checked at construction rather
+than per batch.
+
+```rust
+let base = SmoothBase::new(&primes_below(10));
+assert_eq!(base.primes(), &[2, 3, 5, 7]);
+
+// The same answers as the free function, in batches of the caller's choosing.
+let batch = base.smooth_parts(&[BigUint::from_u64(360), BigUint::from_u64(2 * 11)]);
+assert_eq!(batch[0], BigUint::from_u64(360));
+assert_eq!(batch[1], BigUint::from_u64(2));
+assert_eq!(base.smooth_parts(&[BigUint::from_u64(360)])[0], batch[0]);
+
+// Smoothness is the predicate: the smooth part equals the value.
+assert!(batch[0] == BigUint::from_u64(360));
+assert!(batch[1] != BigUint::from_u64(2 * 11));
+```
+
 The batch is built from `product_tree` (the values' pairwise-product tree)
 and `remainder_tree` (a modulus reduced against every leaf in one descent).
 `product_tree` returns a `ProductTree`, whose levels are private: the

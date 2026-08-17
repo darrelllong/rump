@@ -150,6 +150,28 @@ lattice problem needs.
 
 ---
 
+## Landed in rump, consumer migration pending
+
+**Delivered 2026-08-16: a reusable batch-smoothness context.**
+`SmoothBase` is in `src/number_theory.rs`, exported from the crate root,
+documented in `MANUAL.md` and `manual.tex` and cited in `CITATIONS.md`. It
+carries `new`, `primes` and `smooth_parts`; the free `smooth_parts` is now
+the one-shot form implemented over the context, so there is one algorithm
+and not two, as the request asked. The caller obligation that every entry
+is at least two moved to `new`, checked once instead of per batch.
+
+The property that matters for this API is that answers do not depend on
+how the caller groups its values — the whole point is to let the batch be
+one block rather than one run — so the test asserts the context agrees
+with the free function on a mixed batch, one value at a time, and in
+chunks of three, against a trial-division oracle.
+
+The consumer has not adopted it: `examine` still walks the whole factor
+base per report. That adoption is the consumer's, and is recorded under
+*Deliberately downstream*.
+
+The request as filed, kept for its measurements:
+
 ### A reusable batch-smoothness context
 
 `smooth_parts` (`src/number_theory.rs`) already implements Bernstein's 2004
@@ -210,7 +232,6 @@ ledgers is the failure this file's legend exists to prevent.
 
 ---
 
-## Landed in rump, consumer migration pending
 
 **Delivered 2026-08-16: division by a fixed `u64` divisor.** `Reciprocal`
 is in `src/bigint/reciprocal.rs`, exported from the crate root, documented

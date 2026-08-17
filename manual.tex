@@ -148,6 +148,7 @@ use rump::{
     random_coprime_below, random_nonzero_below, random_probable_prime,
     rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
     remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation,
+    SmoothBase,
     lll_reduce, lll_reduce_delta,
     BarrettCtx, BigInt, BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Reciprocal,
     Rng, Sign,
@@ -1135,6 +1136,14 @@ the \emph{smooth part}, with full multiplicity. A value is fully smooth
 exactly when its smooth part equals itself; $0 \mapsto 0$ and
 $1 \mapsto 1$ pass through without joining the tree.
 
+\code{SmoothBase::new(P)} is the same computation with $z = \prod P$ built
+once and retained. The free function rebuilds $z$ per call; for a base of a
+few thousand primes that product runs to tens of thousands of bits, which is
+free once per run but, charged per batch, dictates the batch size a caller
+may use. The context removes that coupling: batches may be as small as the
+caller likes and the answers do not depend on the grouping. The obligation
+that every entry of $P$ is at least two is checked once, at construction.
+
 \begin{lstlisting}
 let primes = primes_below(10); // 2, 3, 5, 7
 let values = [
@@ -1144,6 +1153,12 @@ let values = [
 let parts = smooth_parts(&values, &primes);
 assert_eq!(parts[0], BigUint::from_u64(360));
 assert_eq!(parts[1], BigUint::from_u64(2));
+
+// The same answers with the product hoisted, in batches of any size.
+let base = SmoothBase::new(&primes);
+assert_eq!(base.primes(), &[2, 3, 5, 7]);
+assert_eq!(base.smooth_parts(&values), parts);
+assert_eq!(base.smooth_parts(&values[..1])[0], parts[0]);
 
 // The trees are public on their own: the root is the product, and one
 // descent reduces a modulus against every leaf.

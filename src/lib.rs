@@ -100,6 +100,7 @@ pub use number_theory::{
     lcm, legendre, miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow,
     primes_below, product_tree, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
     remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, ProductTree,
+    SmoothBase,
 };
 pub use poly::{PolyModP, PolyZ, MAX_ROOT_LEVEL};
 pub use random::{

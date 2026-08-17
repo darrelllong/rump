@@ -1380,58 +1380,137 @@ pub fn remainder_tree(tree: &ProductTree, modulus: &BigUint) -> Vec<BigUint> {
 /// remaining zero-divisor path is unreachable from here.)
 #[must_use]
 pub fn smooth_parts(values: &[BigUint], primes: &[u64]) -> Vec<BigUint> {
-    assert!(
-        primes.iter().all(|&p| p >= 2),
-        "every entry of `primes` must be at least two"
-    );
-    if values.is_empty() {
-        return Vec::new();
-    }
-    // z = ∏ primes, itself via a product tree for the near-linear cost.
-    let prime_values: Vec<BigUint> = primes.iter().map(|&p| BigUint::from_u64(p)).collect();
-    let z = match product_tree(&prime_values).root() {
-        Some(root) => root.clone(),
-        None => BigUint::one(), // no primes: nothing is smooth beyond 1
-    };
+    SmoothBase::new(primes).smooth_parts(values)
+}
 
-    // The remainder tree divides by each value, so trivial values (0 has
-    // no valid reduction; 1 reduces everything to 0) are handled directly
-    // and only the rest form the tree. The smooth part of 0 is 0 — every
-    // prime divides it — and of 1 is 1.
-    let nontrivial: Vec<BigUint> = values
-        .iter()
-        .filter(|v| !v.is_zero() && !v.is_one())
-        .cloned()
-        .collect();
-    let tree = product_tree(&nontrivial);
-    let residues = remainder_tree(&tree, &z);
-    let mut smooth_iter = nontrivial.iter().zip(residues).map(|(value, residue)| {
-        // Raise the residue to 2^s mod v with 2^s ≥ ⌊log₂ v⌋, the largest
-        // multiplicity any prime can have in v. `s` squarings give exponent
-        // 2^s, so s = ⌈log₂(bits)⌉ suffices — a dozen squarings at 4 kbit,
-        // not four thousand.
-        let bits = value.bits();
-        let squarings = bits.ilog2() as usize + 1; // 2^squarings > bits
-        let mut acc = residue; // already z mod value from the tree
-        for _ in 0..squarings {
-            acc = BigUint::mod_mul(&acc, &acc, value);
+/// A factor base with its prime product `z` precomputed, so that batches can
+/// be sized by the caller rather than by what the setup costs.
+///
+/// [`smooth_parts`] rebuilds `z` on every call. For a base to 20 000 that is
+/// a 13 500-bit product over about 1 100 primes — nothing once per run, but
+/// paid per batch it decides how the caller may batch, and a caller whose
+/// natural batch is a few values is pushed into one enormous batch at the end
+/// of a run. That is the wrong shape for relation collection, which stops as
+/// soon as it has enough.
+///
+/// The obligation on `primes` is checked here, once, instead of per batch.
+///
+/// # Examples
+///
+/// ```
+/// use rump::{BigUint, SmoothBase};
+///
+/// let base = SmoothBase::new(&[2, 3, 5]);
+/// assert_eq!(base.primes(), &[2, 3, 5]);
+///
+/// // 360 = 2³·3²·5 is fully smooth; 14 = 2·7 keeps only its 2.
+/// let parts = base.smooth_parts(&[BigUint::from_u64(360), BigUint::from_u64(14)]);
+/// assert_eq!(parts, vec![BigUint::from_u64(360), BigUint::from_u64(2)]);
+///
+/// // Smoothness is the predicate: the smooth part equals the value.
+/// assert!(parts[0] == BigUint::from_u64(360));
+/// assert!(parts[1] != BigUint::from_u64(14));
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SmoothBase {
+    primes: Vec<u64>,
+    /// `∏ primes`, built once by a product tree.
+    product: BigUint,
+}
+
+impl SmoothBase {
+    /// Precompute the product of `primes`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any entry is below two. An entry below two is not a prime
+    /// and cannot mean one; `0` in particular would make the product zero and
+    /// report every value fully smooth, which is a silent wrong answer rather
+    /// than a refusal. A *composite* entry is accepted and behaves
+    /// predictably — the algorithm needs the primes to divide the product,
+    /// not the entries to be irreducible — so `4` computes the smooth part
+    /// over `{2}`.
+    #[must_use]
+    pub fn new(primes: &[u64]) -> Self {
+        assert!(
+            primes.iter().all(|&p| p >= 2),
+            "every entry of `primes` must be at least two"
+        );
+        // z = ∏ primes, itself via a product tree for the near-linear cost.
+        let prime_values: Vec<BigUint> = primes.iter().map(|&p| BigUint::from_u64(p)).collect();
+        let product = match product_tree(&prime_values).root() {
+            Some(root) => root.clone(),
+            None => BigUint::one(), // no primes: nothing is smooth beyond 1
+        };
+        Self {
+            primes: primes.to_vec(),
+            product,
         }
-        // gcd(v, acc) is the product of the smooth prime powers in v.
-        gcd(value, &acc)
-    });
+    }
 
-    values
-        .iter()
-        .map(|value| {
-            if value.is_zero() || value.is_one() {
-                value.clone()
-            } else {
-                smooth_iter
-                    .next()
-                    .expect("one smooth part per nontrivial value")
+    /// The primes this base was built from, in the order given.
+    #[must_use]
+    pub fn primes(&self) -> &[u64] {
+        &self.primes
+    }
+
+    /// The smooth part of each value over this base, in the input's order.
+    ///
+    /// The answer is [`smooth_parts`]'s; only the setup is hoisted. A value
+    /// is smooth over the base exactly when its smooth part equals it, which
+    /// is the predicate a sieve wants before paying for full trial division.
+    ///
+    /// # Panics
+    ///
+    /// Through [`remainder_tree`], if a non-trivial value is zero, which it
+    /// would divide by. (A zero *value* is intercepted before the tree, so
+    /// that path is unreachable from here.)
+    #[must_use]
+    pub fn smooth_parts(&self, values: &[BigUint]) -> Vec<BigUint> {
+        if values.is_empty() {
+            return Vec::new();
+        }
+        let z = &self.product;
+
+        // The remainder tree divides by each value, so trivial values (0 has
+        // no valid reduction; 1 reduces everything to 0) are handled directly
+        // and only the rest form the tree. The smooth part of 0 is 0 — every
+        // prime divides it — and of 1 is 1.
+        let nontrivial: Vec<BigUint> = values
+            .iter()
+            .filter(|v| !v.is_zero() && !v.is_one())
+            .cloned()
+            .collect();
+        let tree = product_tree(&nontrivial);
+        let residues = remainder_tree(&tree, z);
+        let mut smooth_iter = nontrivial.iter().zip(residues).map(|(value, residue)| {
+            // Raise the residue to 2^s mod v with 2^s ≥ ⌊log₂ v⌋, the largest
+            // multiplicity any prime can have in v. `s` squarings give exponent
+            // 2^s, so s = ⌈log₂(bits)⌉ suffices — a dozen squarings at 4 kbit,
+            // not four thousand.
+            let bits = value.bits();
+            let squarings = bits.ilog2() as usize + 1; // 2^squarings > bits
+            let mut acc = residue; // already z mod value from the tree
+            for _ in 0..squarings {
+                acc = BigUint::mod_mul(&acc, &acc, value);
             }
-        })
-        .collect()
+            // gcd(v, acc) is the product of the smooth prime powers in v.
+            gcd(value, &acc)
+        });
+
+        values
+            .iter()
+            .map(|value| {
+                if value.is_zero() || value.is_one() {
+                    value.clone()
+                } else {
+                    smooth_iter
+                        .next()
+                        .expect("one smooth part per nontrivial value")
+                }
+            })
+            .collect()
+    }
 }
 
 // ─── Rational reconstruction ───────────────────────────────────────────────
@@ -4561,6 +4640,14 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "every entry of `primes` must be at least two")]
+    fn smooth_base_rejects_a_non_prime_below_two_at_construction() {
+        // The obligation moved to the constructor so it is checked once
+        // rather than per batch; it must still be checked.
+        let _ = super::SmoothBase::new(&[2, 3, 1]);
+    }
+
+    #[test]
     fn product_tree_accessors_describe_the_tree() {
         let values: Vec<BigUint> = [7u64, 11, 13, 17, 19]
             .iter()
@@ -4646,6 +4733,33 @@ mod tests {
             // The smooth part divides the value.
             assert!(v.modulo(part).is_zero(), "smooth part divides the value");
         }
+
+        // The context is the same algorithm with the product hoisted, so it
+        // must agree with the free function value for value — and, since the
+        // point of hoisting is to let the caller choose the batch, it must
+        // give the same answers one value at a time as it does in one batch.
+        // A batch-size-dependent answer would be the defect this API invites.
+        let base = super::SmoothBase::new(&primes);
+        assert_eq!(base.primes(), &primes[..]);
+        assert_eq!(base.smooth_parts(&values), parts);
+        for (v, part) in values.iter().zip(&parts) {
+            assert_eq!(
+                base.smooth_parts(std::slice::from_ref(v))[0],
+                *part,
+                "one-at-a-time must match the batch"
+            );
+        }
+        for chunk in values.chunks(3) {
+            let expected = smooth_parts(chunk, &primes);
+            assert_eq!(base.smooth_parts(chunk), expected, "chunked batch");
+        }
+        assert!(base.smooth_parts(&[]).is_empty());
+        // An empty base makes nothing smooth beyond the trivial values.
+        let empty = super::SmoothBase::new(&[]);
+        assert_eq!(
+            empty.smooth_parts(&[BigUint::from_u64(30)]),
+            vec![BigUint::one()]
+        );
         // A fully-smooth value has smooth part equal to itself.
         let smooth = BigUint::from_u64(2 * 2 * 3 * 5 * 7);
         assert_eq!(

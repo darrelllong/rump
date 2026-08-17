@@ -11,7 +11,7 @@ use rump::{
     primes_below, product_tree, random_below, random_coprime_below, random_nonzero_below,
     random_probable_prime, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
     remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, BarrettCtx, BigInt,
-    BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Reciprocal, Rng, Sign,
+    BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Reciprocal, Rng, Sign, SmoothBase,
 };
 
 #[test]
@@ -507,6 +507,19 @@ fn manual_batch_smoothness() {
     let parts = smooth_parts(&values, &primes);
     assert_eq!(parts[0], BigUint::from_u64(360));
     assert_eq!(parts[1], BigUint::from_u64(2));
+
+    let base = SmoothBase::new(&primes_below(10));
+    assert_eq!(base.primes(), &[2, 3, 5, 7]);
+
+    // The same answers as the free function, in batches of the caller's choosing.
+    let batch = base.smooth_parts(&[BigUint::from_u64(360), BigUint::from_u64(2 * 11)]);
+    assert_eq!(batch[0], BigUint::from_u64(360));
+    assert_eq!(batch[1], BigUint::from_u64(2));
+    assert_eq!(base.smooth_parts(&[BigUint::from_u64(360)])[0], batch[0]);
+
+    // Smoothness is the predicate: the smooth part equals the value.
+    assert!(batch[0] == BigUint::from_u64(360));
+    assert!(batch[1] != BigUint::from_u64(2 * 11));
 
     let values = [
         BigUint::from_u64(7),
