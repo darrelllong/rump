@@ -405,66 +405,51 @@ fn round_div(numerator: i128, denominator: i128) -> Option<i128> {
 /// needed and none is imposed — a cap here could only turn a correct answer
 /// into a wrong one.
 ///
-/// # Panics
+/// `None` rather than a panic in every rejecting case, so a caller can test
+/// rather than guard: the vectors are linearly dependent (a zero determinant
+/// is not a basis), a weight is not positive, or the arithmetic leaves
+/// `i128`.
 ///
-/// Panics if the two vectors are linearly dependent (a zero determinant is
-/// not a basis), if either weight is not positive, if the basis determinant
-/// overflows `i128`, or if the weighted arithmetic does.
-///
-/// That last bound is a real restriction and tighter than it first looks. The
-/// rounding step forms `2·⟨u,v⟩ + ‖u‖²` over `2‖u‖²`, so it is *twice* the
-/// norm that must be representable, not the norm: the working condition is
+/// That last is a real restriction and tighter than it looks. The rounding
+/// step forms `2·⟨u,v⟩ + ‖u‖²` over `2‖u‖²`, so it is *twice* the norm that
+/// must be representable: the working condition is
 /// `(w₀·x)² + (w₁·y)² < 2¹²⁶` for every vector the reduction visits, which
 /// holds comfortably when each of `|w₀·x|` and `|w₁·y|` stays below `2⁶²`.
-/// A basis whose norms fill `i128` to the top is refused rather than
-/// silently wrapped — a wrapped norm compares wrongly and would return an
+/// A basis whose norms fill `i128` to the top yields `None` rather than a
+/// wrapped answer — a wrapped norm compares wrongly and would return an
 /// unreduced basis with no indication.
 #[must_use]
-pub fn gauss_reduce_weighted(basis: [[i128; 2]; 2], weights: [i128; 2]) -> [[i128; 2]; 2] {
-    assert!(
-        weights[0] > 0 && weights[1] > 0,
-        "a diagonal form needs positive weights"
-    );
+pub fn gauss_reduce_weighted(basis: [[i128; 2]; 2], weights: [i128; 2]) -> Option<[[i128; 2]; 2]> {
+    if weights[0] <= 0 || weights[1] <= 0 {
+        return None;
+    }
     let determinant = basis[0][0]
-        .checked_mul(basis[1][1])
-        .and_then(|a| {
-            basis[0][1]
-                .checked_mul(basis[1][0])
-                .and_then(|b| a.checked_sub(b))
-        })
-        .expect("the basis determinant overflowed i128");
-    assert!(
-        determinant != 0,
-        "a two-dimensional basis needs independent vectors"
-    );
+        .checked_mul(basis[1][1])?
+        .checked_sub(basis[0][1].checked_mul(basis[1][0])?)?;
+    if determinant == 0 {
+        return None;
+    }
 
-    let overflow = "the weighted arithmetic overflowed i128";
     let mut u = basis[0];
     let mut v = basis[1];
-    let mut norm_u = weighted_norm_sq(u, weights).expect(overflow);
-    if norm_u > weighted_norm_sq(v, weights).expect(overflow) {
+    let mut norm_u = weighted_norm_sq(u, weights)?;
+    if norm_u > weighted_norm_sq(v, weights)? {
         core::mem::swap(&mut u, &mut v);
-        norm_u = weighted_norm_sq(u, weights).expect(overflow);
+        norm_u = weighted_norm_sq(u, weights)?;
     }
 
     loop {
         // `norm_u > 0` throughout: the determinant is non-zero, so neither
         // vector is zero, and the weights are positive.
-        let dot = weighted_dot(u, v, weights).expect(overflow);
-        // Distinguished from the norm overflow above: this is the rounding
-        // step, which needs twice the norm to be representable.
-        let q = round_div(dot, norm_u)
-            .expect("the weighted arithmetic overflowed i128 while rounding; norms must fit 2^126");
+        let q = round_div(weighted_dot(u, v, weights)?, norm_u)?;
         let r = [
-            v[0].checked_sub(q.checked_mul(u[0]).expect(overflow))
-                .expect(overflow),
-            v[1].checked_sub(q.checked_mul(u[1]).expect(overflow))
-                .expect(overflow),
+            v[0].checked_sub(q.checked_mul(u[0])?)?,
+            v[1].checked_sub(q.checked_mul(u[1])?)?,
         ];
-        let norm_r = weighted_norm_sq(r, weights).expect(overflow);
+        let norm_r = weighted_norm_sq(r, weights)?;
         if norm_r >= norm_u {
             // `u` is a shortest vector; `r` is reduced against it.
-            return [u, r];
+            return Some([u, r]);
         }
         v = u;
         u = r;
@@ -540,7 +525,7 @@ mod tests {
                 if det(basis) == 0 {
                     continue;
                 }
-                let reduced = gauss_reduce_weighted(basis, weights);
+                let reduced = gauss_reduce_weighted(basis, weights).expect("a valid basis");
 
                 // The reduction returns a basis of the *same* lattice: the
                 // determinant is preserved up to sign.
@@ -588,7 +573,7 @@ mod tests {
             [[65_537, 0], [4_099, 1]],
             [[1024, 0], [37, 1]],
         ] {
-            let reduced = gauss_reduce_weighted(basis, [q, p]);
+            let reduced = gauss_reduce_weighted(basis, [q, p]).expect("a valid basis");
             assert_eq!(det(reduced).abs(), det(basis).abs());
             // Ordered under the metric the caller actually means.
             assert!(
@@ -622,7 +607,7 @@ mod tests {
     #[test]
     fn gauss_reduce_accepts_norms_that_fill_half_the_range() {
         let a = 1i128 << 62;
-        let reduced = gauss_reduce_weighted([[a, a], [a, -a]], [1, 1]);
+        let reduced = gauss_reduce_weighted([[a, a], [a, -a]], [1, 1]).expect("norms fit");
         assert_eq!(det(reduced).abs(), 2 * a * a);
         assert_eq!(
             weighted_norm_sq(reduced[0], [1, 1]).expect("fits"),
@@ -634,32 +619,32 @@ mod tests {
     fn gauss_reduce_leaves_an_already_reduced_basis_alone() {
         // The standard basis is reduced under any weights.
         let basis = [[1i128, 0], [0, 1]];
-        assert_eq!(gauss_reduce_weighted(basis, [1, 1]), [[1, 0], [0, 1]]);
+        assert_eq!(gauss_reduce_weighted(basis, [1, 1]), Some([[1, 0], [0, 1]]));
         // Under a heavy y-weight the x-axis vector is the shorter one.
-        assert_eq!(gauss_reduce_weighted(basis, [1, 100]), [[1, 0], [0, 1]]);
+        assert_eq!(
+            gauss_reduce_weighted(basis, [1, 100]),
+            Some([[1, 0], [0, 1]])
+        );
         // And under a heavy x-weight the order flips.
-        assert_eq!(gauss_reduce_weighted(basis, [100, 1]), [[0, 1], [1, 0]]);
+        assert_eq!(
+            gauss_reduce_weighted(basis, [100, 1]),
+            Some([[0, 1], [1, 0]])
+        );
     }
 
+    /// Every rejection is a `None`, so a caller tests rather than guards.
     #[test]
-    #[should_panic(expected = "independent vectors")]
-    fn gauss_reduce_refuses_a_dependent_pair() {
-        let _ = gauss_reduce_weighted([[2, 4], [1, 2]], [1, 1]);
-    }
-
-    #[test]
-    #[should_panic(expected = "positive weights")]
-    fn gauss_reduce_refuses_a_zero_weight() {
-        let _ = gauss_reduce_weighted([[1, 0], [0, 1]], [1, 0]);
-    }
-
-    #[test]
-    #[should_panic(expected = "overflowed")]
-    fn gauss_reduce_refuses_an_unrepresentable_norm() {
-        // The weighted coordinate squares, so this is past the bound the
-        // documentation names rather than an arbitrary large value.
+    fn gauss_reduce_reports_bad_input_as_none() {
+        // Dependent: the second row is half the first, so no basis.
+        assert!(gauss_reduce_weighted([[2, 4], [1, 2]], [1, 1]).is_none());
+        // A zero or negative weight is not a metric.
+        assert!(gauss_reduce_weighted([[1, 0], [0, 1]], [1, 0]).is_none());
+        assert!(gauss_reduce_weighted([[1, 0], [0, 1]], [-1, 1]).is_none());
+        // Past the range: the weighted coordinate squares.
         let big = 1i128 << 100;
-        let _ = gauss_reduce_weighted([[big, 0], [0, 1]], [1, 1]);
+        assert!(gauss_reduce_weighted([[big, 0], [0, 1]], [1, 1]).is_none());
+        // And a valid basis still comes back.
+        assert!(gauss_reduce_weighted([[1, 0], [0, 1]], [1, 1]).is_some());
     }
 
     fn rows(data: &[&[i64]]) -> Vec<Vec<BigInt>> {

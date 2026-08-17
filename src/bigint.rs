@@ -3446,6 +3446,7 @@ mod tests {
         BigInt, BigUint, MontgomeryCtx, Sign, KARATSUBA_THRESHOLD_LIMBS, SQR_KARATSUBA_MAX_LIMBS,
         SQR_SCHOOLBOOK_MIN_LIMBS, TOOM3_THRESHOLD_LIMBS, UNBALANCED_THRESHOLD_LIMBS,
     };
+    use core::num::NonZeroU64;
 
     fn lcg_next(state: &mut u64) -> u64 {
         *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -3490,7 +3491,9 @@ mod tests {
     fn reciprocal_agrees_with_hardware_division_on_words() {
         let mut state = 0xabcd_ef01_u64;
         for divisor in reciprocal_divisor_corners() {
-            let r = super::Reciprocal::new(divisor);
+            let r = super::Reciprocal::new(
+                NonZeroU64::new(divisor).expect("corner divisors are non-zero"),
+            );
             assert_eq!(r.divisor(), divisor);
             let mut values = vec![0u64, 1, divisor.wrapping_sub(1), divisor, u64::MAX];
             if let Some(next) = divisor.checked_add(1) {
@@ -3503,15 +3506,11 @@ mod tests {
                 let oracle = BigUint::from_u64(value);
                 let (expected_q, expected_r) = oracle.div_rem_u64(divisor);
                 assert_eq!(
-                    r.div_rem_u64(value),
+                    r.div_rem(value),
                     (expected_q.to_u64().expect("word quotient fits"), expected_r),
                     "div_rem_u64({value}) by {divisor}"
                 );
-                assert_eq!(
-                    r.rem_u64(value),
-                    expected_r,
-                    "rem_u64({value}) by {divisor}"
-                );
+                assert_eq!(r.rem(value), expected_r, "rem_u64({value}) by {divisor}");
             }
         }
     }
@@ -3523,7 +3522,9 @@ mod tests {
     fn reciprocal_agrees_with_hardware_division_on_bignums() {
         let mut state = 0x1357_9bdf_u64;
         for divisor in reciprocal_divisor_corners() {
-            let r = super::Reciprocal::new(divisor);
+            let r = super::Reciprocal::new(
+                NonZeroU64::new(divisor).expect("corner divisors are non-zero"),
+            );
             for words in [1usize, 2, 3, 5, 8, 17, 64] {
                 for _ in 0..4 {
                     let value = seeded_biguint(words, &mut state);
@@ -3547,7 +3548,9 @@ mod tests {
     fn reciprocal_rem_euclid_matches_the_signed_oracle() {
         let mut state = 0x2468_ace0_u64;
         for divisor in reciprocal_divisor_corners() {
-            let r = super::Reciprocal::new(divisor);
+            let r = super::Reciprocal::new(
+                NonZeroU64::new(divisor).expect("corner divisors are non-zero"),
+            );
             let mut values = vec![0i64, 1, -1, i64::MAX, i64::MIN];
             for _ in 0..64 {
                 values.push(lcg_next(&mut state) as i64);
@@ -3576,10 +3579,15 @@ mod tests {
         }
     }
 
+    /// Zero is excluded by the argument type, so there is nothing to test at
+    /// run time; this pins that the boundary divisors do build and work.
     #[test]
-    #[should_panic(expected = "division by zero")]
-    fn reciprocal_refuses_a_zero_divisor() {
-        let _ = super::Reciprocal::new(0);
+    fn reciprocal_accepts_the_boundary_divisors() {
+        for d in [1u64, 2, u64::MAX - 1, u64::MAX] {
+            let r = super::Reciprocal::new(NonZeroU64::new(d).expect("non-zero"));
+            assert_eq!(r.divisor(), d);
+            assert_eq!(r.rem(12_345), 12_345 % d);
+        }
     }
 
     fn seeded_biguint(words: usize, state: &mut u64) -> BigUint {
@@ -3767,11 +3775,19 @@ mod tests {
         // The Barrett pair delegates to the same operations.
         let ctx = super::BarrettCtx::new(&BigUint::from_u64(1000)).expect("modulus >= 2");
         assert_eq!(
-            ctx.add_mod(&BigUint::from_u64(999), &BigUint::from_u64(2)),
+            BigUint::mod_add(
+                &BigUint::from_u64(999),
+                &BigUint::from_u64(2),
+                ctx.modulus()
+            ),
             BigUint::from_u64(1)
         );
         assert_eq!(
-            ctx.sub_mod(&BigUint::from_u64(2), &BigUint::from_u64(999)),
+            BigUint::mod_sub(
+                &BigUint::from_u64(2),
+                &BigUint::from_u64(999),
+                ctx.modulus()
+            ),
             BigUint::from_u64(3)
         );
         // from_i64 round-trips both signs into the canonical range.
@@ -3858,8 +3874,8 @@ mod tests {
                     let b = seeded_biguint(words, &mut seed).modulo(&n);
                     let wide = a.mul_ref(&b);
                     assert_eq!(ctx.reduce(&wide), wide.modulo(&n));
-                    assert_eq!(ctx.mul_mod(&a, &b), BigUint::mod_mul(&a, &b, &n));
-                    assert_eq!(ctx.square_mod(&a), BigUint::mod_mul(&a, &a, &n));
+                    assert_eq!(ctx.mod_mul(&a, &b), BigUint::mod_mul(&a, &b, &n));
+                    assert_eq!(ctx.mod_square(&a), BigUint::mod_mul(&a, &a, &n));
                 }
                 // The full-width boundary of the contract: b^2k − 1.
                 let mut edge = BigUint::zero();
@@ -4132,7 +4148,7 @@ mod tests {
         // A deliberately slow reference: square-and-multiply with a full
         // product and a direct division at every step, sharing no code with
         // either context. It exists because `mod_pow` now *delegates* even
-        // moduli to `BarrettCtx::pow_mod` — comparing the two against each
+        // moduli to `BarrettCtx::mod_pow` — comparing the two against each
         // other would be an identity, not a test, and the odd branch's
         // independence (Montgomery) would have quietly become the only
         // real coverage.
@@ -4169,9 +4185,9 @@ mod tests {
                 let expected = reference_pow(&base, &exponent, &n);
                 // Both public routes against the independent ladder.
                 assert_eq!(
-                    ctx.pow_mod(&base, &exponent),
+                    ctx.mod_pow(&base, &exponent),
                     expected,
-                    "BarrettCtx::pow_mod at {words} words, even = {parity_even}"
+                    "BarrettCtx::mod_pow at {words} words, even = {parity_even}"
                 );
                 assert_eq!(
                     mod_pow(&base, &exponent, &n),
@@ -4179,7 +4195,7 @@ mod tests {
                     "mod_pow at {words} words, even = {parity_even}"
                 );
                 assert_eq!(
-                    ctx.pow_mod(&base, &BigUint::zero()),
+                    ctx.mod_pow(&base, &BigUint::zero()),
                     BigUint::one().modulo(&n)
                 );
             }
@@ -4225,7 +4241,7 @@ mod tests {
                     );
                     let ctx = BarrettCtx::new(&modulus).expect("at least 2");
                     assert_eq!(
-                        ctx.pow_mod(&base, &exponent),
+                        ctx.mod_pow(&base, &exponent),
                         expected,
                         "BarrettCtx corner: base {base}, exponent {exponent}, modulus {modulus}"
                     );

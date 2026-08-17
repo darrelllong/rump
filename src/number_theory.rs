@@ -1380,7 +1380,9 @@ pub fn remainder_tree(tree: &ProductTree, modulus: &BigUint) -> Vec<BigUint> {
 /// remaining zero-divisor path is unreachable from here.)
 #[must_use]
 pub fn smooth_parts(values: &[BigUint], primes: &[u64]) -> Vec<BigUint> {
-    SmoothBase::new(primes).smooth_parts(values)
+    SmoothBase::new(primes)
+        .expect("every entry of `primes` must be at least two")
+        .smooth_parts(values)
 }
 
 /// A factor base with its prime product `z` precomputed, so that batches can
@@ -1419,33 +1421,30 @@ pub struct SmoothBase {
 }
 
 impl SmoothBase {
-    /// Precompute the product of `primes`.
+    /// Precompute the product of `primes`, or `None` if any entry is below
+    /// two.
     ///
-    /// # Panics
-    ///
-    /// Panics if any entry is below two. An entry below two is not a prime
-    /// and cannot mean one; `0` in particular would make the product zero and
-    /// report every value fully smooth, which is a silent wrong answer rather
-    /// than a refusal. A *composite* entry is accepted and behaves
-    /// predictably — the algorithm needs the primes to divide the product,
-    /// not the entries to be irreducible — so `4` computes the smooth part
-    /// over `{2}`.
+    /// An entry below two is not a prime and cannot mean one; `0` in
+    /// particular would make the product zero and report every value fully
+    /// smooth, a silent wrong answer rather than a refusal. A *composite*
+    /// entry is accepted and behaves predictably — the algorithm needs the
+    /// primes to divide the product, not the entries to be irreducible — so
+    /// `4` computes the smooth part over `{2}`.
     #[must_use]
-    pub fn new(primes: &[u64]) -> Self {
-        assert!(
-            primes.iter().all(|&p| p >= 2),
-            "every entry of `primes` must be at least two"
-        );
+    pub fn new(primes: &[u64]) -> Option<Self> {
+        if primes.iter().any(|&p| p < 2) {
+            return None;
+        }
         // z = ∏ primes, itself via a product tree for the near-linear cost.
         let prime_values: Vec<BigUint> = primes.iter().map(|&p| BigUint::from_u64(p)).collect();
         let product = match product_tree(&prime_values).root() {
             Some(root) => root.clone(),
             None => BigUint::one(), // no primes: nothing is smooth beyond 1
         };
-        Self {
+        Some(Self {
             primes: primes.to_vec(),
             product,
-        }
+        })
     }
 
     /// The primes this base was built from, in the order given.
@@ -2585,7 +2584,7 @@ pub fn mod_pow(base: &BigUint, exponent: &BigUint, modulus: &BigUint) -> BigUint
     // reduction's and the squaring's advantages do. The context exists for
     // every modulus at least two, which the checks above have established.
     let ctx = BarrettCtx::new(modulus).expect("modulus is at least two here");
-    ctx.pow_mod(base, exponent)
+    ctx.mod_pow(base, exponent)
 }
 
 /// Multiplicative inverse `a^{-1} mod n`, if it exists (*Handbook of Applied
@@ -4635,11 +4634,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "every entry of `primes` must be at least two")]
     fn smooth_base_rejects_a_non_prime_below_two_at_construction() {
-        // The obligation moved to the constructor so it is checked once
-        // rather than per batch; it must still be checked.
-        let _ = super::SmoothBase::new(&[2, 3, 1]);
+        // The obligation is checked once, at construction, and reported as
+        // `None` rather than a panic.
+        assert!(super::SmoothBase::new(&[2, 3, 1]).is_none());
+        assert!(super::SmoothBase::new(&[0]).is_none());
+        assert!(super::SmoothBase::new(&[2, 3, 5]).is_some());
     }
 
     #[test]
@@ -4738,7 +4738,7 @@ mod tests {
         // `f(x) == f(x)` and proves nothing. Every batching is therefore
         // checked against the trial-division oracle instead, which is the
         // only independent answer available.
-        let base = super::SmoothBase::new(&primes);
+        let base = super::SmoothBase::new(&primes).expect("all primes >= 2");
         assert_eq!(base.primes(), &primes[..]);
         for size in [1usize, 2, 3, 7, values.len()] {
             let mut got = Vec::new();
@@ -4756,7 +4756,7 @@ mod tests {
         }
         assert!(base.smooth_parts(&[]).is_empty());
         // An empty base makes nothing smooth beyond the trivial values.
-        let empty = super::SmoothBase::new(&[]);
+        let empty = super::SmoothBase::new(&[]).expect("an empty base is valid");
         assert_eq!(
             empty.smooth_parts(&[BigUint::from_u64(30)]),
             vec![BigUint::one()]

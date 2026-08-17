@@ -44,7 +44,7 @@ enforcing a clean API.
   radix, without producing the digits).
 - **`BarrettCtx`** — fixed-modulus reduction for a modulus of either
   parity (HAC Algorithm 14.42), the complement to the odd-modulus
-  Montgomery domain, with `mul_mod`, `square_mod`, and `pow_mod` built on
+  Montgomery domain, with `mod_mul`, `mod_square`, and `mod_pow` built on
   it.
 - **`PolyZ`, `PolyModP`** — dense univariate polynomials over ℤ and 𝔽ₚ:
   exact and pseudo-division, resultant and discriminant (Bareiss),

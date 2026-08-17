@@ -153,6 +153,7 @@ use rump::{
     BarrettCtx, BigInt, BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Reciprocal,
     Rng, Sign,
 };
+use core::num::NonZeroU64;
 \end{lstlisting}
 
 This manual tracks the development tree (version 0.3.0, untagged, on
@@ -455,10 +456,10 @@ non-negative residue in $[0, d)$ --- what an index into a table requires,
 and what a truncating remainder does not give.
 
 \begin{lstlisting}
-let r = Reciprocal::new(1_000_003);
+let r = Reciprocal::new(NonZeroU64::new(1_000_003).expect("non-zero"));
 assert_eq!(r.divisor(), 1_000_003);
-assert_eq!(r.div_rem_u64(2_000_007), (2, 1));
-assert_eq!(r.rem_u64(2_000_006), 0);
+assert_eq!(r.div_rem(2_000_007), (2, 1));
+assert_eq!(r.rem(2_000_006), 0);
 
 assert_eq!(r.rem_euclid_i64(-1), 1_000_002);
 assert_eq!(r.rem_euclid_i64(-1_000_003), 0);
@@ -544,8 +545,8 @@ q - 2 \;\le\; \hat q \;\le\; q \;=\; \left\lfloor \frac{x}{n} \right\rfloor,
 so $x - \hat q\,n$ lies in $[0, 3n)$ and at most two conditional
 subtractions finish the reduction.
 
-\code{mul\_mod}, \code{square\_mod}, and \code{pow\_mod} are built on
-\code{reduce}. \code{pow\_mod} is left-to-right binary exponentiation
+\code{mod\_mul}, \code{mod\_square}, and \code{mod\_pow} are built on
+\code{reduce}. \code{mod\_pow} is left-to-right binary exponentiation
 (Knuth, \S4.6.3) with the accumulator seeded from the exponent's top set
 bit --- one squaring per remaining exponent bit and one multiplication per
 remaining set bit, each followed by a reduction. $0^0 = 1$ by the usual
@@ -555,7 +556,7 @@ convention.
 let even = BigUint::from_u64(1_000);
 let ctx = BarrettCtx::new(&even).expect("modulus is at least 2");
 assert_eq!(
-    ctx.mul_mod(&BigUint::from_u64(123), &BigUint::from_u64(456)),
+    ctx.mod_mul(&BigUint::from_u64(123), &BigUint::from_u64(456)),
     BigUint::from_u64(88) // 56 088 mod 1000
 );
 \end{lstlisting}
@@ -1155,7 +1156,7 @@ assert_eq!(parts[0], BigUint::from_u64(360));
 assert_eq!(parts[1], BigUint::from_u64(2));
 
 // The same answers with the product hoisted, in batches of any size.
-let base = SmoothBase::new(&primes);
+let base = SmoothBase::new(&primes).expect("entries at least two");
 assert_eq!(base.primes(), &[2, 3, 5, 7]);
 assert_eq!(base.smooth_parts(&values), parts);
 assert_eq!(base.smooth_parts(&values[..1])[0], parts[0]);
@@ -1377,7 +1378,7 @@ inverse hoisted out of the loop --- and skipped entirely for a monic
 divisor; \code{rem} runs the same loop without quotient bookkeeping, the
 form the gcd descent wants), \code{gcd} (Euclid on remainders, result
 returned monic --- over a field the gcd is unique only up to a unit),
-\code{make\_monic}, and \code{pow\_mod} (binary exponentiation with a
+\code{make\_monic}, and \code{mod\_pow} (binary exponentiation with a
 polynomial reduction after every step, the primitive behind the Frobenius
 computations below).
 
@@ -1419,7 +1420,7 @@ x^{p^d} - x \;=\; \prod_{\substack{h \text{ monic irreducible}\\ \deg h \,\mid\,
 \end{equation}
 so $\gcd\bigl(f,\; x^{p^d} - x\bigr)$ extracts from a squarefree $f$ the
 product of its irreducible factors of degree dividing $d$. Computing
-$x^{p^d} \bmod f$ is $d$ Frobenius steps by \code{pow\_mod}; sweeping
+$x^{p^d} \bmod f$ is $d$ Frobenius steps by \code{mod\_pow}; sweeping
 $d = 1, 2, \ldots$ splits $f$ into blocks of equal-degree factors.
 
 \paragraph{Equal-degree splitting (Cantor--Zassenhaus).} A block $f$ of
@@ -1698,13 +1699,13 @@ twice the norm, so the working bound is that norms fit $2^{126}$.
 
 \begin{lstlisting}
 // A skew-12 lattice, reduced under the matching diagonal form.
-let reduced = gauss_reduce_weighted([[1024, 0], [37, 1]], [1, 12]);
+let reduced = gauss_reduce_weighted([[1024, 0], [37, 1]], [1, 12]).expect("valid");
 let det = |b: [[i128; 2]; 2]| b[0][0] * b[1][1] - b[0][1] * b[1][0];
 assert_eq!(det(reduced).abs(), det([[1024, 0], [37, 1]]).abs());
 
 // Weights reorder what counts as short.
-assert_eq!(gauss_reduce_weighted([[1, 0], [0, 1]], [100, 1]), [[0, 1], [1, 0]]);
-assert_eq!(gauss_reduce_weighted([[1, 0], [0, 1]], [1, 100]), [[1, 0], [0, 1]]);
+assert_eq!(gauss_reduce_weighted([[1, 0], [0, 1]], [100, 1]), Some([[0, 1], [1, 0]]));
+assert_eq!(gauss_reduce_weighted([[1, 0], [0, 1]], [1, 100]), Some([[1, 0], [0, 1]]));
 \end{lstlisting}
 
 \section{Random sampling}

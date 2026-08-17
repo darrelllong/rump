@@ -201,30 +201,13 @@ impl BarrettCtx {
         CORRECTIONS.with(std::cell::Cell::get)
     }
 
-    /// `(a + b) mod n` — the additive counterpart of [`Self::mul_mod`], so a
-    /// caller holding a context need not reach past it for one operation.
-    /// `μ` plays no part: [`BigUint::mod_add`] reduces the operands and then
-    /// corrects the sum by at most one subtraction, since a sum of two
-    /// residues is below `2n`.
-    #[must_use]
-    pub fn add_mod(&self, a: &BigUint, b: &BigUint) -> BigUint {
-        BigUint::mod_add(a, b, &self.modulus)
-    }
-
-    /// `(a − b) mod n`, through [`BigUint::mod_sub`]: the wrap adds the
-    /// modulus back rather than borrowing, ℕ having no negative values.
-    #[must_use]
-    pub fn sub_mod(&self, a: &BigUint, b: &BigUint) -> BigUint {
-        BigUint::mod_sub(a, b, &self.modulus)
-    }
-
     /// `(a · b) mod n`: both operands reduced, then the double-width product
     /// reduced again. Three [`Self::reduce`] calls, of which the first two
     /// collapse to a comparison and a copy when the operands already lie in
     /// `[0, n)` — the case in an exponentiation loop, where every operand is
     /// a previous result.
     #[must_use]
-    pub fn mul_mod(&self, a: &BigUint, b: &BigUint) -> BigUint {
+    pub fn mod_mul(&self, a: &BigUint, b: &BigUint) -> BigUint {
         let a = self.reduce(a);
         let b = self.reduce(b);
         self.reduce(&a.mul_ref(&b))
@@ -236,7 +219,7 @@ impl BarrettCtx {
     /// Montgomery domain's [`MontgomeryCtx::square_mont`](super::MontgomeryCtx::square_mont) goes further
     /// still, fusing the reduction into the kernel.
     #[must_use]
-    pub fn square_mod(&self, a: &BigUint) -> BigUint {
+    pub fn mod_square(&self, a: &BigUint) -> BigUint {
         let a = self.reduce(a);
         self.reduce(&a.square_ref())
     }
@@ -253,7 +236,7 @@ impl BarrettCtx {
     /// Variable-time, like the rest of the crate: a clear exponent bit skips
     /// its multiplication.
     #[must_use]
-    pub fn pow_mod(&self, base: &BigUint, exponent: &BigUint) -> BigUint {
+    pub fn mod_pow(&self, base: &BigUint, exponent: &BigUint) -> BigUint {
         if exponent.is_zero() {
             return self.reduce(&BigUint::one());
         }

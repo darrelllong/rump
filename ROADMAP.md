@@ -59,7 +59,7 @@ them remains subject to the joint triage.
    capped at the crossover cost. Both engines' non-residue scans are
    bounded, so composite moduli — odd squares included — yield None.
 9. **Barrett reduction context** — completed 2026-08-14. `BarrettCtx`
-   (HAC 14.42/14.44) for either parity: reduce/mul_mod/square_mod/pow_mod.
+   (HAC 14.42/14.44) for either parity: reduce/mod_mul/mod_square/mod_pow.
    The second product is HAC Note 14.45(ii)'s exact half-product as of
    2026-08-17, taken up to a measured 32 kbit: against a plain division
    `reduce` reads 1.4× at 512 bits, 1.26× at 1024 and 1.31× at 8192, where

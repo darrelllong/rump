@@ -7,6 +7,19 @@ what a consumer must change, not everything that moved.
 
 ### Breaking
 
+- **`BarrettCtx::add_mod` and `sub_mod` are gone; the rest of the family is
+  renamed to the crate's `mod_*` order.** `add_mod`/`sub_mod` were one-line
+  forwarders to `BigUint::mod_add`/`mod_sub` — the same operation under the
+  same two words in the opposite order, and `μ` plays no part in modular
+  addition. Call `BigUint::mod_add(a, b, ctx.modulus())`. The operations that
+  do use the context are now `mod_mul`, `mod_square`, and `mod_pow`, matching
+  `BigUint::mod_mul` and the free `mod_pow` rather than inverting them.
+- **No public function added in 0.3.0 panics on bad input; they return
+  `Option`.** `Reciprocal::new`, `SmoothBase::new`, and
+  `gauss_reduce_weighted` report a zero divisor, an entry below two, and a
+  dependent basis / non-positive weight / out-of-range norm as `None`, which
+  is what `BarrettCtx::new` and `MontgomeryCtx::new` already did. The
+  pre-existing panicking surface is unchanged in this release.
 - **`product_tree` and `remainder_tree` take and return a typed
   `ProductTree`.** Previously:
 
@@ -42,7 +55,7 @@ what a consumer must change, not everything that moved.
 
 - **`Reciprocal`** — division by a `u64` divisor that does not change, with
   the reciprocal precomputed once (Möller & Granlund, IEEE ToC 60 (2011),
-  Algorithm 4). `rem_u64`, `div_rem_u64`, `rem_euclid_i64`, and
+  Algorithm 4). `rem`, `div_rem`, `rem_euclid_i64`, and
   `BigUint::rem_reciprocal` / `div_rem_reciprocal` for multi-limb dividends.
   Worth reaching for at two limbs and above; measured *slower* than the
   hardware divide for word-sized dividends on Apple silicon, and the module

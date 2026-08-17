@@ -4,6 +4,7 @@
 //! `cargo test`; this file is that promise. When an example changes, change
 //! it in both places — a drifted manual fails here.
 
+use core::num::NonZeroU64;
 use rump::{
     crt_combine, gauss_reduce_weighted, gcd, gcd_extended, gcd_u64, is_probable_prime,
     is_probable_prime_bpsw, is_probable_prime_with_bases, is_strong_lucas_probable_prime, jacobi,
@@ -42,11 +43,11 @@ fn manual_barrett_contexts() {
     let even = BigUint::from_u64(1_000);
     let ctx = BarrettCtx::new(&even).expect("modulus is at least 2");
     assert_eq!(
-        ctx.mul_mod(&BigUint::from_u64(123), &BigUint::from_u64(456)),
+        ctx.mod_mul(&BigUint::from_u64(123), &BigUint::from_u64(456)),
         BigUint::from_u64(88) // 56 088 mod 1000
     );
     assert_eq!(
-        ctx.pow_mod(&BigUint::from_u64(7), &BigUint::from_u64(13)),
+        ctx.mod_pow(&BigUint::from_u64(7), &BigUint::from_u64(13)),
         mod_pow(&BigUint::from_u64(7), &BigUint::from_u64(13), &even)
     );
 }
@@ -466,19 +467,22 @@ fn manual_bulk_primes_word_division_estimates() {
 
 #[test]
 fn manual_division_by_an_invariant_divisor() {
-    let r = Reciprocal::new(1_000_003);
+    // Non-zero is the whole precondition, so the type carries it: there is no
+    // error case left for the caller to handle.
+    let r = Reciprocal::new(NonZeroU64::new(1_000_003).expect("literal is non-zero"));
     assert_eq!(r.divisor(), 1_000_003);
 
-    // The same answers as the hardware-division path.
-    assert_eq!(r.div_rem_u64(2_000_007), (2, 1));
-    assert_eq!(r.rem_u64(2_000_006), 0);
+    // The same answers as the hardware-division path. Note the argument roles:
+    // `BigUint::rem_u64` takes the divisor, `Reciprocal::rem` takes the dividend.
+    assert_eq!(r.div_rem(2_000_007), (2, 1));
+    assert_eq!(r.rem(2_000_006), 0);
 
     // Non-negative residues for signed positions.
     assert_eq!(r.rem_euclid_i64(1_000_005), 2);
     assert_eq!(r.rem_euclid_i64(-1), 1_000_002);
     assert_eq!(r.rem_euclid_i64(-1_000_003), 0);
 
-    // Multi-limb dividends go through the same kernel.
+    // Multi-limb dividends go through the same kernel, and are where it wins.
     let n = BigUint::from_u128(340_282_366_920_938_463_463_374_607_431_768_211_455);
     assert_eq!(n.rem_reciprocal(&r), n.rem_u64(1_000_003));
     assert_eq!(n.div_rem_reciprocal(&r).0, n.div_rem_u64(1_000_003).0);
@@ -509,7 +513,7 @@ fn manual_batch_smoothness() {
     assert_eq!(parts[0], BigUint::from_u64(360));
     assert_eq!(parts[1], BigUint::from_u64(2));
 
-    let base = SmoothBase::new(&primes_below(10));
+    let base = SmoothBase::new(&primes_below(10)).expect("every entry is at least two");
     assert_eq!(base.primes(), &[2, 3, 5, 7]);
 
     // The same answers as the free function, in batches of the caller's choosing.
@@ -777,7 +781,7 @@ fn manual_lattice() {
     assert_eq!(basis, vec![row(&[1, 32]), row(&[40, 1])]);
 
     // A skew-12 lattice, reduced under the matching diagonal form.
-    let reduced = gauss_reduce_weighted([[1024, 0], [37, 1]], [1, 12]);
+    let reduced = gauss_reduce_weighted([[1024, 0], [37, 1]], [1, 12]).expect("a valid basis");
     // Same lattice: the determinant is preserved up to sign.
     let det = |b: [[i128; 2]; 2]| b[0][0] * b[1][1] - b[0][1] * b[1][0];
     assert_eq!(det(reduced).abs(), det([[1024, 0], [37, 1]]).abs());
@@ -786,11 +790,11 @@ fn manual_lattice() {
     // y-axis vector wins, and under a heavy y-weight the x-axis vector does.
     assert_eq!(
         gauss_reduce_weighted([[1, 0], [0, 1]], [100, 1]),
-        [[0, 1], [1, 0]]
+        Some([[0, 1], [1, 0]])
     );
     assert_eq!(
         gauss_reduce_weighted([[1, 0], [0, 1]], [1, 100]),
-        [[1, 0], [0, 1]]
+        Some([[1, 0], [0, 1]])
     );
 }
 

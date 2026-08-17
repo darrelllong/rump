@@ -34,6 +34,7 @@
 //! word and multi-limb paths are the same kernel rather than two.
 
 use super::BigUint;
+use core::num::NonZeroU64;
 
 /// A `u64` divisor with its reciprocal precomputed, for division repeated
 /// enough times that the setup is free.
@@ -76,12 +77,12 @@ pub struct Reciprocal {
 impl Reciprocal {
     /// Precompute the reciprocal of `divisor`.
     ///
-    /// # Panics
-    ///
-    /// Panics if `divisor` is zero.
+    /// Total: non-zero is the entire precondition, so it is carried by
+    /// [`NonZeroU64`] rather than reported as a panic or as an unexplained
+    /// `None`. There is no failure left for the return type to describe.
     #[must_use]
-    pub fn new(divisor: u64) -> Self {
-        assert!(divisor != 0, "division by zero");
+    pub fn new(divisor: NonZeroU64) -> Self {
+        let divisor = divisor.get();
         let shift = divisor.leading_zeros();
         let normalized = divisor << shift;
         // `u128::MAX` is `2¹²⁸ − 1`; forming `2¹²⁸` directly would overflow.
@@ -161,9 +162,13 @@ impl Reciprocal {
     }
 
     /// `value mod divisor`, discarding the quotient.
+    ///
+    /// Not `rem_u64`: [`BigUint::rem_u64`] takes the *divisor* as its `u64`,
+    /// and this takes the *dividend*. One name for two argument roles is a
+    /// trap, so the divisor-carrying type spells it without the suffix.
     #[inline]
     #[must_use]
-    pub fn rem_u64(&self, value: u64) -> u64 {
+    pub fn rem(&self, value: u64) -> u64 {
         // Directly, not through `rem_limbs`: a one-word dividend is one
         // `div2by1`, and routing it through the slice loop was measurably
         // worse on the path where this type is already behind the hardware.
@@ -172,10 +177,10 @@ impl Reciprocal {
         self.div2by1(high, low).1 >> self.shift
     }
 
-    /// `(value / divisor, value mod divisor)`.
+    /// `(value / divisor, value mod divisor)`. See [`Self::rem`] on the name.
     #[inline]
     #[must_use]
-    pub fn div_rem_u64(&self, value: u64) -> (u64, u64) {
+    pub fn div_rem(&self, value: u64) -> (u64, u64) {
         let high = self.normalized_limb(&[value], 1);
         let low = self.normalized_limb(&[value], 0);
         let (quotient, remainder) = self.div2by1(high, low);
@@ -191,7 +196,7 @@ impl Reciprocal {
     #[inline]
     #[must_use]
     pub fn rem_euclid_i64(&self, value: i64) -> u64 {
-        let magnitude = self.rem_u64(value.unsigned_abs());
+        let magnitude = self.rem(value.unsigned_abs());
         if value < 0 && magnitude != 0 {
             self.divisor - magnitude
         } else {
