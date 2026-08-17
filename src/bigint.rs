@@ -56,7 +56,7 @@ const TOOM4_THRESHOLD_LIMBS: usize = 3072;
 // digits and multiplying each pair through the balanced kernels beats one
 // flat schoolbook pass. This is deliberately far above the Karatsuba
 // crossover: at 32-limb digits each block is only marginally sub-quadratic
-// while the per-block dispatch, allocation, and scrub overhead is paid in
+// while the per-block dispatch and allocation overhead is paid in
 // full. Measured on M4 (`unbalanced_crossover_timing`): the decomposition
 // loses 2x at 32-limb digits, breaks even near 128, still trails slightly
 // at 192, and wins 25-35% at 256 rising toward 2x at 512. Set at the first
@@ -186,15 +186,6 @@ impl Clone for BigUint {
     /// allocate a fresh one, which is the cost this type exists to avoid on
     /// its cheapest operations.
     fn clone_from(&mut self, source: &Self) {
-        // Scrub the limbs this copy abandons before the truncation strands
-        // them: `Drop` covers only the initialized prefix, and the crate
-        // promises that values do not linger. The volatile scrub, not a
-        // plain fill — stores to memory nothing can legally read again are
-        // stores the optimizer may otherwise delete.
-        let n = source.limbs.len();
-        if self.limbs.len() > n {
-            crate::scrub::zeroize_slice(&mut self.limbs[n..]);
-        }
         self.limbs.clone_from(&source.limbs);
     }
 }
@@ -396,11 +387,9 @@ impl BigUint {
     /// consumer that already owns the [`BigUint`] mutate the buffer in place
     /// rather than copying it, as [`Gf2m::reduce`](crate::gf2m::Gf2m) does).
     ///
-    /// The buffer is extracted with `mem::take` because [`BigUint`]
-    /// implements [`Drop`] (the scrub) and a plain field move is forbidden;
-    /// the drop that follows scrubs the empty vector. The live buffer's
-    /// scrub-on-drop guarantee travels with the caller, who is expected to
-    /// hand the buffer back to [`Self::from_limbs`].
+    /// The buffer is extracted with `mem::take`, leaving an empty vector
+    /// behind; the caller is expected to hand it back to
+    /// [`Self::from_limbs`].
     pub(crate) fn into_limbs(mut self) -> Vec<u64> {
         core::mem::take(&mut self.limbs)
     }
@@ -488,15 +477,14 @@ impl BigUint {
         if self.is_zero() {
             return "0".to_string();
         }
-        let digits = if radix.is_power_of_two() {
+        if radix.is_power_of_two() {
             self.to_digits_pow2(radix)
         } else {
             self.to_digits_dc(radix)
-        };
-        digits
-            .iter()
-            .map(|&d| char::from(RADIX_DIGITS[usize::from(d)]))
-            .collect()
+        }
+        .iter()
+        .map(|&d| char::from(RADIX_DIGITS[usize::from(d)]))
+        .collect()
     }
 
     /// The largest power of `radix` that fits a `u64`, with its digit count —
@@ -1284,13 +1272,8 @@ impl BigUint {
         } else {
             (rhs, lhs)
         };
-        // Shape the buffer to the working width. Any tail beyond it is
-        // scrubbed (volatile, as in `Drop`) before the shrink strands it —
-        // `Drop` covers only the initialized prefix.
+        // Shape the buffer to the working width.
         let n = long.limbs.len();
-        if self.limbs.len() > n {
-            crate::scrub::zeroize_slice(&mut self.limbs[n..]);
-        }
         self.limbs.resize(n, 0);
         let mut carry = 0u128;
         for i in 0..n {
@@ -1323,13 +1306,8 @@ impl BigUint {
     /// Panics if `lhs < rhs`.
     pub fn sub_into(&mut self, lhs: &Self, rhs: &Self) {
         assert!(lhs.cmp(rhs) != Ordering::Less, "BigUint underflow");
-        // Shape the buffer as in `add_into`, scrubbing any abandoned
-        // tail before it shrinks. The normalize below pops only zeros, so
-        // the shrink it performs strands nothing.
+        // Shape the buffer as in `add_into`.
         let n = lhs.limbs.len();
-        if self.limbs.len() > n {
-            crate::scrub::zeroize_slice(&mut self.limbs[n..]);
-        }
         self.limbs.resize(n, 0);
         let mut borrow = 0u128;
         for i in 0..n {
@@ -2182,13 +2160,7 @@ impl BigUint {
         }
         let limb_shifts = n / 64;
         let bit_shifts = n % 64;
-        // Full-limb shift: prepend zeros at the low (index 0) end. The
-        // displaced buffer is dropped unscrubbed, deliberately: this sits on
-        // the recomposition path of every Karatsuba and Toom multiplication,
-        // and scrubbing it here was measured at 3-5% on large balanced
-        // products (an extra full write pass per shift). That keeps it
-        // within the crate's stated scope — buffers freed on reallocation
-        // are not wiped.
+        // Full-limb shift: prepend zeros at the low (index 0) end.
         if limb_shifts > 0 {
             let mut new_limbs = vec![0u64; limb_shifts];
             new_limbs.extend_from_slice(&self.limbs);
@@ -2223,12 +2195,7 @@ impl BigUint {
         let bit_shifts = (n % 64) as u32;
 
         if limb_shifts >= self.limbs.len() {
-            // Everything shifts out. Wipe rather than truncate so the old
-            // limbs do not linger beyond the vector's length. A volatile
-            // scrub, not a plain `fill(0)`: the store is immediately followed
-            // by `clear`, so an ordinary write to memory about to leave the
-            // slice is exactly the dead store the optimizer may elide.
-            crate::scrub::zeroize_slice(self.limbs.as_mut_slice());
+            // Everything shifts out.
             self.limbs.clear();
             return;
         }
@@ -2238,7 +2205,6 @@ impl BigUint {
         if limb_shifts > 0 {
             let kept = self.limbs.len() - limb_shifts;
             self.limbs.copy_within(limb_shifts.., 0);
-            crate::scrub::zeroize_slice(&mut self.limbs[kept..]);
             self.limbs.truncate(kept);
         }
 
@@ -2857,15 +2823,6 @@ impl core::ops::SubAssign<&BigInt> for BigInt {
     }
 }
 
-impl Drop for BigUint {
-    fn drop(&mut self) {
-        // BigUint values may hold secrets — private exponents, prime
-        // factors, nonces. Clear the limb buffer on drop so they do not
-        // linger in freed heap memory.
-        crate::scrub::zeroize_slice(self.limbs.as_mut_slice());
-    }
-}
-
 /// The low 64 bits of a `u128` accumulator as a limb. Every kernel here
 /// accumulates in `u128` and splits the result into a stored limb and a
 /// carry; this is the stored half, written as a masked `try_from` so the
@@ -3150,10 +3107,7 @@ impl BigInt {
                 self.sign = sign;
             }
             Ordering::Equal => {
-                // Scrub before clearing: `Drop` covers only the initialized
-                // prefix, and these limbs may be Bézout coefficients of
-                // secret operands. The capacity is kept for reuse.
-                crate::scrub::zeroize_slice(self.magnitude.limbs.as_mut_slice());
+                // The capacity is kept for reuse.
                 self.magnitude.limbs.clear();
                 self.sign = Sign::Zero;
             }
@@ -4724,64 +4678,6 @@ mod tests {
     fn sub_into_panics_on_underflow() {
         let mut out = BigUint::zero();
         out.sub_into(&BigUint::from_u64(3), &BigUint::from_u64(5));
-    }
-
-    /// The verification counterpart of the crate's audited scrub
-    /// exception: reading a buffer's abandoned tail cannot be expressed in
-    /// safe Rust, so proving the shrink paths scrub it requires one raw
-    /// read-back. Confined to this test; the pointers are captured while
-    /// the limbs are live and the buffer's identity is asserted unchanged
-    /// before each read.
-    #[test]
-    #[allow(unsafe_code)]
-    fn shrinking_paths_scrub_abandoned_limbs() {
-        let read8 =
-            |p: *const u64| -> Vec<u64> { (0..8).map(|i| unsafe { p.add(i).read() }).collect() };
-        let wide = BigUint {
-            limbs: vec![0xdead_beef_0bad_cafe; 8],
-        };
-        let narrow = BigUint::from_u64(1);
-
-        let mut x = wide.clone();
-        let p = x.limbs.as_ptr();
-        x.clone_from(&narrow);
-        assert_eq!(x.limbs.as_ptr(), p, "clone_from reuses the buffer");
-        assert!(
-            read8(p)[1..].iter().all(|&w| w == 0),
-            "clone_from stranded live limbs"
-        );
-
-        let mut out = wide.clone();
-        let p = out.limbs.as_ptr();
-        out.add_into(&narrow, &narrow);
-        assert_eq!(out.limbs.as_ptr(), p, "add_into reuses the buffer");
-        assert!(
-            read8(p)[1..].iter().all(|&w| w == 0),
-            "add_into stranded live limbs"
-        );
-
-        let mut out2 = wide.clone();
-        let p = out2.limbs.as_ptr();
-        out2.sub_into(&narrow, &narrow);
-        assert_eq!(out2.limbs.as_ptr(), p, "sub_into reuses the buffer");
-        assert!(
-            read8(p).iter().all(|&w| w == 0),
-            "sub_into stranded live limbs"
-        );
-
-        let a = BigInt::from_parts(Sign::Positive, wide.clone());
-        let mut z = a.clone();
-        let p = z.magnitude.limbs.as_ptr();
-        z.sub_assign_ref(&a);
-        assert_eq!(
-            z.magnitude.limbs.as_ptr(),
-            p,
-            "cancellation keeps the buffer"
-        );
-        assert!(
-            read8(p).iter().all(|&w| w == 0),
-            "cancellation stranded live limbs"
-        );
     }
 
     #[test]

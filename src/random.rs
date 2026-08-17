@@ -5,7 +5,6 @@
 //! source. Cryptographic callers must supply a CSPRNG (the parent
 //! cryptography crate bridges its DRBGs here); simulations may supply any
 //! deterministic generator. Temporary buffers holding drawn bytes are wiped
-//! before release, matching the crate's scrubbing discipline.
 //!
 //! Every sampler here is a rejection sampler: it draws from an enclosing set
 //! that is easy to sample and discards draws outside the target set. This
@@ -106,7 +105,7 @@ pub trait RandomSource {
 /// the bound's own bit length the bound is at least `2^(bits−1)`, so the
 /// acceptance probability is at least one half and the expected number of
 /// draws is at most two, with equality exactly when the bound is a power of
-/// two. The buffer is scrubbed after each candidate is decoded.
+/// two.
 ///
 /// # Panics
 ///
@@ -138,7 +137,6 @@ pub fn random_below<R: RandomSource + ?Sized>(
         // draws is at most 2.
         bytes[0] &= top_mask;
         let candidate = BigUint::from_be_bytes(&bytes);
-        crate::scrub::zeroize_slice(bytes.as_mut_slice());
         if candidate < *upper_exclusive {
             return Some(candidate);
         }
@@ -344,7 +342,6 @@ pub fn random_probable_prime<R: RandomSource + ?Sized>(
         bytes[last] |= 1;
 
         let candidate = BigUint::from_be_bytes(&bytes);
-        crate::scrub::zeroize_slice(bytes.as_mut_slice());
         if last_rejected.as_ref() == Some(&candidate) {
             // Known composite from the previous round: count the stall and
             // skip the screen it already failed.

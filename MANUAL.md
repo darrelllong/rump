@@ -42,13 +42,10 @@ use rump::{BigInt, BigUint, Sign};
 
 Two properties define the intended use. Operations are **variable-time** (do
 not use them where timing must not leak secrets), and rump is **for non-secret
-data — not a secret-scrubbing or constant-time type**. As cheap defense in
-depth every `BigUint` volatile-wipes its live limbs on drop and the
-exponentiation ladder wipes its workspaces on exit; that is the extent of it
-(spare capacity and buffers freed on reallocation are not wiped, the in-domain
-`mul_mont` / `square_mont` keep their scratch, and `Debug` prints every limb).
-Cryptographic memory hygiene and constant-time operation are out of scope,
-left to a consumer that handles key material.
+data — not a secret-scrubbing or constant-time type**. Nothing is wiped:
+values live in ordinary heap buffers, freed memory keeps its contents, and
+`Debug` prints every limb. Cryptographic memory hygiene and constant-time
+operation are out of scope, left to a consumer that handles key material.
 
 ## BigUint
 
@@ -328,7 +325,7 @@ zero below positives), so `<`, `.max()`, and `slice::sort` all apply.
 Arithmetic never does: rump does not overload `+` or `*`, so every
 multiprecision operation is an explicit method call (`add`, `mul`,
 `negated`, …) and therefore visible in the code that pays for it. Values move
-without copying; `Clone` duplicates the limbs; every value volatile-wipes its
+without copying; `Clone` duplicates the limbs;
 live limbs on drop as defense in depth (see the scope note above).
 
 A complete example — a bubble sort of signed integers, written exactly as it
@@ -404,7 +401,7 @@ operations, allocating it once instead of per multiply — measured
 per-operation at about 43% for a 64-bit modulus, roughly 25–33% at 256
 bits, and ~20% at 512, falling to 2–3% at 2048 bits and to the edge of measurement
 (~1%) at 4096 (the in-tree `mont_workspace_timing` probe reproduces the
-numbers with its per-pass spread printed). The workspace holds unscrubbed
+numbers with its per-pass spread printed). The workspace holds
 intermediates, exactly as the discarded per-call buffer does.
 
 ```rust

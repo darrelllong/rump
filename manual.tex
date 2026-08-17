@@ -113,13 +113,11 @@ operands. Do not use rump where timing must not leak secrets.
 \end{contract}
 
 \begin{contract}[Non-secret data]
-rump is not a secret-scrubbing or constant-time library. As inexpensive
-defense in depth, every \code{BigUint} volatile-wipes its live limbs on drop
-and the Montgomery exponentiation ladder wipes its workspaces on exit; that
-is the extent of it. Spare capacity and buffers freed on reallocation are not
-wiped, and \code{Debug} prints every limb. A consumer handling key material
-must add cryptographic memory hygiene at its own layer.
-\end{contract}
+rump is not a secret-scrubbing or constant-time library. Nothing is wiped:
+values live in ordinary heap buffers, freed memory keeps its contents, and
+\code{Debug} prints every limb. Cryptographic memory hygiene and
+constant-time operation are out of scope, left to the consumer that handles
+key material.
 
 The crate is supported on 64-bit targets only: the limb layout and the index
 arithmetic that sizes it assume a 64-bit \code{usize}. This is enforced rather
@@ -618,7 +616,7 @@ per-operation at about 43\% for a 64-bit modulus, roughly 25--33\% at
 256 bits, and roughly 20\% at 512, falling to 2--3\% at 2048 bits and to the edge
 of measurement ($\sim$1\%) at 4096; the in-tree
 \code{mont\_workspace\_timing} probe reproduces the numbers, printing
-its per-pass spread. The workspace holds unscrubbed intermediates,
+its per-pass spread. The workspace holds intermediates,
 exactly as the discarded per-call buffer does. The exponentiation ladder has two engines, chosen by exponent
 width: above 64 bits, left-to-right $k$-ary with a fixed 4-bit window table
 held in the domain (HAC Algorithm~14.82), seeded from the top window; at 64

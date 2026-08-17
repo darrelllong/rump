@@ -324,7 +324,6 @@ impl MontgomeryContext {
         // The ladder runs on fixed-width buffers with a swap after each step,
         // so the whole exponentiation performs no allocation and no
         // intermediate wipes; every buffer that touched secret-derived state
-        // is scrubbed once, on exit.
         let mut acc = vec![0u64; width];
         let mut tmp = vec![0u64; width];
 
@@ -355,7 +354,6 @@ impl MontgomeryContext {
                 }
             }
 
-            crate::scrub::zeroize_slice(&mut power);
             debug_assert!(seeded, "bits counts up to a set bit");
             acc
         } else {
@@ -432,7 +430,6 @@ impl MontgomeryContext {
                 }
             }
 
-            crate::scrub::zeroize_slice(&mut table);
             acc
         };
 
@@ -443,7 +440,6 @@ impl MontgomeryContext {
         copy_padded(&mut tmp, &acc);
         mont_redc(&mut acc, modulus, self.n0_inv, &mut tmp);
 
-        crate::scrub::zeroize_slice(&mut tmp);
         let mut result = BigUint { limbs: acc };
         result.normalize();
         result
@@ -517,9 +513,7 @@ impl MontgomeryContext {
     #[must_use]
     pub fn encode(&self, value: &BigUint) -> BigUint {
         let mut workspace = Vec::new();
-        let result = self.encode_with_workspace(value, &mut workspace);
-        crate::scrub::zeroize_slice(workspace.as_mut_slice());
-        result
+        self.encode_with_workspace(value, &mut workspace)
     }
 
     /// Convert a Montgomery residue back to the ordinary representation.
@@ -537,9 +531,7 @@ impl MontgomeryContext {
             value.clone()
         };
         let mut workspace = Vec::new();
-        let result = self.decode_with_workspace(&reduced, &mut workspace);
-        crate::scrub::zeroize_slice(workspace.as_mut_slice());
-        result
+        self.decode_with_workspace(&reduced, &mut workspace)
     }
 
     /// Multiply two ordinary residues modulo the context modulus — the
@@ -561,9 +553,7 @@ impl MontgomeryContext {
             self.n0_inv,
             &mut workspace,
         );
-        let result = self.decode_with_workspace(&product_mont, &mut workspace);
-        crate::scrub::zeroize_slice(workspace.as_mut_slice());
-        result
+        self.decode_with_workspace(&product_mont, &mut workspace)
     }
 
     /// Square one ordinary residue modulo the context modulus — the one-shot
@@ -583,9 +573,7 @@ impl MontgomeryContext {
             self.n0_inv,
             &mut workspace,
         );
-        let result = self.decode_with_workspace(&square_mont, &mut workspace);
-        crate::scrub::zeroize_slice(workspace.as_mut_slice());
-        result
+        self.decode_with_workspace(&square_mont, &mut workspace)
     }
 
     /// Multiply two residues that are **already in Montgomery form**, staying
@@ -601,13 +589,6 @@ impl MontgomeryContext {
     /// [`Self::encode`] and returned by the domain operations themselves. The
     /// single conditional subtraction in the reduction relies on it; debug
     /// builds assert it.
-    ///
-    /// Unlike [`Self::mul`]/[`Self::pow`] this does **not** scrub its
-    /// workspace: it is the innermost field-multiply, called in tight loops.
-    /// Memory scrubbing is out of scope for this variable-time crate (see the
-    /// crate-level note); the product `BigUint` is wiped by its own `Drop`
-    /// regardless, and callers who want the scratch wiped can route through
-    /// [`Self::mul`], whose encode/decode path already does.
     ///
     /// # Panics
     ///
@@ -647,9 +628,8 @@ impl MontgomeryContext {
     /// limbs and to the edge of measurement (~1%) at 64, where the kernel
     /// dominates the allocator.
     ///
-    /// The workspace holds unscrubbed Montgomery intermediates, exactly as
+    /// The workspace holds Montgomery intermediates, exactly as
     /// [`Self::mul_mont`]'s discarded buffer does (see the scope note
-    /// there); a caller that wants it wiped scrubs it after the loop.
     ///
     /// # Panics
     ///
@@ -679,7 +659,7 @@ impl MontgomeryContext {
     /// widths its fixed doubling and diagonal passes cost more than the saved
     /// multiplications, a property of the separated-squaring construction; the
     /// crossover favors `mont_sqr` where it matters. Like [`Self::mul_mont`]
-    /// it does not scrub its workspace, for the same reason. Operands must be
+    /// Operands must be
     /// reduced residues (the shared domain contract; debug builds assert it).
     ///
     /// # Panics
@@ -700,7 +680,7 @@ impl MontgomeryContext {
 
     /// [`Self::square_mont`] with a caller-supplied workspace — the
     /// squaring companion to [`Self::mul_mont_with_workspace`], sharing its
-    /// contract, its scrubbing posture, and its buffer (the two size their
+    /// contract and its buffer (the two size their
     /// windows independently from the same `Vec`).
     ///
     /// # Panics
@@ -786,7 +766,6 @@ impl MontgomeryContext {
         let result = self.pow_encoded_with_workspace(&base_mont, exponent, &mut workspace);
         // The workspace held Montgomery intermediates of a (possibly secret)
         // exponentiation; wipe it before the buffer is freed.
-        crate::scrub::zeroize_slice(workspace.as_mut_slice());
         result
     }
 
@@ -808,9 +787,7 @@ impl MontgomeryContext {
     pub fn pow_encoded(&self, base_mont: &BigUint, exponent: &BigUint) -> BigUint {
         debug_assert!(base_mont < &self.modulus, "domain operand arrives reduced");
         let mut workspace = Vec::new();
-        let result = self.pow_encoded_with_workspace(base_mont, exponent, &mut workspace);
-        crate::scrub::zeroize_slice(workspace.as_mut_slice());
-        result
+        self.pow_encoded_with_workspace(base_mont, exponent, &mut workspace)
     }
 }
 

@@ -25,22 +25,19 @@
 //!
 //! - **Variable-time, for non-secret data.** Operations take data-dependent
 //!   paths; do not use them where timing must not leak secrets.
-//! - **Not a secret-scrubbing or constant-time type.** As cheap defense in
-//!   depth every [`BigUint`] volatile-wipes its live limbs on drop, and the
-//!   Montgomery exponentiation ladder ([`MontgomeryContext::pow`](crate::modular::MontgomeryContext::pow) /
-//!   `pow_encoded`) wipes its workspaces on exit. That is the extent of it:
-//!   spare capacity and buffers freed on reallocation are not wiped, the
-//!   in-domain [`MontgomeryContext::mul_mont`](crate::modular::MontgomeryContext::mul_mont) / `square_mont` keep their
-//!   scratch, and `Debug` prints every limb. Cryptographic memory hygiene and
-//!   constant-time operation are out of scope; a consumer that handles key
-//!   material adds them at that layer.
+//! - **Not a secret-scrubbing or constant-time type.** Nothing is wiped:
+//!   values live in ordinary heap buffers, freed memory keeps its contents,
+//!   and `Debug` prints every limb. Cryptographic memory hygiene and
+//!   constant-time operation are out of scope, and a consumer that handles
+//!   key material adds them at that layer with a purpose-built representation
+//!   rather than relying on anything here.
 //!
-//! Safety policy: `#![deny(unsafe_code)]` crate-wide; the audited exceptions
-//! are the volatile-write scrub helper in `scrub`, which has no safe
-//! equivalent — a volatile store requires a raw pointer — and the test probe
-//! that verifies the scrub on every buffer-shrinking path by reading the raw
-//! tail back. `#![deny(missing_docs)]` holds every public item to a doc
-//! comment, and `MANUAL.md` carries a worked, test-pinned example for each.
+//! Safety policy: `#![forbid(unsafe_code)]` crate-wide, with no exceptions —
+//! `forbid` rather than `deny` precisely because an inner `allow` cannot lift
+//! it, so the guarantee is enforced by the compiler against the crate's own
+//! code rather than being a default it could override. `#![deny(missing_docs)]`
+//! holds every public item to a doc comment, and `MANUAL.md` carries a worked,
+//! test-pinned example for each.
 //!
 //! Targets: the limb layout and the index arithmetic that sizes it — `bits`,
 //! and the `R²`/Karatsuba bit shifts that scale a limb count by 128 — assume a
@@ -71,7 +68,7 @@
 //! assert_eq!(jacobi(&a, &p), Some(1));
 //! ```
 
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 // The 64-bit assumption stated in the crate documentation above, enforced.
@@ -96,7 +93,6 @@ mod number_theory_impl;
 mod poly;
 #[path = "random.rs"]
 mod random_impl;
-mod scrub;
 
 pub use bigint::{BigInt, BigUint, Sign};
 
