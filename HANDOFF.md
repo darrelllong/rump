@@ -56,12 +56,17 @@ locally (`BigUint::digit_count`, `BigInt::from_i128`, `gcd_u64`,
 `mod_inverse_u64`) followed at `61cbcef`.
 
 `REQUESTS.md` is **not** cleared, whatever earlier versions of this note said.
-Six entries are outstanding — real roots and real factorisation; sparse `GF(2)`
-linear algebra; the `ℤ[x]/(f, q^k)` Newton-lift square root; two-dimensional
-reduction under a weighted norm; a precomputed `Reciprocal` for fixed `u64`
-divisors; a reusable `SmoothBase` batch-smoothness context — and five more have
-landed here but still have a live copy in the consumer. Each entry sits in
-exactly one of four states; read the legend at the top before adding to it.
+**It is the ledger; this paragraph is not.** Do not maintain a second list
+here — an earlier version of this note did, and within a day it was claiming
+six entries outstanding while `REQUESTS.md` had three of them under *landed*,
+which is precisely the failure that file's legend exists to prevent. Read it
+there.
+
+As of 2026-08-16 three entries are outstanding — real roots and real
+factorisation, sparse `GF(2)` linear algebra, and the `ℤ[x]/(f, q^k)`
+Newton-lift square root — and eight have landed here with a live copy still in
+the consumer. If that count disagrees with `REQUESTS.md`, `REQUESTS.md` is
+right.
 
 ## The external review
 
@@ -349,6 +354,8 @@ code's "Algorithm 2.6.3"), now corrected; and the test-oracle provenance
 (OEIS, GMP 6.3.0 vectors, `jacobitab.h`, CPython, Python), now collected
 in its own table section. All new rows are transcriptions and are marked
 as such in the file's header — the physical checks above still apply.
+
+Added 2026-08-16, both transcriptions: Möller & Granlund, *Improved Division by Invariant Integers*, IEEE ToC 60(2) (2011) — whether the page range 165–175 and the numbering of Algorithm 4 and Algorithm 2 are right, cited by `Reciprocal`; and Gauss, *Disquisitiones Arithmeticae* art. 171 with Vallée, *Gauss' algorithm revisited*, J. Algorithms 12 (1991), 556–572 — whether art. 171 is the right article for the two-dimensional reduction and whether the Vallée pages are right, cited by `gauss_reduce_weighted`. `CITATIONS.md` says both are on this list, which was false until this entry.
 
 One caution from experience: an agent-reported "defect" claiming HAC Algorithm
 14.82 is sliding-window was **wrong** — 14.82 is left-to-right k-ary (14.85 is

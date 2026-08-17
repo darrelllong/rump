@@ -359,6 +359,9 @@ fn weighted_dot(u: [i128; 2], v: [i128; 2], weights: [i128; 2]) -> Option<i128> 
 /// equally reduced bases comes back.
 fn round_div(numerator: i128, denominator: i128) -> Option<i128> {
     debug_assert!(denominator > 0);
+    // Every one of these must fit, which is why the documented bound is on
+    // twice the norm rather than the norm: a basis whose norms reach the top
+    // of `i128` fails here, not in `weighted_norm_sq`.
     let doubled = numerator.checked_mul(2)?;
     let shifted = doubled.checked_add(denominator)?;
     Some(shifted.div_euclid(denominator.checked_mul(2)?))
@@ -376,16 +379,23 @@ fn round_div(numerator: i128, denominator: i128) -> Option<i128> {
 /// algorithm revisited*, J. Algorithms 12 (1991), 556–572).
 ///
 /// The weights make the metric anisotropic, which is what a skewed lattice
-/// wants: a sieve measuring `(a/√s)² + (b·√s)²` for a skew `s` passes
-/// `weights = [1, s]`, since scaling a form by a positive constant changes no
-/// comparison and no rounding, and that scaling is exactly what clears the
-/// square roots. Reduction under a diagonal form is the general shape any
-/// anisotropic two-dimensional lattice problem needs.
+/// wants. To reduce under the skewed form `(x/√s)² + (y·√s)²` for a **rational**
+/// skew `s = p/q`, multiply through by `pq` — scaling a quadratic form by a
+/// positive constant changes no comparison and no rounding — which clears the
+/// square roots and gives `(q·x)² + (p·y)²`, so pass `weights = [q, p]`.
 ///
-/// Everything is integer, so there is no accuracy cliff: a floating-point
-/// metric loses the ordering once the weighted coordinates pass `2⁵³` and
-/// degrades quietly to a poor basis, which is the failure this signature
-/// exists to remove.
+/// An *integer* skew `s` is the case `q = 1`, `weights = [1, s]`. A skew that
+/// is not rational has to be approximated first, and then this reduces exactly
+/// under the approximating form rather than under the intended one: the
+/// arithmetic is exact, the *form* is only as faithful as `p/q`. Choosing that
+/// approximation is the caller's, and it is a real choice — the norms grow
+/// like the square of the weights, so a denominator bought for precision is
+/// paid for out of the range below.
+///
+/// Within the form actually given there is no accuracy cliff, which is the
+/// point: a floating-point metric loses the ordering once the weighted
+/// coordinates pass `2⁵³` and degrades quietly to a poor basis, where this
+/// either answers exactly or refuses.
 ///
 /// # Termination
 ///
@@ -398,10 +408,17 @@ fn round_div(numerator: i128, denominator: i128) -> Option<i128> {
 /// # Panics
 ///
 /// Panics if the two vectors are linearly dependent (a zero determinant is
-/// not a basis), if either weight is not positive, or if the weighted norms
-/// overflow `i128`. The last is a real bound and not a formality: the norm
-/// squares the weighted coordinates, so each of `|w₀·x|` and `|w₁·y|` must
-/// stay below `2⁶³` for the sum of squares to be representable.
+/// not a basis), if either weight is not positive, if the basis determinant
+/// overflows `i128`, or if the weighted arithmetic does.
+///
+/// That last bound is a real restriction and tighter than it first looks. The
+/// rounding step forms `2·⟨u,v⟩ + ‖u‖²` over `2‖u‖²`, so it is *twice* the
+/// norm that must be representable, not the norm: the working condition is
+/// `(w₀·x)² + (w₁·y)² < 2¹²⁶` for every vector the reduction visits, which
+/// holds comfortably when each of `|w₀·x|` and `|w₁·y|` stays below `2⁶²`.
+/// A basis whose norms fill `i128` to the top is refused rather than
+/// silently wrapped — a wrapped norm compares wrongly and would return an
+/// unreduced basis with no indication.
 #[must_use]
 pub fn gauss_reduce_weighted(basis: [[i128; 2]; 2], weights: [i128; 2]) -> [[i128; 2]; 2] {
     assert!(
@@ -421,7 +438,7 @@ pub fn gauss_reduce_weighted(basis: [[i128; 2]; 2], weights: [i128; 2]) -> [[i12
         "a two-dimensional basis needs independent vectors"
     );
 
-    let overflow = "the weighted norm overflowed i128";
+    let overflow = "the weighted arithmetic overflowed i128";
     let mut u = basis[0];
     let mut v = basis[1];
     let mut norm_u = weighted_norm_sq(u, weights).expect(overflow);
@@ -433,7 +450,11 @@ pub fn gauss_reduce_weighted(basis: [[i128; 2]; 2], weights: [i128; 2]) -> [[i12
     loop {
         // `norm_u > 0` throughout: the determinant is non-zero, so neither
         // vector is zero, and the weights are positive.
-        let q = round_div(weighted_dot(u, v, weights).expect(overflow), norm_u).expect(overflow);
+        let dot = weighted_dot(u, v, weights).expect(overflow);
+        // Distinguished from the norm overflow above: this is the rounding
+        // step, which needs twice the norm to be representable.
+        let q = round_div(dot, norm_u)
+            .expect("the weighted arithmetic overflowed i128 while rounding; norms must fit 2^126");
         let r = [
             v[0].checked_sub(q.checked_mul(u[0]).expect(overflow))
                 .expect(overflow),
@@ -543,29 +564,70 @@ mod tests {
         }
     }
 
-    /// The skewed metric a lattice sieve uses is `(x/√s)² + (y·√s)²`. Scaling
-    /// it by `s` gives `x² + (s·y)²`, which is `weights = [1, s]` — the same
-    /// comparisons and the same rounding, with the square roots cleared.
+    /// A skewed sieve metric `(x/√s)² + (y·√s)²` for a *rational* `s = p/q`
+    /// is `weights = [q, p]`, after multiplying the form through by `pq`.
+    ///
+    /// The integer skew this test used to take is the easy case (`q = 1`) and
+    /// the one that does not occur: a sieve's skew is the argmin of a search
+    /// and is not an integer, so rounding it to one reduces under a different
+    /// form and can return a vector that is longer under the metric actually
+    /// wanted. That is what this checks — against the float metric the caller
+    /// means, not against the integer one the reduction was handed.
     #[test]
-    fn gauss_reduce_weights_match_the_skewed_sieve_metric() {
-        let skew = 12i128;
+    fn gauss_reduce_weights_encode_a_rational_skew() {
+        // A non-integer skew of the shape `skew_for` produces.
+        let (p, q) = (2_113_745_839i128, 10_000_000i128); // s ≈ 211.3745839
+        let s = p as f64 / q as f64;
+        let float_norm = |v: [i128; 2]| {
+            let a = v[0] as f64 / s.sqrt();
+            let b = v[1] as f64 * s.sqrt();
+            a * a + b * b
+        };
         for basis in [
-            [[1024i128, 0], [37, 1]],
-            [[100_000, 0], [7, 3]],
-            [[5, 9], [11, 2]],
+            [[20_003i128, 0], [12_577, 1]],
+            [[65_537, 0], [4_099, 1]],
+            [[1024, 0], [37, 1]],
         ] {
-            let reduced = gauss_reduce_weighted(basis, [1, skew]);
-            let float_norm = |v: [i128; 2]| {
-                let s = skew as f64;
-                let a = v[0] as f64 / s.sqrt();
-                let b = v[1] as f64 * s.sqrt();
-                a * a + b * b
-            };
-            // The integer form orders vectors exactly as the float form does,
-            // which is what makes it a drop-in replacement.
-            assert!(float_norm(reduced[0]) <= float_norm(reduced[1]) + 1e-9);
+            let reduced = gauss_reduce_weighted(basis, [q, p]);
             assert_eq!(det(reduced).abs(), det(basis).abs());
+            // Ordered under the metric the caller actually means.
+            assert!(
+                float_norm(reduced[0]) <= float_norm(reduced[1]) * (1.0 + 1e-12),
+                "out of order under the intended metric"
+            );
+            // And no nearby combination is shorter under that metric either.
+            for a in -3i128..=3 {
+                for b in -3i128..=3 {
+                    if a == 0 && b == 0 {
+                        continue;
+                    }
+                    let v = [
+                        a * reduced[0][0] + b * reduced[1][0],
+                        a * reduced[0][1] + b * reduced[1][1],
+                    ];
+                    assert!(
+                        float_norm(v) >= float_norm(reduced[0]) * (1.0 - 1e-12),
+                        "({a},{b}) beats the answer under the intended metric"
+                    );
+                }
+            }
         }
+    }
+
+    /// Twice the norm must be representable, not the norm: the rounding step
+    /// forms `2⟨u,v⟩ + ‖u‖²` over `2‖u‖²`. This basis is already reduced and
+    /// its norms fit `i128` with room to spare, so it must come back
+    /// unchanged rather than panic — the case the documented bound used to
+    /// admit and the code used to refuse.
+    #[test]
+    fn gauss_reduce_accepts_norms_that_fill_half_the_range() {
+        let a = 1i128 << 62;
+        let reduced = gauss_reduce_weighted([[a, a], [a, -a]], [1, 1]);
+        assert_eq!(det(reduced).abs(), 2 * a * a);
+        assert_eq!(
+            weighted_norm_sq(reduced[0], [1, 1]).expect("fits"),
+            2 * a * a
+        );
     }
 
     #[test]

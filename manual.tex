@@ -1682,14 +1682,19 @@ Each round replaces the shorter vector with a strictly shorter one, so the
 squared norms strictly decrease in the positive integers and the loop runs
 $O(\log)$ times; no iteration cap is imposed.
 
-A sieve working under the skewed metric $(x/\sqrt{s})^2 + (y\sqrt{s})^2$
-passes $w = (1, s)$. Scaling a quadratic form by a positive constant changes
-neither the comparisons nor the rounding, and scaling by $s$ clears the
-square roots, so the whole computation is exact \code{i128}. This is the
-substantive difference from a floating-point metric, which loses the ordering
-once the weighted coordinates pass $2^{53}$ and degrades quietly to a poor
-basis. It panics on a dependent pair, a non-positive weight, or a weighted
-norm past \code{i128}.
+For a skewed metric $(x/\sqrt{s})^2 + (y\sqrt{s})^2$ with rational
+$s = p/q$, multiply the form through by $pq$: a positive scale factor changes
+neither the comparisons nor the rounding, and this clears the square roots,
+giving $(qx)^2 + (py)^2$, so $w = (q, p)$. An integer skew is the case
+$q = 1$. A skew that is not rational must be approximated first, and the
+reduction is then exact under the approximating form rather than the intended
+one --- the arithmetic is exact, the form only as faithful as $p/q$, and the
+denominator is paid for out of range, since norms grow as the square of the
+weights. Within the form given there is no accuracy cliff, which is the
+difference from a floating-point metric that loses the ordering once the
+weighted coordinates pass $2^{53}$. It panics on a dependent pair, a
+non-positive weight, or arithmetic past \code{i128}; the rounding step needs
+twice the norm, so the working bound is that norms fit $2^{126}$.
 
 \begin{lstlisting}
 // A skew-12 lattice, reduced under the matching diagonal form.

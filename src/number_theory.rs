@@ -1460,11 +1460,6 @@ impl SmoothBase {
     /// is smooth over the base exactly when its smooth part equals it, which
     /// is the predicate a sieve wants before paying for full trial division.
     ///
-    /// # Panics
-    ///
-    /// Through [`remainder_tree`], if a non-trivial value is zero, which it
-    /// would divide by. (A zero *value* is intercepted before the tree, so
-    /// that path is unreachable from here.)
     #[must_use]
     pub fn smooth_parts(&self, values: &[BigUint]) -> Vec<BigUint> {
         if values.is_empty() {
@@ -4739,19 +4734,25 @@ mod tests {
         // point of hoisting is to let the caller choose the batch, it must
         // give the same answers one value at a time as it does in one batch.
         // A batch-size-dependent answer would be the defect this API invites.
+        // `smooth_parts` delegates to `SmoothBase`, so comparing the two is
+        // `f(x) == f(x)` and proves nothing. Every batching is therefore
+        // checked against the trial-division oracle instead, which is the
+        // only independent answer available.
         let base = super::SmoothBase::new(&primes);
         assert_eq!(base.primes(), &primes[..]);
-        assert_eq!(base.smooth_parts(&values), parts);
-        for (v, part) in values.iter().zip(&parts) {
-            assert_eq!(
-                base.smooth_parts(std::slice::from_ref(v))[0],
-                *part,
-                "one-at-a-time must match the batch"
-            );
-        }
-        for chunk in values.chunks(3) {
-            let expected = smooth_parts(chunk, &primes);
-            assert_eq!(base.smooth_parts(chunk), expected, "chunked batch");
+        for size in [1usize, 2, 3, 7, values.len()] {
+            let mut got = Vec::new();
+            for chunk in values.chunks(size) {
+                got.extend(base.smooth_parts(chunk));
+            }
+            assert_eq!(got.len(), values.len());
+            for (v, part) in values.iter().zip(&got) {
+                assert_eq!(
+                    *part,
+                    smooth_part_naive(v),
+                    "batch size {size} disagrees with trial division"
+                );
+            }
         }
         assert!(base.smooth_parts(&[]).is_empty());
         // An empty base makes nothing smooth beyond the trivial values.

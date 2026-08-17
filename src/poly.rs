@@ -370,7 +370,7 @@ fn check_root_level_width(current: usize, adding: u64, limit: usize) {
     let total = (current as u64).checked_add(adding);
     assert!(
         total.is_some_and(|total| total <= limit as u64),
-        "the Hensel lift would widen past {limit} candidates"
+        "the root level would widen past {limit} candidates"
     );
 }
 
@@ -1070,11 +1070,14 @@ impl PolyZ {
     /// those two cases every residue is a root and returning `pᵉ` of them as
     /// a list is not useful.
     ///
-    /// Panics, too, when the answer or an intermediate level of the lift
-    /// would be too wide to hold: a branching root splits into `p`
-    /// candidates at once, and a common factor of `pᵛ` multiplies the final
-    /// count by `pᵛ`. Both are refused above [`MAX_ROOT_LEVEL`] rather than
-    /// left to exhaust memory. That bound is on the *level*, not on the
+    /// Panics, too, when the answer or any level of the lift would be too wide
+    /// to hold. Three things can widen one: the base level itself, which holds
+    /// up to `min(deg f, p)` roots; a branching root, which splits into `p`
+    /// candidates at once; and a common factor of `pᵛ`, which multiplies the
+    /// final count by `pᵛ`. All three are refused above [`MAX_ROOT_LEVEL`]
+    /// rather than left to exhaust memory — though only the last two are
+    /// refused *before* the work, since the base level has to be found before
+    /// it can be counted. That bound is on the *level*, not on the
     /// prime: a branching root modulo a 40-bit prime is refused even though
     /// the prime is far below `2⁶⁴`, which is the case an earlier revision
     /// of this documentation got wrong.

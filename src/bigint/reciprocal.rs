@@ -4,9 +4,29 @@
 //! Transactions on Computers 60 (2011), Algorithm 4 (`div2by1`) over the
 //! reciprocal of Algorithm 2; the approach descends from Granlund &
 //! Montgomery, *Division by Invariant Integers using Multiplication*, PLDI
-//! 1994. A hardware divide is 20–40 cycles and does not learn from repetition;
-//! one multiplication by a precomputed `v`, a correction, and a rare second
-//! correction replace it.
+//! 1994. The precomputed reciprocal replaces each division with a
+//! multiplication, a correction, and a rare second correction.
+//!
+//! **This is a multi-limb win and a word-sized loss**, at least on the
+//! hardware it has been measured on. Divisor table of the 2 262 primes below
+//! 20 000, M4, `--release`, minimum of nine rounds, against the hardware-divide
+//! path it replaces:
+//!
+//! ```text
+//!   width          hardware   Reciprocal
+//!   one word         0.84 ns     2.07 ns    0.41x  — slower
+//!   two limbs        1.37x faster
+//!   four limbs       1.52x faster
+//!   sixteen limbs    2.38x faster
+//! ```
+//!
+//! Apple's divider retires a 64-bit division in a few cycles, so a word-sized
+//! remainder has nothing to gain and pays for the setup and the correction
+//! branches. The often-quoted "20–40 cycles" for a hardware divide is an x86
+//! figure and does not describe this machine; it was in this comment,
+//! unmeasured, until the numbers above were taken. Reach for this type when
+//! the dividend is a `BigUint` of two limbs or more, not for reducing sieve
+//! positions that already fit a word.
 //!
 //! One reciprocal serves every entry point here. Dividing a multi-limb value
 //! by a word is Horner's recurrence in base `2⁶⁴`, and each step of it is a
@@ -20,8 +40,11 @@ use super::BigUint;
 ///
 /// Build one per divisor and keep it. Construction costs a single hardware
 /// division; every use afterwards costs a multiplication and a correction.
-/// The intended shape is a table built once — a sieve's factor base, say —
-/// and consulted for the rest of a run.
+///
+/// Worth it for `BigUint` dividends of two limbs or more, where the division
+/// this replaces is paid *per limb*. Not worth it for word-sized dividends:
+/// see the module documentation for measurements, which show the hardware
+/// divide ahead there.
 ///
 /// # Examples
 ///
@@ -138,12 +161,19 @@ impl Reciprocal {
     }
 
     /// `value mod divisor`, discarding the quotient.
+    #[inline]
     #[must_use]
     pub fn rem_u64(&self, value: u64) -> u64 {
-        self.rem_limbs(&[value])
+        // Directly, not through `rem_limbs`: a one-word dividend is one
+        // `div2by1`, and routing it through the slice loop was measurably
+        // worse on the path where this type is already behind the hardware.
+        let high = self.normalized_limb(&[value], 1);
+        let low = self.normalized_limb(&[value], 0);
+        self.div2by1(high, low).1 >> self.shift
     }
 
     /// `(value / divisor, value mod divisor)`.
+    #[inline]
     #[must_use]
     pub fn div_rem_u64(&self, value: u64) -> (u64, u64) {
         let high = self.normalized_limb(&[value], 1);
@@ -158,6 +188,7 @@ impl Reciprocal {
     /// indexes a table, so a truncating remainder is the wrong answer for
     /// half the inputs and every caller that re-derives this gets a chance to
     /// be wrong. `i64::MIN` is handled — the magnitude is taken as `u64`.
+    #[inline]
     #[must_use]
     pub fn rem_euclid_i64(&self, value: i64) -> u64 {
         let magnitude = self.rem_u64(value.unsigned_abs());
@@ -209,8 +240,11 @@ impl BigUint {
     /// `self mod r.divisor()`, using a precomputed reciprocal.
     ///
     /// The answer is [`Self::rem_u64`]'s; this trades a hardware division per
-    /// limb for a multiplication per limb, which pays whenever the same
-    /// divisor is used more than a handful of times.
+    /// limb for a multiplication per limb. Since [`Reciprocal::new`] costs one
+    /// division in total, that pays back within the first call on a dividend
+    /// of two limbs or more, and by a widening margin above — not, as an
+    /// earlier version of this sentence claimed, only after the divisor has
+    /// been reused a number of times.
     #[must_use]
     pub fn rem_reciprocal(&self, r: &Reciprocal) -> u64 {
         r.rem_limbs(self.limbs())

@@ -1101,11 +1101,16 @@ non-zero vector of the lattice outright, first, with the second shortest
 independent of it after. The metric is the diagonal form
 `‖(x, y)‖² = (w₀·x)² + (w₁·y)²`.
 
-A skewed sieve measuring `(x/√s)² + (y·√s)²` passes `weights = [1, s]`:
-scaling a form by a positive constant changes no comparison and no rounding,
-and that scaling clears the square roots, so the arithmetic is exact `i128`
-throughout with no accuracy cliff. It panics on a dependent pair, a
-non-positive weight, or a weighted norm past `i128`.
+For a skewed metric `(x/√s)² + (y·√s)²` with **rational** `s = p/q`, multiply
+the form through by `pq` — a positive scale factor changes no comparison and
+no rounding — which clears the square roots and gives `(q·x)² + (p·y)²`, so
+pass `weights = [q, p]`. An integer skew is the case `q = 1`. A skew that is
+not rational must be approximated first, and the reduction is then exact under
+the approximating form rather than the intended one; the approximation is the
+caller's choice, and it costs range, since the norms grow as the square of the
+weights. It panics on a dependent pair, a non-positive weight, or arithmetic
+past `i128` — and because the rounding step needs twice the norm, the working
+bound is that norms fit `2¹²⁶`.
 
 ```rust
 // A skew-12 lattice, reduced under the matching diagonal form.

@@ -40,6 +40,20 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **`Reciprocal`** — division by a `u64` divisor that does not change, with
+  the reciprocal precomputed once (Möller & Granlund, IEEE ToC 60 (2011),
+  Algorithm 4). `rem_u64`, `div_rem_u64`, `rem_euclid_i64`, and
+  `BigUint::rem_reciprocal` / `div_rem_reciprocal` for multi-limb dividends.
+  Worth reaching for at two limbs and above; measured *slower* than the
+  hardware divide for word-sized dividends on Apple silicon, and the module
+  documentation carries the numbers.
+- **`SmoothBase`** — Bernstein batch smoothness with the primes' product built
+  once, so the caller chooses the batch size rather than the setup cost
+  choosing it. The free `smooth_parts` is now the one-shot form over this
+  type, so there is one algorithm rather than two.
+- **`gauss_reduce_weighted`** — exact two-dimensional Lagrange–Gauss reduction
+  under a diagonal form `(w₀x)² + (w₁y)²`, in `i128`. For a skewed metric
+  `(x/√s)² + (y√s)²` with rational `s = p/q`, pass `weights = [q, p]`.
 - **A `compile_error!` gate on non-64-bit targets.** The crate has documented
   a 64-bit-only contract since 0.2.x — `bits()` scales a limb count by 64, and
   the `R²` and Karatsuba paths scale one by 128, products that overflow a
