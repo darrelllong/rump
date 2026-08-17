@@ -84,12 +84,12 @@ primary values. Every other export has one module path:
 |---|---|---|
 | crate root | BigInt, BigUint, Sign | done |
 | integer | ParseBigIntError, WordReciprocal | done |
-| modular | BarrettContext, MontgomeryContext, modular arithmetic and errors | done; error type pending below |
-| number_theory | gcd/lcm, symbols, primality, CRT, reconstruction, valuations, product trees, smoothness | done; error type pending below |
+| modular | BarrettContext, MontgomeryContext, ModulusError, modular arithmetic | done |
+| number_theory | gcd/lcm, symbols, primality, CRT, reconstruction, valuations, product trees, smoothness, SmoothnessBaseError | done |
 | polynomial | PolyZ, PolyMod, polynomial limits and errors | done |
 | finite_field | Gf2m | done |
 | gf2 | dense null space, singleton pruning, Block Lanczos | blocked — consumer transfer |
-| lattice | LLL and weighted Gauss reduction | done; error type pending below |
+| lattice | LLL, weighted Gauss reduction, ReductionError | done |
 | random | RandomSource and random-value functions | done |
 
 Private source files do not have to mirror this facade one-for-one. The public
@@ -128,9 +128,9 @@ listed above retain their current leaf names under the canonical path.
 | sqrt_mod | modular::mod_sqrt | done | |
 | sqrt_mod_prime_power | modular::mod_sqrt_prime_power | done | |
 | BigUint mod_add/mod_sub/mod_mul | same leaf names | done | inherent operations stay on the value |
-| BarrettContext::new returning Option | return Result<Self, ModulusError> | pending | zero and one are rejected |
-| MontgomeryContext::new returning Option | return Result<Self, ModulusError> | pending | zero and even moduli are rejected |
-| no public modular construction error | modular::ModulusError { Zero, One, Even } | pending | shared factual variants; no context-dependent “below two” variant |
+| BarrettContext::new returning Option | return Result<Self, ModulusError> | done | zero and one are rejected |
+| MontgomeryContext::new returning Option | return Result<Self, ModulusError> | done | zero and even moduli are rejected |
+| no public modular construction error | modular::ModulusError { Zero, One, Even } | done | shared factual variants; no context-dependent “below two” variant |
 | raw BigUint Montgomery-domain values | opaque MontgomeryResidue | pending | context and reduction invariant belong in the type |
 | mul_mont/square_mont/add_mont/sub_mont/one_mont/pow_encoded | residue mul/square/add/sub/one/pow | blocked — MontgomeryResidue |
 | with_workspace methods taking Vec<u64> | opaque scratch or into operations | blocked — residue/output design |
@@ -155,9 +155,9 @@ public.
 | product_tree / remainder_tree | same under number_theory | done | algorithmic one-shot pair |
 | SmoothBase | number_theory::SmoothnessBase | done | reusable smoothness context |
 | free smooth_parts | number_theory::smooth_parts | done | one-shot convenience through context |
-| SmoothBase::new returning Option | SmoothnessBase::new returning Result<Self, SmoothnessBaseError> | pending | entries below two are invalid input |
-| no public smoothness construction error | number_theory::SmoothnessBaseError { index, value } | pending | fields private; read through index() and value() |
-| no error accessors | SmoothnessBaseError::index / value | pending | exact rejected entry without caller rescanning |
+| SmoothBase::new returning Option | SmoothnessBase::new returning Result<Self, SmoothnessBaseError> | done | entries below two are invalid input |
+| no public smoothness construction error | number_theory::SmoothnessBaseError { index, value } | done | fields private; read through index() and value() |
+| no error accessors | SmoothnessBaseError::index / value | done | exact rejected entry without caller rescanning |
 
 All other current number-theory exports retain their leaf names and move only
 to number_theory, except the modular functions assigned above.
@@ -192,9 +192,9 @@ prime-field promise.
 |---|---|---|---|
 | lll_reduce / lll_reduce_delta | same under lattice | done | LLL is standard |
 | gauss_reduce_weighted | lattice::gauss_reduce_weighted | done | leaf order is canonical |
-| weights: [i128; 2] | weights: [NonZeroU64; 2] | pending | encodes positivity and removes no previously successful input |
-| gauss_reduce_weighted returning Option | return Result<_, ReductionError> | pending | invalid basis/range is bad input |
-| no public lattice reduction error | lattice::ReductionError { DependentBasis, OutOfRange } | pending | no weight variant after NonZeroU64 |
+| weights: [i128; 2] | weights: [NonZeroU64; 2] | done | encodes positivity and removes no previously successful input |
+| gauss_reduce_weighted returning Option | return Result<_, ReductionError> | done | invalid basis/range is bad input |
+| no public lattice reduction error | lattice::ReductionError { DependentBasis, OutOfRange } | done | no weight variant after NonZeroU64 |
 | factoring dense null space | gf2::dense_null_space | blocked — consumer transfer |
 | factoring singleton peel | gf2::prune_singletons | blocked — consumer transfer |
 | factoring Block Lanczos | gf2::block_lanczos_dependencies | blocked — consumer transfer |
@@ -223,16 +223,16 @@ Transfer state is maintained in both this file and the ownership rows in the
 
 | Canonical Rump API | Factoring site | Transfer state |
 |---|---|---|
-| polynomial::PolyZ::balanced_base_expansion | gnfs/polynomial_selection.rs | implementation landed; canonical Rump path pending |
-| polynomial::PolyZ::roots_mod_prime_power | gnfs/polynomial_selection.rs | implementation landed; consumer migration pending |
-| polynomial::PolyZ monic remainder/product | gnfs/algebraic_square_root.rs | implementation landed; consumer migration pending |
-| polynomial::PolyZ::homogeneous_substitution | gnfs/lattice.rs | implementation landed; consumer migration pending |
-| polynomial::PolyMod symmetric_lift/change_modulus | gnfs/algebraic_square_root.rs | implementation landed; canonical Rump names pending |
-| lattice::gauss_reduce_weighted | gnfs/lattice.rs | implementation landed; canonical Rump path pending |
+| polynomial::PolyZ::balanced_base_expansion | gnfs/polynomial_selection.rs | Rump canonical; consumer transfer |
+| polynomial::PolyZ::roots_mod_prime_power | gnfs/polynomial_selection.rs | Rump canonical; consumer transfer |
+| polynomial::PolyZ monic remainder/product | gnfs/algebraic_square_root.rs | Rump canonical; consumer transfer |
+| polynomial::PolyZ::homogeneous_substitution | gnfs/lattice.rs | Rump canonical; consumer transfer |
+| polynomial::PolyMod symmetric_lift/change_modulus | gnfs/algebraic_square_root.rs | Rump canonical; consumer transfer |
+| lattice::gauss_reduce_weighted | gnfs/lattice.rs | Rump canonical; consumer transfer |
 | gf2 dense/sparse solvers | qs/linalg.rs and qs/lanczos.rs | not yet landed in Rump |
 | polynomial::PolyZ::real_roots | gnfs/norm_model.rs | not yet landed in Rump |
-| integer::WordReciprocal | six division sites | implementation landed; canonical Rump name pending |
-| number_theory::SmoothnessBase | relation confirmation | implementation landed; canonical Rump name pending |
+| integer::WordReciprocal | six division sites | Rump canonical; consumer transfer |
+| number_theory::SmoothnessBase | relation confirmation | Rump canonical; consumer transfer |
 
 ## Frozen during the cut
 

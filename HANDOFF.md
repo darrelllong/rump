@@ -46,9 +46,9 @@ docs. Zero dependencies.
 ## Where things stand
 
 Tier 3 for the factoring consumer is complete and delivered: `PolyZ` and
-`PolyModP` (arithmetic, exact and pseudo-division, resultant, discriminant,
+`PolyMod` (arithmetic, exact and pseudo-division, resultant, discriminant,
 squarefree/distinct-degree/Cantor–Zassenhaus factorisation, roots) and integral
-LLL. The last Tier 1 item — the public `BigInt` signed ring (`mul_ref`,
+LLL. The last Tier 1 item — the public `BigInt` signed ring (`mul`,
 truncated `div_rem`, `abs`), the external reviewer's standing #1 — landed
 2026-08-15, differentially tested against `i128` and documented in MANUAL.md
 and the LaTeX manual. Four word-and-size primitives the consumer had grown
@@ -119,9 +119,9 @@ assume the name means the same pass. Dispositions, 2026-08-16:
 
 | Their # | Finding | Disposition |
 |---|---|---|
-| 1 | `MontgomeryCtx`'s `value < modulus` invariant is `debug_assert` only, on a safe public API | **Open, needs an owner's call.** Verified: the assertions sit in `mul_mont`, `square_mont`, `add_mont`/`sub_mont` and their workspace forms. The proposed fix is a context-bound `MontgomeryResidue` returned by `encode`, which would also stop values from different contexts mixing — an API break. The cheaper alternative is promoting the checks to release assertions and measuring. Neither taken. |
+| 1 | `MontgomeryContext`'s `value < modulus` invariant is `debug_assert` only, on a safe public API | **Open, needs an owner's call.** Verified: the assertions sit in `mul_mont`, `square_mont`, `add_mont`/`sub_mont` and their workspace forms. The proposed fix is a context-bound `MontgomeryResidue` returned by `encode`, which would also stop values from different contexts mixing — an API break. The cheaper alternative is promoting the checks to release assertions and measuring. Neither taken. |
 | 2 | The `_with_workspace` forms still allocate every result | **Fixed as documentation; API half open.** Verified: they return an owned `BigUint` built by `out[..width].to_vec()`, so scratch is reused and the result is not. README no longer says "allocation-free". The suggested `mul_mont_into` / `square_mont_into` are not added. |
-| 4 | The Hensel cap skips the initial root set | **Fixed.** The base level is now checked against `MAX_ROOT_LEVEL` before the lift. |
+| 4 | The Hensel cap skips the initial root set | **Fixed.** The base level is now checked against `MAX_ENUMERATED_ROOTS` before the lift. |
 
 Their findings 8, 9 and 10 restate this repository's 1, 2 and 7. Their 3, 5, 6
 and 7 are consumer-side work.
@@ -145,7 +145,7 @@ Two distinct defects, both now fixed:
    heavy-tailed operations are i.i.d. mixtures — microsecond rejections
    punctured by rare enormous readings — which that detector reads as regime
    changes and discards, so the reported figure need not even lie inside the
-   sample's own range (a 7168-bit `sqrt_mod` cell read 21.9 ms against its own
+   sample's own range (a 7168-bit `mod_sqrt` cell read 21.9 ms against its own
    0.12 ms p99). The reduction now computes the whole-sample mean, so that
    class of corruption is structurally impossible.
 2. **The samples were far too small to mean anything.** Each reading needs a
@@ -217,7 +217,7 @@ operand generation dominates. If a cell cannot clear it, leave it marked
    the safe shape is: keep `src/bigint.rs` and `src/number_theory.rs` as module
    roots and add sibling directories, moving one cohesive block at a time with
    `cargo build` after each move so visibility errors stay local. Suggested
-   cuts: `bigint/montgomery.rs` (MontgomeryCtx, BarrettCtx, the REDC and
+   cuts: `bigint/montgomery.rs` (MontgomeryContext, BarrettContext, the REDC and
    mont_mul/mont_sqr slice kernels, `copy_padded`), `bigint/mul.rs`
    (schoolbook, Karatsuba, Toom-3, Toom-4 and the thresholds), `bigint/div.rs`
    (Algorithm D and the Horner path); `number_theory/gcd.rs` (Lehmer, Half-GCD,
@@ -264,7 +264,7 @@ own findings folded back in. Summary of dispositions:
 identity); the three polynomial division loops (in-place window subtraction,
 degree tracked by hand, `rem` without quotient bookkeeping, correct quotient
 sizing, monic `mod_inverse` skip, `scale` unit fast paths, dead `shift_up`
-helpers deleted); `BarrettCtx::pow_mod` top-bit seeding; `sqrt_floor` /
+helpers deleted); `BarrettContext::mod_pow` top-bit seeding; `sqrt_floor` /
 `sqrt_rem` sharing a private `sqrt_newton`; `gf2m::inverse` bit lengths
 travelling across the swap; `gf2m::reduce` via a new `pub(crate)`
 `BigUint::into_limbs`; `squarefree_into` expect messages.
@@ -317,9 +317,9 @@ twelve-base Miller–Rabin determinism bound was stated as ψ₁₃ = 3.317×10�
 everywhere; the true twelve-base bound is ψ₁₂ ≈ 3.19×10²³, and there is an
 explicit composite between them that the crate certifies prime. Corrected in
 `number_theory.rs`, `random.rs`, `CITATIONS.md`, and the manual — the *code*
-was never wrong, the claim was. Also: `MontgomeryCtx::pow`'s rustdoc now
+was never wrong, the claim was. Also: `MontgomeryContext::pow`'s rustdoc now
 names both ladder engines (right-to-left binary at ≤ 64-bit exponents, 4-bit
-window above); `PolyModP::div_rem`'s panic contract notes the
+window above); `PolyMod::div_rem`'s panic contract notes the
 degenerate-degree early return; a pin test
 (`composite_modulus_verdicts_are_unspecified_not_proofs`) nails the
 `x² + 1 mod 15` unspecified verdict so it cannot later be sold as a proof.
@@ -336,13 +336,13 @@ for `is_irreducible`;
 *Guide to ECC* §2.3.5 and Algorithms 2.41–2.45 for tap-wise reduction; Knuth
 §3.4.1 for `random_below`; IEEE Std 1363-2000 Annex A.4.7 for the even-degree
 quadratic solver; Knuth §4.6.3 as newly applied to `Gf2m::pow` (the section
-is verified for the same method at `MontgomeryCtx::pow`, but this
+is verified for the same method at `MontgomeryContext::pow`, but this
 application was recalled, not checked); whether Bodrato's optimised sequence really describes the
 Toom interpolation as written (it reads as a first-principles Vandermonde
 solve); and Dussé & Kaliski EUROCRYPT '90 as where the word-level `n₀'`
 constant "was introduced". The once-missing `CITATIONS.md` rows were closed
 2026-08-15 in two passes: a pattern sweep (which found `mont_sqr`
-HAC 14.16, `BarrettCtx::pow_mod` §4.6.3, `gcd_extended` HAC 2.107 / Knuth
+HAC 14.16, `BarrettContext::mod_pow` §4.6.3, `gcd_extended` HAC 2.107 / Knuth
 Algorithm X, `mod_inverse` HAC 2.142 — and *missed* Dussé & Kaliski,
 because that citation has no algorithm number for a pattern to hit), then
 an exhaustive line-by-line read of every comment in every source file,
@@ -355,7 +355,7 @@ code's "Algorithm 2.6.3"), now corrected; and the test-oracle provenance
 in its own table section. All new rows are transcriptions and are marked
 as such in the file's header — the physical checks above still apply.
 
-Added 2026-08-16, both transcriptions: Möller & Granlund, *Improved Division by Invariant Integers*, IEEE ToC 60(2) (2011) — whether the page range 165–175 and the numbering of Algorithm 4 and Algorithm 2 are right, cited by `Reciprocal`; and Gauss, *Disquisitiones Arithmeticae* art. 171 with Vallée, *Gauss' algorithm revisited*, J. Algorithms 12 (1991), 556–572 — whether art. 171 is the right article for the two-dimensional reduction and whether the Vallée pages are right, cited by `gauss_reduce_weighted`. `CITATIONS.md` says both are on this list, which was false until this entry.
+Added 2026-08-16, both transcriptions: Möller & Granlund, *Improved Division by Invariant Integers*, IEEE ToC 60(2) (2011) — whether the page range 165–175 and the numbering of Algorithm 4 and Algorithm 2 are right, cited by `WordReciprocal`; and Gauss, *Disquisitiones Arithmeticae* art. 171 with Vallée, *Gauss' algorithm revisited*, J. Algorithms 12 (1991), 556–572 — whether art. 171 is the right article for the two-dimensional reduction and whether the Vallée pages are right, cited by `gauss_reduce_weighted`. `CITATIONS.md` says both are on this list, which was false until this entry.
 
 One caution from experience: an agent-reported "defect" claiming HAC Algorithm
 14.82 is sliding-window was **wrong** — 14.82 is left-to-right k-ary (14.85 is
@@ -414,15 +414,40 @@ is correct. Check before you correct.
 - The MANUAL's code blocks are mirrored verbatim in `tests/manual_examples.rs`
   and asserted on every `cargo test`, so the manual cannot drift. Change both.
 
+## The public surface
+
+`NAMES.md` is the naming authority and wins over this note. The crate root
+exports only `BigInt`, `BigUint` and `Sign`; everything else sits under one
+module path, and every implementation module is private so nothing is
+reachable by two names:
+
+| Module | Contents |
+|---|---|
+| `integer` | `ParseBigIntError`, `WordReciprocal` |
+| `modular` | `BarrettContext`, `MontgomeryContext`, `ModulusError`, `mod_pow`, `mod_inverse*`, `mod_sqrt*` |
+| `number_theory` | gcd/lcm, symbols, primality, CRT, reconstruction, valuations, `ProductTree`, `SmoothnessBase`, `SmoothnessBaseError` |
+| `polynomial` | `PolyZ`, `PolyMod`, `MAX_ENUMERATED_ROOTS` |
+| `finite_field` | `Gf2m` |
+| `lattice` | `lll_reduce`, `lll_reduce_delta`, `gauss_reduce_weighted`, `ReductionError` |
+| `random` | `RandomSource` and the samplers |
+
+Constructors report invalid input as a typed error, never a panic:
+`ModulusError`, `SmoothnessBaseError`, `ReductionError`. `Option` is reserved
+for legitimate mathematical absence, and a precondition goes into the type
+where it can — `WordReciprocal::new` takes `NonZeroU64` and is total,
+`gauss_reduce_weighted` takes `[NonZeroU64; 2]`.
+
 ## Map of the tree
 
 | Path | What it is |
 |---|---|
-| `src/bigint.rs` | `BigUint`, `BigInt`, `Sign`, `MontgomeryCtx`, `BarrettCtx`, the multiply ladder, Algorithm D, radix I/O |
-| `src/number_theory.rs` | gcd family, symbols, square roots, primality, CRT, reconstruction, trees |
+| `src/lib.rs` | the module facade; implementation modules are private, `#[path]` where the public name took the file name |
+| `src/bigint.rs` | `BigUint`, `BigInt`, `Sign`, `ModulusError`, the multiply ladder, Algorithm D, radix I/O |
+| `src/bigint/montgomery.rs`, `src/bigint/barrett.rs`, `src/bigint/reciprocal.rs` | the two reduction contexts and the invariant-divisor reciprocal |
+| `src/number_theory.rs` | gcd family, symbols, square roots, primality, CRT, reconstruction, trees, smoothness |
 | `src/gf2m.rs` | GF(2^m) |
-| `src/poly.rs` | `PolyZ`, `PolyModP` |
-| `src/lattice.rs` | integral LLL |
+| `src/poly.rs` | `PolyZ`, `PolyMod` |
+| `src/lattice.rs` | integral LLL and weighted two-dimensional Gauss reduction |
 | `src/random.rs`, `src/scrub.rs` | sampling; the volatile scrub — the non-test audited `unsafe` (the other audited site is the test probe in `bigint.rs`) |
 | `scripts/bench_primitives.sh` | measurement — read its reduction before changing anything |
 | `scripts/check_bench_consistency.py` | the self-consistency guard |

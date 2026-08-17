@@ -7,19 +7,37 @@ what a consumer must change, not everything that moved.
 
 ### Breaking
 
-- **`BarrettCtx::add_mod` and `sub_mod` are gone; the rest of the family is
+- **`BarrettContext::add_mod` and `sub_mod` are gone; the rest of the family is
   renamed to the crate's `mod_*` order.** `add_mod`/`sub_mod` were one-line
   forwarders to `BigUint::mod_add`/`mod_sub` — the same operation under the
   same two words in the opposite order, and `μ` plays no part in modular
   addition. Call `BigUint::mod_add(a, b, ctx.modulus())`. The operations that
   do use the context are now `mod_mul`, `mod_square`, and `mod_pow`, matching
   `BigUint::mod_mul` and the free `mod_pow` rather than inverting them.
-- **No public function added in 0.3.0 panics on bad input; they return
-  `Option`.** `Reciprocal::new`, `SmoothBase::new`, and
-  `gauss_reduce_weighted` report a zero divisor, an entry below two, and a
-  dependent basis / non-positive weight / out-of-range norm as `None`, which
-  is what `BarrettCtx::new` and `MontgomeryCtx::new` already did. The
-  pre-existing panicking surface is unchanged in this release.
+- **No public constructor added or touched in 0.3.0 panics on bad input.**
+  Invalid input is a typed error; `Option` is reserved for legitimate
+  mathematical absence.
+
+  - `BarrettContext::new` and `MontgomeryContext::new` return
+    `Result<Self, modular::ModulusError>`, whose `Zero`, `One` and `Even`
+    variants describe the rejected value rather than the context that
+    refused it. Barrett returns `Zero` or `One`; Montgomery returns `Zero`
+    or `Even`, and still accepts a modulus of one, which is odd.
+  - `SmoothnessBase::new` returns
+    `Result<Self, number_theory::SmoothnessBaseError>`, reporting the first
+    entry below two through `index()` and `value()`. A composite entry is
+    still accepted deliberately, so neither the type nor its message calls
+    the rejected value non-prime.
+  - `gauss_reduce_weighted` returns
+    `Result<_, lattice::ReductionError>` with `DependentBasis` and
+    `OutOfRange`, and takes `weights: [NonZeroU64; 2]` — positivity moved
+    into the type, so there is no weight variant to report.
+  - `WordReciprocal::new` takes `NonZeroU64` and is total: non-zero is the
+    entire precondition, so nothing is left for a return type to describe.
+
+  All three error types are `#[non_exhaustive]`, `Copy`, and implement
+  `Display` and `std::error::Error`. The pre-existing panicking surface is
+  unchanged in this release.
 - **`product_tree` and `remainder_tree` take and return a typed
   `ProductTree`.** Previously:
 
@@ -38,7 +56,7 @@ what a consumer must change, not everything that moved.
   The change makes a structural precondition unrepresentable: a caller can no
   longer hand `remainder_tree` a `Vec<Vec<BigUint>>` of the wrong shape, and
   the function can rely on the layout `product_tree` established rather than
-  re-deriving or trusting it. `ProductTree` is exported from the crate root.
+  re-deriving or trusting it. `ProductTree` is exported as `number_theory::ProductTree`.
 
   A caller that only pipes one into the other is unaffected apart from the
   type name. A caller that *inspected* the levels must go through
@@ -53,14 +71,14 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
-- **`Reciprocal`** — division by a `u64` divisor that does not change, with
+- **`WordReciprocal`** — division by a `u64` divisor that does not change, with
   the reciprocal precomputed once (Möller & Granlund, IEEE ToC 60 (2011),
   Algorithm 4). `rem`, `div_rem`, `rem_euclid_i64`, and
   `BigUint::rem_reciprocal` / `div_rem_reciprocal` for multi-limb dividends.
   Worth reaching for at two limbs and above; measured *slower* than the
   hardware divide for word-sized dividends on Apple silicon, and the module
   documentation carries the numbers.
-- **`SmoothBase`** — Bernstein batch smoothness with the primes' product built
+- **`SmoothnessBase`** — Bernstein batch smoothness with the primes' product built
   once, so the caller chooses the batch size rather than the setup cost
   choosing it. The free `smooth_parts` is now the one-shot form over this
   type, so there is one algorithm rather than two.

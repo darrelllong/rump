@@ -44,7 +44,7 @@ that ended up downstream because it was written where it was first needed.
 
 ### Real roots and the real factorisation of a `PolyZ`
 
-`PolyZ` already carries `resultant`, `discriminant`, and — through `PolyModP`
+`PolyZ` already carries `resultant`, `discriminant`, and — through `PolyMod`
 — roots modulo a prime. What it has no answer for is where a polynomial
 crosses the *real* line, and that is the conspicuous gap in an otherwise
 complete polynomial type.
@@ -122,15 +122,15 @@ The last of six polynomial pieces that ended up downstream. The other
 five landed 2026-08-16 and have moved to *Landed in rump, consumer
 migration pending*, below.
 
-Its two building blocks are delivered — `PolyModP::symmetric_lift` and
-`PolyModP::with_modulus`, with a test showing they compose into the lift —
+Its two building blocks are delivered — `PolyMod::symmetric_lift` and
+`PolyMod::change_modulus`, with a test showing they compose into the lift —
 but the lift itself is not, because the consumer's version is inseparable
 from its stopping rule. `lift_target_bits` and `MAX_LIFTS` decide when a
 failing check becomes a verdict, and they are calibrated on the measured
 `H(β)/H(δ)` ratio of number-field-sieve dependencies. A general version needs
 the caller to name a target precision instead, which is a different signature
 from the one the consumer uses; filing it that way is the next step rather
-than a port. Note also that `with_modulus`'s two divisibility directions
+than a port. Note also that `change_modulus`'s two divisibility directions
 behave differently — narrowing is the ring projection, widening is only a
 section — which the consumer's `widen` relies on without saying so.
 
@@ -139,8 +139,8 @@ section — which the consumer's `widen` relies on without saying so.
 ## Landed in rump, consumer migration pending
 
 **Delivered 2026-08-16: two-dimensional reduction under a weighted norm.**
-`gauss_reduce_weighted` is in `src/lattice.rs`, exported from the crate
-root, documented in `MANUAL.md` and `manual.tex` and cited in
+`gauss_reduce_weighted` is in `src/lattice.rs`, exported as
+`lattice::gauss_reduce_weighted`, documented in `MANUAL.md` and `manual.tex` and cited in
 `CITATIONS.md`. Machine integers throughout, as asked — no bignums.
 
 It is exact where the consumer's version is not, and that is the point of
@@ -180,7 +180,7 @@ lattice problem needs.
 
 
 **Delivered 2026-08-16: a reusable batch-smoothness context.**
-`SmoothBase` is in `src/number_theory.rs`, exported from the crate root,
+`SmoothnessBase` is in `src/number_theory.rs`, exported from its canonical module,
 documented in `MANUAL.md` and `manual.tex` and cited in `CITATIONS.md`. It
 carries `new`, `primes` and `smooth_parts`; the free `smooth_parts` is now
 the one-shot form implemented over the context, so there is one algorithm
@@ -221,10 +221,13 @@ works: the run stops as soon as it has enough.
 
 Wanted, roughly:
 
+As filed; construction reports invalid input rather than returning the type
+unconditionally:
+
 ```text
-SmoothBase::new(primes: &[u64]) -> SmoothBase   // builds z once
-SmoothBase::primes(&self) -> &[u64]
-SmoothBase::smooth_parts(&self, values: &[BigUint]) -> Vec<BigUint>
+SmoothnessBase::new(primes: &[u64]) -> Result<SmoothnessBase, SmoothnessBaseError>
+SmoothnessBase::primes(&self) -> &[u64]
+SmoothnessBase::smooth_parts(&self, values: &[BigUint]) -> Vec<BigUint>
 ```
 
 with the existing free function kept as the one-shot convenience form,
@@ -249,7 +252,7 @@ Two notes for a mover:
   fine for the context to return smooth parts exactly as the free function
   does.
 - The caller obligations already documented on `smooth_parts` — entries at
-  least two, the panic on a smaller one — should move onto `SmoothBase::new`,
+  least two, the panic on a smaller one — should move onto `SmoothnessBase::new`,
   where they can be checked once instead of per batch.
 
 Both entries above were staged in the consumer as `REQUESTS-TO-RUMP.md` and
@@ -260,8 +263,8 @@ ledgers is the failure this file's legend exists to prevent.
 ---
 
 
-**Delivered 2026-08-16: division by a fixed `u64` divisor.** `Reciprocal`
-is in `src/bigint/reciprocal.rs`, exported from the crate root, documented
+**Delivered 2026-08-16: division by a fixed `u64` divisor.** `WordReciprocal`
+is in `src/bigint/reciprocal.rs`, exported from its canonical module, documented
 in `MANUAL.md` and `manual.tex` and cited in `CITATIONS.md`. It carries
 `new`, `divisor`, `rem_u64`, `div_rem_u64` and `rem_euclid_i64`, with
 `BigUint::rem_reciprocal` and `BigUint::div_rem_reciprocal` for multi-limb
@@ -289,22 +292,28 @@ and does not care that the divisor has not changed; a precomputed reciprocal
 turns each into a multiply and a shift.
 
 This is the one classical integer-arithmetic primitive rump does not have.
-`BarrettCtx` covers a fixed `BigUint` modulus (`src/bigint/barrett.rs`), and
+`BarrettContext` covers a fixed `BigUint` modulus (`src/bigint/barrett.rs`), and
 `div_rem_u64` / `rem_u64` cover a word divisor used once. The gap is a word
 divisor used *many* times.
 
 Wanted, roughly:
 
-```text
-Reciprocal::new(divisor: u64) -> Reciprocal          // divisor >= 1
-Reciprocal::divisor(&self) -> u64
-Reciprocal::rem_u64(&self, value: u64) -> u64
-Reciprocal::div_rem_u64(&self, value: u64) -> (u64, u64)
-Reciprocal::rem_euclid_i64(&self, value: i64) -> u64 // non-negative residue
+As filed; the delivered signatures differ where the ledger settled a name or
+moved a precondition into the type:
 
-BigUint::rem_reciprocal(&self, r: &Reciprocal) -> u64
-BigUint::div_rem_reciprocal(&self, r: &Reciprocal) -> (BigUint, u64)
+```text
+WordReciprocal::new(divisor: NonZeroU64) -> WordReciprocal   // total
+WordReciprocal::divisor(&self) -> u64
+WordReciprocal::rem(&self, value: u64) -> u64            // filed as rem_u64
+WordReciprocal::div_rem(&self, value: u64) -> (u64, u64)  // filed as div_rem_u64
+WordReciprocal::rem_euclid_i64(&self, value: i64) -> u64  // non-negative residue
+
+BigUint::rem_reciprocal(&self, r: &WordReciprocal) -> u64
+BigUint::div_rem_reciprocal(&self, r: &WordReciprocal) -> (BigUint, u64)
 ```
+
+`rem_u64` was not kept: `BigUint::rem_u64` takes the *divisor* as its `u64`
+and this takes the *dividend*, and one name for two argument roles is a trap.
 
 Granlund–Montgomery (PLDI 1994) for the exact quotient form, Möller–Granlund
 (IEEE ToC 2011) for the improved variant, Lemire–Kaser–Kurz (2019) for the
@@ -344,7 +353,7 @@ would have:
   are signed and the residue must be non-negative. Every consumer that has to
   re-derive that from a truncating remainder gets a chance to be wrong.
 - **The precompute must amortise, and here it does completely.** One
-  `Reciprocal` per factor-base entry, built once when the base is built, reused
+  `WordReciprocal` per factor-base entry, built once when the base is built, reused
   across ~1 600 blocks and thousands of reports. A `new` that costs a division
   is fine; one that costs more than a few is still fine.
 - **A remainder-only fast path is worth having separately.** The probe at
@@ -377,8 +386,8 @@ of 2026-08-16 and will drift.
 | `PolyZ::rem_monic` | `src/gnfs/sqrt.rs:234` | `reduce` |
 | `PolyZ::product_mod_monic` | `src/gnfs/sqrt.rs:186` | `algebraic_product` |
 | `PolyZ::homogeneous_substitution` | `src/gnfs/lattice.rs:313` | `transformed_norm` |
-| `PolyModP::with_modulus` | `src/gnfs/sqrt.rs:401` | `widen` |
-| `PolyModP::symmetric_lift` | `src/gnfs/sqrt.rs:401-418` | (alongside `widen`) |
+| `PolyMod::change_modulus` | `src/gnfs/sqrt.rs:401` | `widen` |
+| `PolyMod::symmetric_lift` | `src/gnfs/sqrt.rs:401-418` | (alongside `widen`) |
 
 Delivered 2026-08-16 in `src/poly.rs`:
 
@@ -390,7 +399,7 @@ Delivered 2026-08-16 in `src/poly.rs`:
   a polynomial whose content is divisible by `p` is *answered* rather than
   refused (the roots of `f/pᵛ` at precision `e−v`, expanded back), and the
   width cap is on the candidate count rather than on the prime, with
-  `MAX_ROOT_LEVEL` exported. The consumer's `LIFT_WIDTH` truncation is not
+  `MAX_ENUMERATED_ROOTS` exported. The consumer's `LIFT_WIDTH` truncation is not
   reproduced: rump refuses rather than silently returning some of the roots.
   Verified against exhaustive search over every residue for nine `(p, e)`
   pairs, including forced-branching cubes and non-primitive polynomials.
@@ -468,7 +477,7 @@ For the record, so the boundary stays where it is:
 - **What the consumer owes on the two entries merged 2026-08-16**, carried over
   from the staging file so the boundary stays honest in both directions.
   Neither is rump's work: adopting `smooth_parts` at all once the
-  `SmoothBase` context exists — the primitive has been available and unused,
+  `SmoothnessBase` context exists — the primitive has been available and unused,
   which is a downstream omission rather than an upstream gap — and deciding
   *where* the pre-filter sits in confirmation, then re-measuring the
   sieve/confirmation split afterwards, since that split moves with the bar,
@@ -514,13 +523,13 @@ balanced base-`m` expansion, where it roughly halves every norm the sieve must
 find smooth, and the lift of the algebraic square root out of `ℤ/q^k`, where
 taking the non-negative representative instead produces a plausible wrong
 answer rather than an error. With this delivered `gnfs::arith` is deleted;
-`mul`, `div_rem` and `abs` had been indirection to `mul_ref`, `div_rem` and
+`mul`, `div_rem` and `abs` had been indirection to `mul`, `div_rem` and
 `magnitude()` since 0.2.2, across fifty-three call sites.
 
 **Post-0.2.1 — `BigInt` signed arithmetic (was Tier 1 #0, blocking for
 GNFS).**
 
-- `BigInt::mul_ref` is now `pub` — the existing crate-private product, made
+- `BigInt::mul` is now `pub` — the existing crate-private product, made
   public unchanged.
 - `BigInt::div_rem`, truncated toward zero (the C and Rust `/` convention;
   the remainder takes the dividend's sign), documented in the rustdoc with
@@ -537,7 +546,7 @@ rump's ring now.
 
 - `primes_below` (was #2). The consumer had written a sieve of Eratosthenes
   twice; both are gone.
-- `sqrt_mod_prime_power` (was #3). The quadratic sieve's factor base carried
+- `mod_sqrt_prime_power` (was #3). The quadratic sieve's factor base carried
   its own Hensel lift for roots modulo `p^e`.
 - `BigUint::div_rem_u64` and `to_u64` (was #1), and `ln_approx` /
   `to_f64_lossy` (was #4). The first removes an allocation from the sieve's
@@ -545,7 +554,7 @@ rump's ring now.
   as the literature states them instead of off a decimal-digit proxy.
 - `product_tree`, `remainder_tree`, `smooth_parts` (was #5) — batch smoothness
   by Bernstein's method.
-- `PolyZ` and `PolyModP` (was #6), with `resultant`, `discriminant`,
+- `PolyZ` and `PolyMod` (was #6), with `resultant`, `discriminant`,
   `squarefree_factorization`, `is_irreducible`, `factor`, and `roots`. This is
   what makes the number field sieve possible at all: `resultant` is the
   algebraic norm, and `roots` modulo a small prime *is* the algebraic factor
@@ -554,13 +563,13 @@ rump's ring now.
 
 **0.2.0 and 93b4d57 — the earlier round.**
 
-- `MontgomeryCtx::add_mont` / `sub_mont`, `BigUint::mod_add` / `mod_sub`.
+- `MontgomeryContext::add_mont` / `sub_mont`, `BigUint::mod_add` / `mod_sub`.
   Pollard's rho iterates `x ↦ x² + c` inside the Montgomery domain, and the
   `+ c` was a hand-written conditional subtraction downstream, correct only
   under a reduced-operand precondition living in a comment. Now one call:
 
   ```rust
-  fn next(ctx: &MontgomeryCtx, y: &BigUint, c: &BigUint) -> BigUint {
+  fn next(ctx: &MontgomeryContext, y: &BigUint, c: &BigUint) -> BigUint {
       ctx.add_mont(&ctx.square_mont(y), c)
   }
   ```

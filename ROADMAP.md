@@ -54,11 +54,11 @@ them remains subject to the joint triage.
    Math. Comp. 48 (1987)); measured 1.5× at a batch of two, levelling
    near 3.4× — the ratio of one Lehmer inversion to three multiplications.
 8. **Cipolla's square root** — completed 2026-08-14. Dispatched inside
-   `sqrt_mod` when s² > 4·bits (crossings measured at s ≈ 70/93/124 for
+   `mod_sqrt` when s² > 4·bits (crossings measured at s ≈ 70/93/124 for
    1024/2048/4096 bits by a both-engines probe); the descent's s² tail is
    capped at the crossover cost. Both engines' non-residue scans are
    bounded, so composite moduli — odd squares included — yield None.
-9. **Barrett reduction context** — completed 2026-08-14. `BarrettCtx`
+9. **Barrett reduction context** — completed 2026-08-14. `BarrettContext`
    (HAC 14.42/14.44) for either parity: reduce/mod_mul/mod_square/mod_pow.
    The second product is HAC Note 14.45(ii)'s exact half-product as of
    2026-08-17, taken up to a measured 32 kbit: against a plain division
@@ -223,7 +223,7 @@ the Hilbert symbol (needs §2's `valuation`). The subquadratic Jacobi
 **Efficient (prime modulus):** Tonelli–Shanks and Cipolla (both present —
 Cipolla landed 2026-08-14 as queue item 8, dispatched where the descent's
 2-adic tail lives); the mod-8 special cases, Hensel lifting to prime
-powers, and all-roots return landed with `sqrt_mod_prime_power` (0.2.1);
+powers, and all-roots return landed with `mod_sqrt_prime_power` (0.2.1);
 still open: nth roots mod p.
 
 **Gated on factoring:** `mod_sqrt_composite` requires the modulus's
@@ -294,7 +294,7 @@ and factorization over F_p — square-free, distinct-degree, equal-degree,
 Cantor–Zassenhaus (randomized polynomial), Berlekamp — plus integer
 polynomial factorization via LLL (van Hoeij). The substrate for §13 and much
 of §8; the natural second pillar after the integer layer. Present:
-`PolyZ`/`PolyModP` with exact and pseudo-division, resultant, discriminant,
+`PolyZ`/`PolyMod` with exact and pseudo-division, resultant, discriminant,
 the full squarefree/distinct-degree/Cantor–Zassenhaus pipeline,
 `is_irreducible`, and `roots` (0.2.1), alongside the GF(2)[x] internals
 behind `Gf2m`; still open here: the asymptotic upgrades (Newton inversion,
@@ -303,7 +303,7 @@ multipoint evaluation, subproduct trees), Berlekamp, and van Hoeij.
 ## 13. Finite fields
 
 **Efficient — all of it.** `PrimeField(p)` (a completion of what
-`MontgomeryCtx` starts), `ExtensionField` on §12's polynomial arithmetic,
+`MontgomeryContext` starts), `ExtensionField` on §12's polynomial arithmetic,
 Frobenius, trace, norm, minimal polynomials, roots, irreducible-polynomial
 generation, isomorphisms, bases. Present: the binary-field list, complete,
 in `Gf2m`.
@@ -344,7 +344,7 @@ exponentially many outputs — iterators only, never materialized.
 1. Arbitrary-precision integers — **largely present**
 2. GCD and extended GCD — **present** (Lehmer + Half-GCD)
 3. Modular contexts and exponentiation — **present** (Montgomery and Barrett)
-4. Modular inverse and square roots — **present** (`sqrt_mod` one root mod an odd prime; `sqrt_mod_prime_power` all roots mod `p^e`, `p = 2` included)
+4. Modular inverse and square roots — **present** (`mod_sqrt` one root mod an odd prime; `mod_sqrt_prime_power` all roots mod `p^e`, `p = 2` included)
 5. Jacobi and Kronecker symbols — **present**
 6. CRT and rational reconstruction — **present** (Garner; reconstruction landed 2026-08-14)
 7. Sieving and primality testing — **partial** (Miller–Rabin, BPSW, and bulk
@@ -352,7 +352,7 @@ exponentially many outputs — iterators only, never materialized.
 8. Basic factorization — absent (deliberately: it lives downstream, see
    REQUESTS.md's boundary)
 9. Polynomial arithmetic over ℤ and F_p — **present** (0.2.1: `PolyZ`,
-   `PolyModP`, resultant/discriminant, factorization, roots)
+   `PolyMod`, resultant/discriminant, factorization, roots)
 10. Prime and extension fields — **partial** (GF(2^m) only)
 11. Exact matrices and linear algebra — absent
 12. LLL — **present** (0.2.1: `lll_reduce`, `lll_reduce_delta`, integral form)
