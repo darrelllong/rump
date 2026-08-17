@@ -1,5 +1,236 @@
 # Second review of `rump`
 
+## API and naming recovery plan — 2026-08-16
+
+The authoritative ledger is [`NAMES.md`](NAMES.md), paired with
+[`../factoring/NAMES.md`](../factoring/NAMES.md). Where this review differs,
+the ledgers win. In particular, the coordinated breaking cut uses no
+deprecated aliases, forwarding wrappers, or duplicate public paths.
+
+### Verdict
+
+Rump's arithmetic is not the mess; its surface is. The crate root re-exports
+unrelated integer types, modular contexts, primality tests, polynomial types,
+lattice reduction, product trees, smoothness helpers, random sampling, and
+GF(2^m) operations as one flat vocabulary. Inside that surface, at least four
+naming grammars compete:
+
+- allocating arithmetic uses `add_ref`, `sub_ref`, `mul_ref`, and
+  `square_ref`;
+- mutation uses both `add_assign_ref` and `assign_add`;
+- modular arithmetic mixes `mod_mul`, `mod_pow`, `mod_inverse`, `sqrt_mod`,
+  `mul_mont`, and `pow_encoded`;
+- scratch reuse is exposed as raw `&mut Vec<u64>` through
+  `_with_workspace` names.
+
+The live uncommitted work has begun making some names more coherent—Barrett
+operations are moving toward `mod_*`, `Reciprocal` word operations are losing
+misleading `_u64` suffixes, and invalid constructors are becoming fallible.
+Those directions are useful, but piecemeal public renames at version `0.2.2`
+would repeat the `ProductTree` compatibility mistake. Settle the complete
+grammar first, then land it as an intentional release train.
+
+Freeze new public exports until that grammar is recorded. A naming commit must
+not also change a kernel, cutoff, allocation strategy, or mathematical
+contract. This section supersedes the ordering advice later in this report
+where the two conflict; the earlier findings remain evidence for the plan.
+
+### Public namespace: organize before moving files
+
+Expose a stable facade first. Physical module splitting can follow without
+another public break:
+
+```rust
+pub mod integer;        // parse errors and WordReciprocal
+pub mod modular;        // modular functions and validated contexts
+pub mod number_theory;  // gcd, symbols, primality, CRT, roots
+pub mod polynomial;     // PolyZ and PolyMod
+pub mod gf2;            // dense and sparse binary linear algebra
+pub mod finite_field;   // Gf2m
+pub mod lattice;        // LLL and weighted Gauss reduction
+pub mod random;         // the byte-source trait and samplers
+
+pub use bigint::{BigInt, BigUint, Sign};
+```
+
+Keep only the three core integer types at the root. The breaking commit removes
+the old root paths as it adds their canonical module paths; it does not retain
+both. Do not make the internal modules public wholesale: facade modules expose
+only the supported contract.
+
+The package is named `rust-mp`, the library target is `rump`, and the repository
+is called Rump. That distinction is survivable only if it is stated once and
+then left alone. Do not attempt a repository/package/crate rename in the same
+release as the arithmetic cleanup. Reconsider branding only after the API is
+stable; it has no bearing on method correctness.
+
+### One naming grammar
+
+Adopt these rules and apply them across `BigUint`, `BigInt`, contexts,
+polynomials, documentation, and examples:
+
+1. A borrowed argument is visible in the Rust signature; do not encode it in
+   a `_ref` suffix.
+2. The ordinary allocating operation is `add`, `sub`, `mul`, or `square`.
+   Prefer the standard operator traits at call sites (`&a + &b`, `x += &y`).
+3. A caller-supplied output is named `*_into`; scratch storage is `*_with_scratch`.
+   Do not use `assign_add` for one and `add_assign_ref` for the other.
+4. Modular operations consistently use the `mod_*` family: `mod_add`,
+   `mod_sub`, `mod_mul`, `mod_square`, `mod_pow`, `mod_inverse`, and
+   `mod_sqrt`. The live Barrett rename follows this rule; `sqrt_mod` does not.
+5. `Result` reports an invalid public input or failed precondition. `Option`
+   means a mathematically legitimate absence, such as no inverse or no root.
+   If a nonzero value is the entire precondition, accept `NonZeroU64` rather
+   than returning an unexplained `None`.
+6. `_unchecked` is private. A safe public API must validate its invariant in
+   every build or encode it in a type.
+
+The migration table should start with:
+
+| Current | Canonical target |
+|---|---|
+| `add_ref`, `sub_ref`, `mul_ref`, `square_ref` | `add`, `sub`, `mul`, `square` |
+| `add_assign_ref`, `sub_assign_ref` | operator traits, or `add_assign` / `sub_assign` if an inherent method is still needed |
+| `assign_add`, `assign_sub` | `add_into`, `sub_into` |
+| `sqrt_mod` | `mod_sqrt` |
+| `BarrettCtx` | `BarrettContext` |
+| `MontgomeryCtx` | `MontgomeryContext` |
+| `Rng` | `RandomSource` |
+| `Reciprocal` | `WordReciprocal` |
+| `SmoothBase` | `SmoothnessBase` |
+| `PolyModP` | `PolyMod` unless construction begins proving that the modulus is prime |
+
+`PolyZ` is a conventional mathematical name and can remain. `PolyModP` cannot:
+its constructors accept an arbitrary modulus, including composite values, so
+the `P` promises a prime field that the type does not establish. There are two
+honest designs:
+
+- rename the coefficient-ring type to `PolyMod`, and have field-only
+  algorithms validate their preconditions; or
+- introduce a validated `PrimeModulus`/`PrimeFieldContext` and allow a
+  genuinely field-bound polynomial type to use a prime-field name.
+
+The first is the smaller cleanup. Do not preserve a mathematically false name
+for symmetry.
+
+### Make modular domains types, not suffixes
+
+The biggest API improvement is not a spelling change. A Montgomery-domain
+value is currently an ordinary `BigUint`, so the compiler cannot prevent an
+unencoded value, an out-of-range value, or a residue from another modulus from
+reaching `mul_mont`. That forces names such as `mul_mont`, `one_mont`, and
+`pow_encoded` to carry invariants the type system should carry.
+
+The target should be an opaque context-bound `MontgomeryResidue`. Encoding
+returns that type; decoding consumes or borrows it; residue operations are
+simply `add`, `sub`, `mul`, `square`, and `pow`. A context mismatch must be a
+checked error, never a debug-only assertion. The context may retain private
+unchecked kernels after measurement, but callers must not see them.
+
+Likewise, replace `&mut Vec<u64>` scratch parameters with an opaque
+`MontgomeryScratch` or output-reusing residue operation. The public API should
+state whether it reuses scratch and/or result storage. “Allocation-free” must
+mean no allocation, not merely no scratch allocation.
+
+Barrett values remain ordinary residues, so `BarrettContext::mod_mul` and
+friends are appropriate. A context should expose only operations it
+accelerates; deleting the live `add_mod`/`sub_mod` forwarding methods is the
+right division because they added no Barrett behavior.
+
+### Turn construction and batch helpers into object APIs
+
+Several free-function/type pairs should become one invariant-bearing API:
+
+```text
+product_tree(values)                  -> ProductTree::new(values)
+remainder_tree(&tree, modulus)        -> tree.remainders(modulus)
+smooth_parts(values, primes)          -> SmoothnessBase::new(primes)?.smooth_parts(values)
+```
+
+Keep a convenience free function only when it adds a genuinely useful
+one-shot path. Do not keep two equally prominent ways to perform the same
+operation.
+
+The live review corrected an important false premise in the first draft:
+`is_probable_prime` is the fixed twelve-base Miller–Rabin schedule, while
+`is_probable_prime_bpsw` is Baillie–PSW. They are distinct mathematical
+contracts, not duplicate spellings, and both remain canonical under
+`number_theory`. The explicit-base entry is
+`miller_rabin_with_bases`, so the caller can see which guarantee changed.
+
+### Division of labor with `factoring`
+
+Rump owns exact, factoring-free mathematics. It does not own factoring search
+policy merely because that policy contains arithmetic.
+
+| Move to or keep in Rump | Keep in `factoring` |
+|---|---|
+| Big integers and modular contexts | Algorithm cascade and budgets |
+| Polynomial-ring operations and validated field algorithms | Polynomial-selection score and lift-width policy |
+| Product/remainder trees and batch smooth parts | Factor bases, ideals, relations, and smoothness acceptance |
+| Weighted Gauss reduction | Q-lattice construction and special-q scheduling |
+| Dense GF(2) null space, singleton pruning, Block Lanczos | Matrix layout and conversion of dependencies into congruences |
+| Generic real-polynomial root finding | GNFS norm-model acceptance and sieve-region policy |
+
+The polynomial primitives already added here should be consumed before more
+variants are invented: balanced base expansion, prime-power roots, monic
+remainder/product, homogeneous substitution, symmetric lift, and modulus
+change. Stabilize their names and contracts in Rump, then have factoring switch
+and delete each local copy in the same commit.
+
+Bring the GF(2) solvers across under names that describe the operation, for
+example `gf2::dense_null_space`, `gf2::prune_singletons`, and
+`gf2::block_lanczos_dependencies`. They must not retain QS terminology; GNFS
+already uses them. Move only the generic real-root solver, not factoring's
+`NormModel` or its heuristic acceptance rules.
+
+No helper moves merely because it might someday be reusable. Require a
+factoring-free contract, an independent test oracle, and a credible second
+consumer. Once a helper does move, however, leaving the consumer copy in place
+is a defect.
+
+### Release train
+
+1. **Maintain the paired ledgers.** Every public name and ownership change
+   lands there first in a documentation-only commit.
+2. **Finish the current correctness work without opportunistic renames.** Do
+   not mix reciprocal, Barrett, smoothness, or lattice behavior changes with
+   the API sweep.
+3. **Create the facade namespaces in the breaking commit.** Add each canonical
+   path and remove its old root path in the same change. Add no forwarding
+   alias or duplicate re-export.
+4. **Release this as Rump `0.3.0`.** The existing `ProductTree` signature
+   change and the planned naming changes are breaking. Version them honestly.
+5. **Migrate factoring in four small batches:** polynomial primitives,
+   weighted Gauss, GF(2), and real roots, against the recorded paired Rump
+   revision. Each batch deletes the downstream copy and runs both gates.
+6. **Add external compile fixtures.** Test only the canonical examples as
+   downstream crates, not merely as unit tests inside Rump.
+7. **Audit removed spellings.** Searches may find them only in release notes
+   and history, never in live exports or forwarding functions.
+8. **Split the large implementation files after the facade is stable.** Split
+   by invariant (`integer`, multiplication, division, modular contexts;
+   Euclid, symbols, roots, primality, batch; integer and modular polynomials),
+   not by an arbitrary line target.
+
+Each commit should pass formatting, Clippy and rustdoc with warnings denied,
+ordinary tests, and `git diff --check`. Behavior-preserving moves also compare
+the existing benchmark baselines. A cleanup commit does not get to claim a
+speedup, and an optimization commit does not get to hide behind a rename.
+
+The non-negotiable restriction remains: use `#![forbid(unsafe_code)]` and pure
+safe Rust throughout. No assembly, FFI, intrinsics, raw-pointer tricks,
+target-only representation, or unportable public API belongs in this plan.
+Portability failures should be represented by checked sizes and clear errors,
+not by target assumptions.
+
+The coordinated consumer-side sequence and concrete factoring names are in
+[`../factoring/SECOND-REVIEWER.md`](../factoring/SECOND-REVIEWER.md).
+
+---
+
+The original hard review follows unchanged.
+
 ## Scope and verdict
 
 This is a hard review of the live repository, not only `HEAD`. The base commit

@@ -83,14 +83,14 @@ primary values. Every other export has one module path:
 | Canonical module | Canonical contents | State |
 |---|---|---|
 | crate root | BigInt, BigUint, Sign | done |
-| integer | ParseBigIntError, WordReciprocal | pending |
-| modular | BarrettContext, MontgomeryContext, modular arithmetic and errors | pending |
-| number_theory | gcd/lcm, symbols, primality, CRT, reconstruction, valuations, product trees, smoothness | pending |
-| polynomial | PolyZ, PolyMod, polynomial limits and errors | pending |
-| finite_field | Gf2m | pending |
+| integer | ParseBigIntError, WordReciprocal | done |
+| modular | BarrettContext, MontgomeryContext, modular arithmetic and errors | done; error type pending below |
+| number_theory | gcd/lcm, symbols, primality, CRT, reconstruction, valuations, product trees, smoothness | done; error type pending below |
+| polynomial | PolyZ, PolyMod, polynomial limits and errors | done |
+| finite_field | Gf2m | done |
 | gf2 | dense null space, singleton pruning, Block Lanczos | blocked — consumer transfer |
-| lattice | LLL and weighted Gauss reduction | pending |
-| random | RandomSource and random-value functions | pending |
+| lattice | LLL and weighted Gauss reduction | done; error type pending below |
+| random | RandomSource and random-value functions | done |
 
 Private source files do not have to mirror this facade one-for-one. The public
 path is the contract; physical splitting follows after names settle.
@@ -99,19 +99,19 @@ path is the contract; physical splitting follows after names settle.
 
 | Current | Canonical | State | Notes |
 |---|---|---|---|
-| BigUint::add_ref / BigInt::add_ref | add | pending | borrowing remains visible in the signature |
-| BigUint::sub_ref / BigInt::sub_ref | sub | pending | |
-| BigUint::mul_ref / BigInt::mul_ref | mul | pending | |
-| BigUint::square_ref | square | pending | |
-| BigInt::mul_biguint_ref | mul_biguint | pending | |
-| add_assign_ref / sub_assign_ref | removed; use += &rhs / -= &rhs | pending | operator traits own receiver mutation |
-| assign_add / assign_sub | add_into / sub_into | pending | caller-owned reusable output |
-| BigUint::modulo | rem | pending | aligns with div_rem and rem_u64 |
-| BigInt::modulo_positive | rem_euclid | pending | non-negative residue |
-| BigInt::symmetric_remainder | symmetric_rem | pending | |
-| Reciprocal | integer::WordReciprocal | pending | fixed divisor is exactly one word |
-| Reciprocal::new(NonZeroU64) | WordReciprocal::new(NonZeroU64) | pending | total constructor |
-| Reciprocal::rem / div_rem | WordReciprocal::rem / div_rem | pending | leaf names are canonical |
+| BigUint::add_ref / BigInt::add_ref | add | done | borrowing remains visible in the signature |
+| BigUint::sub_ref / BigInt::sub_ref | sub | done | |
+| BigUint::mul_ref / BigInt::mul_ref | mul | done | |
+| BigUint::square_ref | square | done | |
+| BigInt::mul_biguint_ref | mul_biguint | done | |
+| add_assign_ref / sub_assign_ref | removed; use += &rhs / -= &rhs | done | operator traits own receiver mutation |
+| assign_add / assign_sub | add_into / sub_into | done | caller-owned reusable output |
+| BigUint::modulo | rem | done | aligns with div_rem and rem_u64 |
+| BigInt::modulo_positive | rem_euclid | done | non-negative residue |
+| BigInt::symmetric_remainder | symmetric_rem | done | |
+| Reciprocal | integer::WordReciprocal | done | fixed divisor is exactly one word |
+| Reciprocal::new(NonZeroU64) | WordReciprocal::new(NonZeroU64) | done | total constructor |
+| Reciprocal::rem / div_rem | WordReciprocal::rem / div_rem | done | leaf names are canonical |
 
 Constructors, conversions, predicates, roots, shifts, and div_rem methods not
 listed above retain their current leaf names under the canonical path.
@@ -120,51 +120,64 @@ listed above retain their current leaf names under the canonical path.
 
 | Current | Canonical | State | Notes |
 |---|---|---|---|
-| BarrettCtx | modular::BarrettContext | pending | no local public contractions |
-| MontgomeryCtx | modular::MontgomeryContext | pending | |
-| BarrettCtx mod_mul/mod_square/mod_pow | BarrettContext mod_mul/mod_square/mod_pow | pending | mod order is settled |
+| BarrettCtx | modular::BarrettContext | done | no local public contractions |
+| MontgomeryCtx | modular::MontgomeryContext | done | |
+| BarrettCtx mod_mul/mod_square/mod_pow | BarrettContext mod_mul/mod_square/mod_pow | done | mod order is settled |
 | BarrettCtx add_mod/sub_mod | removed | done | redundant forwarders already deleted |
-| free mod_pow / mod_inverse family | same leaf names under modular | pending path |
-| sqrt_mod | modular::mod_sqrt | pending | |
-| sqrt_mod_prime_power | modular::mod_sqrt_prime_power | pending | |
+| free mod_pow / mod_inverse family | same leaf names under modular | done |
+| sqrt_mod | modular::mod_sqrt | done | |
+| sqrt_mod_prime_power | modular::mod_sqrt_prime_power | done | |
 | BigUint mod_add/mod_sub/mod_mul | same leaf names | done | inherent operations stay on the value |
+| BarrettContext::new returning Option | return Result<Self, ModulusError> | pending | zero and one are rejected |
+| MontgomeryContext::new returning Option | return Result<Self, ModulusError> | pending | zero and even moduli are rejected |
+| no public modular construction error | modular::ModulusError { Zero, One, Even } | pending | shared factual variants; no context-dependent “below two” variant |
 | raw BigUint Montgomery-domain values | opaque MontgomeryResidue | pending | context and reduction invariant belong in the type |
 | mul_mont/square_mont/add_mont/sub_mont/one_mont/pow_encoded | residue mul/square/add/sub/one/pow | blocked — MontgomeryResidue |
 | with_workspace methods taking Vec<u64> | opaque scratch or into operations | blocked — residue/output design |
 
-BarrettContext::new and MontgomeryContext::new return Result with a shared
-modular-construction error. Invalid modulus is bad input, not a mathematical
-absence. No unchecked Montgomery operation is public.
+ModulusError is a non-exhaustive Copy enum implementing Display and
+std::error::Error. BarrettContext returns Zero or One; MontgomeryContext
+returns Zero or Even. The variants describe the rejected value rather than
+making a context-dependent assertion such as “below two.” Invalid modulus is
+bad input, not a mathematical absence. No unchecked Montgomery operation is
+public.
 
 ## Number theory and batching
 
 | Current | Canonical | State | Notes |
 |---|---|---|---|
-| is_probable_prime | number_theory::is_probable_prime | pending path | sole recommended Baillie–PSW entry |
-| is_probable_prime_bpsw | removed | pending | duplicate recommended entry |
-| is_probable_prime_with_bases | number_theory::miller_rabin_with_bases | pending | algorithm must be visible |
-| miller_rabin_witness | same under number_theory | pending path | |
-| is_strong_lucas_probable_prime | same under number_theory | pending path | |
-| ProductTree | number_theory::ProductTree | pending path | typed invariant is canonical |
-| product_tree / remainder_tree | same under number_theory | pending path | algorithmic one-shot pair |
-| SmoothBase | number_theory::SmoothnessBase | pending | reusable smoothness context |
-| free smooth_parts | number_theory::smooth_parts | pending path | one-shot convenience through context |
-| SmoothBase::new returning Option | SmoothnessBase::new returning Result | pending | entries below two are invalid input |
+| is_probable_prime | number_theory::is_probable_prime | done | fixed twelve-base Miller–Rabin default; not BPSW |
+| is_probable_prime_bpsw | number_theory::is_probable_prime_bpsw | done | distinct Baillie–PSW contract, not an alias |
+| is_probable_prime_with_bases | number_theory::miller_rabin_with_bases | done | algorithm is visible |
+| miller_rabin_witness | same under number_theory | done | |
+| is_strong_lucas_probable_prime | same under number_theory | done | |
+| ProductTree | number_theory::ProductTree | done | typed invariant is canonical |
+| product_tree / remainder_tree | same under number_theory | done | algorithmic one-shot pair |
+| SmoothBase | number_theory::SmoothnessBase | done | reusable smoothness context |
+| free smooth_parts | number_theory::smooth_parts | done | one-shot convenience through context |
+| SmoothBase::new returning Option | SmoothnessBase::new returning Result<Self, SmoothnessBaseError> | pending | entries below two are invalid input |
+| no public smoothness construction error | number_theory::SmoothnessBaseError { index, value } | pending | fields private; read through index() and value() |
+| no error accessors | SmoothnessBaseError::index / value | pending | exact rejected entry without caller rescanning |
 
 All other current number-theory exports retain their leaf names and move only
 to number_theory, except the modular functions assigned above.
+
+SmoothnessBaseError is a non-exhaustive Copy struct implementing Display and
+std::error::Error. It reports the first entry below two. Composites remain
+valid, so neither the type nor its message calls the offending value
+“non-prime.”
 
 ## Polynomials and fields
 
 | Current | Canonical | State | Notes |
 |---|---|---|---|
-| PolyZ | polynomial::PolyZ | pending path | conventional mathematical name |
-| PolyModP | polynomial::PolyMod | pending | constructors do not prove prime modulus |
-| PolyModP::pow_mod | PolyMod::mod_pow | pending | residue-ring naming rule |
-| PolyModP::with_modulus | PolyMod::change_modulus | pending | “with” hid a nontrivial operation |
-| MAX_ROOT_LEVEL | polynomial::MAX_ENUMERATED_ROOTS | pending | names resource limit, not algorithm level |
-| Gf2m | finite_field::Gf2m | pending path | conventional field notation |
-| Rng | random::RandomSource | pending | trait supplies bytes; it chooses no entropy source |
+| PolyZ | polynomial::PolyZ | done | conventional mathematical name |
+| PolyModP | polynomial::PolyMod | done | constructors do not prove prime modulus |
+| PolyModP::pow_mod | PolyMod::mod_pow | done | residue-ring naming rule |
+| PolyModP::with_modulus | PolyMod::change_modulus | done | “with” hid a nontrivial operation |
+| MAX_ROOT_LEVEL | polynomial::MAX_ENUMERATED_ROOTS | done | names resource limit, not algorithm level |
+| Gf2m | finite_field::Gf2m | done | conventional field notation |
+| Rng | random::RandomSource | done | trait supplies bytes; it chooses no entropy source |
 | factoring real-root solver | PolyZ::real_roots | blocked — consumer transfer | only generic root finding moves; NormModel stays downstream |
 
 PolyZ balanced_base_expansion, rem_monic, product_mod_monic,
@@ -177,12 +190,21 @@ prime-field promise.
 
 | Current | Canonical | State | Notes |
 |---|---|---|---|
-| lll_reduce / lll_reduce_delta | same under lattice | pending path | LLL is standard |
-| gauss_reduce_weighted | lattice::gauss_reduce_weighted | pending path | leaf order is canonical |
-| gauss_reduce_weighted returning Option | return Result | pending | invalid/dependent basis is bad input |
+| lll_reduce / lll_reduce_delta | same under lattice | done | LLL is standard |
+| gauss_reduce_weighted | lattice::gauss_reduce_weighted | done | leaf order is canonical |
+| weights: [i128; 2] | weights: [NonZeroU64; 2] | pending | encodes positivity and removes no previously successful input |
+| gauss_reduce_weighted returning Option | return Result<_, ReductionError> | pending | invalid basis/range is bad input |
+| no public lattice reduction error | lattice::ReductionError { DependentBasis, OutOfRange } | pending | no weight variant after NonZeroU64 |
 | factoring dense null space | gf2::dense_null_space | blocked — consumer transfer |
 | factoring singleton peel | gf2::prune_singletons | blocked — consumer transfer |
 | factoring Block Lanczos | gf2::block_lanczos_dependencies | blocked — consumer transfer |
+
+ReductionError is a non-exhaustive Copy enum implementing Display and
+std::error::Error. NonZeroU64 is sufficient for every successful call under
+the documented i128 bound: a full-rank basis has a nonzero coordinate in each
+dimension, and a weight above u64 already makes that weighted coordinate's
+square unrepresentable. The signature therefore removes only inputs that
+already returned OutOfRange, while making non-positive weights unrepresentable.
 
 ## Ownership
 
