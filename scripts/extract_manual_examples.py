@@ -5,7 +5,7 @@ The LaTeX manual's code listings are drawn from MANUAL.md, whose blocks are
 test-pinned; this extractor is the corresponding guard for manual.tex
 itself. It emits a single `main.rs` to stdout that compiles against the
 crate and executes every listing's assertions. Two blocks are skipped by
-content, not by count: the Cargo.toml snippet and the `pub trait Rng`
+content, not by count: the Cargo.toml snippet and the `pub trait RandomSource`
 declaration excerpt, neither of which is a runnable statement sequence.
 
 No per-block scoping is applied: later blocks legitimately reuse bindings
@@ -28,7 +28,7 @@ for b in blocks:
     if "rust-mp = " in b:  # the Cargo.toml snippet
         skipped += 1
         continue
-    if b.strip().startswith("pub trait Rng"):  # the trait declaration excerpt
+    if b.strip().startswith("pub trait RandomSource"):  # the trait declaration excerpt
         skipped += 1
         continue
     if b.strip().startswith("use rump::"):

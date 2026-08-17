@@ -9,7 +9,7 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use rump::{BigUint, MontgomeryCtx};
+use rump::{BigUint, MontgomeryContext};
 
 /// Deterministic test generator: splitmix64 (Steele, Lea & Flood 2014),
 /// vendored so the tests need no dependency. Not a CSPRNG and not meant to
@@ -130,7 +130,7 @@ fn run_for_bits(rng: &mut SplitMix64, bits: usize) {
     );
     let e_65537 = BigUint::from_u64(65_537);
     let exp_random = random_biguint(rng, 256);
-    let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus");
+    let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
 
     println!("\n### {}-bit", bits);
     println!("| Operation | ns/op | Iters |");

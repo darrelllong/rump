@@ -10,7 +10,7 @@
 //! 4-bit window alignments, all-zero windows (whose multiply is skipped),
 //! and operand shapes that stress the reduction's conditional subtract.
 
-use rump::{BigUint, MontgomeryCtx};
+use rump::{BigUint, MontgomeryContext};
 
 /// Deterministic test generator: splitmix64 (Steele, Lea & Flood 2014),
 /// vendored so the tests need no dependency. Not a CSPRNG and not meant to
@@ -108,7 +108,7 @@ fn structured_odd_modulus(words: usize, rng: &mut SplitMix64) -> BigUint {
 
 /// Check `ctx.pow` (and `pow_encoded` through the same call) against the
 /// reference, plus the canonical-range invariant.
-fn check_pow(ctx: &MontgomeryCtx, base: &BigUint, exponent: &BigUint) {
+fn check_pow(ctx: &MontgomeryContext, base: &BigUint, exponent: &BigUint) {
     let modulus = ctx.modulus();
     let actual = ctx.pow(base, exponent);
     let expected = pow_reference(base, exponent, modulus);
@@ -133,7 +133,7 @@ fn pow_matches_reference_across_shapes() {
     for modulus_words in [1usize, 2, 3, 4, 8] {
         for _ in 0..6 {
             let modulus = structured_odd_modulus(modulus_words, &mut rng);
-            let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus");
+            let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
 
             for base_words in [1usize, modulus_words, modulus_words + 1] {
                 let base = structured_biguint(base_words, &mut rng);
@@ -180,7 +180,7 @@ fn pow_exponent_boundaries() {
 
     for modulus_words in [1usize, 2, 4] {
         let modulus = structured_odd_modulus(modulus_words, &mut rng);
-        let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus");
+        let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
         let base = structured_biguint(modulus_words, &mut rng);
         for exponent in &exponents {
             check_pow(&ctx, &base, exponent);
@@ -192,7 +192,7 @@ fn pow_exponent_boundaries() {
 fn pow_base_edge_cases() {
     let mut rng = rng();
     let modulus = structured_odd_modulus(4, &mut rng);
-    let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus");
+    let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
 
     let n_minus_1 = modulus.sub_ref(&BigUint::one());
     let n_plus_1 = modulus.add_ref(&BigUint::one());
@@ -223,7 +223,7 @@ fn pow_base_edge_cases() {
 #[test]
 fn pow_tiny_and_degenerate_moduli() {
     // modulus == 1: everything collapses to zero.
-    let one_ctx = MontgomeryCtx::new(&BigUint::one()).expect("one is odd");
+    let one_ctx = MontgomeryContext::new(&BigUint::one()).expect("one is odd");
     assert_eq!(
         one_ctx.pow(&BigUint::from_u64(5), &BigUint::from_u64(3)),
         BigUint::zero()
@@ -236,7 +236,7 @@ fn pow_tiny_and_degenerate_moduli() {
     // Small odd moduli, exhaustively checkable shapes.
     for n in [3u64, 5, 9, 15, 255, 65_535] {
         let modulus = BigUint::from_u64(n);
-        let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus");
+        let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
         for base in 0..7u64 {
             for exponent in 0..7u64 {
                 check_pow(&ctx, &BigUint::from_u64(base), &BigUint::from_u64(exponent));
@@ -245,8 +245,8 @@ fn pow_tiny_and_degenerate_moduli() {
     }
 
     // Even or zero moduli have no Montgomery context.
-    assert!(MontgomeryCtx::new(&BigUint::zero()).is_none());
-    assert!(MontgomeryCtx::new(&BigUint::from_u64(100)).is_none());
+    assert!(MontgomeryContext::new(&BigUint::zero()).is_none());
+    assert!(MontgomeryContext::new(&BigUint::from_u64(100)).is_none());
 }
 
 #[test]
@@ -258,7 +258,7 @@ fn encode_decode_and_context_constants() {
             if modulus.is_one() {
                 continue;
             }
-            let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus");
+            let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
 
             // one_mont really is the encoding of one, and decode inverts
             // encode across the whole residue range shape.
@@ -284,7 +284,7 @@ fn mul_and_square_match_division_reference() {
             if modulus.is_one() {
                 continue;
             }
-            let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus");
+            let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
 
             for _ in 0..8 {
                 let a = structured_biguint(modulus_words, &mut rng).modulo(&modulus);
@@ -327,7 +327,7 @@ fn squaring_kernel_stresses_carry_chains() {
         if modulus.is_one() {
             continue;
         }
-        let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus");
+        let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
 
         let mut values = vec![
             BigUint::zero(),
@@ -358,7 +358,7 @@ fn pow_at_public_key_sizes() {
     for bits in [256usize, 1024, 2048] {
         let words = bits / 64;
         let modulus = structured_odd_modulus(words, &mut rng);
-        let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus");
+        let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
         let base = structured_biguint(words, &mut rng);
 
         check_pow(&ctx, &base, &BigUint::from_u64(65_537));

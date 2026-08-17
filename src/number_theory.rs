@@ -18,7 +18,7 @@
 //! caller-supplied generator — since rump chooses no entropy source of its
 //! own.
 
-use crate::bigint::{BarrettCtx, BigInt, BigUint, MontgomeryCtx, Sign};
+use crate::bigint::{BarrettContext, BigInt, BigUint, MontgomeryContext, Sign};
 
 // ─── Divisibility ──────────────────────────────────────────────────────────────
 
@@ -1380,7 +1380,7 @@ pub fn remainder_tree(tree: &ProductTree, modulus: &BigUint) -> Vec<BigUint> {
 /// remaining zero-divisor path is unreachable from here.)
 #[must_use]
 pub fn smooth_parts(values: &[BigUint], primes: &[u64]) -> Vec<BigUint> {
-    SmoothBase::new(primes)
+    SmoothnessBase::new(primes)
         .expect("every entry of `primes` must be at least two")
         .smooth_parts(values)
 }
@@ -1400,9 +1400,9 @@ pub fn smooth_parts(values: &[BigUint], primes: &[u64]) -> Vec<BigUint> {
 /// # Examples
 ///
 /// ```
-/// use rump::{BigUint, SmoothBase};
+/// use rump::{BigUint, SmoothnessBase};
 ///
-/// let base = SmoothBase::new(&[2, 3, 5]);
+/// let base = SmoothnessBase::new(&[2, 3, 5]);
 /// assert_eq!(base.primes(), &[2, 3, 5]);
 ///
 /// // 360 = 2³·3²·5 is fully smooth; 14 = 2·7 keeps only its 2.
@@ -1414,13 +1414,13 @@ pub fn smooth_parts(values: &[BigUint], primes: &[u64]) -> Vec<BigUint> {
 /// assert!(parts[1] != BigUint::from_u64(14));
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SmoothBase {
+pub struct SmoothnessBase {
     primes: Vec<u64>,
     /// `∏ primes`, built once by a product tree.
     product: BigUint,
 }
 
-impl SmoothBase {
+impl SmoothnessBase {
     /// Precompute the product of `primes`, or `None` if any entry is below
     /// two.
     ///
@@ -1660,7 +1660,7 @@ const CIPOLLA_THRESHOLD_FACTOR: usize = 4;
 ///
 /// The whole squaring chain runs inside the Montgomery domain: the three
 /// seeds are encoded once and every round is a `square_mont`/`mul_mont`, with
-/// a single `decode` on the returned root. [`MontgomeryCtx::pow`] returns an
+/// a single `decode` on the returned root. [`MontgomeryContext::pow`] returns an
 /// *ordinary* residue, not an encoded one, which is why each of `c`, `t`, and
 /// `r` is re-encoded after its exponentiation. Montgomery form is canonical
 /// — `x·R mod p` in `[0, p)` — so the `!= one_mont` tests compare encoded
@@ -1675,7 +1675,7 @@ const CIPOLLA_THRESHOLD_FACTOR: usize = 4;
 fn sqrt_mod_descent(
     a: &BigUint,
     p: &BigUint,
-    ctx: &MontgomeryCtx,
+    ctx: &MontgomeryContext,
     q: &BigUint,
     s: usize,
 ) -> Option<BigUint> {
@@ -1764,7 +1764,7 @@ const NON_RESIDUE_SCAN_BOUND: u32 = 128;
 /// Reference: Cipolla, *Un metodo per la risoluzione della congruenza di
 /// secondo grado*, Rend. Accad. Sci. Fis. Mat. Napoli (3) 9 (1903),
 /// 153–163.
-fn sqrt_mod_cipolla(a: &BigUint, p: &BigUint, ctx: &MontgomeryCtx) -> Option<BigUint> {
+fn sqrt_mod_cipolla(a: &BigUint, p: &BigUint, ctx: &MontgomeryContext) -> Option<BigUint> {
     let one = BigUint::one();
     // t = 1, 2, …: the first with t² − a a non-residue, under the same
     // scan bound as the descent's search.
@@ -2543,12 +2543,12 @@ pub fn kronecker(a: &BigUint, n: &BigUint) -> i8 {
 ///
 /// Dispatches on the modulus parity, because Montgomery's reduction only
 /// exists for odd moduli: an odd modulus runs the exponentiation in a
-/// [`MontgomeryCtx`] (each step a REDC, no division), while an even
+/// [`MontgomeryContext`] (each step a REDC, no division), while an even
 /// modulus — which has no Montgomery form — runs it over a
-/// [`BarrettCtx`], whose reduction is two multiplications and no division
+/// [`BarrettContext`], whose reduction is two multiplications and no division
 /// either. Both yield the same value; the split is purely which reduction
 /// is available. A caller holding one even modulus across many
-/// exponentiations should build the [`BarrettCtx`] itself and keep it: the
+/// exponentiations should build the [`BarrettContext`] itself and keep it: the
 /// context costs one division to precompute `μ`, which this function pays
 /// per call.
 ///
@@ -2561,7 +2561,7 @@ pub fn mod_pow(base: &BigUint, exponent: &BigUint, modulus: &BigUint) -> BigUint
     if modulus == &BigUint::one() {
         return BigUint::zero();
     }
-    if let Some(ctx) = MontgomeryCtx::new(modulus) {
+    if let Some(ctx) = MontgomeryContext::new(modulus) {
         return ctx.pow(base, exponent);
     }
 
@@ -2583,7 +2583,7 @@ pub fn mod_pow(base: &BigUint, exponent: &BigUint, modulus: &BigUint) -> BigUint
     // 2048, 1.10× at 4096 — the win shrinks with width, because both the
     // reduction's and the squaring's advantages do. The context exists for
     // every modulus at least two, which the checks above have established.
-    let ctx = BarrettCtx::new(modulus).expect("modulus is at least two here");
+    let ctx = BarrettContext::new(modulus).expect("modulus is at least two here");
     ctx.mod_pow(base, exponent)
 }
 
@@ -2737,7 +2737,7 @@ pub fn sqrt_mod(a: &BigUint, p: &BigUint) -> Option<BigUint> {
     }
 
     let one = BigUint::one();
-    let ctx = MontgomeryCtx::new(p).expect("p is odd and non-zero");
+    let ctx = MontgomeryContext::new(p).expect("p is odd and non-zero");
 
     let candidate = if low_bits_mod_pow2(p, 3) == 3 {
         // a^((p+1)/4): squaring it gives a^((p+1)/2) = a · a^((p-1)/2) = a
@@ -2890,14 +2890,14 @@ const SMALL_TRIAL_PRIMES: [u16; 168] = [
 ///
 /// The chain runs entirely inside the Montgomery domain: `value` is held
 /// encoded, so each round is one `square_mont` where `ctx.square` would pay an
-/// encode and a decode per round. [`MontgomeryCtx::pow`] returns an *ordinary*
+/// encode and a decode per round. [`MontgomeryContext::pow`] returns an *ordinary*
 /// residue rather than an encoded one, so its result is re-encoded once to
 /// enter the domain. Montgomery form is canonical — `x·R mod n` in `[0, n)` —
 /// so the two comparison constants are encoded once and equality of encoded
 /// values is equality of the residues they stand for.
 fn is_witness(
     base: &BigUint,
-    ctx: &MontgomeryCtx,
+    ctx: &MontgomeryContext,
     odd_factor: &BigUint,
     two_adic_exponent: usize,
 ) -> bool {
@@ -3049,7 +3049,7 @@ pub fn is_probable_prime_with_bases(candidate: &BigUint, bases: &[u64]) -> bool 
 /// only that this witness proved nothing.
 #[must_use]
 pub fn miller_rabin_witness(candidate: &BigUint, witness: &BigUint) -> bool {
-    let Some(ctx) = MontgomeryCtx::new(candidate) else {
+    let Some(ctx) = MontgomeryContext::new(candidate) else {
         // No Montgomery context exists for an even or zero modulus, so no
         // round can run. Parity decides these outright, and the answer this
         // function owes is whether the candidate is *proven composite*: two is
@@ -3137,7 +3137,7 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
     // The screen leaves an odd candidate above 997, so the context always
     // builds; the `else` is a guard against a future screen that admits an
     // even value, not a case reachable from here.
-    let Some(ctx) = MontgomeryCtx::new(candidate) else {
+    let Some(ctx) = MontgomeryContext::new(candidate) else {
         return false;
     };
     let n_minus_one = candidate.sub_ref(&BigUint::one());
@@ -3239,7 +3239,7 @@ fn selfridge_discriminant(n: &BigUint) -> Option<i64> {
 /// (add `n` first when the residue is odd), and commutes with the
 /// Montgomery encoding because dividing by two is multiplication by the
 /// constant `2⁻¹ mod n`.
-fn strong_lucas_core(n: &BigUint, ctx: &MontgomeryCtx, discriminant: i64) -> bool {
+fn strong_lucas_core(n: &BigUint, ctx: &MontgomeryContext, discriminant: i64) -> bool {
     let to_residue = |value: i64| -> BigUint { BigInt::from_i64(value).modulo_positive(n) };
     let half_mod = |value: &BigUint| -> BigUint {
         let mut halved = if value.is_odd() {
@@ -3312,7 +3312,7 @@ pub fn is_strong_lucas_probable_prime(n: &BigUint) -> bool {
     let Some(discriminant) = selfridge_discriminant(n) else {
         return false;
     };
-    let ctx = MontgomeryCtx::new(n).expect("candidate is odd");
+    let ctx = MontgomeryContext::new(n).expect("candidate is odd");
     strong_lucas_core(n, &ctx, discriminant)
 }
 
@@ -3347,7 +3347,7 @@ pub fn is_probable_prime_bpsw(n: &BigUint) -> bool {
         return verdict;
     }
     // The screen passed an odd n > 1 with no factor ≤ 997.
-    let ctx = MontgomeryCtx::new(n).expect("screened candidate is odd");
+    let ctx = MontgomeryContext::new(n).expect("screened candidate is odd");
     let (odd_factor, two_adic_exponent) = decompose_n_minus_one(n);
     if is_witness(&BigUint::from_u64(2), &ctx, &odd_factor, two_adic_exponent) {
         return false;
@@ -4637,9 +4637,9 @@ mod tests {
     fn smooth_base_rejects_a_non_prime_below_two_at_construction() {
         // The obligation is checked once, at construction, and reported as
         // `None` rather than a panic.
-        assert!(super::SmoothBase::new(&[2, 3, 1]).is_none());
-        assert!(super::SmoothBase::new(&[0]).is_none());
-        assert!(super::SmoothBase::new(&[2, 3, 5]).is_some());
+        assert!(super::SmoothnessBase::new(&[2, 3, 1]).is_none());
+        assert!(super::SmoothnessBase::new(&[0]).is_none());
+        assert!(super::SmoothnessBase::new(&[2, 3, 5]).is_some());
     }
 
     #[test]
@@ -4734,11 +4734,11 @@ mod tests {
         // point of hoisting is to let the caller choose the batch, it must
         // give the same answers one value at a time as it does in one batch.
         // A batch-size-dependent answer would be the defect this API invites.
-        // `smooth_parts` delegates to `SmoothBase`, so comparing the two is
+        // `smooth_parts` delegates to `SmoothnessBase`, so comparing the two is
         // `f(x) == f(x)` and proves nothing. Every batching is therefore
         // checked against the trial-division oracle instead, which is the
         // only independent answer available.
-        let base = super::SmoothBase::new(&primes).expect("all primes >= 2");
+        let base = super::SmoothnessBase::new(&primes).expect("all primes >= 2");
         assert_eq!(base.primes(), &primes[..]);
         for size in [1usize, 2, 3, 7, values.len()] {
             let mut got = Vec::new();
@@ -4756,7 +4756,7 @@ mod tests {
         }
         assert!(base.smooth_parts(&[]).is_empty());
         // An empty base makes nothing smooth beyond the trivial values.
-        let empty = super::SmoothBase::new(&[]).expect("an empty base is valid");
+        let empty = super::SmoothnessBase::new(&[]).expect("an empty base is valid");
         assert_eq!(
             empty.smooth_parts(&[BigUint::from_u64(30)]),
             vec![BigUint::one()]
@@ -5057,7 +5057,7 @@ mod tests {
     #[test]
     fn cipolla_agrees_with_the_descent() {
         use super::{sqrt_mod, sqrt_mod_cipolla};
-        use crate::bigint::MontgomeryCtx;
+        use crate::bigint::MontgomeryContext;
         let mut rng = SplitMix64 {
             state: 0xc1b0_11a0_0000_0001,
         };
@@ -5071,7 +5071,7 @@ mod tests {
                 continue;
             }
             let descent_root = sqrt_mod(&a, &p).expect("a is a residue by construction");
-            let ctx = MontgomeryCtx::new(&p).expect("odd prime");
+            let ctx = MontgomeryContext::new(&p).expect("odd prime");
             let cipolla_root =
                 sqrt_mod_cipolla(&a, &p, &ctx).expect("prime modulus never exhausts the scan");
             assert!(
@@ -5192,7 +5192,7 @@ mod tests {
     #[ignore = "timing probe for the Tonelli-Shanks/Cipolla crossover; run with --ignored"]
     fn cipolla_crossover_timing() {
         use super::{decompose_n_minus_one, sqrt_mod_cipolla, sqrt_mod_descent};
-        use crate::bigint::MontgomeryCtx;
+        use crate::bigint::MontgomeryContext;
         use std::hint::black_box;
         use std::time::Instant;
         let mut rng = SplitMix64 {
@@ -5211,7 +5211,7 @@ mod tests {
                 let p = prime_with_two_adic_valuation(bits, s, &mut rng);
                 let (q, s_actual) = decompose_n_minus_one(&p);
                 assert_eq!(s_actual, s, "constructed valuation");
-                let ctx = MontgomeryCtx::new(&p).expect("odd prime");
+                let ctx = MontgomeryContext::new(&p).expect("odd prime");
                 let x = draw_below(&mut rng, &p);
                 let a = BigUint::mod_mul(&x, &x, &p);
                 let time = |f: &dyn Fn()| {

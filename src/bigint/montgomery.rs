@@ -22,7 +22,7 @@ use core::cmp::Ordering;
 /// paying the setup cost on every multiply, and the explicit context lets
 /// callers stay in the Montgomery domain across whole computations.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MontgomeryCtx {
+pub struct MontgomeryContext {
     modulus: BigUint,
     // n0_inv = -n^{-1} mod 2^64 (Montgomery reduction coefficient).
     n0_inv: u64,
@@ -231,7 +231,7 @@ fn cmp_limbs(lhs: &[u64], rhs: &[u64]) -> Ordering {
     Ordering::Equal
 }
 
-impl MontgomeryCtx {
+impl MontgomeryContext {
     /// Modulus width in limbs; every kernel buffer is sized from this.
     fn width(&self) -> usize {
         self.modulus.limbs.len()
@@ -456,7 +456,7 @@ impl MontgomeryCtx {
     /// and REDC requires `R` and the modulus to be coprime; since `R` is a
     /// power of two, that holds exactly when the modulus is odd. An even (or
     /// zero) modulus has no Montgomery form, hence the `None` — reach for
-    /// [`BarrettCtx`](super::BarrettCtx), which reduces modulo either parity. Construction also
+    /// [`BarrettContext`](super::BarrettContext), which reduces modulo either parity. Construction also
     /// precomputes the inverse `−n⁻¹ mod 2⁶⁴` (Hensel lifting) and `R² mod n`
     /// once, so later encode/multiply steps do not repeat that work.
     #[must_use]

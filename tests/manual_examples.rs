@@ -12,8 +12,8 @@ use rump::{
     mod_inverse_u64, mod_pow, primes_below, product_tree, random_below, random_coprime_below,
     random_nonzero_below, random_probable_prime, rational_reconstruct,
     rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, sqrt_mod,
-    sqrt_mod_prime_power, valuation, BarrettCtx, BigInt, BigUint, Gf2m, MontgomeryCtx, PolyModP,
-    PolyZ, Reciprocal, Rng, Sign, SmoothBase,
+    sqrt_mod_prime_power, valuation, BarrettContext, BigInt, BigUint, Gf2m, MontgomeryContext,
+    PolyMod, PolyZ, RandomSource, Sign, SmoothnessBase, WordReciprocal,
 };
 
 #[test]
@@ -41,7 +41,7 @@ fn manual_biguint_roots_powers_bits() {
 #[test]
 fn manual_barrett_contexts() {
     let even = BigUint::from_u64(1_000);
-    let ctx = BarrettCtx::new(&even).expect("modulus is at least 2");
+    let ctx = BarrettContext::new(&even).expect("modulus is at least 2");
     assert_eq!(
         ctx.mod_mul(&BigUint::from_u64(123), &BigUint::from_u64(456)),
         BigUint::from_u64(88) // 56 088 mod 1000
@@ -253,9 +253,9 @@ fn manual_bigint_signed() {
 #[test]
 fn manual_montgomery_domain() {
     let p = BigUint::from_u64(97);
-    let ctx = MontgomeryCtx::new(&p).expect("97 is odd");
+    let ctx = MontgomeryContext::new(&p).expect("97 is odd");
     assert_eq!(*ctx.modulus(), p);
-    assert!(MontgomeryCtx::new(&BigUint::from_u64(100)).is_none()); // even
+    assert!(MontgomeryContext::new(&BigUint::from_u64(100)).is_none()); // even
 
     let a = BigUint::from_u64(5);
     let b = BigUint::from_u64(6);
@@ -469,11 +469,11 @@ fn manual_bulk_primes_word_division_estimates() {
 fn manual_division_by_an_invariant_divisor() {
     // Non-zero is the whole precondition, so the type carries it: there is no
     // error case left for the caller to handle.
-    let r = Reciprocal::new(NonZeroU64::new(1_000_003).expect("literal is non-zero"));
+    let r = WordReciprocal::new(NonZeroU64::new(1_000_003).expect("literal is non-zero"));
     assert_eq!(r.divisor(), 1_000_003);
 
     // The same answers as the hardware-division path. Note the argument roles:
-    // `BigUint::rem_u64` takes the divisor, `Reciprocal::rem` takes the dividend.
+    // `BigUint::rem_u64` takes the divisor, `WordReciprocal::rem` takes the dividend.
     assert_eq!(r.div_rem(2_000_007), (2, 1));
     assert_eq!(r.rem(2_000_006), 0);
 
@@ -513,7 +513,7 @@ fn manual_batch_smoothness() {
     assert_eq!(parts[0], BigUint::from_u64(360));
     assert_eq!(parts[1], BigUint::from_u64(2));
 
-    let base = SmoothBase::new(&primes_below(10)).expect("every entry is at least two");
+    let base = SmoothnessBase::new(&primes_below(10)).expect("every entry is at least two");
     assert_eq!(base.primes(), &[2, 3, 5, 7]);
 
     // The same answers as the free function, in batches of the caller's choosing.
@@ -607,7 +607,7 @@ fn manual_number_theory_baillie_psw() {
 /// xorshift64: deterministic and compact. Fine for a manual; NOT a CSPRNG.
 struct XorShift64(u64);
 
-impl Rng for XorShift64 {
+impl RandomSource for XorShift64 {
     fn fill_bytes(&mut self, dest: &mut [u8]) {
         for chunk in dest.chunks_mut(8) {
             self.0 ^= self.0 << 13;
@@ -717,9 +717,9 @@ fn manual_polynomials() {
 
     // Over ℤ/7ℤ: (x - 1)(x - 2) and (x - 2)(x - 3) share x - 2.
     let p = BigUint::from_u64(7);
-    let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[2, -3, 1]), &p); // x^2 - 3x + 2
-    let g = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[6, -5, 1]), &p); // x^2 - 5x + 6
-    let shared = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-2, 1]), &p); // x - 2
+    let f = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[2, -3, 1]), &p); // x^2 - 3x + 2
+    let g = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[6, -5, 1]), &p); // x^2 - 5x + 6
+    let shared = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[-2, 1]), &p); // x - 2
     assert_eq!(f.gcd(&g), shared);
 
     // disc(x^2 + 5x + 6) = 25 - 24 = 1.
@@ -738,7 +738,7 @@ fn manual_polynomials() {
     );
 
     struct Lcg(u64);
-    impl Rng for Lcg {
+    impl RandomSource for Lcg {
         fn fill_bytes(&mut self, d: &mut [u8]) {
             for b in d {
                 self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -750,19 +750,19 @@ fn manual_polynomials() {
     let mut rng = Lcg(0x1234_5678);
 
     // x^2 - 1 = (x - 1)(x + 1) mod 7 — two roots.
-    let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
+    let f = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
     let mut roots = f.roots(&mut rng);
     roots.sort();
     assert_eq!(roots, vec![BigUint::from_u64(1), BigUint::from_u64(6)]); // 6 ≡ -1
 
     // x^2 + 1 is irreducible mod 7 (−1 is a non-residue), so no roots.
-    let g = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &p);
+    let g = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &p);
     assert!(g.is_irreducible());
     assert!(g.roots(&mut rng).is_empty());
 
     // factor returns monic irreducibles with multiplicities:
     // x^3 + x = x · (x^2 + 1) over F_7.
-    let h = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[0, 1, 0, 1]), &p);
+    let h = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[0, 1, 0, 1]), &p);
     let mut fs = h.factor(&mut rng);
     fs.sort_by_key(|(fac, _)| fac.degree());
     assert_eq!(fs.len(), 2);
@@ -801,7 +801,7 @@ fn manual_lattice() {
 #[test]
 fn manual_polynomials_quotient_rings_and_lifting() {
     struct Lcg2(u64);
-    impl Rng for Lcg2 {
+    impl RandomSource for Lcg2 {
         fn fill_bytes(&mut self, d: &mut [u8]) {
             for b in d {
                 self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -855,5 +855,5 @@ fn manual_polynomials_quotient_rings_and_lifting() {
 
     // A symmetric lift recovers the integer polynomial it came from.
     let wide = BigUint::from_u64(2).pow_u64(96);
-    assert_eq!(PolyModP::from_poly_z(&a, &wide).symmetric_lift(), a);
+    assert_eq!(PolyMod::from_poly_z(&a, &wide).symmetric_lift(), a);
 }

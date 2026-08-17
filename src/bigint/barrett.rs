@@ -25,7 +25,7 @@ use super::BigUint;
 pub(super) const BARRETT_HALF_PRODUCT_MAX_LIMBS: usize = 512;
 
 /// Barrett reduction context for a fixed modulus of either parity — the
-/// complement to [`MontgomeryCtx`](super::MontgomeryCtx), which requires an odd
+/// complement to [`MontgomeryContext`](super::MontgomeryContext), which requires an odd
 /// modulus.
 ///
 /// Precomputes `μ = ⌊b^{2k} / n⌋` for `b = 2⁶⁴` and `k` the modulus's limb
@@ -87,7 +87,7 @@ pub(super) const BARRETT_HALF_PRODUCT_MAX_LIMBS: usize = 512;
 ///
 /// Like the rest of the crate, variable-time.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BarrettCtx {
+pub struct BarrettContext {
     modulus: BigUint,
     mu: BigUint,
     limb_count: usize,
@@ -95,11 +95,11 @@ pub struct BarrettCtx {
 
 #[cfg(test)]
 thread_local! {
-    /// Corrections taken by the last `BarrettCtx::reduce` on this thread.
+    /// Corrections taken by the last `BarrettContext::reduce` on this thread.
     static CORRECTIONS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-impl BarrettCtx {
+impl BarrettContext {
     /// Build the context. The single division here computes
     /// `μ = ⌊b^{2k}/n⌋` for `b = 2⁶⁴` and `k` the modulus's limb count; every
     /// later [`Self::reduce`] spends two multiplications and at most two
@@ -216,7 +216,7 @@ impl BarrettCtx {
     /// `a² mod n`. The square comes from [`BigUint::square_ref`], whose
     /// specialized kernels form each cross term once between 8 and 256
     /// limbs, so this costs a squaring plus one Barrett reduction. The
-    /// Montgomery domain's [`MontgomeryCtx::square_mont`](super::MontgomeryCtx::square_mont) goes further
+    /// Montgomery domain's [`MontgomeryContext::square_mont`](super::MontgomeryContext::square_mont) goes further
     /// still, fusing the reduction into the kernel.
     #[must_use]
     pub fn mod_square(&self, a: &BigUint) -> BigUint {
@@ -231,7 +231,7 @@ impl BarrettCtx {
     /// (as the Montgomery ladder in this file does), so the cost is one
     /// squaring per remaining exponent bit and one multiplication per
     /// remaining set bit; there is no window table here, unlike
-    /// [`MontgomeryCtx::pow`](super::MontgomeryCtx::pow). `0^0 = 1` by the usual convention.
+    /// [`MontgomeryContext::pow`](super::MontgomeryContext::pow). `0^0 = 1` by the usual convention.
     ///
     /// Variable-time, like the rest of the crate: a clear exponent bit skips
     /// its multiplication.

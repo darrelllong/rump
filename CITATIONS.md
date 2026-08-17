@@ -36,7 +36,7 @@ Algorithm M.
 |---|---|---|
 | Schoolbook multiplication | `mul_schoolbook_ref` | Knuth, *TAOCP* vol. 2, §4.3.1, Algorithm M. |
 | Single-limb division and radix accumulation | `div_rem_u64` / `rem_u64` (via `div_rem_limb`), the classical radix parse, the render base case in `to_digits_dc`, and `bigint_div_exact` (the Toom interpolation's exact division) | Horner's rule (classical), in base 2⁶⁴. |
-| Division by an invariant divisor | `Reciprocal` (`src/bigint/reciprocal.rs`); the two-word-by-one-word kernel is `Reciprocal::div2by1`, and the reciprocal itself is built in `Reciprocal::new` | Möller & Granlund, *Improved Division by Invariant Integers*, IEEE Transactions on Computers 60(2) (2011), 165–175 — Algorithm 4 (`div2by1`) over the reciprocal of Algorithm 2. Descends from Granlund & Montgomery, *Division by Invariant Integers using Multiplication*, PLDI 1994, 61–72. Transcribed; the algorithm and figure numbers are on the HANDOFF check list. |
+| Division by an invariant divisor | `WordReciprocal` (`src/bigint/reciprocal.rs`); the two-word-by-one-word kernel is `WordReciprocal::div2by1`, and the reciprocal itself is built in `WordReciprocal::new` | Möller & Granlund, *Improved Division by Invariant Integers*, IEEE Transactions on Computers 60(2) (2011), 165–175 — Algorithm 4 (`div2by1`) over the reciprocal of Algorithm 2. Descends from Granlund & Montgomery, *Division by Invariant Integers using Multiplication*, PLDI 1994, 61–72. Transcribed; the algorithm and figure numbers are on the HANDOFF check list. |
 | Long division, base 2⁶⁴ | `div_rem` (Knuth's Algorithm D) | Knuth, *The Art of Computer Programming*, vol. 2 (*Seminumerical Algorithms*), §4.3.1, Algorithm D; the q̂ ≤ q + 1 estimate bound is §4.3.1, exercise 20. Add-back and borrow mechanics after Warren, *Hacker's Delight*, 2nd ed., §9-2 (`divmnu`). |
 | Karatsuba multiplication | `mul_karatsuba_ref` (dispatched from `mul_ref`) | Karatsuba & Ofman, *Multiplication of Multidigit Numbers on Automata*, Soviet Physics–Doklady 7 (1963); Knuth, *TAOCP* vol. 2, §4.3.3. |
 | Integer squaring (schoolbook) | `sqr_schoolbook_ref` (behind `square_ref`) | *Handbook of Applied Cryptography*, Algorithm 14.16 (cross terms once, then double, then the diagonal). |
@@ -53,12 +53,12 @@ Algorithm M.
 
 | Algorithm | Location | Reference |
 |---|---|---|
-| Montgomery multiplication | `MontgomeryCtx`, `mul_mont` | Montgomery, *Modular Multiplication Without Trial Division*, Math. Comp. 44 (1985), 519–521. Separated-operand-scanning shape from Koç, Acar & Kaliski, *Analyzing and Comparing Montgomery Multiplication Algorithms*, IEEE Micro 16(3) (1996), 26–33. |
+| Montgomery multiplication | `MontgomeryContext`, `mul_mont` | Montgomery, *Modular Multiplication Without Trial Division*, Math. Comp. 44 (1985), 519–521. Separated-operand-scanning shape from Koç, Acar & Kaliski, *Analyzing and Comparing Montgomery Multiplication Algorithms*, IEEE Micro 16(3) (1996), 26–33. |
 | Montgomery squaring | `mont_sqr` (behind `square_mont`) | *Handbook of Applied Cryptography*, Algorithm 14.16 (cross terms once, then double, then the diagonal). |
 | Word-level Montgomery constant `n₀′` | `montgomery_n0_inv` | Dussé & Kaliski, *A Cryptographic Library for the Motorola DSP56000*, EUROCRYPT '90 — the word-level variant of Montgomery reduction; the "where it was introduced" attribution is on the HANDOFF check list. |
-| Low half-product | `mul_low_ref` (behind `BarrettCtx::reduce`) | *Handbook of Applied Cryptography*, Note 14.45(ii): Barrett's second multiplication needs only the low `k+1` limbs, and forming only those is exact. |
-| Barrett reduction | `BarrettCtx`, `reduce` | Barrett, CRYPTO '86; *Handbook of Applied Cryptography*, Algorithm 14.42, correction bound Note 14.44 (half-product refinement Note 14.45(ii) and (iii), also Brent and Zimmermann, *MCA*, §2.4). |
-| Barrett exponentiation | `BarrettCtx::pow_mod` | left-to-right binary exponentiation, Knuth, *TAOCP* vol. 2, §4.6.3. |
+| Low half-product | `mul_low_ref` (behind `BarrettContext::reduce`) | *Handbook of Applied Cryptography*, Note 14.45(ii): Barrett's second multiplication needs only the low `k+1` limbs, and forming only those is exact. |
+| Barrett reduction | `BarrettContext`, `reduce` | Barrett, CRYPTO '86; *Handbook of Applied Cryptography*, Algorithm 14.42, correction bound Note 14.44 (half-product refinement Note 14.45(ii) and (iii), also Brent and Zimmermann, *MCA*, §2.4). |
+| Barrett exponentiation | `BarrettContext::pow_mod` | left-to-right binary exponentiation, Knuth, *TAOCP* vol. 2, §4.6.3. |
 
 ## GCD and the Euclidean family (`src/number_theory.rs`)
 
@@ -86,7 +86,7 @@ Algorithm M.
 | Tonelli–Shanks square root | `sqrt_mod_descent` | Cohen, Algorithm 1.5.1; the p ≡ 3 (mod 4) shortcut, *HAC* §3.5.1. |
 | Cipolla's square root | `sqrt_mod_cipolla` | Cipolla, *Un metodo per la risoluzione della congruenza di secondo grado*, Rend. Accad. Sci. Fis. Mat. Napoli (3) 9 (1903), 153–163. |
 | Prime-power square roots (Hensel lift) | `sqrt_mod_prime_power` | Hensel's lemma (Cohen, §3.5.3, "Factorization Modulo pᵉ: Hensel's Lemma"); dyadic and valuation cases per the standard structure of squares in ℤ/2^eℤ. |
-| Windowed Montgomery exponentiation | `MontgomeryCtx::pow` | fixed 4-bit window (left-to-right k-ary method), *Handbook of Applied Cryptography*, Algorithm 14.82; Knuth, *TAOCP* vol. 2, §4.6.3; the short-exponent binary square-and-multiply engine cites the same Knuth section. |
+| Windowed Montgomery exponentiation | `MontgomeryContext::pow` | fixed 4-bit window (left-to-right k-ary method), *Handbook of Applied Cryptography*, Algorithm 14.82; Knuth, *TAOCP* vol. 2, §4.6.3; the short-exponent binary square-and-multiply engine cites the same Knuth section. |
 
 ## Primality (`src/number_theory.rs`)
 
@@ -106,27 +106,27 @@ Algorithm M.
 | Rational reconstruction | `rational_reconstruct`, `_bounded` | von zur Gathen and Gerhard, *Modern Computer Algebra*, 3rd ed. (2013), §5.10; technique of Wang, *A p-adic algorithm for univariate partial fractions*, SYMSAC '81, 212–217 (rational-number statement: Wang, Guy and Davenport, SIGSAM Bulletin 16(2) (1982), 2–3); accelerated variants Collins and Encarnación, *Efficient rational number reconstruction*, J. Symbolic Comput. 20(3) (1995), 287–297. |
 | Batch modular inversion | `mod_inverse_batch` | Montgomery, *Speeding the Pollard and elliptic curve methods of factorization*, Math. Comp. 48 (1987), 243–264 (simultaneous-inversion trick). |
 | p-adic valuation / remove factor | `valuation`, `remove_factor` | squared-power ladder (shape of GMP's `mpz_remove`); `valuation` accepts any `p ≥ 2`, PARI's `valuation` convention. |
-| Batch smoothness (product/remainder trees) | `product_tree`, `remainder_tree`, `smooth_parts`, and `SmoothBase` (the same algorithm with the primes' product retained across batches) | Bernstein, *How to find smooth parts of integers* (2004). |
+| Batch smoothness (product/remainder trees) | `product_tree`, `remainder_tree`, `smooth_parts`, and `SmoothnessBase` (the same algorithm with the primes' product retained across batches) | Bernstein, *How to find smooth parts of integers* (2004). |
 
 ## Polynomials (`src/poly.rs`)
 
 | Algorithm | Location | Reference |
 |---|---|---|
-| Polynomial evaluation | `PolyZ::evaluate`, `PolyModP::evaluate` | Horner's rule (classical), in its original polynomial form: fold `acc ← acc·x + cᵢ` from the leading coefficient down. |
-| Polynomial multiplication (Karatsuba) | `convolve_z`, `convolve_modp` (behind `PolyZ::mul`, `PolyModP::mul`) | Karatsuba & Ofman, Soviet Physics–Doklady 7 (1963), applied to the coefficient convolution; the mod-p form defers its reductions to one per output coefficient. |
-| Polynomial squaring | `convolve_square_modp` (behind `PolyModP::pow_mod`) | the cross-terms-once square of HAC Algorithm 14.16 in the coefficient ring; in characteristic 2 it degenerates to the Frobenius spread `g(x)² = g(x²)`. |
+| Polynomial evaluation | `PolyZ::evaluate`, `PolyMod::evaluate` | Horner's rule (classical), in its original polynomial form: fold `acc ← acc·x + cᵢ` from the leading coefficient down. |
+| Polynomial multiplication (Karatsuba) | `convolve_z`, `convolve_modp` (behind `PolyZ::mul`, `PolyMod::mul`) | Karatsuba & Ofman, Soviet Physics–Doklady 7 (1963), applied to the coefficient convolution; the mod-p form defers its reductions to one per output coefficient. |
+| Polynomial squaring | `convolve_square_modp` (behind `PolyMod::pow_mod`) | the cross-terms-once square of HAC Algorithm 14.16 in the coefficient ring; in characteristic 2 it degenerates to the Frobenius spread `g(x)² = g(x²)`. |
 | Pseudo-division over ℤ | `PolyZ::pseudo_div_rem` | Knuth, *TAOCP* vol. 2, §4.6.1, Algorithm R. |
 | Resultant (Bareiss fraction-free determinant) | `PolyZ::resultant` | Bareiss, *Sylvester's identity and multistep integer-preserving Gaussian elimination*, Math. Comp. 22 (1968), 565–578; Cohen, *A Course in Computational Algebraic Number Theory*, §3.3.1. |
 | Discriminant | `PolyZ::discriminant` | Cohen, *A Course in Computational Algebraic Number Theory*, §3.3.2 (disc = (−1)^(d(d−1)/2) res(f, f′)/lc). |
-| Squarefree factorization over 𝔽ₚ | `PolyModP::squarefree_factorization` | Cohen, §3.4.2 (Squarefree Factorization); the characteristic-`p` residual is recovered through its `p`-th root. |
-| Distinct-degree factorization | `PolyModP::distinct_degree` | Cohen, §3.4.3 (Distinct Degree Factorization); the Frobenius `x ↦ xᵖ` reduced modulo the running polynomial. |
-| Equal-degree split (Cantor–Zassenhaus) | `PolyModP::equal_degree_split` (used by `factor` and `roots`; `is_irreducible` is deterministic and uses only the distinct-degree stage) | Cantor & Zassenhaus, *A new algorithm for factoring polynomials over finite fields*, Math. Comp. 36 (1981), 587–592; Cohen, §3.4.4 (Final Splitting). The `p = 2` case uses the trace map, the standard characteristic-2 instance. |
+| Squarefree factorization over 𝔽ₚ | `PolyMod::squarefree_factorization` | Cohen, §3.4.2 (Squarefree Factorization); the characteristic-`p` residual is recovered through its `p`-th root. |
+| Distinct-degree factorization | `PolyMod::distinct_degree` | Cohen, §3.4.3 (Distinct Degree Factorization); the Frobenius `x ↦ xᵖ` reduced modulo the running polynomial. |
+| Equal-degree split (Cantor–Zassenhaus) | `PolyMod::equal_degree_split` (used by `factor` and `roots`; `is_irreducible` is deterministic and uses only the distinct-degree stage) | Cantor & Zassenhaus, *A new algorithm for factoring polynomials over finite fields*, Math. Comp. 36 (1981), 587–592; Cohen, §3.4.4 (Final Splitting). The `p = 2` case uses the trace map, the standard characteristic-2 instance. |
 | Division by a monic polynomial | `PolyZ::rem_monic` | Knuth, *TAOCP* vol. 2, §4.6.1, Algorithm D specialized to a unit leading coefficient: the quotient coefficient is the remainder's leading coefficient, so no coefficient division occurs and the division cannot fail. |
 | Product tree over a quotient ring | `PolyZ::product_mod_monic` | the product-tree shape of Bernstein, *Fast multiplication and its applications* (§12 in *Algorithmic Number Theory*, MSRI 44, 2008), carried into `ℤ[x]/(f)` — reduction after every level is legitimate because reduction modulo a monic polynomial is a ring homomorphism. |
 | Balanced base-`m` expansion | `PolyZ::balanced_base_expansion` | the balanced (symmetric-digit) radix representation, Knuth, *TAOCP* vol. 2, §4.1; used in this form for number-field-sieve polynomial selection, e.g. Lenstra & Lenstra (eds.), *The Development of the Number Field Sieve*, LNM 1554 (1993), §2. |
 | Homogeneous substitution | `PolyZ::homogeneous_substitution` | the homogenization `F(X,Y) = Yᵈ f(X/Y)` (classical projective construction); the algebraic-norm instance `bᵈ f(a/b)` is the sieve's, Lenstra & Lenstra (eds.), LNM 1554, §3. |
 | Roots modulo a prime power (Hensel lifting, with branching) | `PolyZ::roots_mod_prime_power` | Cohen, §1.6 (Hensel's lemma) for the simple-root case; the branching case where `f′(r) ≡ 0 (mod p)` — all `p` lifts or none — is the general extension a root-finder needs and is not in the lemma as usually stated. |
-| Symmetric (balanced) lift from ℤ/mℤ | `PolyModP::symmetric_lift` | the same balanced convention as the expansion above, applied coefficientwise; it is what makes a modular computation's answer recoverable over ℤ once the modulus exceeds twice the height. |
+| Symmetric (balanced) lift from ℤ/mℤ | `PolyMod::symmetric_lift` | the same balanced convention as the expansion above, applied coefficientwise; it is what makes a modular computation's answer recoverable over ℤ once the modulus exceeds twice the height. |
 
 ## Lattice reduction (`src/lattice.rs`)
 
@@ -149,7 +149,7 @@ Algorithm M.
 | Quadratic solver | `Gf2m::solve_quadratic` | IEEE Std 1363-2000, Annex A.4.7 for the even-degree construction; odd degrees route through the half-trace. |
 | Irreducibility (Rabin's test) | `Gf2m::is_irreducible` | Rabin, *Probabilistic algorithms in finite fields*, 1980, in its deterministic GF(2) form (venue on the HANDOFF check list). |
 | Curve-degree facts (163/233/283/409/571 all odd, and the test moduli) | `Gf2m::half_trace` doc, test moduli | FIPS 186-4 (the binary-curve degrees; named as context, not as an algorithm source). |
-| Exponentiation | `Gf2m::pow` | left-to-right binary square-and-multiply, Knuth, *TAOCP* vol. 2, §4.6.3 — the section already verified for the same method at `MontgomeryCtx::pow`; its application *here* was added 2026-08-15 and is on the HANDOFF check list. |
+| Exponentiation | `Gf2m::pow` | left-to-right binary square-and-multiply, Knuth, *TAOCP* vol. 2, §4.6.3 — the section already verified for the same method at `MontgomeryContext::pow`; its application *here* was added 2026-08-15 and is on the HANDOFF check list. |
 
 ## Randomness (`src/random.rs`)
 

@@ -14,7 +14,7 @@
 //! and `CITATIONS.md` collects them.
 //!
 //! Around that integer core sit three layers with the same discipline:
-//! [`Gf2m`] for binary extension fields GF(2^m), [`PolyZ`]/[`PolyModP`] for
+//! [`Gf2m`] for binary extension fields GF(2^m), [`PolyZ`]/[`PolyMod`] for
 //! univariate polynomials, and [`lll_reduce`] for lattice basis reduction.
 //!
 //! The arithmetic and number theory are deterministic functions of their
@@ -27,10 +27,10 @@
 //!   paths; do not use them where timing must not leak secrets.
 //! - **Not a secret-scrubbing or constant-time type.** As cheap defense in
 //!   depth every [`BigUint`] volatile-wipes its live limbs on drop, and the
-//!   Montgomery exponentiation ladder ([`MontgomeryCtx::pow`] /
+//!   Montgomery exponentiation ladder ([`MontgomeryContext::pow`] /
 //!   `pow_encoded`) wipes its workspaces on exit. That is the extent of it:
 //!   spare capacity and buffers freed on reallocation are not wiped, the
-//!   in-domain [`MontgomeryCtx::mul_mont`] / `square_mont` keep their
+//!   in-domain [`MontgomeryContext::mul_mont`] / `square_mont` keep their
 //!   scratch, and `Debug` prints every limb. Cryptographic memory hygiene and
 //!   constant-time operation are out of scope; a consumer that handles key
 //!   material adds them at that layer.
@@ -91,7 +91,9 @@ mod poly;
 mod random;
 mod scrub;
 
-pub use bigint::{BarrettCtx, BigInt, BigUint, MontgomeryCtx, ParseBigIntError, Reciprocal, Sign};
+pub use bigint::{
+    BarrettContext, BigInt, BigUint, MontgomeryContext, ParseBigIntError, Sign, WordReciprocal,
+};
 pub use gf2m::Gf2m;
 pub use lattice::{gauss_reduce_weighted, lll_reduce, lll_reduce_delta};
 pub use number_theory::{
@@ -100,9 +102,9 @@ pub use number_theory::{
     lcm, legendre, miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow,
     primes_below, product_tree, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
     remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, ProductTree,
-    SmoothBase,
+    SmoothnessBase,
 };
-pub use poly::{PolyModP, PolyZ, MAX_ROOT_LEVEL};
+pub use poly::{PolyMod, PolyZ, MAX_ENUMERATED_ROOTS};
 pub use random::{
-    random_below, random_coprime_below, random_nonzero_below, random_probable_prime, Rng,
+    random_below, random_coprime_below, random_nonzero_below, random_probable_prime, RandomSource,
 };

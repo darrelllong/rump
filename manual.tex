@@ -27,8 +27,8 @@
   keywords={as, break, const, continue, crate, dyn, else, enum, extern, fn,
     for, if, impl, in, let, loop, match, mod, move, mut, pub, ref, return,
     self, Self, static, struct, trait, type, unsafe, use, where, while},
-  keywords=[2]{BigUint, BigInt, Sign, MontgomeryCtx, BarrettCtx, Gf2m, PolyZ,
-    PolyModP, Rng, Vec, Option, Some, None, Ok, Err, u8, u64, u128, usize,
+  keywords=[2]{BigUint, BigInt, Sign, MontgomeryContext, BarrettContext, Gf2m, PolyZ,
+    PolyMod, RandomSource, Vec, Option, Some, None, Ok, Err, u8, u64, u128, usize,
     i64, bool},
   sensitive=true,
   comment=[l]{//},
@@ -148,10 +148,10 @@ use rump::{
     random_coprime_below, random_nonzero_below, random_probable_prime,
     rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
     remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation,
-    SmoothBase,
+    SmoothnessBase,
     gauss_reduce_weighted, lll_reduce, lll_reduce_delta,
-    BarrettCtx, BigInt, BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Reciprocal,
-    Rng, Sign,
+    BarrettContext, BigInt, BigUint, Gf2m, MontgomeryContext, PolyMod, PolyZ, WordReciprocal,
+    RandomSource, Sign,
 };
 use core::num::NonZeroU64;
 \end{lstlisting}
@@ -431,7 +431,7 @@ assert_eq!(BigUint::zero().digit_count(10), 1); // written "0"
 
 \subsection{Division by an invariant divisor}
 
-\code{Reciprocal::new(d)} precomputes, for a fixed non-zero $d$, the
+\code{WordReciprocal::new(d)} precomputes, for a fixed non-zero $d$, the
 normalized divisor $d' = d \cdot 2^{s}$ with $s = \operatorname{clz}(d)$ and
 the word
 \begin{equation}
@@ -456,7 +456,7 @@ non-negative residue in $[0, d)$ --- what an index into a table requires,
 and what a truncating remainder does not give.
 
 \begin{lstlisting}
-let r = Reciprocal::new(NonZeroU64::new(1_000_003).expect("non-zero"));
+let r = WordReciprocal::new(NonZeroU64::new(1_000_003).expect("non-zero"));
 assert_eq!(r.divisor(), 1_000_003);
 assert_eq!(r.div_rem(2_000_007), (2, 1));
 assert_eq!(r.rem(2_000_006), 0);
@@ -520,12 +520,12 @@ assert_eq!(minus_seven.abs(), BigUint::from_u64(7));
 // -3 = 8 (mod 11), in canonical range.
 assert_eq!(minus_three.modulo_positive(&BigUint::from_u64(11)), BigUint::from_u64(8));
 \end{lstlisting}
-\section{Barrett reduction: \code{BarrettCtx}}
+\section{Barrett reduction: \code{BarrettContext}}
 \label{sec:barrett}
 
-\code{BarrettCtx} is the fixed-modulus reduction context for a modulus of
-\emph{either parity} --- the complement to \code{MontgomeryCtx}, which
-requires an odd one. \code{BarrettCtx::new(n)} returns \code{None} for
+\code{BarrettContext} is the fixed-modulus reduction context for a modulus of
+\emph{either parity} --- the complement to \code{MontgomeryContext}, which
+requires an odd one. \code{BarrettContext::new(n)} returns \code{None} for
 $n < 2$; otherwise it pays one division to precompute, for a $k$-limb
 modulus,
 \begin{equation}
@@ -554,14 +554,14 @@ convention.
 
 \begin{lstlisting}
 let even = BigUint::from_u64(1_000);
-let ctx = BarrettCtx::new(&even).expect("modulus is at least 2");
+let ctx = BarrettContext::new(&even).expect("modulus is at least 2");
 assert_eq!(
     ctx.mod_mul(&BigUint::from_u64(123), &BigUint::from_u64(456)),
     BigUint::from_u64(88) // 56 088 mod 1000
 );
 \end{lstlisting}
 
-\section{The Montgomery domain: \code{MontgomeryCtx}}
+\section{The Montgomery domain: \code{MontgomeryContext}}
 \label{sec:montgomery}
 
 Montgomery multiplication (Montgomery 1985) replaces division by a modulus
@@ -572,7 +572,7 @@ The \emph{Montgomery representative} of $x$ is
 \bar{x} \;=\; xR \bmod n .
 \end{equation}
 
-\code{MontgomeryCtx::new(n)} returns \code{None} for even or zero $n$;
+\code{MontgomeryContext::new(n)} returns \code{None} for even or zero $n$;
 otherwise it precomputes $R^2 \bmod n$ (for encoding) and the word-level
 constant (Duss\'e and Kaliski, EUROCRYPT~'90)
 \begin{equation}
@@ -633,7 +633,7 @@ representative and reduce.
 
 \begin{lstlisting}
 let p = BigUint::from_u64(97);
-let ctx = MontgomeryCtx::new(&p).expect("97 is odd");
+let ctx = MontgomeryContext::new(&p).expect("97 is odd");
 let a = BigUint::from_u64(5);
 let b = BigUint::from_u64(6);
 
@@ -889,10 +889,10 @@ assert_eq!(kronecker(&BigUint::from_u64(5), &BigUint::from_u64(8)), -1);
 \subsection{Modular exponentiation and inverses}
 
 \code{mod\_pow(b, e, n)} computes $b^e \bmod n$ for any $n \ge 1$: through
-the Montgomery ladder when $n$ is odd, and over a \code{BarrettCtx} when
+the Montgomery ladder when $n$ is odd, and over a \code{BarrettContext} when
 $n$ is even (where Montgomery cannot operate). Neither route divides per
 step. A caller holding one even modulus across many exponentiations should
-build the \code{BarrettCtx} itself and keep it, since the context costs one
+build the \code{BarrettContext} itself and keep it, since the context costs one
 division to precompute $\mu$, which \code{mod\_pow} pays per call.
 
 \code{mod\_inverse(a, n)} returns $a^{-1} \bmod n$ from the extended
@@ -1137,7 +1137,7 @@ the \emph{smooth part}, with full multiplicity. A value is fully smooth
 exactly when its smooth part equals itself; $0 \mapsto 0$ and
 $1 \mapsto 1$ pass through without joining the tree.
 
-\code{SmoothBase::new(P)} is the same computation with $z = \prod P$ built
+\code{SmoothnessBase::new(P)} is the same computation with $z = \prod P$ built
 once and retained. The free function rebuilds $z$ per call; for a base of a
 few thousand primes that product runs to tens of thousands of bits, which is
 free once per run but, charged per batch, dictates the batch size a caller
@@ -1156,7 +1156,7 @@ assert_eq!(parts[0], BigUint::from_u64(360));
 assert_eq!(parts[1], BigUint::from_u64(2));
 
 // The same answers with the product hoisted, in batches of any size.
-let base = SmoothBase::new(&primes).expect("entries at least two");
+let base = SmoothnessBase::new(&primes).expect("entries at least two");
 assert_eq!(base.primes(), &[2, 3, 5, 7]);
 assert_eq!(base.smooth_parts(&values), parts);
 assert_eq!(base.smooth_parts(&values[..1])[0], parts[0]);
@@ -1271,15 +1271,15 @@ assert!(!is_probable_prime_bpsw(&BigUint::from_u64(2_047))); // Lucas rejects
 assert!(is_strong_lucas_probable_prime(&BigUint::from_u64(5_459)));
 assert!(!is_probable_prime_bpsw(&BigUint::from_u64(5_459))); // base 2 rejects
 \end{lstlisting}
-\section{Polynomials: \code{PolyZ} and \code{PolyModP}}
+\section{Polynomials: \code{PolyZ} and \code{PolyMod}}
 
 Both types are dense univariate polynomials, coefficients stored low to
 high and normalized to drop trailing zeros, so the zero polynomial is the
 empty coefficient list and \code{degree()} is \code{None} for it.
-\code{PolyZ} works over $\Z$; \code{PolyModP} over $\Z/m\Z$ with every
+\code{PolyZ} works over $\Z$; \code{PolyMod} over $\Z/m\Z$ with every
 coefficient held as its least non-negative residue and the modulus carried
 by the value --- mixing two moduli in one operation is a hard panic in
-every build. The division-based operations of \code{PolyModP} require a
+every build. The division-based operations of \code{PolyMod} require a
 \emph{prime} modulus (they invert leading coefficients); a composite
 modulus panics on the first non-invertible pivot.
 
@@ -1372,7 +1372,7 @@ assert_eq!(u.resultant(&v), BigInt::zero());
 
 \subsection{Arithmetic over $\F_p$}
 
-\code{PolyModP} adds the field-division layer: \code{div\_rem} and
+\code{PolyMod} adds the field-division layer: \code{div\_rem} and
 \code{rem} (schoolbook long division with the one leading-coefficient
 inverse hoisted out of the loop --- and skipped entirely for a monic
 divisor; \code{rem} runs the same loop without quotient bookkeeping, the
@@ -1385,9 +1385,9 @@ computations below).
 \begin{lstlisting}
 // Over Z/7Z: (x - 1)(x - 2) and (x - 2)(x - 3) share x - 2.
 let p = BigUint::from_u64(7);
-let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[2, -3, 1]), &p);
-let g = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[6, -5, 1]), &p);
-let shared = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-2, 1]), &p);
+let f = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[2, -3, 1]), &p);
+let g = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[6, -5, 1]), &p);
+let shared = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[-2, 1]), &p);
 assert_eq!(f.gcd(&g), shared);
 \end{lstlisting}
 
@@ -1443,11 +1443,11 @@ than spinning.
 \code{is\_irreducible} runs the distinct-degree sieve as a test;
 \code{roots(rng)} extracts the linear factors of
 $\gcd\bigl(f, x^p - x\bigr)$ and returns the residues where $f$ vanishes.
-Factoring and root-finding take an \code{Rng} (\S\ref{sec:random}).
+Factoring and root-finding take an \code{RandomSource} (\S\ref{sec:random}).
 
 \begin{lstlisting}
 struct Lcg(u64);
-impl Rng for Lcg {
+impl RandomSource for Lcg {
     fn fill_bytes(&mut self, d: &mut [u8]) {
         for b in d {
             self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -1459,19 +1459,19 @@ let p = BigUint::from_u64(7);
 let mut rng = Lcg(0x1234_5678);
 
 // x^2 - 1 = (x - 1)(x + 1) mod 7 - two roots.
-let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
+let f = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
 let mut roots = f.roots(&mut rng);
 roots.sort();
 assert_eq!(roots, vec![BigUint::from_u64(1), BigUint::from_u64(6)]);
 
 // x^2 + 1 is irreducible mod 7 (-1 is a non-residue), so no roots.
-let g = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &p);
+let g = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &p);
 assert!(g.is_irreducible());
 assert!(g.roots(&mut rng).is_empty());
 
 // factor returns monic irreducibles with multiplicities:
 // x^3 + x = x * (x^2 + 1) over F_7.
-let h = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[0, 1, 0, 1]), &p);
+let h = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[0, 1, 0, 1]), &p);
 let mut fs = h.factor(&mut rng);
 fs.sort_by_key(|(fac, _)| fac.degree());
 assert_eq!(fs.len(), 2);
@@ -1564,7 +1564,7 @@ seeding step of a Newton lift.
 
 \begin{lstlisting}
 struct Lcg2(u64);
-impl Rng for Lcg2 {
+impl RandomSource for Lcg2 {
     fn fill_bytes(&mut self, d: &mut [u8]) {
         for b in d {
             self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -1614,7 +1614,7 @@ assert_eq!(sqrt2, vec![BigUint::from_u64(108), BigUint::from_u64(235)]);
 
 // A symmetric lift recovers the integer polynomial it came from.
 let wide = BigUint::from_u64(2).pow_u64(96);
-assert_eq!(PolyModP::from_poly_z(&a, &wide).symmetric_lift(), a);
+assert_eq!(PolyMod::from_poly_z(&a, &wide).symmetric_lift(), a);
 \end{lstlisting}
 
 \section{Lattice reduction: \code{lll\_reduce}}
@@ -1714,7 +1714,7 @@ assert_eq!(gauss_reduce_weighted([[1, 0], [0, 1]], [1, 100]), Some([[1, 0], [0, 
 rump chooses no entropy source. Every sampler is driven by a
 caller-supplied generator implementing the one-method trait
 \begin{lstlisting}
-pub trait Rng {
+pub trait RandomSource {
     fn fill_bytes(&mut self, dest: &mut [u8]);
 }
 \end{lstlisting}
@@ -1782,7 +1782,7 @@ coverage differs, and the one gap is stated rather than papered over:
 /// xorshift64: deterministic and compact. Fine for a manual; NOT a CSPRNG.
 struct XorShift64(u64);
 
-impl Rng for XorShift64 {
+impl RandomSource for XorShift64 {
     fn fill_bytes(&mut self, dest: &mut [u8]) {
         for chunk in dest.chunks_mut(8) {
             self.0 ^= self.0 << 13;
@@ -1840,12 +1840,12 @@ returns \code{Option} instead.
 \code{mul\_mont} / \code{square\_mont} / their \code{\_with\_workspace} forms / \code{pow\_encoded} & an operand \emph{wider} than the modulus, in every build; an unreduced operand of the modulus's width trips a debug assert only (\S\ref{sec:montgomery}) \\
 \code{Gf2m::half\_trace} & the field degree is even \\
 \code{Gf2m::trace} & a reducible modulus makes the Frobenius sum leave GF(2) \\
-\code{PolyZ} / \code{PolyModP} division & the divisor is the zero polynomial \\
-\code{PolyModP::new} / \code{zero} / \code{from\_poly\_z} & the modulus is below 2 \\
-\code{PolyModP} (mixed moduli) & the two operands carry different moduli \\
-\code{PolyModP} division / \code{gcd} / \code{factor} & a non-invertible pivot (composite modulus) \\
+\code{PolyZ} / \code{PolyMod} division & the divisor is the zero polynomial \\
+\code{PolyMod::new} / \code{zero} / \code{from\_poly\_z} & the modulus is below 2 \\
+\code{PolyMod} (mixed moduli) & the two operands carry different moduli \\
+\code{PolyMod} division / \code{gcd} / \code{factor} & a non-invertible pivot (composite modulus) \\
 \code{squarefree\_factorization} / \code{factor} & the polynomial is constant or zero \\
-\code{factor} / \code{roots} & the supplied \code{Rng} makes no progress (the equal-degree splitter's stall guard) \\
+\code{factor} / \code{roots} & the supplied \code{RandomSource} makes no progress (the equal-degree splitter's stall guard) \\
 \code{rem\_monic} / \code{product\_mod\_monic} & the divisor is zero or is not monic \\
 \code{balanced\_base\_expansion} & the base is below 2 \\
 \code{roots\_mod\_prime\_power} & a zero exponent, a base below 2, a polynomial that is zero or has every coefficient divisible by $p^e$, or a lift wider than \code{MAX\_ROOT\_LEVEL} \\

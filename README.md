@@ -19,7 +19,7 @@ the breaking API cut uses no compatibility shims or duplicate public paths.
   `u64` limbs. Schoolbook (Knuth's Algorithm M), Karatsuba, and Toom–Cook
   three- and four-way multiplication; Knuth's Algorithm D division (*TAOCP*
   vol. 2, §4.3.1) with a Horner path for single-limb divisors.
-- **`MontgomeryCtx`** — a public Montgomery domain (Montgomery 1985; the
+- **`MontgomeryContext`** — a public Montgomery domain (Montgomery 1985; the
   separated-operand-scanning shape from Koç, Acar & Kaliski, IEEE Micro 1996):
   encode once, compute in-domain (`mul_mont`, `square_mont`, their
   `_with_workspace` forms for loops that reuse one scratch buffer,
@@ -47,11 +47,11 @@ the breaking API cut uses no compatibility shims or duplicate public paths.
   (certified Newton), `nth_root_floor`, `is_square`, `is_perfect_power`,
   `popcount`, `trailing_zeros`, and `digit_count` (written length in any
   radix, without producing the digits).
-- **`BarrettCtx`** — fixed-modulus reduction for a modulus of either
+- **`BarrettContext`** — fixed-modulus reduction for a modulus of either
   parity (HAC Algorithm 14.42), the complement to the odd-modulus
   Montgomery domain, with `mod_mul`, `mod_square`, and `mod_pow` built on
   it.
-- **`PolyZ`, `PolyModP`** — dense univariate polynomials over ℤ and 𝔽ₚ:
+- **`PolyZ`, `PolyMod`** — dense univariate polynomials over ℤ and 𝔽ₚ:
   exact and pseudo-division, resultant and discriminant (Bareiss),
   squarefree/distinct-degree/Cantor–Zassenhaus factorization,
   `is_irreducible`, and `roots`.
@@ -67,7 +67,7 @@ the breaking API cut uses no compatibility shims or duplicate public paths.
   the field polynomial, never supplied alongside it.
 - **Sampling** — `random_below`, `random_nonzero_below`,
   `random_coprime_below`, and `random_probable_prime`, driven entirely by a
-  caller-supplied `Rng` (one method: `fill_bytes`). rump chooses no entropy
+  caller-supplied `RandomSource` (one method: `fill_bytes`). rump chooses no entropy
   source; output quality is exactly source quality, so cryptographic callers
   must supply a CSPRNG.
 

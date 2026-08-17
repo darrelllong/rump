@@ -2,7 +2,7 @@
 //!
 //! Two concrete named types, in the crate's style — a documented
 //! representation rather than a tower of coefficient-ring traits:
-//! [`PolyZ`] over the integers and [`PolyModP`] over a fixed modulus. They
+//! [`PolyZ`] over the integers and [`PolyMod`] over a fixed modulus. They
 //! are the substrate the general number field sieve is built on (the
 //! algebraic side is a degree-5 or -6 polynomial over ℤ and its behaviour
 //! modulo small primes), and more broadly the polynomial layer a computer
@@ -82,7 +82,7 @@ const POLY_KARATSUBA_THRESHOLD_Z: usize = 96;
 /// within a point. Medians of six and seven runs.
 const POLY_KARATSUBA_ANY_RATIO_Z: usize = 128;
 
-/// The same threshold for [`PolyModP`], with a balance rule attached.
+/// The same threshold for [`PolyMod`], with a balance rule attached.
 ///
 /// Two things move it out. The coefficients do not grow — every one stays
 /// reduced below the modulus — so the multiplication a split saves never
@@ -125,7 +125,7 @@ const POLY_KARATSUBA_THRESHOLD_MODP: usize = 128;
 /// *measured* rather than the size at which it turns — and so refused
 /// splits that measure +23% and +24% at 384.
 ///
-/// End to end against that revision, `PolyModP::mul` gains 1.31× at 384×576
+/// End to end against that revision, `PolyMod::mul` gains 1.31× at 384×576
 /// and 1.26× at 384×767, 1.15× and 1.12× at 256, and 1.08× at 192×288;
 /// 192×383 is the marginal cell and does not move outside noise, which is
 /// what a threshold placed exactly at the turn should look like. Shapes
@@ -287,7 +287,7 @@ fn karatsuba_square_products_estimate(len: usize, threshold: usize) -> usize {
 ///
 /// Measured against the fixed cut, `PolyZ::mul` on 2048-coefficient
 /// operands gains 2.12× at 74% density, 1.72× at 60% and 1.27× at 76%;
-/// `PolyModP::mul` gains 1.40× at 74% on 1024. Densities on the far side
+/// `PolyMod::mul` gains 1.40× at 74% on 1024. Densities on the far side
 /// of the old cut in either direction — 80% and above, 30% and below, and
 /// the two-term sparse shapes the fixed cut was introduced to protect —
 /// are unchanged to within a point, so nothing was traded for it. Medians
@@ -301,7 +301,7 @@ fn karatsuba_square_products_estimate(len: usize, threshold: usize) -> usize {
 /// half at every leaf, so the two are compared without it.
 ///
 /// A square is where the omission bites hardest, because squaring is what
-/// [`PolyModP::pow_mod`] does at every step and the ladder's early values
+/// [`PolyMod::pow_mod`] does at every step and the ladder's early values
 /// are the sparsest there are — `x`, `x²`, `x⁴` — staying sparse until
 /// reduction densifies them. Splitting a two-term value of 1024
 /// coefficients measured 13× slower than the schoolbook square it
@@ -353,19 +353,19 @@ fn poly_split_dense_enough(
 /// reason, and drops the tail; here the caller is told instead, because a
 /// root-finder that silently returns some of the roots is worse than one
 /// that refuses.
-pub const MAX_ROOT_LEVEL: usize = 1 << 20;
+pub const MAX_ENUMERATED_ROOTS: usize = 1 << 20;
 
 /// Panics unless a level of `current` candidates can absorb `adding` more
-/// without passing [`MAX_ROOT_LEVEL`].
+/// without passing [`MAX_ENUMERATED_ROOTS`].
 ///
 /// Both push paths go through this, which is the point. An earlier
 /// revision guarded only the branching push, and so enforced
-/// `|next| ≤ MAX_ROOT_LEVEL + |level|` rather than the bound it documented
+/// `|next| ≤ MAX_ENUMERATED_ROOTS + |level|` rather than the bound it documented
 /// — a level of one branching root followed by simple ones overran the cap
 /// by one per simple root, and since `|level|` obeys only the same
 /// recurrence the real ceiling was twice the stated one. The check is a
 /// function rather than two `assert!`s so that it can be tested at small
-/// widths, `MAX_ROOT_LEVEL` being far too large to reach in a test.
+/// widths, `MAX_ENUMERATED_ROOTS` being far too large to reach in a test.
 fn check_root_level_width(current: usize, adding: u64, limit: usize) {
     let total = (current as u64).checked_add(adding);
     assert!(
@@ -1074,7 +1074,7 @@ impl PolyZ {
     /// to hold. Three things can widen one: the base level itself, which holds
     /// up to `min(deg f, p)` roots; a branching root, which splits into `p`
     /// candidates at once; and a common factor of `pᵛ`, which multiplies the
-    /// final count by `pᵛ`. All three are refused above [`MAX_ROOT_LEVEL`]
+    /// final count by `pᵛ`. All three are refused above [`MAX_ENUMERATED_ROOTS`]
     /// rather than left to exhaust memory — though only the last two are
     /// refused *before* the work, since the base level has to be found before
     /// it can be counted. That bound is on the *level*, not on the
@@ -1084,7 +1084,7 @@ impl PolyZ {
     ///
     /// `prime` must be prime; over a composite the result is unspecified.
     #[must_use]
-    pub fn roots_mod_prime_power<R: crate::random::Rng + ?Sized>(
+    pub fn roots_mod_prime_power<R: crate::random::RandomSource + ?Sized>(
         &self,
         prime: &BigUint,
         exponent: u32,
@@ -1125,7 +1125,7 @@ impl PolyZ {
             &stripped
         };
         let exponent = reduced_exponent;
-        let base = PolyModP::from_poly_z(target, prime);
+        let base = PolyMod::from_poly_z(target, prime);
         debug_assert!(
             !base.is_zero(),
             "dividing out the content leaves a polynomial not divisible by p"
@@ -1133,18 +1133,18 @@ impl PolyZ {
         // The derivative is only ever consulted modulo p — the case split
         // above turns on `f′(r) mod p`, not on any higher power — so it is
         // reduced once here and evaluated per root.
-        let derivative = PolyModP::from_poly_z(&target.derivative(), prime);
+        let derivative = PolyMod::from_poly_z(&target.derivative(), prime);
         let mut level = base.roots(rng);
         // The base level obeys the same bound as every level above it:
         // `roots` returns up to `min(deg f, p)` of them, and at `exponent ==
         // 1` the lift below never runs, so without this the base level could
         // leave as the answer unchecked.
-        check_root_level_width(0, level.len() as u64, MAX_ROOT_LEVEL);
+        check_root_level_width(0, level.len() as u64, MAX_ENUMERATED_ROOTS);
         let mut modulus = prime.clone();
 
         for _ in 1..exponent {
             let next_modulus = modulus.mul_ref(prime);
-            let reduced = PolyModP::from_poly_z(target, &next_modulus);
+            let reduced = PolyMod::from_poly_z(target, &next_modulus);
             let mut next = Vec::with_capacity(level.len());
             for r in &level {
                 let value = reduced.evaluate(r);
@@ -1152,7 +1152,7 @@ impl PolyZ {
                 if slope.is_zero() {
                     if value.is_zero() {
                         let span = prime.to_u64().unwrap_or(u64::MAX);
-                        check_root_level_width(next.len(), span, MAX_ROOT_LEVEL);
+                        check_root_level_width(next.len(), span, MAX_ENUMERATED_ROOTS);
                         for t in 0..span {
                             next.push(r.add_ref(&BigUint::from_u64(t).mul_ref(&modulus)));
                         }
@@ -1166,7 +1166,7 @@ impl PolyZ {
                         .expect("a non-zero residue is invertible modulo a prime");
                     let negated = BigUint::mod_sub(&BigUint::zero(), &s.modulo(prime), prime);
                     let t = BigUint::mod_mul(&negated, &inverse, prime);
-                    check_root_level_width(next.len(), 1, MAX_ROOT_LEVEL);
+                    check_root_level_width(next.len(), 1, MAX_ENUMERATED_ROOTS);
                     next.push(r.add_ref(&t.mul_ref(&modulus)));
                 }
             }
@@ -1181,7 +1181,7 @@ impl PolyZ {
                 .to_u64()
                 .unwrap_or(u64::MAX);
             let total = span.saturating_mul(level.len() as u64);
-            check_root_level_width(0, total, MAX_ROOT_LEVEL);
+            check_root_level_width(0, total, MAX_ENUMERATED_ROOTS);
             let mut expanded = Vec::with_capacity(level.len() * span as usize);
             for r in &level {
                 for t in 0..span {
@@ -1308,7 +1308,7 @@ fn add_into_at_z(acc: &mut [BigInt], addend: &[BigInt], offset: usize) {
 }
 
 /// The convolution `a ⋆ b` modulo `m`, returning `a.len() + b.len() - 1`
-/// coefficients — the coefficient-vector core behind [`PolyModP::mul`].
+/// coefficients — the coefficient-vector core behind [`PolyMod::mul`].
 /// Shape and split rule are [`convolve_z`]'s, at
 /// [`POLY_KARATSUBA_THRESHOLD_MODP`] (far higher, for the reasons recorded
 /// on that constant); the differences are where the modular reductions sit
@@ -1602,12 +1602,12 @@ fn bareiss_determinant(mut matrix: Vec<Vec<BigInt>>) -> BigInt {
 /// invertible modulo `m`) and panic on a non-invertible pivot. This is the
 /// field ℤ/pℤ the factorization routines are built over.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PolyModP {
+pub struct PolyMod {
     coeffs: Vec<BigUint>,
     modulus: BigUint,
 }
 
-impl PolyModP {
+impl PolyMod {
     /// Build from coefficients low-to-high, reducing each modulo `modulus`
     /// and normalizing away trailing zeros. Both steps establish the type's
     /// invariants: coefficients are the least non-negative residues, so two
@@ -1730,7 +1730,7 @@ impl PolyModP {
         // element with an 𝔽_q one and tag the result with one of the two moduli.
         assert_eq!(
             self.modulus, other.modulus,
-            "PolyModP operands must share a modulus"
+            "PolyMod operands must share a modulus"
         );
     }
 
@@ -2331,8 +2331,8 @@ impl PolyModP {
     /// stated precondition, which is unchecked: given a `self` that is not a
     /// product of distinct degree-`d` irreducibles the target is
     /// unreachable and the stall guard below fires, attributing the failure
-    /// to the `Rng`.
-    fn equal_degree_split<R: crate::random::Rng + ?Sized>(
+    /// to the `RandomSource`.
+    fn equal_degree_split<R: crate::random::RandomSource + ?Sized>(
         &self,
         d: usize,
         rng: &mut R,
@@ -2346,8 +2346,8 @@ impl PolyModP {
         let two = BigUint::from_u64(2);
         // Cantor–Zassenhaus is Las Vegas: each draw splits a given pair of
         // factors with probability ≥ 1/2, so the loop finishes quickly for any
-        // Rng that produces entropy. Bound the consecutive draws that make no
-        // progress so a dead or all-zero Rng fails loudly instead of spinning
+        // RandomSource that produces entropy. Bound the consecutive draws that make no
+        // progress so a dead or all-zero RandomSource fails loudly instead of spinning
         // forever — 256 fruitless draws has probability ≈ 2⁻²⁵⁶ for a working
         // source, so this can only fire on a broken one.
         const MAX_STALLED_DRAWS: usize = 256;
@@ -2372,7 +2372,7 @@ impl PolyModP {
             assert!(
                 stalled < MAX_STALLED_DRAWS,
                 "equal-degree split made no progress in {MAX_STALLED_DRAWS} draws: \
-                 either the Rng yields no entropy, or the input is not a product \
+                 either the RandomSource yields no entropy, or the input is not a product \
                  of distinct degree-{d} irreducibles as this step requires"
             );
             let before = factors.len();
@@ -2435,9 +2435,9 @@ impl PolyModP {
     /// for a zero bound, which `m ≥ 2` excludes — is folded to zero for the
     /// same reason. `random_below` itself panics on a generator whose
     /// output is confined to `[m, 2^bits)` (its own stall guard), which is
-    /// the one way a broken `Rng` aborts here instead of reaching the
+    /// the one way a broken `RandomSource` aborts here instead of reaching the
     /// stall assertion in `equal_degree_split`.
-    fn random_below_degree<R: crate::random::Rng + ?Sized>(&self, rng: &mut R) -> Self {
+    fn random_below_degree<R: crate::random::RandomSource + ?Sized>(&self, rng: &mut R) -> Self {
         let deg = self.degree().expect("non-zero");
         let coeffs = (0..deg)
             .map(|_| crate::random::random_below(rng, &self.modulus).unwrap_or_else(BigUint::zero))
@@ -2504,7 +2504,10 @@ impl PolyModP {
     /// modulus is required (see the type documentation); over a composite
     /// modulus the result is unspecified and may be returned without a panic.
     #[must_use]
-    pub fn factor<R: crate::random::Rng + ?Sized>(&self, rng: &mut R) -> Vec<(Self, usize)> {
+    pub fn factor<R: crate::random::RandomSource + ?Sized>(
+        &self,
+        rng: &mut R,
+    ) -> Vec<(Self, usize)> {
         let mut result = Vec::new();
         for (squarefree, mult) in self.squarefree_factorization() {
             for (degree, block) in squarefree.distinct_degree() {
@@ -2541,7 +2544,7 @@ impl PolyModP {
     /// documentation); over a composite modulus the result is unspecified
     /// and may be returned without a panic.
     #[must_use]
-    pub fn roots<R: crate::random::Rng + ?Sized>(&self, rng: &mut R) -> Vec<BigUint> {
+    pub fn roots<R: crate::random::RandomSource + ?Sized>(&self, rng: &mut R) -> Vec<BigUint> {
         if self.degree().is_none_or(|d| d == 0) {
             return Vec::new();
         }
@@ -2629,15 +2632,15 @@ impl PolyModP {
 #[cfg(test)]
 mod tests {
     use super::{
-        convolve_modp, convolve_schoolbook_modp, convolve_schoolbook_z, convolve_z, PolyModP,
-        PolyZ, POLY_KARATSUBA_THRESHOLD_MODP, POLY_KARATSUBA_THRESHOLD_Z,
+        convolve_modp, convolve_schoolbook_modp, convolve_schoolbook_z, convolve_z, PolyMod, PolyZ,
+        POLY_KARATSUBA_THRESHOLD_MODP, POLY_KARATSUBA_THRESHOLD_Z,
     };
     use crate::bigint::{BigInt, BigUint, Sign};
 
     struct SplitMix64 {
         state: u64,
     }
-    impl crate::random::Rng for SplitMix64 {
+    impl crate::random::RandomSource for SplitMix64 {
         fn fill_bytes(&mut self, dest: &mut [u8]) {
             let mut i = 0;
             while i < dest.len() {
@@ -2753,7 +2756,7 @@ mod tests {
                 assert_eq!(
                     karatsuba_forced_modp(&am, &bm, &modulus),
                     convolve_schoolbook_modp(&am, &bm, &modulus),
-                    "PolyModP forced split differs at {la}x{lb}"
+                    "PolyMod forced split differs at {la}x{lb}"
                 );
             }
         }
@@ -2783,7 +2786,7 @@ mod tests {
             assert_eq!(
                 convolve_modp(&am, &bm, &modulus),
                 convolve_schoolbook_modp(&am, &bm, &modulus),
-                "PolyModP dispatched convolution differs at {la}x{lb}"
+                "PolyMod dispatched convolution differs at {la}x{lb}"
             );
         }
     }
@@ -3324,7 +3327,7 @@ mod tests {
 
     #[test]
     fn root_level_width_guard_covers_both_push_paths() {
-        // `MAX_ROOT_LEVEL` is far too large to reach in a test, so the
+        // `MAX_ENUMERATED_ROOTS` is far too large to reach in a test, so the
         // check itself is tested at small widths. Both push paths call it —
         // an earlier revision guarded only the branching one, which let a
         // level of one branching root followed by simple ones overrun the
@@ -3392,11 +3395,11 @@ mod tests {
         // branching root widens the level to just under the cap — passing
         // its own check, which is made while the level is still short — and
         // the simple roots after it each add one more. With the check on
-        // the branching push alone the level ran past `MAX_ROOT_LEVEL` by
+        // the branching push alone the level ran past `MAX_ENUMERATED_ROOTS` by
         // one per simple root, so the enforced bound was twice the
         // documented one.
         //
-        // p = 1048573 is the largest prime below 2²⁰ = MAX_ROOT_LEVEL, so
+        // p = 1048573 is the largest prime below 2²⁰ = MAX_ENUMERATED_ROOTS, so
         // the double root at 0 branches to within three of the cap and the
         // four simple roots at 1..4 carry it over. This is the only shape
         // that reaches the cap at the shipped constant, which is why it is
@@ -3647,12 +3650,12 @@ mod tests {
         let mut rng = SplitMix64 {
             state: 0x4001_0000_0001,
         };
-        let to_mod = |poly: &PolyZ| PolyModP::from_poly_z(poly, &p);
+        let to_mod = |poly: &PolyZ| PolyMod::from_poly_z(poly, &p);
         for _ in 0..500 {
             let a = to_mod(&rng.poly_z(8, 200));
             let mut b = to_mod(&rng.poly_z(5, 200));
             if b.is_zero() {
-                b = PolyModP::new(vec![BigUint::one()], &p);
+                b = PolyMod::new(vec![BigUint::one()], &p);
             }
             let (q, r) = a.div_rem(&b);
             // a = q·b + r, deg r < deg b.
@@ -3683,7 +3686,7 @@ mod tests {
         // assertion ever fails, the behaviour changed: re-document it,
         // do not "fix" the test.
         let m = BigUint::from_u64(15);
-        let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &m);
+        let f = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &m);
         assert!(
             f.is_irreducible(),
             "unspecified composite-modulus verdict drifted; update the contract notes"
@@ -3694,7 +3697,7 @@ mod tests {
     fn poly_mod_p_gcd_of_known_factors() {
         let p = BigUint::from_u64(7);
         // (x-1)(x-2) and (x-2)(x-3) share (x-2).
-        let x_minus = |a: i64| PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-a, 1]), &p);
+        let x_minus = |a: i64| PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[-a, 1]), &p);
         let f = x_minus(1).mul(&x_minus(2));
         let g = x_minus(2).mul(&x_minus(3));
         assert_eq!(f.gcd(&g), x_minus(2), "shared linear factor");
@@ -3706,8 +3709,8 @@ mod tests {
         // Composite modulus with a divisor whose leading coefficient shares
         // a factor: 2x + 1 mod 6, leading coeff 2 not invertible.
         let m = BigUint::from_u64(6);
-        let a = PolyModP::new(vec![BigUint::one(), BigUint::one(), BigUint::one()], &m);
-        let b = PolyModP::new(vec![BigUint::one(), BigUint::from_u64(2)], &m);
+        let a = PolyMod::new(vec![BigUint::one(), BigUint::one(), BigUint::one()], &m);
+        let b = PolyMod::new(vec![BigUint::one(), BigUint::from_u64(2)], &m);
         let _ = a.div_rem(&b);
     }
 
@@ -3883,8 +3886,8 @@ mod tests {
     }
 
     // Multiply a slice of factors-with-multiplicity back into one poly.
-    fn reassemble(factors: &[(PolyModP, usize)], p: &BigUint) -> PolyModP {
-        let mut acc = PolyModP::new(vec![BigUint::one()], p);
+    fn reassemble(factors: &[(PolyMod, usize)], p: &BigUint) -> PolyMod {
+        let mut acc = PolyMod::new(vec![BigUint::one()], p);
         for (f, e) in factors {
             for _ in 0..*e {
                 acc = acc.mul(f);
@@ -3902,17 +3905,17 @@ mod tests {
             let pm = BigUint::from_u64(p);
             for _ in 0..200 {
                 // Build a random product of small factors with multiplicities.
-                let mut f = PolyModP::new(vec![BigUint::one()], &pm);
+                let mut f = PolyMod::new(vec![BigUint::one()], &pm);
                 let parts = 1 + (rng.next_u64() % 3) as usize;
                 for _ in 0..parts {
                     let deg = 1 + (rng.next_u64() % 3) as usize;
                     let coeffs: Vec<BigUint> = (0..=deg)
                         .map(|_| BigUint::from_u64(rng.next_u64() % p))
                         .collect();
-                    let mut base = PolyModP::new(coeffs, &pm);
+                    let mut base = PolyMod::new(coeffs, &pm);
                     // Ensure non-constant.
                     if base.degree().unwrap_or(0) < 1 {
-                        base = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[0, 1]), &pm);
+                        base = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[0, 1]), &pm);
                     }
                     let mult = 1 + (rng.next_u64() % 3) as usize;
                     for _ in 0..mult {
@@ -3951,7 +3954,7 @@ mod tests {
                 coeffs[deg] = 1;
                 loop {
                     let poly =
-                        PolyModP::new(coeffs.iter().map(|&c| BigUint::from_u64(c)).collect(), &pm);
+                        PolyMod::new(coeffs.iter().map(|&c| BigUint::from_u64(c)).collect(), &pm);
                     if poly.degree() == Some(deg) {
                         let brute = brute_irreducible(&poly, p);
                         assert_eq!(
@@ -3981,7 +3984,7 @@ mod tests {
 
     // Trial-division irreducibility oracle: divisible by no lower-degree
     // monic of degree 1..deg.
-    fn brute_irreducible(poly: &PolyModP, p: u64) -> bool {
+    fn brute_irreducible(poly: &PolyMod, p: u64) -> bool {
         let pm = BigUint::from_u64(p);
         let deg = poly.degree().unwrap();
         if deg < 1 {
@@ -3992,7 +3995,7 @@ mod tests {
             coeffs[d] = 1;
             loop {
                 let divisor =
-                    PolyModP::new(coeffs.iter().map(|&c| BigUint::from_u64(c)).collect(), &pm);
+                    PolyMod::new(coeffs.iter().map(|&c| BigUint::from_u64(c)).collect(), &pm);
                 if divisor.degree() == Some(d) && poly.rem(&divisor).is_zero() {
                     return false;
                 }
@@ -4025,7 +4028,7 @@ mod tests {
                 let coeffs: Vec<BigUint> = (0..=deg)
                     .map(|_| BigUint::from_u64(rng.next_u64() % p))
                     .collect();
-                let f = PolyModP::new(coeffs, &pm);
+                let f = PolyMod::new(coeffs, &pm);
                 if f.degree().unwrap_or(0) < 1 {
                     continue;
                 }
@@ -4054,13 +4057,13 @@ mod tests {
     fn factor_of_known_polynomial() {
         // x^2 - 1 = (x-1)(x+1) mod 7.
         let p = BigUint::from_u64(7);
-        let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
+        let f = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
         let mut rng = SplitMix64 { state: 0x1234 };
         let factors = f.factor(&mut rng);
         assert_eq!(factors.len(), 2);
         assert_eq!(reassemble(&factors, &p), f.make_monic());
         // x^2 + 1 is irreducible mod 7 (no root: -1 is a non-residue mod 7).
-        let g = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &p);
+        let g = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &p);
         assert!(g.is_irreducible());
         assert!(g.roots(&mut rng).is_empty());
     }
@@ -4073,7 +4076,7 @@ mod tests {
         // The p = 2 trace-map loop body executes only for d ≥ 2, so this is the
         // case that exercises it (the odd-p exponent path is never taken here).
         let p = BigUint::from_u64(2);
-        let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 1, 1, 1, 1, 1, 1]), &p);
+        let f = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[1, 1, 1, 1, 1, 1, 1]), &p);
         let mut rng = SplitMix64 { state: 0xfac0_0002 };
         let mut factors = f.factor(&mut rng);
         assert_eq!(factors.len(), 2, "two cubic factors over F_2");
@@ -4089,8 +4092,8 @@ mod tests {
         );
         // The two cubics are exactly x³+x+1 and x³+x²+1.
         factors.sort_by(|a, b| a.0.coefficients().cmp(b.0.coefficients()));
-        let c_small = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1, 1]), &p); // x³+x²+1
-        let c_big = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 1, 0, 1]), &p); // x³+x+1
+        let c_small = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1, 1]), &p); // x³+x²+1
+        let c_big = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[1, 1, 0, 1]), &p); // x³+x+1
         assert_eq!(factors[0].0, c_small);
         assert_eq!(factors[1].0, c_big);
     }
@@ -4100,26 +4103,26 @@ mod tests {
     fn poly_mod_p_rejects_mixed_moduli() {
         // Combining an 𝔽₅ element with an 𝔽₇ one must panic in every build, not
         // silently emit a value tagged with one modulus (review §2.1).
-        let a = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[2]), &BigUint::from_u64(5));
-        let b = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[3]), &BigUint::from_u64(7));
+        let a = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[2]), &BigUint::from_u64(5));
+        let b = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[3]), &BigUint::from_u64(7));
         let _ = a.add(&b);
     }
 
     #[test]
     #[should_panic(expected = "made no progress")]
     fn factor_with_dead_rng_panics_rather_than_hangs() {
-        // An Rng that never yields entropy cannot drive the equal-degree split;
+        // An RandomSource that never yields entropy cannot drive the equal-degree split;
         // it must panic after a bounded number of fruitless draws, not loop
         // forever (review §2.4 / §5.4). x² − 1 = (x−1)(x+1) mod 7 leaves a
         // degree-1 block of two factors, so the split is actually entered.
         struct ZeroRng;
-        impl crate::random::Rng for ZeroRng {
+        impl crate::random::RandomSource for ZeroRng {
             fn fill_bytes(&mut self, dest: &mut [u8]) {
                 dest.fill(0);
             }
         }
         let p = BigUint::from_u64(7);
-        let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
+        let f = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
         let _ = f.factor(&mut ZeroRng);
     }
 
@@ -4130,17 +4133,17 @@ mod tests {
             state: 0x7011_0000_0001,
         };
         for _ in 0..100 {
-            let base = PolyModP::from_poly_z(&rng.poly_z(4, 50), &p);
+            let base = PolyMod::from_poly_z(&rng.poly_z(4, 50), &p);
             let modulus = {
-                let mut m = PolyModP::from_poly_z(&rng.poly_z(4, 50), &p);
+                let mut m = PolyMod::from_poly_z(&rng.poly_z(4, 50), &p);
                 if m.degree().unwrap_or(0) < 1 {
-                    m = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &p);
+                    m = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &p);
                 }
                 m
             };
             let e = rng.next_u64() % 20;
             let by_pow = base.pow_mod(&BigUint::from_u64(e), &modulus);
-            let mut by_mul = PolyModP::new(vec![BigUint::one()], &p).rem(&modulus);
+            let mut by_mul = PolyMod::new(vec![BigUint::one()], &p).rem(&modulus);
             for _ in 0..e {
                 by_mul = by_mul.mul(&base).rem(&modulus);
             }
@@ -4445,7 +4448,7 @@ mod tests {
                     .iter()
                     .map(|r| r.to_u64().expect("a residue below p^e fits"))
                     .collect();
-                let reduced = PolyModP::from_poly_z(&f, &power);
+                let reduced = PolyMod::from_poly_z(&f, &power);
                 let expected: Vec<u64> = (0..p.pow(e))
                     .filter(|&r| reduced.evaluate(&BigUint::from_u64(r)).is_zero())
                     .collect();
@@ -4496,7 +4499,7 @@ mod tests {
         let half = modulus.div_rem(&BigUint::from_u64(2)).0;
         for _ in 0..200 {
             let f = rng.poly_z(8, 1_000_000);
-            let lifted = PolyModP::from_poly_z(&f, &modulus).symmetric_lift();
+            let lifted = PolyMod::from_poly_z(&f, &modulus).symmetric_lift();
             assert_eq!(lifted, f, "the lift recovers a polynomial that fits");
             for c in lifted.coefficients() {
                 assert!(c.abs() <= half, "the lift is balanced");
@@ -4512,7 +4515,7 @@ mod tests {
         let narrow = BigUint::from_u64(1_000_003);
         let wide = narrow.mul_ref(&narrow);
         for _ in 0..100 {
-            let f = PolyModP::from_poly_z(&rng.poly_z(6, 10_000), &narrow);
+            let f = PolyMod::from_poly_z(&rng.poly_z(6, 10_000), &narrow);
             let widened = f.with_modulus(&wide);
             assert_eq!(widened.modulus(), &wide);
             // The representatives carried are the *canonical* ones, in
@@ -4526,7 +4529,7 @@ mod tests {
         // and 4 modulo 7 widen to 5 and 4, not to 47 and 46.
         let small = BigUint::from_u64(7);
         let big = BigUint::from_u64(49);
-        let f = PolyModP::new(vec![BigUint::from_u64(5), BigUint::from_u64(4)], &small);
+        let f = PolyMod::new(vec![BigUint::from_u64(5), BigUint::from_u64(4)], &small);
         assert_eq!(
             f.with_modulus(&big).coefficients(),
             &[BigUint::from_u64(5), BigUint::from_u64(4)]
@@ -4534,15 +4537,15 @@ mod tests {
         // Narrowing is the ring projection and commutes with addition;
         // widening is its section and does not. Both directions asserted,
         // because the documentation distinguishes them.
-        let g = PolyModP::new(vec![BigUint::from_u64(4)], &small);
-        let h = PolyModP::new(vec![BigUint::from_u64(5)], &small);
+        let g = PolyMod::new(vec![BigUint::from_u64(4)], &small);
+        let h = PolyMod::new(vec![BigUint::from_u64(5)], &small);
         assert_ne!(
             g.add(&h).with_modulus(&big),
             g.with_modulus(&big).add(&h.with_modulus(&big)),
             "widening is not additive"
         );
-        let wide_g = PolyModP::new(vec![BigUint::from_u64(40)], &big);
-        let wide_h = PolyModP::new(vec![BigUint::from_u64(45)], &big);
+        let wide_g = PolyMod::new(vec![BigUint::from_u64(40)], &big);
+        let wide_h = PolyMod::new(vec![BigUint::from_u64(45)], &big);
         assert_eq!(
             wide_g.add(&wide_h).with_modulus(&small),
             wide_g
@@ -4565,8 +4568,8 @@ mod tests {
         let delta = beta.mul(&beta).rem_monic(&f);
 
         let q = BigUint::from_u64(7);
-        let field = PolyModP::from_poly_z(&f, &q);
-        let residue = PolyModP::from_poly_z(&delta, &q).rem(&field);
+        let field = PolyMod::from_poly_z(&f, &q);
+        let residue = PolyMod::from_poly_z(&delta, &q).rem(&field);
 
         // Base root by exhaustion over the 49 elements of 𝔽_49 — deliberately
         // not the field square-root routine, so this test does not depend on
@@ -4574,7 +4577,7 @@ mod tests {
         let mut root = None;
         for a in 0..7u64 {
             for b in 0..7u64 {
-                let candidate = PolyModP::new(vec![BigUint::from_u64(a), BigUint::from_u64(b)], &q);
+                let candidate = PolyMod::new(vec![BigUint::from_u64(a), BigUint::from_u64(b)], &q);
                 if candidate.mul(&candidate).rem(&field) == residue {
                     root = Some(candidate);
                     break;
@@ -4586,7 +4589,7 @@ mod tests {
 
         // u ≈ (2β)⁻¹ in the field, by Fermat: the inverse Newton also lifts.
         let order = q.pow_u64(2);
-        let two = PolyModP::new(vec![BigUint::from_u64(2)], &q);
+        let two = PolyMod::new(vec![BigUint::from_u64(2)], &q);
         let mut inverse = two
             .mul(&current)
             .rem(&field)
@@ -4603,8 +4606,8 @@ mod tests {
             }
             // Square the precision: q^k → q^{2k}.
             let next = modulus.mul_ref(&modulus);
-            let f_next = PolyModP::from_poly_z(&f, &next);
-            let delta_next = PolyModP::from_poly_z(&delta, &next).rem(&f_next);
+            let f_next = PolyMod::from_poly_z(&f, &next);
+            let delta_next = PolyMod::from_poly_z(&delta, &next).rem(&f_next);
             let mut b = current.with_modulus(&next);
             let u = inverse.with_modulus(&next);
 
@@ -4613,7 +4616,7 @@ mod tests {
             b = b.sub(&error.mul(&u).rem(&f_next));
 
             // u ← u·(2 − 2βu), Newton for the inverse.
-            let two_next = PolyModP::new(vec![BigUint::from_u64(2)], &next);
+            let two_next = PolyMod::new(vec![BigUint::from_u64(2)], &next);
             let product = two_next.mul(&b).rem(&f_next).mul(&u).rem(&f_next);
             inverse = u.mul(&two_next.sub(&product)).rem(&f_next);
 

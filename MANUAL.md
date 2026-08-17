@@ -22,8 +22,8 @@ use rump::{
     lll_reduce, miller_rabin_witness, mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow,
     primes_below, product_tree, random_below, random_coprime_below, random_nonzero_below,
     random_probable_prime, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
-    remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, BarrettCtx, BigInt,
-    BigUint, Gf2m, MontgomeryCtx, PolyModP, PolyZ, Rng, Sign,
+    remove_factor, smooth_parts, sqrt_mod, sqrt_mod_prime_power, valuation, BarrettContext, BigInt,
+    BigUint, Gf2m, MontgomeryContext, PolyMod, PolyZ, RandomSource, Sign,
 };
 use core::num::NonZeroU64;
 ```
@@ -357,15 +357,15 @@ oblivious to whether an element fits in one word or a hundred.
 
 ## Barrett contexts
 
-`BarrettCtx` is the fixed-modulus reduction context for **either parity**
-— the complement to `MontgomeryCtx`, which requires an odd modulus. One
+`BarrettContext` is the fixed-modulus reduction context for **either parity**
+— the complement to `MontgomeryContext`, which requires an odd modulus. One
 division precomputes `μ`; `reduce` then costs two multiplications
 (HAC Algorithm 14.42), with `mod_mul`, `mod_square`, and `mod_pow` built
 on it. `None` for a modulus below 2.
 
 ```rust
 let even = BigUint::from_u64(1_000);
-let ctx = BarrettCtx::new(&even).expect("modulus is at least 2");
+let ctx = BarrettContext::new(&even).expect("modulus is at least 2");
 assert_eq!(
     ctx.mod_mul(&BigUint::from_u64(123), &BigUint::from_u64(456)),
     BigUint::from_u64(88) // 56 088 mod 1000
@@ -378,7 +378,7 @@ assert_eq!(
 
 ## The Montgomery domain
 
-`MontgomeryCtx::new` precomputes the Montgomery constants for one odd
+`MontgomeryContext::new` precomputes the Montgomery constants for one odd
 modulus (`None` for even or zero); `modulus()` returns it. Long computations
 encode once, stay in the domain with `mul_mont` / `square_mont` /
 `add_mont` / `sub_mont` — the encoding is linear, so domain addition and
@@ -397,9 +397,9 @@ intermediates, exactly as the discarded per-call buffer does.
 
 ```rust
 let p = BigUint::from_u64(97);
-let ctx = MontgomeryCtx::new(&p).expect("97 is odd");
+let ctx = MontgomeryContext::new(&p).expect("97 is odd");
 assert_eq!(*ctx.modulus(), p);
-assert!(MontgomeryCtx::new(&BigUint::from_u64(100)).is_none()); // even
+assert!(MontgomeryContext::new(&BigUint::from_u64(100)).is_none()); // even
 
 let a = BigUint::from_u64(5);
 let b = BigUint::from_u64(6);
@@ -716,7 +716,7 @@ assert_eq!(BigUint::zero().digit_count(10), 1); // written "0"
 
 ### Division by a divisor that does not change
 
-`Reciprocal::new(d)` precomputes the reciprocal of a `u64` divisor once, so
+`WordReciprocal::new(d)` precomputes the reciprocal of a `u64` divisor once, so
 that later divisions by `d` cost a multiplication and a correction instead of
 a hardware divide (Möller & Granlund, IEEE ToC 60 (2011), Algorithm 4). It
 answers exactly what `div_rem_u64` and `rem_u64` answer; the difference is
@@ -731,11 +731,11 @@ truncating `%` does not give.
 ```rust
 // Non-zero is the whole precondition, so the type carries it: there is no
 // error case left for the caller to handle.
-let r = Reciprocal::new(NonZeroU64::new(1_000_003).expect("literal is non-zero"));
+let r = WordReciprocal::new(NonZeroU64::new(1_000_003).expect("literal is non-zero"));
 assert_eq!(r.divisor(), 1_000_003);
 
 // The same answers as the hardware-division path. Note the argument roles:
-// `BigUint::rem_u64` takes the divisor, `Reciprocal::rem` takes the dividend.
+// `BigUint::rem_u64` takes the divisor, `WordReciprocal::rem` takes the dividend.
 assert_eq!(r.div_rem(2_000_007), (2, 1));
 assert_eq!(r.rem(2_000_006), 0);
 
@@ -784,7 +784,7 @@ assert_eq!(parts[0], BigUint::from_u64(360));
 assert_eq!(parts[1], BigUint::from_u64(2));
 ```
 
-`SmoothBase::new(primes)` is the same algorithm with the primes' product
+`SmoothnessBase::new(primes)` is the same algorithm with the primes' product
 built once and kept, for a caller that wants to choose its own batch size.
 The free function above rebuilds that product on every call, which for a base
 of a few thousand primes is a product of tens of thousands of bits: paid once
@@ -795,7 +795,7 @@ obligation that every entry is at least two is checked at construction rather
 than per batch.
 
 ```rust
-let base = SmoothBase::new(&primes_below(10)).expect("every entry is at least two");
+let base = SmoothnessBase::new(&primes_below(10)).expect("every entry is at least two");
 assert_eq!(base.primes(), &[2, 3, 5, 7]);
 
 // The same answers as the free function, in batches of the caller's choosing.
@@ -884,13 +884,13 @@ assert!(!is_probable_prime_bpsw(&BigUint::from_u64(5_459)));
 
 ## Polynomials
 
-`PolyZ` is a dense univariate polynomial over ℤ and `PolyModP` one over
+`PolyZ` is a dense univariate polynomial over ℤ and `PolyMod` one over
 ℤ/mℤ; both store coefficients low-to-high and normalize away trailing
 zeros, so the zero polynomial is the empty coefficient list. `PolyZ`
 offers `add`/`sub`/`mul`, `evaluate` (Horner), `derivative`, `content` and
 `primitive_part`, `div_rem` (exact division over ℤ, `None` when it does not
 divide evenly), and `pseudo_div_rem` (the always-defined integer-preserving
-form). `PolyModP` adds `div_rem`/`rem`/`gcd`/`make_monic`/
+form). `PolyMod` adds `div_rem`/`rem`/`gcd`/`make_monic`/
 `pow_mod` — the division-based operations invert a leading coefficient, so
 they require a prime modulus and panic on a non-invertible pivot.
 
@@ -921,9 +921,9 @@ assert_eq!(c.primitive_part(), PolyZ::from_i64_slice(&[5, 3, 2]));
 
 // Over ℤ/7ℤ: (x - 1)(x - 2) and (x - 2)(x - 3) share x - 2.
 let p = BigUint::from_u64(7);
-let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[2, -3, 1]), &p); // x^2 - 3x + 2
-let g = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[6, -5, 1]), &p); // x^2 - 5x + 6
-let shared = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-2, 1]), &p); // x - 2
+let f = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[2, -3, 1]), &p); // x^2 - 3x + 2
+let g = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[6, -5, 1]), &p); // x^2 - 5x + 6
+let shared = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[-2, 1]), &p); // x - 2
 assert_eq!(f.gcd(&g), shared);
 ```
 
@@ -947,15 +947,15 @@ assert_eq!(u.resultant(&v), BigInt::zero());
 assert_eq!(PolyZ::from_i64_slice(&[1, -2, 1]).discriminant(), BigInt::zero());
 ```
 
-Over a prime modulus, `PolyModP` factors and finds roots: `factor` returns
+Over a prime modulus, `PolyMod` factors and finds roots: `factor` returns
 monic irreducibles with multiplicities, `is_irreducible` tests a single
 polynomial, and `roots` gives the residues where it vanishes. Factoring and
-root-finding are randomized (Cantor–Zassenhaus), so they take an `Rng` (see
+root-finding are randomized (Cantor–Zassenhaus), so they take an `RandomSource` (see
 Random sampling below for the trait; a minimal one is used here).
 
 ```rust
 struct Lcg(u64);
-impl Rng for Lcg {
+impl RandomSource for Lcg {
     fn fill_bytes(&mut self, d: &mut [u8]) {
         for b in d {
             self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -967,19 +967,19 @@ let p = BigUint::from_u64(7);
 let mut rng = Lcg(0x1234_5678);
 
 // x^2 - 1 = (x - 1)(x + 1) mod 7 — two roots.
-let f = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
+let f = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
 let mut roots = f.roots(&mut rng);
 roots.sort();
 assert_eq!(roots, vec![BigUint::from_u64(1), BigUint::from_u64(6)]); // 6 ≡ -1
 
 // x^2 + 1 is irreducible mod 7 (−1 is a non-residue), so no roots.
-let g = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &p);
+let g = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[1, 0, 1]), &p);
 assert!(g.is_irreducible());
 assert!(g.roots(&mut rng).is_empty());
 
 // factor returns monic irreducibles with multiplicities:
 // x^3 + x = x · (x^2 + 1) over F_7.
-let h = PolyModP::from_poly_z(&PolyZ::from_i64_slice(&[0, 1, 0, 1]), &p);
+let h = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[0, 1, 0, 1]), &p);
 let mut fs = h.factor(&mut rng);
 fs.sort_by_key(|(fac, _)| fac.degree());
 assert_eq!(fs.len(), 2);
@@ -1001,11 +1001,11 @@ Karatsuba wants, and because reduction is a ring homomorphism the answer
 equals the fold multiplied out and reduced once — at a fraction of the
 cost, since no intermediate is ever allowed to exceed `deg f`.
 
-`PolyModP::symmetric_lift` returns the ℤ[x] representative with
+`PolyMod::symmetric_lift` returns the ℤ[x] representative with
 coefficients in (−m/2, m/2]. That is the lift to use when a modular
 computation was meant to recover an integer answer: a modulus wider than
 twice the height returns the true polynomial exactly, signs and all.
-`PolyModP::with_modulus` re-reads the same coefficient representatives at
+`PolyMod::with_modulus` re-reads the same coefficient representatives at
 a different modulus. Narrowing (the new modulus divides the old) is the
 ring projection and preserves sums and products; widening (the old divides
 the new) is its canonical section, which preserves only equality — it is
@@ -1022,7 +1022,7 @@ from the roots modulo `p`, branching where the derivative vanishes.
 
 ```rust
 struct Lcg2(u64);
-impl Rng for Lcg2 {
+impl RandomSource for Lcg2 {
     fn fill_bytes(&mut self, d: &mut [u8]) {
         for b in d {
             self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -1076,7 +1076,7 @@ assert_eq!(108u64 * 108 % 343, 2);
 
 // A symmetric lift recovers the integer polynomial it came from.
 let wide = BigUint::from_u64(2).pow_u64(96);
-assert_eq!(PolyModP::from_poly_z(&a, &wide).symmetric_lift(), a);
+assert_eq!(PolyMod::from_poly_z(&a, &wide).symmetric_lift(), a);
 ```
 
 ## Lattice reduction
@@ -1131,7 +1131,7 @@ assert_eq!(gauss_reduce_weighted([[1, 0], [0, 1]], [1, 100]), Some([[1, 0], [0, 
 
 ## Random sampling
 
-Implement `Rng` — one method, `fill_bytes` — and every sampler is driven by
+Implement `RandomSource` — one method, `fill_bytes` — and every sampler is driven by
 it. rump chooses no entropy source: output quality is exactly source
 quality, so cryptographic callers must supply a CSPRNG. `random_below`
 draws uniformly in `[0, upper)` by rejection, `random_nonzero_below` in
@@ -1158,7 +1158,7 @@ avoid.
 /// xorshift64: deterministic and compact. Fine for a manual; NOT a CSPRNG.
 struct XorShift64(u64);
 
-impl Rng for XorShift64 {
+impl RandomSource for XorShift64 {
     fn fill_bytes(&mut self, dest: &mut [u8]) {
         for chunk in dest.chunks_mut(8) {
             self.0 ^= self.0 << 13;
@@ -1214,18 +1214,18 @@ recoverable conditions:
 | `remainder_tree` / `smooth_parts` | a value (leaf) is zero — but `smooth_parts` maps a zero value to zero rather than reducing it |
 | `Gf2m::half_trace` | the field degree is even |
 | `Gf2m::trace` | a reducible modulus makes the Frobenius sum leave GF(2) |
-| `PolyZ` / `PolyModP` division | the divisor is the zero polynomial |
-| `PolyModP::new` / `zero` / `from_poly_z` | the modulus is below 2 |
-| `PolyModP` (any two-operand op) | the operands carry different moduli |
-| `PolyModP` division / `gcd` / `factor` | a non-invertible pivot (composite modulus) |
+| `PolyZ` / `PolyMod` division | the divisor is the zero polynomial |
+| `PolyMod::new` / `zero` / `from_poly_z` | the modulus is below 2 |
+| `PolyMod` (any two-operand op) | the operands carry different moduli |
+| `PolyMod` division / `gcd` / `factor` | a non-invertible pivot (composite modulus) |
 | `squarefree_factorization` / `factor` | the polynomial is constant or zero |
-| `PolyModP::factor` / `roots` | the supplied `Rng` makes no progress (the equal-degree splitter's stall guard) |
+| `PolyMod::factor` / `roots` | the supplied `RandomSource` makes no progress (the equal-degree splitter's stall guard) |
 | `PolyZ::rem_monic` / `product_mod_monic` | the divisor is zero or its leading coefficient is not 1 |
 | `PolyZ::balanced_base_expansion` | the base is below 2 |
-| `PolyZ::roots_mod_prime_power` | the exponent is zero, the base is below 2, the polynomial is zero or has every coefficient divisible by `pᵉ` (every residue is then a root), or the lift would exceed `MAX_ROOT_LEVEL` candidates at some level or in its answer |
+| `PolyZ::roots_mod_prime_power` | the exponent is zero, the base is below 2, the polynomial is zero or has every coefficient divisible by `pᵉ` (every residue is then a root), or the lift would exceed `MAX_ENUMERATED_ROOTS` candidates at some level or in its answer |
 | `lll_reduce` / `lll_reduce_delta` | dependent, ragged, or zero-length rows; the `_delta` form also on `δ ∉ (1/4, 1)` or a zero denominator |
 | `to_be_bytes_padded` | the value needs more than the requested byte length |
-| `MontgomeryCtx::mul_mont` / `square_mont` / their `_with_workspace` forms / `pow_encoded` | given an operand not reduced below the modulus — the shared in-domain contract, asserted in debug builds; in release a grossly over-width operand trips the internal bounds check. `encode` and `decode` instead reduce any representative and never panic on width |
+| `MontgomeryContext::mul_mont` / `square_mont` / their `_with_workspace` forms / `pow_encoded` | given an operand not reduced below the modulus — the shared in-domain contract, asserted in debug builds; in release a grossly over-width operand trips the internal bounds check. `encode` and `decode` instead reduce any representative and never panic on width |
 | `random_below` / `random_nonzero_below` / `random_coprime_below` / `random_probable_prime` | the generator trips a stall guard — see Random sampling above for what each guard can and cannot detect |
 
 Fallible mathematics — a missing inverse, a non-residue, an even Montgomery

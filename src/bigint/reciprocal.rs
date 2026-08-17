@@ -13,7 +13,7 @@
 //! path it replaces:
 //!
 //! ```text
-//!   width          hardware   Reciprocal
+//!   width          hardware   WordReciprocal
 //!   one word         0.84 ns     2.07 ns    0.41x  — slower
 //!   two limbs        1.37x faster
 //!   four limbs       1.52x faster
@@ -50,9 +50,9 @@ use core::num::NonZeroU64;
 /// # Examples
 ///
 /// ```
-/// use rump::{BigUint, Reciprocal};
+/// use rump::{BigUint, WordReciprocal};
 ///
-/// let r = Reciprocal::new(1_000_003);
+/// let r = WordReciprocal::new(1_000_003);
 /// assert_eq!(r.rem_u64(2_000_006), 0);
 /// assert_eq!(r.div_rem_u64(2_000_007), (2, 1));
 ///
@@ -63,7 +63,7 @@ use core::num::NonZeroU64;
 /// assert_eq!(n.rem_reciprocal(&r), n.rem_u64(1_000_003));
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Reciprocal {
+pub struct WordReciprocal {
     divisor: u64,
     /// `divisor << shift`, so the top bit is set — Algorithm 4 requires it.
     normalized: u64,
@@ -74,7 +74,7 @@ pub struct Reciprocal {
     shift: u32,
 }
 
-impl Reciprocal {
+impl WordReciprocal {
     /// Precompute the reciprocal of `divisor`.
     ///
     /// Total: non-zero is the entire precondition, so it is carried by
@@ -245,20 +245,20 @@ impl BigUint {
     /// `self mod r.divisor()`, using a precomputed reciprocal.
     ///
     /// The answer is [`Self::rem_u64`]'s; this trades a hardware division per
-    /// limb for a multiplication per limb. Since [`Reciprocal::new`] costs one
+    /// limb for a multiplication per limb. Since [`WordReciprocal::new`] costs one
     /// division in total, that pays back within the first call on a dividend
     /// of two limbs or more, and by a widening margin above — not, as an
     /// earlier version of this sentence claimed, only after the divisor has
     /// been reused a number of times.
     #[must_use]
-    pub fn rem_reciprocal(&self, r: &Reciprocal) -> u64 {
+    pub fn rem_reciprocal(&self, r: &WordReciprocal) -> u64 {
         r.rem_limbs(self.limbs())
     }
 
     /// `(self / r.divisor(), self mod r.divisor())`, using a precomputed
     /// reciprocal. The answer is [`Self::div_rem_u64`]'s.
     #[must_use]
-    pub fn div_rem_reciprocal(&self, r: &Reciprocal) -> (Self, u64) {
+    pub fn div_rem_reciprocal(&self, r: &WordReciprocal) -> (Self, u64) {
         let (limbs, remainder) = r.div_rem_limbs(self.limbs());
         (Self::from_limbs(limbs), remainder)
     }

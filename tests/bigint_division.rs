@@ -14,7 +14,7 @@
 //! default `cargo test` stays quick while a soak run can push the same code
 //! through orders of magnitude more cases.
 
-use rump::{BigUint, MontgomeryCtx};
+use rump::{BigUint, MontgomeryContext};
 
 /// Deterministic test generator: splitmix64 (Steele, Lea & Flood 2014),
 /// vendored so the tests need no dependency. Not a CSPRNG and not meant to
@@ -431,7 +431,7 @@ fn mod_mul_matches_reference_and_montgomery() {
             assert!(product < modulus);
 
             if modulus.is_odd() {
-                let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus builds a context");
+                let ctx = MontgomeryContext::new(&modulus).expect("odd modulus builds a context");
                 assert_eq!(
                     product,
                     ctx.mul(&lhs, &rhs),

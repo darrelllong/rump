@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use rump::{
     gcd, gcd_extended, is_probable_prime, jacobi, mod_inverse, mod_pow, sqrt_mod, BigUint, Gf2m,
-    MontgomeryCtx,
+    MontgomeryContext,
 };
 
 // ─── Random operand generation ──────────────────────────────────────────────
@@ -111,7 +111,7 @@ struct IntPool {
 
 /// The Montgomery-domain slice of the pool.
 struct MontState {
-    ctx: MontgomeryCtx,
+    ctx: MontgomeryContext,
     a_mont: BigUint,
     b_mont: BigUint,
 }
@@ -138,7 +138,7 @@ impl IntPool {
             "montmul" | "montsqr" | "montpow_e65537" | "montpow_rand"
         )
         .then(|| {
-            let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus");
+            let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
             let a_mont = ctx.encode(&a);
             let b_mont = ctx.encode(&b);
             MontState {
@@ -285,7 +285,7 @@ fn int_op(name: &str) -> Option<fn(&mut IntPool)> {
             black_box(BigUint::mod_mul(&p.a, &p.b, &p.modulus));
         },
         "montsetup" => |p| {
-            black_box(MontgomeryCtx::new(&p.modulus));
+            black_box(MontgomeryContext::new(&p.modulus));
         },
         "montmul" => |p| {
             let m = p.mont();

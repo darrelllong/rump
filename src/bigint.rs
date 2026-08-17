@@ -20,14 +20,14 @@ use core::cmp::Ordering;
 
 mod montgomery;
 
-pub use montgomery::MontgomeryCtx;
+pub use montgomery::MontgomeryContext;
 use montgomery::{copy_padded, mont_mul, mont_scratch_limbs, mont_sqr};
 
 mod barrett;
 mod reciprocal;
 
-pub use barrett::BarrettCtx;
-pub use reciprocal::Reciprocal;
+pub use barrett::BarrettContext;
+pub use reciprocal::WordReciprocal;
 // Only the test module reads the threshold from here now — the dispatch that
 // acts on it moved into `barrett` with the code it gates.
 #[cfg(test)]
@@ -885,7 +885,7 @@ impl BigUint {
     /// handles the whole-limb part; a mask clears the surplus bits of the
     /// boundary limb when `k` is not a multiple of 64. Reduction modulo a
     /// power of two is a truncation, not a division, which is why
-    /// [`BarrettCtx::reduce`] can take its `mod b^{k+1}` windows this way.
+    /// [`BarrettContext::reduce`] can take its `mod b^{k+1}` windows this way.
     #[must_use]
     pub fn low_bits(&self, k: usize) -> Self {
         let full_limbs = k / 64;
@@ -908,7 +908,7 @@ impl BigUint {
 
     /// Whether the value is odd: bit 0 of limb 0, with zero handled first
     /// because it has no limb to read. This is the predicate
-    /// [`MontgomeryCtx::new`] gates on — REDC needs `gcd(2^64, n) = 1` — and
+    /// [`MontgomeryContext::new`] gates on — REDC needs `gcd(2^64, n) = 1` — and
     /// the one the binary gcd and Jacobi recursions branch on.
     #[must_use]
     pub fn is_odd(&self) -> bool {
@@ -1198,7 +1198,7 @@ impl BigUint {
     /// index lies above the current width. Setting a bit can only raise the
     /// top limb above zero, so the canonical form survives without a
     /// `normalize` pass. This is how the crate materializes a power of two —
-    /// `R² = 2^(128w)` in [`MontgomeryCtx::new`], the Newton seeds in
+    /// `R² = 2^(128w)` in [`MontgomeryContext::new`], the Newton seeds in
     /// [`Self::sqrt_rem`] — without building and shifting a value.
     pub fn set_bit(&mut self, index: usize) {
         let limb = index / 64;
@@ -1489,7 +1489,7 @@ impl BigUint {
     /// calling one.
     ///
     /// The Montgomery domain keeps its own in-domain squaring
-    /// ([`MontgomeryCtx::square_mont`]), which fuses the reduction and is
+    /// ([`MontgomeryContext::square_mont`]), which fuses the reduction and is
     /// not reached from here.
     #[must_use]
     pub fn square_ref(&self) -> Self {
@@ -2325,7 +2325,7 @@ impl BigUint {
     /// Compute `(lhs * rhs) mod modulus`.
     ///
     /// Multiply, then reduce once. This used to build a throwaway
-    /// [`MontgomeryCtx`] for odd moduli and fall back to a double-and-add
+    /// [`MontgomeryContext`] for odd moduli and fall back to a double-and-add
     /// reducer for even ones, both to dodge a division. With Algorithm D doing
     /// the reduction that trade no longer pays: a Montgomery context costs a
     /// division to construct (`R² mod n`) and then three Montgomery multiplies
@@ -2334,7 +2334,7 @@ impl BigUint {
     /// special case.
     ///
     /// Callers that perform many multiplications under one modulus should still
-    /// build a [`MontgomeryCtx`] once and reuse it; this is the one-shot path.
+    /// build a [`MontgomeryContext`] once and reuse it; this is the one-shot path.
     ///
     /// # Panics
     ///
@@ -3443,8 +3443,9 @@ mod tests {
         assert_eq!(*least.magnitude(), BigUint::from_u128(1u128 << 127));
     }
     use super::{
-        BigInt, BigUint, MontgomeryCtx, Sign, KARATSUBA_THRESHOLD_LIMBS, SQR_KARATSUBA_MAX_LIMBS,
-        SQR_SCHOOLBOOK_MIN_LIMBS, TOOM3_THRESHOLD_LIMBS, UNBALANCED_THRESHOLD_LIMBS,
+        BigInt, BigUint, MontgomeryContext, Sign, KARATSUBA_THRESHOLD_LIMBS,
+        SQR_KARATSUBA_MAX_LIMBS, SQR_SCHOOLBOOK_MIN_LIMBS, TOOM3_THRESHOLD_LIMBS,
+        UNBALANCED_THRESHOLD_LIMBS,
     };
     use core::num::NonZeroU64;
 
@@ -3491,7 +3492,7 @@ mod tests {
     fn reciprocal_agrees_with_hardware_division_on_words() {
         let mut state = 0xabcd_ef01_u64;
         for divisor in reciprocal_divisor_corners() {
-            let r = super::Reciprocal::new(
+            let r = super::WordReciprocal::new(
                 NonZeroU64::new(divisor).expect("corner divisors are non-zero"),
             );
             assert_eq!(r.divisor(), divisor);
@@ -3522,7 +3523,7 @@ mod tests {
     fn reciprocal_agrees_with_hardware_division_on_bignums() {
         let mut state = 0x1357_9bdf_u64;
         for divisor in reciprocal_divisor_corners() {
-            let r = super::Reciprocal::new(
+            let r = super::WordReciprocal::new(
                 NonZeroU64::new(divisor).expect("corner divisors are non-zero"),
             );
             for words in [1usize, 2, 3, 5, 8, 17, 64] {
@@ -3548,7 +3549,7 @@ mod tests {
     fn reciprocal_rem_euclid_matches_the_signed_oracle() {
         let mut state = 0x2468_ace0_u64;
         for divisor in reciprocal_divisor_corners() {
-            let r = super::Reciprocal::new(
+            let r = super::WordReciprocal::new(
                 NonZeroU64::new(divisor).expect("corner divisors are non-zero"),
             );
             let mut values = vec![0i64, 1, -1, i64::MAX, i64::MIN];
@@ -3584,7 +3585,7 @@ mod tests {
     #[test]
     fn reciprocal_accepts_the_boundary_divisors() {
         for d in [1u64, 2, u64::MAX - 1, u64::MAX] {
-            let r = super::Reciprocal::new(NonZeroU64::new(d).expect("non-zero"));
+            let r = super::WordReciprocal::new(NonZeroU64::new(d).expect("non-zero"));
             assert_eq!(r.divisor(), d);
             assert_eq!(r.rem(12_345), 12_345 % d);
         }
@@ -3773,7 +3774,7 @@ mod tests {
             );
         }
         // The Barrett pair delegates to the same operations.
-        let ctx = super::BarrettCtx::new(&BigUint::from_u64(1000)).expect("modulus >= 2");
+        let ctx = super::BarrettContext::new(&BigUint::from_u64(1000)).expect("modulus >= 2");
         assert_eq!(
             BigUint::mod_add(
                 &BigUint::from_u64(999),
@@ -3808,12 +3809,12 @@ mod tests {
 
     #[test]
     fn montgomery_domain_add_sub_match_plain_arithmetic() {
-        use super::MontgomeryCtx;
+        use super::MontgomeryContext;
         let mut seed = 0x0a0d_50b7_0000_0001;
         for &words in &[1usize, 4, 32] {
             let mut n = seeded_biguint(words, &mut seed);
             n.limbs[0] |= 1;
-            let ctx = MontgomeryCtx::new(&n).expect("odd modulus");
+            let ctx = MontgomeryContext::new(&n).expect("odd modulus");
             for _ in 0..16 {
                 let a = seeded_biguint(words, &mut seed).modulo(&n);
                 let b = seeded_biguint(words, &mut seed).modulo(&n);
@@ -3854,7 +3855,7 @@ mod tests {
 
     #[test]
     fn barrett_matches_division_reduction() {
-        use super::BarrettCtx;
+        use super::BarrettContext;
         let mut seed = 0xba22_e77e_0000_0001;
         for &words in &[1usize, 4, 16, 64] {
             for parity_even in [false, true] {
@@ -3867,7 +3868,7 @@ mod tests {
                 if n.bits() < 2 {
                     continue;
                 }
-                let ctx = BarrettCtx::new(&n).expect("modulus is at least 2");
+                let ctx = BarrettContext::new(&n).expect("modulus is at least 2");
                 for _ in 0..8 {
                     // Products of reduced values — the advertised domain.
                     let a = seeded_biguint(words, &mut seed).modulo(&n);
@@ -3892,7 +3893,7 @@ mod tests {
         // Tiny and structured moduli.
         for n_small in [2u64, 3, 4, 16, 255, 256, 257, u64::MAX] {
             let n = BigUint::from_u64(n_small);
-            let ctx = BarrettCtx::new(&n).expect("at least 2");
+            let ctx = BarrettContext::new(&n).expect("at least 2");
             for x in [
                 Some(0u64),
                 Some(1),
@@ -3907,8 +3908,8 @@ mod tests {
                 assert_eq!(ctx.reduce(&x2), x2.modulo(&n), "n = {n_small}, x = {x}");
             }
         }
-        assert!(BarrettCtx::new(&BigUint::one()).is_none());
-        assert!(BarrettCtx::new(&BigUint::zero()).is_none());
+        assert!(BarrettContext::new(&BigUint::one()).is_none());
+        assert!(BarrettContext::new(&BigUint::zero()).is_none());
         // The tightest shapes for the quotient estimate: moduli at the
         // limb-boundary edges, b^(k-1) and b^k - 1.
         for k in [2usize, 3, 8] {
@@ -3929,7 +3930,7 @@ mod tests {
                     v.sub_ref(&BigUint::one())
                 },
             ] {
-                let ctx = BarrettCtx::new(&n).expect("at least 2");
+                let ctx = BarrettContext::new(&n).expect("at least 2");
                 let mut seed2 = 0x0b0b_0b0b_0000_0001 ^ (k as u64);
                 for _ in 0..6 {
                     let a = seeded_biguint(k, &mut seed2).modulo(&n);
@@ -3954,7 +3955,7 @@ mod tests {
         // still compute the right answer. Only the timing changes, and only
         // above 32 kbit. The constant is guarded by the comment on it and
         // by `--ignored` measurement, not by this.
-        use super::{BarrettCtx, BARRETT_HALF_PRODUCT_MAX_LIMBS};
+        use super::{BarrettContext, BARRETT_HALF_PRODUCT_MAX_LIMBS};
         let cutoff = BARRETT_HALF_PRODUCT_MAX_LIMBS;
         let mut seed = 0x5a11_b0bb_0000_0001;
         for k in [cutoff - 1, cutoff, cutoff + 1, cutoff + 2] {
@@ -3962,7 +3963,7 @@ mod tests {
             // is parity-blind — comparisons, shifts, two products and the
             // correction loop, with nothing that branches on the low bit —
             // so the even shape is not closing a class of parity defect;
-            // the parity-sensitive code is in `MontgomeryCtx::new` and in
+            // the parity-sensitive code is in `MontgomeryContext::new` and in
             // `mod_pow`'s routing, neither of which this test reaches. It
             // is here because an even modulus is the case this type exists
             // to serve and ought to be exercised at width somewhere, and
@@ -3987,7 +3988,7 @@ mod tests {
 
             for (label, n) in shapes {
                 assert_eq!(n.bits().div_ceil(64), k, "{label}: k = {k} as intended");
-                let ctx = BarrettCtx::new(&n).expect("a modulus of at least 2");
+                let ctx = BarrettContext::new(&n).expect("a modulus of at least 2");
                 for _ in 0..2 {
                     let a = seeded_biguint(k, &mut seed).modulo(&n);
                     let b = seeded_biguint(k, &mut seed).modulo(&n);
@@ -4018,7 +4019,7 @@ mod tests {
     #[test]
     #[ignore = "search for a two-correction witness; run with --ignored"]
     fn barrett_correction_search() {
-        use super::BarrettCtx;
+        use super::BarrettContext;
         let mut seed = 0x7777_0000_0000_0001;
         let mut seen = [0usize; 4];
         let mut witness: Option<(String, String)> = None;
@@ -4042,7 +4043,7 @@ mod tests {
                 if n.bits() < 2 {
                     continue;
                 }
-                let ctx = BarrettCtx::new(&n).expect("ok");
+                let ctx = BarrettContext::new(&n).expect("ok");
                 let kk = n.bits().div_ceil(64);
                 let mut top = BigUint::zero();
                 top.set_bit(128 * kk);
@@ -4054,7 +4055,7 @@ mod tests {
                         _ => n.mul_ref(&seeded_biguint(kk, &mut seed)).modulo(&top),
                     };
                     assert_eq!(ctx.reduce(&x), x.modulo(&n));
-                    let t = BarrettCtx::last_corrections() as usize;
+                    let t = BarrettContext::last_corrections() as usize;
                     seen[t.min(3)] += 1;
                     if t == 2 && witness.is_none() {
                         witness = Some((
@@ -4095,7 +4096,7 @@ mod tests {
         // range. `barrett_correction_search`, run with `--ignored`, is the
         // wider sweep this was cut down from: 678 two-correction reductions
         // in 168 000, and no three-correction reduction at any width.
-        use super::BarrettCtx;
+        use super::BarrettContext;
         let mut seed = 0xc0de_1044_0000_0001;
         let mut seen = [0usize; 3];
         for k in 2usize..=4 {
@@ -4114,7 +4115,7 @@ mod tests {
                     continue;
                 }
                 let width = n.bits().div_ceil(64);
-                let ctx = BarrettCtx::new(&n).expect("a modulus of at least 2");
+                let ctx = BarrettContext::new(&n).expect("a modulus of at least 2");
                 let mut top = BigUint::zero();
                 top.set_bit(128 * width);
                 let top = top.sub_ref(&BigUint::one());
@@ -4127,7 +4128,7 @@ mod tests {
                         n.mul_ref(&seeded_biguint(width, &mut seed)).modulo(&top)
                     };
                     assert_eq!(ctx.reduce(&x), x.modulo(&n), "k = {k}, step {step}");
-                    let taken = BarrettCtx::last_corrections();
+                    let taken = BarrettContext::last_corrections();
                     assert!(taken <= 2, "k = {k}: {taken} corrections exceeds the bound");
                     seen[taken as usize] += 1;
                 }
@@ -4142,13 +4143,13 @@ mod tests {
 
     #[test]
     fn barrett_pow_matches_mod_pow() {
-        use super::BarrettCtx;
+        use super::BarrettContext;
         use crate::number_theory::mod_pow;
 
         // A deliberately slow reference: square-and-multiply with a full
         // product and a direct division at every step, sharing no code with
         // either context. It exists because `mod_pow` now *delegates* even
-        // moduli to `BarrettCtx::mod_pow` — comparing the two against each
+        // moduli to `BarrettContext::mod_pow` — comparing the two against each
         // other would be an identity, not a test, and the odd branch's
         // independence (Montgomery) would have quietly become the only
         // real coverage.
@@ -4179,7 +4180,7 @@ mod tests {
                 if n.is_zero() || n.is_one() {
                     continue;
                 }
-                let ctx = BarrettCtx::new(&n).expect("at least 2");
+                let ctx = BarrettContext::new(&n).expect("at least 2");
                 let base = seeded_biguint(words, &mut seed);
                 let exponent = seeded_biguint(2, &mut seed);
                 let expected = reference_pow(&base, &exponent, &n);
@@ -4187,7 +4188,7 @@ mod tests {
                 assert_eq!(
                     ctx.mod_pow(&base, &exponent),
                     expected,
-                    "BarrettCtx::mod_pow at {words} words, even = {parity_even}"
+                    "BarrettContext::mod_pow at {words} words, even = {parity_even}"
                 );
                 assert_eq!(
                     mod_pow(&base, &exponent, &n),
@@ -4239,11 +4240,11 @@ mod tests {
                         expected,
                         "mod_pow corner: base {base}, exponent {exponent}, modulus {modulus}"
                     );
-                    let ctx = BarrettCtx::new(&modulus).expect("at least 2");
+                    let ctx = BarrettContext::new(&modulus).expect("at least 2");
                     assert_eq!(
                         ctx.mod_pow(&base, &exponent),
                         expected,
-                        "BarrettCtx corner: base {base}, exponent {exponent}, modulus {modulus}"
+                        "BarrettContext corner: base {base}, exponent {exponent}, modulus {modulus}"
                     );
                 }
             }
@@ -5150,7 +5151,7 @@ mod tests {
         let mut ws: Vec<u64> = Vec::new();
         for &limbs in &[16usize, 2, 3, 8, 1, 5] {
             let n = seeded_odd_modulus(limbs, &mut seed);
-            let ctx = MontgomeryCtx::new(&n).expect("odd modulus");
+            let ctx = MontgomeryContext::new(&n).expect("odd modulus");
             let mut x = ctx.encode(&seeded_biguint(limbs, &mut seed));
             let y = ctx.encode(&seeded_biguint(limbs, &mut seed));
             for round in 0..200 {
@@ -5226,7 +5227,7 @@ mod tests {
         let mut seed = 0x0dd5_eed0_0000_0002;
         for &limbs in &[1usize, 4, 8, 32, 64] {
             let n = seeded_odd_modulus(limbs, &mut seed);
-            let ctx = MontgomeryCtx::new(&n).expect("odd modulus");
+            let ctx = MontgomeryContext::new(&n).expect("odd modulus");
             let a = ctx.encode(&seeded_biguint(limbs, &mut seed));
             let b = ctx.encode(&seeded_biguint(limbs, &mut seed));
             let chunk = 256u32;
@@ -5766,7 +5767,7 @@ mod tests {
 
     #[test]
     fn montgomery_mod_pow_matches_small_arithmetic() {
-        let ctx = MontgomeryCtx::new(&BigUint::from_u64(1_000_000_007))
+        let ctx = MontgomeryContext::new(&BigUint::from_u64(1_000_000_007))
             .expect("odd modulus builds a context");
         let base = BigUint::from_u64(123_456_789);
         let exponent = BigUint::from_u64(65_537);
@@ -5775,7 +5776,7 @@ mod tests {
 
     #[test]
     fn montgomery_ctx_mul_matches_small_arithmetic() {
-        let ctx = MontgomeryCtx::new(&BigUint::from_u64(1_000_000_007))
+        let ctx = MontgomeryContext::new(&BigUint::from_u64(1_000_000_007))
             .expect("odd modulus builds a context");
         let a = BigUint::from_u64(123_456_789);
         let b = BigUint::from_u64(987_654_321);
@@ -5803,7 +5804,7 @@ mod tests {
                 let mut modulus = seeded_biguint(words, &mut seed);
                 modulus.limbs[0] |= 1; // Montgomery needs an odd modulus.
 
-                let ctx = MontgomeryCtx::new(&modulus).expect("odd modulus builds a context");
+                let ctx = MontgomeryContext::new(&modulus).expect("odd modulus builds a context");
                 assert_eq!(BigUint::mod_mul(&lhs, &rhs, &modulus), ctx.mul(&lhs, &rhs));
             }
         }

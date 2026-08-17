@@ -1,7 +1,7 @@
 //! Random sampling of integers and probable primes.
 //!
 //! rump chooses no entropy source: every function is driven by a
-//! caller-supplied [`Rng`], and the output is exactly as good as that
+//! caller-supplied [`RandomSource`], and the output is exactly as good as that
 //! source. Cryptographic callers must supply a CSPRNG (the parent
 //! cryptography crate bridges its DRBGs here); simulations may supply any
 //! deterministic generator. Temporary buffers holding drawn bytes are wiped
@@ -15,7 +15,7 @@
 //! the supplied generator, not a guarantee of the code. Each sampler carries
 //! a stall guard that panics rather than looping forever on the degenerate
 //! sources it can soundly detect — the posture
-//! `PolyModP::equal_degree_split` takes — and every guard is sized so a
+//! `PolyMod::equal_degree_split` takes — and every guard is sized so a
 //! working generator trips it with probability at most `e⁻¹¹¹ ≈ 2⁻¹⁶⁰`
 //! (the loosest of the individual bounds; each function documents its
 //! own), so the panic is a diagnosis, never a sampling accident. What
@@ -52,7 +52,7 @@ use crate::number_theory::{gcd, is_probable_prime};
 /// accept each draw with probability at least one half, so a working
 /// generator survives this bound with probability at most `2⁻²⁵⁶` —
 /// the same constant, and the same reasoning, as
-/// `PolyModP::equal_degree_split`'s stall guard.
+/// `PolyMod::equal_degree_split`'s stall guard.
 const MAX_REJECTED_DRAWS: usize = 256;
 
 /// Consecutive draws of the *same rejected candidate* after which a
@@ -62,7 +62,7 @@ const MAX_REJECTED_DRAWS: usize = 256;
 /// draws repeat the previous one with probability at most one half, and
 /// 256 consecutive repeats has probability at most `2⁻²⁵⁶` — the same
 /// constant, and the same reasoning, as the stall guard in
-/// `PolyModP::equal_degree_split`.
+/// `PolyMod::equal_degree_split`.
 ///
 /// Two samplers use it, in different roles. For [`random_coprime_below`]
 /// it is the *only* guard, because no usable rejection count exists there
@@ -79,7 +79,7 @@ const MAX_IDENTICAL_REJECTIONS: usize = 256;
 /// strong generator is the caller's responsibility when the use demands one.
 /// The samplers assume only that successive fills are independent draws;
 /// nothing in this module inspects, reseeds, or forks the generator.
-pub trait Rng {
+pub trait RandomSource {
     /// Fill `dest` with random bytes.
     ///
     /// Every byte of `dest` must be written. An implementation that leaves
@@ -115,7 +115,10 @@ pub trait Rng {
 /// this has probability at most `2⁻²⁵⁶`; it fires only on a generator whose
 /// output is confined to the rejected region (see the module note).
 #[must_use]
-pub fn random_below<R: Rng + ?Sized>(rng: &mut R, upper_exclusive: &BigUint) -> Option<BigUint> {
+pub fn random_below<R: RandomSource + ?Sized>(
+    rng: &mut R,
+    upper_exclusive: &BigUint,
+) -> Option<BigUint> {
     if upper_exclusive.is_zero() {
         return None;
     }
@@ -143,7 +146,7 @@ pub fn random_below<R: Rng + ?Sized>(rng: &mut R, upper_exclusive: &BigUint) -> 
     panic!(
         "random_below rejected {MAX_REJECTED_DRAWS} consecutive draws \
          (each is accepted with probability at least 1/2): \
-         the supplied Rng yields no usable entropy"
+         the supplied RandomSource yields no usable entropy"
     );
 }
 
@@ -164,7 +167,7 @@ pub fn random_below<R: Rng + ?Sized>(rng: &mut R, upper_exclusive: &BigUint) -> 
 /// candidate in two), or as [`random_below`] does if the generator stalls
 /// below it.
 #[must_use]
-pub fn random_nonzero_below<R: Rng + ?Sized>(
+pub fn random_nonzero_below<R: RandomSource + ?Sized>(
     rng: &mut R,
     upper_exclusive: &BigUint,
 ) -> Option<BigUint> {
@@ -181,7 +184,7 @@ pub fn random_nonzero_below<R: Rng + ?Sized>(
     panic!(
         "random_nonzero_below drew zero {MAX_REJECTED_DRAWS} times in a row \
          (zero is at most one candidate in two): \
-         the supplied Rng yields no usable entropy"
+         the supplied RandomSource yields no usable entropy"
     );
 }
 
@@ -223,7 +226,7 @@ pub fn random_nonzero_below<R: Rng + ?Sized>(
 /// as the module note explains — no argument-independent bound can
 /// distinguish it from an unlucky legitimate run.
 #[must_use]
-pub fn random_coprime_below<R: Rng + ?Sized>(
+pub fn random_coprime_below<R: RandomSource + ?Sized>(
     rng: &mut R,
     upper_exclusive: &BigUint,
     coprime_to: &BigUint,
@@ -251,7 +254,7 @@ pub fn random_coprime_below<R: Rng + ?Sized>(
                 stalled < MAX_IDENTICAL_REJECTIONS,
                 "random_coprime_below drew the same rejected candidate \
                  {MAX_IDENTICAL_REJECTIONS} times in a row: \
-                 the supplied Rng yields no usable entropy"
+                 the supplied RandomSource yields no usable entropy"
             );
         } else {
             stalled = 0;
@@ -317,7 +320,10 @@ pub fn random_coprime_below<R: Rng + ?Sized>(
 /// fruitless rounds in total (probability below `e⁻¹¹¹` for a working
 /// generator at every width, by the split argument above).
 #[must_use]
-pub fn random_probable_prime<R: Rng + ?Sized>(rng: &mut R, bits: usize) -> Option<BigUint> {
+pub fn random_probable_prime<R: RandomSource + ?Sized>(
+    rng: &mut R,
+    bits: usize,
+) -> Option<BigUint> {
     if bits < 2 {
         return None;
     }
@@ -347,7 +353,7 @@ pub fn random_probable_prime<R: Rng + ?Sized>(rng: &mut R, bits: usize) -> Optio
                 stalled < MAX_IDENTICAL_REJECTIONS,
                 "random_probable_prime drew the same composite \
                  {MAX_IDENTICAL_REJECTIONS} times in a row at {bits} bits: \
-                 the supplied Rng yields no usable entropy"
+                 the supplied RandomSource yields no usable entropy"
             );
             continue;
         }
@@ -360,7 +366,7 @@ pub fn random_probable_prime<R: Rng + ?Sized>(rng: &mut R, bits: usize) -> Optio
     panic!(
         "random_probable_prime found no prime in {} rounds at {bits} bits \
          (about 185 times the expected search length): \
-         the supplied Rng yields no usable entropy",
+         the supplied RandomSource yields no usable entropy",
         64 * bits
     );
 }
@@ -368,7 +374,8 @@ pub fn random_probable_prime<R: Rng + ?Sized>(rng: &mut R, bits: usize) -> Optio
 #[cfg(test)]
 mod tests {
     use super::{
-        random_below, random_coprime_below, random_nonzero_below, random_probable_prime, Rng,
+        random_below, random_coprime_below, random_nonzero_below, random_probable_prime,
+        RandomSource,
     };
     use crate::bigint::BigUint;
     use crate::number_theory::{gcd, is_probable_prime};
@@ -381,7 +388,7 @@ mod tests {
         state: u64,
     }
 
-    impl Rng for SplitMix64 {
+    impl RandomSource for SplitMix64 {
         fn fill_bytes(&mut self, dest: &mut [u8]) {
             for chunk in dest.chunks_mut(8) {
                 self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -396,7 +403,7 @@ mod tests {
 
     struct ZeroRng;
 
-    impl Rng for ZeroRng {
+    impl RandomSource for ZeroRng {
         fn fill_bytes(&mut self, dest: &mut [u8]) {
             dest.fill(0);
         }
@@ -471,14 +478,14 @@ mod tests {
     /// stall guards exist to diagnose.
     struct ConstRng(u8);
 
-    impl Rng for ConstRng {
+    impl RandomSource for ConstRng {
         fn fill_bytes(&mut self, dest: &mut [u8]) {
             dest.fill(self.0);
         }
     }
 
     #[test]
-    #[should_panic(expected = "the supplied Rng yields no usable entropy")]
+    #[should_panic(expected = "the supplied RandomSource yields no usable entropy")]
     fn stalled_generator_fails_loudly_in_random_below() {
         // Bound 5 has bit length 3, so the masked draw is always 0x07 = 7,
         // which is rejected forever: the guard must fire, not spin.
@@ -487,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "the supplied Rng yields no usable entropy")]
+    #[should_panic(expected = "the supplied RandomSource yields no usable entropy")]
     fn stalled_generator_fails_loudly_in_random_nonzero_below() {
         // Every draw is zero — always in range, never non-zero.
         let mut rng = ZeroRng;
@@ -495,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "the supplied Rng yields no usable entropy")]
+    #[should_panic(expected = "the supplied RandomSource yields no usable entropy")]
     fn stalled_generator_fails_loudly_in_random_coprime_below() {
         // Every draw is 2 — in range, non-zero, and never coprime to 6.
         let mut rng = ConstRng(0x02);
@@ -503,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "the supplied Rng yields no usable entropy")]
+    #[should_panic(expected = "the supplied RandomSource yields no usable entropy")]
     fn stalled_generator_fails_loudly_in_random_probable_prime() {
         // Forcing the top and low bits of an all-zero draw pins the
         // candidate at 2^7 + 1 = 129 = 3·43, composite forever. This trips
@@ -520,7 +527,7 @@ mod tests {
         flip: bool,
     }
 
-    impl Rng for TwoCycleRng {
+    impl RandomSource for TwoCycleRng {
         fn fill_bytes(&mut self, dest: &mut [u8]) {
             dest.fill(if self.flip { self.second } else { self.first });
             self.flip = !self.flip;
@@ -528,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "the supplied Rng yields no usable entropy")]
+    #[should_panic(expected = "the supplied RandomSource yields no usable entropy")]
     fn cycling_generator_fails_loudly_in_random_probable_prime() {
         // Bytes 0x00 and 0x04 force the 8-bit candidates 129 = 3·43 and
         // 133 = 7·19, alternating: never the same as the previous draw, so
