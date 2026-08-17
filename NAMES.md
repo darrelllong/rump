@@ -88,7 +88,7 @@ primary values. Every other export has one module path:
 | number_theory | gcd/lcm, symbols, primality, CRT, reconstruction, valuations, product trees, smoothness, SmoothnessBaseError | done |
 | polynomial | PolyZ, PolyMod, polynomial limits and errors | done |
 | finite_field | Gf2m | done |
-| gf2 | dense null space, singleton pruning, Block Lanczos, PrunedMatrix | pending |
+| gf2 | dense null space, singleton pruning, Block Lanczos, PrunedMatrix | partial — Lanczos pending |
 | lattice | LLL, weighted Gauss reduction, ReductionError | done |
 | random | RandomSource and random-value functions | done |
 
@@ -204,9 +204,9 @@ prime-field promise.
 | weights: [i128; 2] | weights: [NonZeroU64; 2] | done | encodes positivity and removes no previously successful input |
 | gauss_reduce_weighted returning Option | return Result<_, ReductionError> | done | invalid basis/range is bad input |
 | no public lattice reduction error | lattice::ReductionError { DependentBasis, OutOfRange } | done | no weight variant after NonZeroU64 |
-| factoring dense null space | gf2::dense_null_space | pending | `(rows, columns) -> Vec<Vec<usize>>`; rows bit-packed little-endian, `u64` per word |
-| factoring singleton peel | gf2::prune_singletons | pending | returns `PrunedMatrix` |
-| factoring `Reduced` | gf2::PrunedMatrix | pending | the result type the transfer needs; fields private behind `rows()`, `columns()`, `original()` |
+| factoring dense null space | gf2::dense_null_space | done in Rump; consumer transfer | `(rows, columns) -> Vec<Vec<usize>>`; rows bit-packed little-endian, `u64` per word |
+| factoring singleton peel | gf2::prune_singletons | done in Rump; consumer transfer | returns `PrunedMatrix` |
+| factoring `Reduced` | gf2::PrunedMatrix | done in Rump; consumer transfer | the result type the transfer needs; fields private behind `rows()`, `columns()`, `original()` |
 | factoring Block Lanczos | gf2::block_lanczos_dependencies | pending | takes `&mut R: RandomSource` rather than a `u64` seed — rump chooses no entropy source |
 
 `PrunedMatrix`'s three parts must agree: one original index per surviving row,

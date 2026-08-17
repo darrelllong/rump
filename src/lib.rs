@@ -73,6 +73,8 @@
 // Implementation modules are private; every public path below is a facade, so
 // each exported item has exactly one public path, as NAMES.md requires.
 mod bigint;
+#[path = "gf2.rs"]
+mod gf2_impl;
 mod gf2m;
 #[path = "lattice.rs"]
 mod lattice_impl;
@@ -115,6 +117,11 @@ pub mod number_theory {
 /// Univariate polynomials over ℤ and over a residue ring.
 pub mod polynomial {
     pub use crate::poly::{PolyMod, PolyZ, MAX_ENUMERATED_ROOTS};
+}
+
+/// Linear algebra over GF(2): null space, pruning, Block Lanczos.
+pub mod gf2 {
+    pub use crate::gf2_impl::{dense_null_space, prune_singletons, PrunedMatrix};
 }
 
 /// Binary extension fields GF(2^m).
