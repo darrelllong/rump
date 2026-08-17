@@ -10,7 +10,7 @@ use rump::integer::WordReciprocal;
 use rump::lattice::{gauss_reduce_weighted, lll_reduce, ReductionError};
 use rump::modular::{
     mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow, mod_sqrt, mod_sqrt_prime_power,
-    BarrettContext, ModulusError, MontgomeryContext,
+    BarrettContext, ModulusError, MontgomeryContext, MontgomeryScratch,
 };
 use rump::number_theory::{
     crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
@@ -267,7 +267,7 @@ fn manual_montgomery_domain() {
     assert_eq!(
         MontgomeryContext::new(&BigUint::from_u64(100)),
         Err(ModulusError::Even)
-    ); // even
+    );
 
     let a = BigUint::from_u64(5);
     let b = BigUint::from_u64(6);
@@ -277,40 +277,59 @@ fn manual_montgomery_domain() {
     assert_eq!(ctx.square(&BigUint::from_u64(9)), BigUint::from_u64(81));
     assert_eq!(ctx.pow(&a, &BigUint::from_u64(3)), BigUint::from_u64(28)); // 125 mod 97
 
-    // Staying in the domain: encode once, multiply cheaply, decode once.
-    let a_mont = ctx.encode(&a);
-    let b_mont = ctx.encode(&b);
-    let product_mont = ctx.mul_mont(&a_mont, &b_mont);
-    assert_eq!(ctx.decode(&product_mont), BigUint::from_u64(30));
+    // Staying in the domain: encode once, operate cheaply, decode once.
+    let a_mont = ctx.to_residue(&a);
+    let b_mont = ctx.to_residue(&b);
+    let product = ctx.mul_residue(&a_mont, &b_mont).expect("same context");
+    assert_eq!(
+        ctx.from_residue(&product).expect("same context"),
+        BigUint::from_u64(30)
+    );
 
-    // Loops thread one workspace through the domain operations: the same
+    // Loops thread one scratch buffer through the domain operations: the same
     // values, one allocation instead of one per multiply.
-    let mut ws: Vec<u64> = Vec::new();
+    let mut scratch = MontgomeryScratch::new();
     assert_eq!(
-        ctx.mul_mont_with_workspace(&a_mont, &b_mont, &mut ws),
-        product_mont
-    );
-    assert_eq!(
-        ctx.square_mont_with_workspace(&a_mont, &mut ws),
-        ctx.square_mont(&a_mont)
+        ctx.mul_residue_with(&a_mont, &b_mont, &mut scratch)
+            .expect("same context"),
+        product
     );
 
-    assert_eq!(ctx.decode(&ctx.square_mont(&a_mont)), BigUint::from_u64(25));
+    let squared = ctx.square_residue(&a_mont).expect("same context");
     assert_eq!(
-        ctx.decode(&ctx.add_mont(&a_mont, &b_mont)),
+        ctx.from_residue(&squared).expect("same context"),
+        BigUint::from_u64(25)
+    );
+
+    let sum = ctx.add_residue(&a_mont, &b_mont).expect("same context");
+    assert_eq!(
+        ctx.from_residue(&sum).expect("same context"),
         BigUint::from_u64(11)
     );
+
+    let difference = ctx.sub_residue(&a_mont, &b_mont).expect("same context");
     assert_eq!(
-        ctx.decode(&ctx.sub_mont(&a_mont, &b_mont)),
+        ctx.from_residue(&difference).expect("same context"),
         BigUint::from_u64(96) // 5 − 6 ≡ −1 ≡ 96 (mod 97)
     );
-    assert_eq!(ctx.decode(ctx.one_mont()), BigUint::one());
 
-    // Reuse an encoded base across exponents.
     assert_eq!(
-        ctx.pow_encoded(&a_mont, &BigUint::from_u64(3)),
+        ctx.from_residue(&ctx.one()).expect("same context"),
+        BigUint::one()
+    );
+
+    // Reuse an encoded base across exponents, staying in the domain.
+    let cubed = ctx
+        .pow_residue(&a_mont, &BigUint::from_u64(3))
+        .expect("same context");
+    assert_eq!(
+        ctx.from_residue(&cubed).expect("same context"),
         BigUint::from_u64(28)
     );
+
+    // A residue from another context is refused rather than silently wrong.
+    let other = MontgomeryContext::new(&BigUint::from_u64(101)).expect("101 is odd");
+    assert!(other.from_residue(&a_mont).is_err());
 }
 
 #[test]

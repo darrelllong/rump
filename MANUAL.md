@@ -24,7 +24,7 @@ use rump::integer::WordReciprocal;
 use rump::lattice::{gauss_reduce_weighted, lll_reduce, ReductionError};
 use rump::modular::{
     mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow, mod_sqrt, mod_sqrt_prime_power,
-    BarrettContext, MontgomeryContext,
+    BarrettContext, ModulusError, MontgomeryContext, MontgomeryScratch,
 };
 use rump::number_theory::{
     crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
@@ -388,27 +388,40 @@ assert_eq!(
 ## The Montgomery domain
 
 `MontgomeryContext::new` precomputes the Montgomery constants for one odd
-modulus (`None` for even or zero); `modulus()` returns it. Long computations
-encode once, stay in the domain with `mul_mont` / `square_mont` /
-`add_mont` / `sub_mont` — the encoding is linear, so domain addition and
-subtraction are one compare-and-correct each — and decode at the boundary;
-`one_mont()` is the encoding of one. `mul`, `square`, and
-`pow` are the one-shot forms that convert internally. `pow_encoded` reuses
-an already encoded base across exponents. For the loops where the product
-*is* the loop, `mul_mont_with_workspace` / `square_mont_with_workspace`
-thread one caller-owned scratch buffer through a sequence of domain
-operations, allocating it once instead of per multiply — measured
-per-operation at about 43% for a 64-bit modulus, roughly 25–33% at 256
-bits, and ~20% at 512, falling to 2–3% at 2048 bits and to the edge of measurement
+modulus, returning `Err(ModulusError::Even)` or `Err(ModulusError::Zero)`
+otherwise; `modulus()` returns it. `mul`, `square`, and `pow` are the one-shot
+forms that convert in and out internally.
+
+Long computations instead encode once and stay in the domain. `to_residue`
+returns an opaque `MontgomeryResidue`, `from_residue` decodes one, `one()` is
+the encoding of one, and the domain operations are `mul_residue`,
+`square_residue`, `add_residue`, `sub_residue` and `pow_residue` — the
+encoding is linear, so domain addition and subtraction are one
+compare-and-correct each.
+
+The residue is opaque because its invariant cannot be stated in a signature
+that takes a bare integer: a domain value is encoded, reduced, and bound to
+one context. The type carries all three, so an unencoded, unreduced, or
+foreign value cannot reach a kernel. Where the relationship cannot be checked
+at compile time — two contexts built at run time — it is checked at run time,
+and the operations return `Result<_, ContextMismatch>`.
+
+For loops where the product *is* the loop, every domain operation has a
+`_with` form taking a `MontgomeryScratch`, which threads one caller-owned
+buffer through a sequence instead of allocating per multiply — measured
+per-operation at about 43% for a 64-bit modulus, roughly 25–33% at 256 bits,
+and ~20% at 512, falling to 2–3% at 2048 bits and to the edge of measurement
 (~1%) at 4096 (the in-tree `mont_workspace_timing` probe reproduces the
-numbers with its per-pass spread printed). The workspace holds
-intermediates, exactly as the discarded per-call buffer does.
+numbers with its per-pass spread printed).
 
 ```rust
 let p = BigUint::from_u64(97);
 let ctx = MontgomeryContext::new(&p).expect("97 is odd");
 assert_eq!(*ctx.modulus(), p);
-assert!(MontgomeryContext::new(&BigUint::from_u64(100)).is_none()); // even
+assert_eq!(
+    MontgomeryContext::new(&BigUint::from_u64(100)),
+    Err(ModulusError::Even)
+);
 
 let a = BigUint::from_u64(5);
 let b = BigUint::from_u64(6);
@@ -418,36 +431,41 @@ assert_eq!(ctx.mul(&a, &b), BigUint::from_u64(30));
 assert_eq!(ctx.square(&BigUint::from_u64(9)), BigUint::from_u64(81));
 assert_eq!(ctx.pow(&a, &BigUint::from_u64(3)), BigUint::from_u64(28)); // 125 mod 97
 
-// Staying in the domain: encode once, multiply cheaply, decode once.
-let a_mont = ctx.encode(&a);
-let b_mont = ctx.encode(&b);
-let product_mont = ctx.mul_mont(&a_mont, &b_mont);
-assert_eq!(ctx.decode(&product_mont), BigUint::from_u64(30));
+// Staying in the domain: encode once, operate cheaply, decode once.
+let a_mont = ctx.to_residue(&a);
+let b_mont = ctx.to_residue(&b);
+let product = ctx.mul_residue(&a_mont, &b_mont).expect("same context");
+assert_eq!(ctx.from_residue(&product).expect("same context"), BigUint::from_u64(30));
 
-// Loops thread one workspace through the domain operations: the same
+// Loops thread one scratch buffer through the domain operations: the same
 // values, one allocation instead of one per multiply.
-let mut ws: Vec<u64> = Vec::new();
-assert_eq!(ctx.mul_mont_with_workspace(&a_mont, &b_mont, &mut ws), product_mont);
+let mut scratch = MontgomeryScratch::new();
 assert_eq!(
-    ctx.square_mont_with_workspace(&a_mont, &mut ws),
-    ctx.square_mont(&a_mont)
+    ctx.mul_residue_with(&a_mont, &b_mont, &mut scratch).expect("same context"),
+    product
 );
+
+let squared = ctx.square_residue(&a_mont).expect("same context");
+assert_eq!(ctx.from_residue(&squared).expect("same context"), BigUint::from_u64(25));
+
+let sum = ctx.add_residue(&a_mont, &b_mont).expect("same context");
+assert_eq!(ctx.from_residue(&sum).expect("same context"), BigUint::from_u64(11));
+
+let difference = ctx.sub_residue(&a_mont, &b_mont).expect("same context");
 assert_eq!(
-    ctx.decode(&ctx.square_mont(&a_mont)),
-    BigUint::from_u64(25)
-);
-assert_eq!(ctx.decode(&ctx.add_mont(&a_mont, &b_mont)), BigUint::from_u64(11));
-assert_eq!(
-    ctx.decode(&ctx.sub_mont(&a_mont, &b_mont)),
+    ctx.from_residue(&difference).expect("same context"),
     BigUint::from_u64(96) // 5 − 6 ≡ −1 ≡ 96 (mod 97)
 );
-assert_eq!(ctx.decode(ctx.one_mont()), BigUint::one());
 
-// Reuse an encoded base across exponents.
-assert_eq!(
-    ctx.pow_encoded(&a_mont, &BigUint::from_u64(3)),
-    BigUint::from_u64(28)
-);
+assert_eq!(ctx.from_residue(&ctx.one()).expect("same context"), BigUint::one());
+
+// Reuse an encoded base across exponents, staying in the domain.
+let cubed = ctx.pow_residue(&a_mont, &BigUint::from_u64(3)).expect("same context");
+assert_eq!(ctx.from_residue(&cubed).expect("same context"), BigUint::from_u64(28));
+
+// A residue from another context is refused rather than silently wrong.
+let other = MontgomeryContext::new(&BigUint::from_u64(101)).expect("101 is odd");
+assert!(other.from_residue(&a_mont).is_err());
 ```
 
 ## Galois fields GF(2^m)

@@ -143,7 +143,7 @@ use rump::lattice::{gauss_reduce_weighted, lll_reduce, lll_reduce_delta,
                     ReductionError};
 use rump::modular::{
     mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow, mod_sqrt, mod_sqrt_prime_power,
-    BarrettContext, MontgomeryContext,
+    BarrettContext, MontgomeryContext, MontgomeryScratch,
 };
 use rump::number_theory::{
     crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
@@ -601,38 +601,48 @@ needs only $n_0'$, never the full $n'$. Products in the domain multiply as
 \;=\; \overline{x y},
 \end{equation}
 so a long computation encodes once ($\bar x = \REDC(x \cdot R^2)$), stays in
-the domain with \code{mul\_mont} / \code{square\_mont} / \code{add\_mont} /
-\code{sub\_mont} --- the encoding is linear, so domain addition and
-subtraction are one compare-and-correct each --- and decodes once at the
-boundary ($x = \REDC(\bar x)$). \code{one\_mont()} is $\bar 1 = R \bmod n$.
+the domain, and decodes once at the boundary ($x = \REDC(\bar x)$).
+
+A domain value is an opaque \code{MontgomeryResidue}, produced only by
+\code{to\_residue} and read only by \code{from\_residue}, with \code{one()}
+giving $\bar 1 = R \bmod n$. The domain operations are \code{mul\_residue},
+\code{square\_residue}, \code{add\_residue}, \code{sub\_residue} and
+\code{pow\_residue}; the encoding is linear, so domain addition and
+subtraction are one compare-and-correct each.
+
+The opacity is the point. A domain value must be encoded, reduced, and bound
+to one context, and none of those can be stated in a signature that takes a
+bare integer --- the earlier API took \code{BigUint} and could only check in
+debug builds, so a release build accepted an unencoded or unreduced operand
+and returned a wrong answer. The type carries all three instead. Where the
+relationship cannot be checked at compile time, two contexts both built at run
+time, it is checked at run time and the operations return
+\code{Result<\_, ContextMismatch>}.
 
 \code{mul}, \code{square}, and \code{pow} are one-shot forms that convert
-internally; \code{pow\_encoded} reuses an already encoded base across
-exponents. For loops where the product \emph{is} the loop,
-\code{mul\_mont\_with\_workspace} / \code{square\_mont\_with\_workspace}
-thread one caller-owned scratch buffer through a sequence of domain
-operations, allocating it once instead of per multiply --- measured
-per-operation at about 43\% for a 64-bit modulus, roughly 25--33\% at
-256 bits, and roughly 20\% at 512, falling to 2--3\% at 2048 bits and to the edge
-of measurement ($\sim$1\%) at 4096; the in-tree
-\code{mont\_workspace\_timing} probe reproduces the numbers, printing
-its per-pass spread. The workspace holds intermediates,
-exactly as the discarded per-call buffer does. The exponentiation ladder has two engines, chosen by exponent
-width: above 64 bits, left-to-right $k$-ary with a fixed 4-bit window table
-held in the domain (HAC Algorithm~14.82), seeded from the top window; at 64
-bits or fewer (e.g.\ the F4 public exponent 65\,537), right-to-left binary
+internally. For loops where the product \emph{is} the loop, every domain
+operation has a \code{\_with} form taking an opaque
+\code{MontgomeryScratch}, threading one caller-owned buffer through a
+sequence instead of allocating per multiply --- measured per-operation at
+about 43\% for a 64-bit modulus, roughly 25--33\% at 256 bits, and roughly
+20\% at 512, falling to 2--3\% at 2048 bits and to the edge of measurement
+($\sim$1\%) at 4096; the in-tree \code{mont\_workspace\_timing} probe
+reproduces the numbers, printing its per-pass spread. The exponentiation
+ladder has two engines, chosen by exponent width: above 64 bits, left-to-right
+$k$-ary with a fixed 4-bit window table held in the domain
+(HAC Algorithm~14.82), seeded from the top window; at 64 bits or fewer
+(e.g.\ the F4 public exponent 65\,537), right-to-left binary
 square-and-multiply, which skips the window-table setup that would dominate
-so short a ladder. Both wipe their workspaces on exit.
+so short a ladder.
 
-\begin{contract}[In-domain operands are reduced]
-\code{mul\_mont} and \code{square\_mont} (in both their allocating and
-\code{\_with\_workspace} forms) and \code{pow\_encoded} require
-operands already reduced below the modulus. An operand \emph{wider} than
-the modulus panics in every build (it does not fit the kernel's
-modulus-width windows); an unreduced operand of the modulus's width trips
-a debug assertion only, and in release yields a non-canonical result. The
-boundary operations \code{encode} / \code{decode} instead accept any
-representative and reduce.
+\begin{contract}[The domain invariant lives in the type]
+A \code{MontgomeryResidue} is encoded, reduced below the modulus, and bound to
+the context that produced it. There is no constructor that can violate this
+and no accessor that exposes the raw value, so no domain operation has to
+re-check it. A residue offered to a context that did not produce it is
+refused with \code{ContextMismatch} rather than silently producing a wrong
+answer. The boundary operations \code{to\_residue} / \code{from\_residue}
+accept any representative and reduce.
 \end{contract}
 
 \begin{lstlisting}
@@ -645,21 +655,25 @@ let b = BigUint::from_u64(6);
 assert_eq!(ctx.mul(&a, &b), BigUint::from_u64(30));
 assert_eq!(ctx.pow(&a, &BigUint::from_u64(3)), BigUint::from_u64(28)); // 125 mod 97
 
-// Staying in the domain: encode once, multiply cheaply, decode once.
-let a_mont = ctx.encode(&a);
-let b_mont = ctx.encode(&b);
-let product_mont = ctx.mul_mont(&a_mont, &b_mont);
-assert_eq!(ctx.decode(&product_mont), BigUint::from_u64(30));
+// Staying in the domain: encode once, operate cheaply, decode once.
+let a_mont = ctx.to_residue(&a);
+let b_mont = ctx.to_residue(&b);
+let product = ctx.mul_residue(&a_mont, &b_mont).expect("same context");
+assert_eq!(ctx.from_residue(&product).expect("same context"), BigUint::from_u64(30));
 
-// Loops thread one workspace through the domain operations: the same
-// values, one allocation instead of one per multiply.
-let mut ws: Vec<u64> = Vec::new();
-assert_eq!(ctx.mul_mont_with_workspace(&a_mont, &b_mont, &mut ws), product_mont);
+// Loops thread one scratch buffer through the domain operations.
+let mut scratch = MontgomeryScratch::new();
 assert_eq!(
-    ctx.square_mont_with_workspace(&a_mont, &mut ws),
-    ctx.square_mont(&a_mont)
+    ctx.mul_residue_with(&a_mont, &b_mont, &mut scratch).expect("same context"),
+    product
 );
-assert_eq!(ctx.decode(&ctx.sub_mont(&a_mont, &b_mont)), BigUint::from_u64(96));
+
+let difference = ctx.sub_residue(&a_mont, &b_mont).expect("same context");
+assert_eq!(ctx.from_residue(&difference).expect("same context"), BigUint::from_u64(96));
+
+// A residue from another context is refused, not silently wrong.
+let other = MontgomeryContext::new(&BigUint::from_u64(101)).expect("101 is odd");
+assert!(other.from_residue(&a_mont).is_err());
 \end{lstlisting}
 
 \section{Binary fields: \code{Gf2m}}

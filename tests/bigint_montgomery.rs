@@ -108,7 +108,7 @@ fn structured_odd_modulus(words: usize, rng: &mut SplitMix64) -> BigUint {
     from_limbs(&limbs)
 }
 
-/// Check `ctx.pow` (and `pow_encoded` through the same call) against the
+/// Check `ctx.pow` (and `pow_residue` through the same call) against the
 /// reference, plus the canonical-range invariant.
 fn check_pow(ctx: &MontgomeryContext, base: &BigUint, exponent: &BigUint) {
     let modulus = ctx.modulus();
@@ -120,11 +120,12 @@ fn check_pow(ctx: &MontgomeryContext, base: &BigUint, exponent: &BigUint) {
     );
     assert!(actual < *modulus || modulus.is_one());
 
-    let encoded = ctx.encode(&base.rem(modulus));
+    let encoded = ctx.to_residue(&base.rem(modulus));
     assert_eq!(
-        ctx.pow_encoded(&encoded, exponent),
+        ctx.from_residue(&ctx.pow_residue(&encoded, exponent).expect("same context"))
+            .expect("same context"),
         expected,
-        "pow_encoded disagrees with pow for base {base:?}"
+        "pow_residue disagrees with pow for base {base:?}"
     );
 }
 
@@ -270,14 +271,23 @@ fn encode_decode_and_context_constants() {
 
             // one_mont really is the encoding of one, and decode inverts
             // encode across the whole residue range shape.
-            assert_eq!(ctx.encode(&BigUint::one()), *ctx.one_mont());
-            assert_eq!(ctx.decode(ctx.one_mont()), BigUint::one());
+            assert_eq!(ctx.to_residue(&BigUint::one()), ctx.one());
+            assert_eq!(
+                ctx.from_residue(&ctx.one()).expect("same context"),
+                BigUint::one()
+            );
 
             for _ in 0..8 {
                 let value = structured_biguint(modulus_words, &mut rng).rem(&modulus);
-                let encoded = ctx.encode(&value);
-                assert!(encoded < modulus);
-                assert_eq!(ctx.decode(&encoded), value, "decode∘encode != id");
+                let encoded = ctx.to_residue(&value);
+                // Reducedness is the residue type's invariant now, not a
+                // property a caller can inspect; the decode is the observable.
+                assert!(ctx.from_residue(&encoded).expect("same context") < modulus);
+                assert_eq!(
+                    ctx.from_residue(&encoded).expect("same context"),
+                    value,
+                    "decode∘encode != id"
+                );
             }
         }
     }
@@ -307,13 +317,21 @@ fn mul_and_square_match_division_reference() {
                 );
 
                 // The in-domain multiply must commute with encode/decode.
-                let product_mont = ctx.mul_mont(&ctx.encode(&a), &ctx.encode(&b));
-                assert!(product_mont < modulus);
-                assert_eq!(ctx.decode(&product_mont), expected, "mul_mont disagrees");
+                let product_mont = ctx
+                    .mul_residue(&ctx.to_residue(&a), &ctx.to_residue(&b))
+                    .expect("same context");
+                assert!(ctx.from_residue(&product_mont).expect("same context") < modulus);
                 assert_eq!(
-                    ctx.square_mont(&ctx.encode(&a)),
-                    ctx.mul_mont(&ctx.encode(&a), &ctx.encode(&a)),
-                    "square_mont disagrees with mul_mont"
+                    ctx.from_residue(&product_mont).expect("same context"),
+                    expected,
+                    "mul_residue disagrees"
+                );
+                assert_eq!(
+                    ctx.square_residue(&ctx.to_residue(&a))
+                        .expect("same context"),
+                    ctx.mul_residue(&ctx.to_residue(&a), &ctx.to_residue(&a))
+                        .expect("same context"),
+                    "square_residue disagrees with mul_residue"
                 );
             }
         }
@@ -348,10 +366,10 @@ fn squaring_kernel_stresses_carry_chains() {
         }
 
         for value in &values {
-            let encoded = ctx.encode(value);
+            let encoded = ctx.to_residue(value);
             assert_eq!(
-                ctx.square_mont(&encoded),
-                ctx.mul_mont(&encoded, &encoded),
+                ctx.square_residue(&encoded).expect("same context"),
+                ctx.mul_residue(&encoded, &encoded).expect("same context"),
                 "squaring != multiply-by-self for {value:?} mod {modulus:?}"
             );
         }

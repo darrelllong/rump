@@ -218,7 +218,7 @@ impl BarrettContext {
     /// `a² mod n`. The square comes from [`BigUint::square`], whose
     /// specialized kernels form each cross term once between 8 and 256
     /// limbs, so this costs a squaring plus one Barrett reduction. The
-    /// Montgomery domain's [`MontgomeryContext::square_mont`](super::MontgomeryContext::square_mont) goes further
+    /// Montgomery domain's [`MontgomeryContext::square_residue`](crate::modular::MontgomeryContext::square_residue)(super::MontgomeryContext::square_mont) goes further
     /// still, fusing the reduction into the kernel.
     #[must_use]
     pub fn mod_square(&self, a: &BigUint) -> BigUint {

@@ -92,7 +92,10 @@ pub mod integer {
 /// Residue-ring arithmetic: the fixed-modulus contexts and the modular
 /// operations that are free functions.
 pub mod modular {
-    pub use crate::bigint::{BarrettContext, ModulusError, MontgomeryContext};
+    pub use crate::bigint::{
+        BarrettContext, ContextMismatch, ModulusError, MontgomeryContext, MontgomeryResidue,
+        MontgomeryScratch,
+    };
     pub use crate::number_theory_impl::{
         mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow, mod_sqrt, mod_sqrt_prime_power,
     };

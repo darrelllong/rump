@@ -131,9 +131,10 @@ listed above retain their current leaf names under the canonical path.
 | BarrettContext::new returning Option | return Result<Self, ModulusError> | done | zero and one are rejected |
 | MontgomeryContext::new returning Option | return Result<Self, ModulusError> | done | zero and even moduli are rejected |
 | no public modular construction error | modular::ModulusError { Zero, One, Even } | done | shared factual variants; no context-dependent “below two” variant |
-| raw BigUint Montgomery-domain values | opaque MontgomeryResidue | pending | context and reduction invariant belong in the type |
-| mul_mont/square_mont/add_mont/sub_mont/one_mont/pow_encoded | residue mul/square/add/sub/one/pow | blocked — MontgomeryResidue |
-| with_workspace methods taking Vec<u64> | opaque scratch or into operations | blocked — residue/output design |
+| no public domain-mismatch error | modular::ContextMismatch | done | checked where the type system cannot express the relationship |
+| raw BigUint Montgomery-domain values | modular::MontgomeryResidue | done | opaque; encoded, reduced and context-bound by construction |
+| mul_mont/square_mont/add_mont/sub_mont/one_mont/pow_encoded | mul_residue/square_residue/add_residue/sub_residue/one/pow_residue | done | the raw forms are crate-private kernels, not public |
+| with_workspace methods taking Vec<u64> | modular::MontgomeryScratch, passed to the `_with` forms | done | `into` output variants deferred until profiling justifies the surface |
 
 ModulusError is a non-exhaustive Copy enum implementing Display and
 std::error::Error. BarrettContext returns Zero or One; MontgomeryContext

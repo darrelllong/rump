@@ -20,7 +20,7 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use rump::finite_field::Gf2m;
-use rump::modular::{mod_inverse, mod_pow, mod_sqrt, MontgomeryContext};
+use rump::modular::{mod_inverse, mod_pow, mod_sqrt, MontgomeryContext, MontgomeryResidue};
 use rump::number_theory::{gcd, gcd_extended, is_probable_prime, jacobi};
 use rump::BigUint;
 
@@ -112,8 +112,8 @@ struct IntPool {
 /// The Montgomery-domain slice of the pool.
 struct MontState {
     ctx: MontgomeryContext,
-    a_mont: BigUint,
-    b_mont: BigUint,
+    a_mont: MontgomeryResidue,
+    b_mont: MontgomeryResidue,
 }
 
 impl IntPool {
@@ -139,8 +139,8 @@ impl IntPool {
         )
         .then(|| {
             let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
-            let a_mont = ctx.encode(&a);
-            let b_mont = ctx.encode(&b);
+            let a_mont = ctx.to_residue(&a);
+            let b_mont = ctx.to_residue(&b);
             MontState {
                 ctx,
                 a_mont,
@@ -291,11 +291,15 @@ fn int_op(name: &str) -> Option<fn(&mut IntPool)> {
         },
         "montmul" => |p| {
             let m = p.mont();
-            black_box(m.ctx.mul_mont(&m.a_mont, &m.b_mont));
+            black_box(
+                m.ctx
+                    .mul_residue(&m.a_mont, &m.b_mont)
+                    .expect("same context"),
+            );
         },
         "montsqr" => |p| {
             let m = p.mont();
-            black_box(m.ctx.square_mont(&m.a_mont));
+            black_box(m.ctx.square_residue(&m.a_mont).expect("same context"));
         },
         "montpow_e65537" => |p| {
             black_box(p.mont().ctx.pow(&p.a, &p.e65537));

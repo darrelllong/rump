@@ -14,6 +14,64 @@
 use super::{bit_span, low_u64, BigUint, ModulusError};
 use core::cmp::Ordering;
 
+/// Identifies the context a [`MontgomeryResidue`] belongs to.
+///
+/// The modulus's limb count and its low limb: enough to separate the contexts
+/// a program holds at once, while staying `Copy`. A guard against mixing
+/// domains, not a cryptographic binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ContextTag {
+    modulus_low: u64,
+    limbs: usize,
+}
+
+/// A value in a [`MontgomeryContext`]'s domain.
+///
+/// Opaque on purpose. The domain invariant — encoded, reduced, belonging to
+/// one context — is carried by the type rather than by a debug assertion.
+/// There is no way to build one except [`MontgomeryContext::to_residue`] and
+/// no way to read one except [`MontgomeryContext::from_residue`], so an
+/// unencoded, unreduced, or foreign value cannot reach a kernel at all.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MontgomeryResidue {
+    value: BigUint,
+    tag: ContextTag,
+}
+
+/// Reusable scratch for the domain operations.
+///
+/// Opaque, so the limb buffer is not part of the contract. Hand the same one
+/// to every call in a loop and the scratch allocates once.
+#[derive(Clone, Debug, Default)]
+pub struct MontgomeryScratch {
+    limbs: Vec<u64>,
+}
+
+impl MontgomeryScratch {
+    /// A new, empty scratch buffer. It grows to the width the first operation
+    /// needs and is reused from then on.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { limbs: Vec::new() }
+    }
+}
+
+/// A residue was used with a context that did not produce it.
+///
+/// The type system cannot express "this residue belongs to that context" for
+/// contexts built at run time, so the relationship is checked and reported.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct ContextMismatch;
+
+impl core::fmt::Display for ContextMismatch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("residue belongs to a different Montgomery context")
+    }
+}
+
+impl std::error::Error for ContextMismatch {}
+
 /// Montgomery arithmetic context for a fixed odd modulus.
 ///
 /// Long computations — exponentiation ladders, field arithmetic — spend
@@ -292,7 +350,7 @@ impl MontgomeryContext {
     }
 
     /// The exponentiation ladder shared by [`Self::pow`] and
-    /// [`Self::pow_encoded`]: two engines selected by exponent width — binary
+    /// The ladder: two engines selected by exponent width — binary
     /// square-and-multiply for exponents inside one word, a fixed 4-bit
     /// window above that — followed by a single decoding REDC. The result
     /// leaves the Montgomery domain here, so both public entry points return
@@ -301,7 +359,14 @@ impl MontgomeryContext {
     /// Both engines run on `width`-limb buffers swapped in place, so the
     /// ladder allocates nothing after the table and every buffer that held an
     /// exponent-dependent intermediate is wiped on the way out.
-    fn pow_encoded_with_workspace(
+    /// The exponentiation ladder, returning the result **still encoded**.
+    ///
+    /// Split from the decoding step because the two callers want different
+    /// halves: `pow_encoded_with_workspace` decodes, `pow_residue` keeps the
+    /// domain element. Conflating them is exactly the trap HANDOFF records —
+    /// a ladder that takes an encoded base and returns an ordinary residue —
+    /// and it cost a wrong answer here before the tests caught it.
+    fn pow_ladder_encoded(
         &self,
         base_mont: &BigUint,
         exponent: &BigUint,
@@ -313,8 +378,8 @@ impl MontgomeryContext {
 
         let bits = exponent.bits();
         if bits == 0 {
-            // `x^0 = 1`, and the modulus exceeds one here.
-            return BigUint::one();
+            // `x^0 = 1` encoded is `one_mont`, and the modulus exceeds one.
+            return self.one_mont.clone();
         }
 
         let width = self.width();
@@ -433,16 +498,23 @@ impl MontgomeryContext {
             acc
         };
 
-        // Decode with a bare REDC (see `decode_with_workspace`), reusing
-        // `tmp` as the double-width input.
-        let mut acc = result;
-        tmp.resize(mont_scratch_limbs(width), 0);
-        copy_padded(&mut tmp, &acc);
-        mont_redc(&mut acc, modulus, self.n0_inv, &mut tmp);
-
-        let mut result = BigUint { limbs: acc };
+        let mut result = BigUint { limbs: result };
         result.normalize();
         result
+    }
+
+    /// The ladder followed by the decode: an ordinary residue out.
+    fn pow_encoded_with_workspace(
+        &self,
+        base_mont: &BigUint,
+        exponent: &BigUint,
+        workspace: &mut Vec<u64>,
+    ) -> BigUint {
+        if self.modulus.is_one() {
+            return BigUint::zero();
+        }
+        let encoded = self.pow_ladder_encoded(base_mont, exponent, workspace);
+        self.decode_with_workspace(&encoded, workspace)
     }
 
     /// Build a Montgomery context for an odd, non-zero modulus.
@@ -538,8 +610,8 @@ impl MontgomeryContext {
     /// one-shot encode → multiply → decode round trip.
     ///
     /// Convenient for a single product. Callers doing many operations should
-    /// encode once and stay in the domain with [`Self::mul_mont`] /
-    /// [`Self::square_mont`], decoding only at the end, rather than re-paying
+    /// encode once and stay in the domain with [`Self::mul_residue`] /
+    /// [`Self::square_residue`], decoding only at the end, rather than re-paying
     /// the encode and decode conversions on every step.
     #[must_use]
     pub fn mul(&self, lhs: &BigUint, rhs: &BigUint) -> BigUint {
@@ -576,29 +648,210 @@ impl MontgomeryContext {
         self.decode_with_workspace(&square_mont, &mut workspace)
     }
 
-    /// Multiply two residues that are **already in Montgomery form**, staying
-    /// in Montgomery form.
+    /// This context's tag, so a residue from another context is caught.
+    #[inline]
+    fn tag(&self) -> ContextTag {
+        ContextTag {
+            modulus_low: self.modulus.limbs[0],
+            limbs: self.modulus.limbs.len(),
+        }
+    }
+
+    /// The tag check every residue operation performs.
+    fn check(&self, residue: &MontgomeryResidue) -> Result<(), ContextMismatch> {
+        if residue.tag == self.tag() {
+            Ok(())
+        } else {
+            Err(ContextMismatch)
+        }
+    }
+
+    /// Encode `value` into this context's Montgomery domain.
     ///
-    /// One Montgomery reduction instead of the encode/multiply/decode round
-    /// trip of [`Self::mul`]; the workhorse for callers (such as elliptic
-    /// curve point arithmetic) that keep whole computations in the Montgomery
-    /// domain and convert only at the boundaries.
-    ///
-    /// Operands must be reduced residues, below the modulus — the domain
-    /// contract shared by every in-domain operation, as produced by
-    /// [`Self::encode`] and returned by the domain operations themselves. The
-    /// single conditional subtraction in the reduction relies on it; debug
-    /// builds assert it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if either operand occupies more limbs than the modulus: the
-    /// kernel pads operands into modulus-width windows, and a wider one does
-    /// not fit. An operand of the modulus's width but at or above it does not
-    /// panic in release builds — it returns a non-canonical result, which is
-    /// what the debug assertion exists to catch.
+    /// The returned [`MontgomeryResidue`] carries the domain invariant — it is
+    /// encoded, reduced, and belongs to this context — so no operation has to
+    /// re-check it and no caller can violate it. That is the point of the
+    /// type: the raw API this replaces took a bare `BigUint` and could only
+    /// check in debug builds, so a release build accepted an unencoded or
+    /// unreduced value and returned a wrong answer.
     #[must_use]
-    pub fn mul_mont(&self, lhs: &BigUint, rhs: &BigUint) -> BigUint {
+    pub fn to_residue(&self, value: &BigUint) -> MontgomeryResidue {
+        self.to_residue_with(value, &mut MontgomeryScratch::new())
+    }
+
+    /// [`Self::to_residue`], reusing a caller-held scratch buffer.
+    #[must_use]
+    pub fn to_residue_with(
+        &self,
+        value: &BigUint,
+        scratch: &mut MontgomeryScratch,
+    ) -> MontgomeryResidue {
+        MontgomeryResidue {
+            value: self.encode_with_workspace(value, &mut scratch.limbs),
+            tag: self.tag(),
+        }
+    }
+
+    /// Decode a residue back to an ordinary value in `[0, modulus)`.
+    ///
+    /// # Errors
+    ///
+    /// [`ContextMismatch`] if `residue` was produced by a different context.
+    pub fn from_residue(&self, residue: &MontgomeryResidue) -> Result<BigUint, ContextMismatch> {
+        self.from_residue_with(residue, &mut MontgomeryScratch::new())
+    }
+
+    /// [`Self::from_residue`], reusing a caller-held scratch buffer.
+    pub fn from_residue_with(
+        &self,
+        residue: &MontgomeryResidue,
+        scratch: &mut MontgomeryScratch,
+    ) -> Result<BigUint, ContextMismatch> {
+        self.check(residue)?;
+        Ok(self.decode_with_workspace(&residue.value, &mut scratch.limbs))
+    }
+
+    /// One, encoded in this context's domain.
+    #[must_use]
+    pub fn one(&self) -> MontgomeryResidue {
+        MontgomeryResidue {
+            value: self.one_mont.clone(),
+            tag: self.tag(),
+        }
+    }
+
+    /// `lhs · rhs` in the domain.
+    ///
+    /// # Errors
+    ///
+    /// [`ContextMismatch`] if either operand belongs to another context.
+    pub fn mul_residue(
+        &self,
+        lhs: &MontgomeryResidue,
+        rhs: &MontgomeryResidue,
+    ) -> Result<MontgomeryResidue, ContextMismatch> {
+        self.mul_residue_with(lhs, rhs, &mut MontgomeryScratch::new())
+    }
+
+    /// [`Self::mul_residue`], reusing a caller-held scratch buffer — the
+    /// inner-loop form. The scratch is reused across calls; the returned
+    /// residue still owns its own result.
+    pub fn mul_residue_with(
+        &self,
+        lhs: &MontgomeryResidue,
+        rhs: &MontgomeryResidue,
+        scratch: &mut MontgomeryScratch,
+    ) -> Result<MontgomeryResidue, ContextMismatch> {
+        self.check(lhs)?;
+        self.check(rhs)?;
+        Ok(MontgomeryResidue {
+            value: BigUint::montgomery_mul_odd_with_workspace(
+                &lhs.value,
+                &rhs.value,
+                &self.modulus,
+                self.n0_inv,
+                &mut scratch.limbs,
+            ),
+            tag: self.tag(),
+        })
+    }
+
+    /// `value²` in the domain, by the dedicated squaring kernel: each cross
+    /// term formed once, `width·(width+1)/2` multiplications against `width²`.
+    ///
+    /// # Errors
+    ///
+    /// [`ContextMismatch`] if `value` belongs to another context.
+    pub fn square_residue(
+        &self,
+        value: &MontgomeryResidue,
+    ) -> Result<MontgomeryResidue, ContextMismatch> {
+        self.square_residue_with(value, &mut MontgomeryScratch::new())
+    }
+
+    /// [`Self::square_residue`], reusing a caller-held scratch buffer.
+    pub fn square_residue_with(
+        &self,
+        value: &MontgomeryResidue,
+        scratch: &mut MontgomeryScratch,
+    ) -> Result<MontgomeryResidue, ContextMismatch> {
+        self.check(value)?;
+        Ok(MontgomeryResidue {
+            value: BigUint::montgomery_sqr_odd_with_workspace(
+                &value.value,
+                &self.modulus,
+                self.n0_inv,
+                &mut scratch.limbs,
+            ),
+            tag: self.tag(),
+        })
+    }
+
+    /// `lhs + rhs` in the domain. The encoding is linear —
+    /// `x̃ + ỹ ≡ (x + y)·R (mod n)` — so modular addition acts on domain
+    /// residues exactly as on ordinary ones.
+    ///
+    /// # Errors
+    ///
+    /// [`ContextMismatch`] if either operand belongs to another context.
+    pub fn add_residue(
+        &self,
+        lhs: &MontgomeryResidue,
+        rhs: &MontgomeryResidue,
+    ) -> Result<MontgomeryResidue, ContextMismatch> {
+        self.check(lhs)?;
+        self.check(rhs)?;
+        Ok(MontgomeryResidue {
+            value: BigUint::mod_add(&lhs.value, &rhs.value, &self.modulus),
+            tag: self.tag(),
+        })
+    }
+
+    /// `lhs − rhs` in the domain.
+    ///
+    /// # Errors
+    ///
+    /// [`ContextMismatch`] if either operand belongs to another context.
+    pub fn sub_residue(
+        &self,
+        lhs: &MontgomeryResidue,
+        rhs: &MontgomeryResidue,
+    ) -> Result<MontgomeryResidue, ContextMismatch> {
+        self.check(lhs)?;
+        self.check(rhs)?;
+        Ok(MontgomeryResidue {
+            value: BigUint::mod_sub(&lhs.value, &rhs.value, &self.modulus),
+            tag: self.tag(),
+        })
+    }
+
+    /// `base^exponent` in the domain, staying encoded throughout.
+    ///
+    /// # Errors
+    ///
+    /// [`ContextMismatch`] if `base` belongs to another context.
+    pub fn pow_residue(
+        &self,
+        base: &MontgomeryResidue,
+        exponent: &BigUint,
+    ) -> Result<MontgomeryResidue, ContextMismatch> {
+        self.check(base)?;
+        let mut workspace = Vec::new();
+        Ok(MontgomeryResidue {
+            value: self.pow_ladder_encoded(&base.value, exponent, &mut workspace),
+            tag: self.tag(),
+        })
+    }
+
+    // ─── Crate-private raw kernels ─────────────────────────────────────
+    //
+    // The public domain API is the residue type above. These take bare
+    // `BigUint`s and carry the reduced-operand contract in a debug
+    // assertion, which is only sound because every caller is in this
+    // crate and holds the invariant by construction. They are not, and
+    // must not become, public.
+
+    pub(crate) fn mul_mont(&self, lhs: &BigUint, rhs: &BigUint) -> BigUint {
         debug_assert!(
             lhs < &self.modulus && rhs < &self.modulus,
             "domain operands arrive reduced"
@@ -613,61 +866,7 @@ impl MontgomeryContext {
         )
     }
 
-    /// [`Self::mul_mont`] with a caller-supplied workspace, for the loops
-    /// where the product *is* the loop: the kernel pads its operands and
-    /// carves scratch out of one buffer, and threading that buffer through
-    /// a sequence of calls allocates it once instead of per multiply.
-    /// Pass the same `Vec` (empty on the first call — it is sized on
-    /// demand) to every domain operation in the loop. Measured
-    /// per-operation at exact modulus widths by `mont_workspace_timing` in
-    /// this file (run with `--ignored`; it interleaves the two forms in
-    /// paired chunks so drift cancels, and prints every pass so a figure
-    /// inside the spread reads as the noise it is): about 43% saved at one
-    /// limb, roughly 25–33% at four, and ~20% at eight — the 64–512-bit
-    /// moduli where Pollard rho actually runs — falling to 2–3% at 32
-    /// limbs and to the edge of measurement (~1%) at 64, where the kernel
-    /// dominates the allocator.
-    ///
-    /// The workspace holds Montgomery intermediates, exactly as
-    /// [`Self::mul_mont`]'s discarded buffer does (see the scope note
-    ///
-    /// # Panics
-    ///
-    /// Panics if either operand occupies more limbs than the modulus, as
-    /// in [`Self::mul_mont`].
-    #[must_use]
-    pub fn mul_mont_with_workspace(
-        &self,
-        lhs: &BigUint,
-        rhs: &BigUint,
-        workspace: &mut Vec<u64>,
-    ) -> BigUint {
-        debug_assert!(
-            lhs < &self.modulus && rhs < &self.modulus,
-            "domain operands arrive reduced"
-        );
-        BigUint::montgomery_mul_odd_with_workspace(lhs, rhs, &self.modulus, self.n0_inv, workspace)
-    }
-
-    /// Square a residue that is already in Montgomery form, staying in
-    /// Montgomery form.
-    ///
-    /// Uses the dedicated squaring kernel (`mont_sqr`, each cross term formed
-    /// once) rather than `mul_mont(value, value)`: it does `width·(width+1)/2`
-    /// multiplications instead of `width²`, so it is the faster kernel at the
-    /// exponentiation-sized moduli where squarings dominate. At very small
-    /// widths its fixed doubling and diagonal passes cost more than the saved
-    /// multiplications, a property of the separated-squaring construction; the
-    /// crossover favors `mont_sqr` where it matters. Like [`Self::mul_mont`]
-    /// Operands must be
-    /// reduced residues (the shared domain contract; debug builds assert it).
-    ///
-    /// # Panics
-    ///
-    /// Panics if `value` occupies more limbs than the modulus, as in
-    /// [`Self::mul_mont`].
-    #[must_use]
-    pub fn square_mont(&self, value: &BigUint) -> BigUint {
+    pub(crate) fn square_mont(&self, value: &BigUint) -> BigUint {
         debug_assert!(value < &self.modulus, "domain operand arrives reduced");
         let mut workspace = Vec::new();
         BigUint::montgomery_sqr_odd_with_workspace(
@@ -678,31 +877,16 @@ impl MontgomeryContext {
         )
     }
 
-    /// [`Self::square_mont`] with a caller-supplied workspace — the
-    /// squaring companion to [`Self::mul_mont_with_workspace`], sharing its
-    /// contract and its buffer (the two size their
-    /// windows independently from the same `Vec`).
-    ///
-    /// # Panics
-    ///
-    /// Panics if `value` occupies more limbs than the modulus, as in
-    /// [`Self::mul_mont`].
-    #[must_use]
-    pub fn square_mont_with_workspace(&self, value: &BigUint, workspace: &mut Vec<u64>) -> BigUint {
+    pub(crate) fn square_mont_with_workspace(
+        &self,
+        value: &BigUint,
+        workspace: &mut Vec<u64>,
+    ) -> BigUint {
         debug_assert!(value < &self.modulus, "domain operand arrives reduced");
         BigUint::montgomery_sqr_odd_with_workspace(value, &self.modulus, self.n0_inv, workspace)
     }
 
-    /// Add two residues in Montgomery form, staying in Montgomery form:
-    /// the reduced-operand fast path of [`BigUint::mod_add`], one
-    /// compare-and-subtract with no reduction machinery. The encoding is
-    /// linear — `x̃ + ỹ ≡ (x + y)·R (mod n)` — so modular addition acts on
-    /// domain residues exactly as on ordinary ones. Operands must be
-    /// reduced (below the modulus), the same precondition every domain
-    /// operation carries; it is checked in debug builds only, and a
-    /// release caller violating it gets a non-canonical result.
-    #[must_use]
-    pub fn add_mont(&self, lhs: &BigUint, rhs: &BigUint) -> BigUint {
+    pub(crate) fn add_mont(&self, lhs: &BigUint, rhs: &BigUint) -> BigUint {
         debug_assert!(
             lhs < &self.modulus && rhs < &self.modulus,
             "domain operands arrive reduced"
@@ -715,13 +899,7 @@ impl MontgomeryContext {
         }
     }
 
-    /// Subtract one Montgomery-form residue from another, staying in
-    /// Montgomery form: the reduced-operand fast path of
-    /// [`BigUint::mod_sub`], the wrap adding the modulus back. Linear for
-    /// the same reason as [`Self::add_mont`], under the same
-    /// debug-checked reduced-operand contract.
-    #[must_use]
-    pub fn sub_mont(&self, lhs: &BigUint, rhs: &BigUint) -> BigUint {
+    pub(crate) fn sub_mont(&self, lhs: &BigUint, rhs: &BigUint) -> BigUint {
         debug_assert!(
             lhs < &self.modulus && rhs < &self.modulus,
             "domain operands arrive reduced"
@@ -733,61 +911,17 @@ impl MontgomeryContext {
         }
     }
 
-    /// The Montgomery encoding of one, `R mod n` — the multiplicative
-    /// identity of the domain, precomputed at construction. A ladder that
-    /// starts from an identity needs this and not [`BigUint::one`], which is
-    /// not a domain element; it is also entry 0 of the window table in
-    /// [`Self::pow`].
-    #[must_use]
-    pub fn one_mont(&self) -> &BigUint {
+    pub(crate) fn one_mont(&self) -> &BigUint {
         &self.one_mont
     }
 
-    /// Compute `base^exponent mod modulus` inside the context.
-    ///
-    /// Encodes `base` once, runs the exponentiation entirely in the
-    /// Montgomery domain — where each squaring and product is one REDC
-    /// rather than a division — and decodes the result. Exponents above 64
-    /// bits take a fixed 4-bit-window left-to-right ladder (the k-ary
-    /// method, HAC Algorithm 14.82), seeded from the top window; exponents
-    /// of 64 bits or fewer (e.g. the F4 public exponent) take right-to-left
-    /// binary square-and-multiply instead, which skips the window-table
-    /// setup that would dominate so short a ladder. Keeping the whole
-    /// ladder in-domain is the point of the context: the per-step cost is
-    /// a Montgomery multiply, not a modular reduction. The workspace holding
-    /// the (possibly secret) intermediates is wiped before it is freed.
-    ///
-    /// `base` may be unreduced (encoding reduces it); `exponent == 0` yields
-    /// one, and a modulus of one yields zero.
+    /// `base^exponent mod modulus` on ordinary values, encoding and decoding
+    /// at the boundary.
     #[must_use]
     pub fn pow(&self, base: &BigUint, exponent: &BigUint) -> BigUint {
         let mut workspace = Vec::new();
         let base_mont = self.encode_with_workspace(base, &mut workspace);
-        let result = self.pow_encoded_with_workspace(&base_mont, exponent, &mut workspace);
-        // The workspace held Montgomery intermediates of a (possibly secret)
-        // exponentiation; wipe it before the buffer is freed.
-        result
-    }
-
-    /// Compute `base^exponent mod modulus` with `base` already in Montgomery form.
-    ///
-    /// Saves the encoding multiplication when a caller reuses one base across
-    /// many exponentiations and can cache its encoded form. Otherwise
-    /// identical to [`Self::pow`], including the decoding step: the result
-    /// comes back as an ordinary residue, not a domain element.
-    ///
-    /// `base_mont` must be a reduced residue (below the modulus), the shared
-    /// domain contract; debug builds assert it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `base_mont` occupies more limbs than the modulus, as in
-    /// [`Self::mul_mont`].
-    #[must_use]
-    pub fn pow_encoded(&self, base_mont: &BigUint, exponent: &BigUint) -> BigUint {
-        debug_assert!(base_mont < &self.modulus, "domain operand arrives reduced");
-        let mut workspace = Vec::new();
-        self.pow_encoded_with_workspace(base_mont, exponent, &mut workspace)
+        self.pow_encoded_with_workspace(&base_mont, exponent, &mut workspace)
     }
 }
 

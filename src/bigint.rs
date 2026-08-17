@@ -20,8 +20,8 @@ use core::cmp::Ordering;
 
 mod montgomery;
 
-pub use montgomery::MontgomeryContext;
 use montgomery::{copy_padded, mont_mul, mont_scratch_limbs, mont_sqr};
+pub use montgomery::{ContextMismatch, MontgomeryContext, MontgomeryResidue, MontgomeryScratch};
 
 mod barrett;
 mod reciprocal;
@@ -1467,7 +1467,7 @@ impl BigUint {
     /// calling one.
     ///
     /// The Montgomery domain keeps its own in-domain squaring
-    /// ([`MontgomeryContext::square_mont`]), which fuses the reduction and is
+    /// ([`MontgomeryContext::square_residue`](crate::modular::MontgomeryContext::square_residue)), which fuses the reduction and is
     /// not reached from here.
     #[must_use]
     pub fn square(&self) -> Self {
@@ -3496,12 +3496,12 @@ mod tests {
         assert_eq!(least.sign(), Sign::Negative);
         assert_eq!(*least.magnitude(), BigUint::from_u128(1u128 << 127));
     }
-    use super::ModulusError;
     use super::{
         BigInt, BigUint, MontgomeryContext, Sign, KARATSUBA_THRESHOLD_LIMBS,
         SQR_KARATSUBA_MAX_LIMBS, SQR_SCHOOLBOOK_MIN_LIMBS, TOOM3_THRESHOLD_LIMBS,
         UNBALANCED_THRESHOLD_LIMBS,
     };
+    use super::{ModulusError, MontgomeryScratch};
     use core::num::NonZeroU64;
 
     fn lcg_next(state: &mut u64) -> u64 {
@@ -5134,36 +5134,56 @@ mod tests {
         // zero-fills and the kernels clear their scratch on entry, so none
         // of it may show.
         let mut seed = 0x0dd5_eed0_0000_0001;
-        let mut ws: Vec<u64> = Vec::new();
+        let mut ws = MontgomeryScratch::new();
         for &limbs in &[16usize, 2, 3, 8, 1, 5] {
             let n = seeded_odd_modulus(limbs, &mut seed);
             let ctx = MontgomeryContext::new(&n).expect("odd modulus");
-            let mut x = ctx.encode(&seeded_biguint(limbs, &mut seed));
-            let y = ctx.encode(&seeded_biguint(limbs, &mut seed));
+            let x_plain = seeded_biguint(limbs, &mut seed);
+            let y_plain = seeded_biguint(limbs, &mut seed);
+            let mut x = ctx.to_residue(&x_plain);
+            let y = ctx.to_residue(&y_plain);
             for round in 0..200 {
                 // Alternate the call order so each window size follows the
                 // other's leftovers.
                 let next = if round % 2 == 0 {
-                    let m = ctx.mul_mont_with_workspace(&x, &y, &mut ws);
-                    assert_eq!(m, ctx.mul_mont(&x, &y), "mul at {limbs} limbs");
-                    let s = ctx.square_mont_with_workspace(&m, &mut ws);
-                    assert_eq!(s, ctx.square_mont(&m), "sqr at {limbs} limbs");
+                    let m = ctx.mul_residue_with(&x, &y, &mut ws).expect("same context");
+                    assert_eq!(
+                        m,
+                        ctx.mul_residue(&x, &y).expect("same"),
+                        "mul at {limbs} limbs"
+                    );
+                    let s = ctx.square_residue_with(&m, &mut ws).expect("same context");
+                    assert_eq!(
+                        s,
+                        ctx.square_residue(&m).expect("same"),
+                        "sqr at {limbs} limbs"
+                    );
                     s
                 } else {
-                    let s = ctx.square_mont_with_workspace(&x, &mut ws);
-                    assert_eq!(s, ctx.square_mont(&x), "sqr at {limbs} limbs");
-                    let m = ctx.mul_mont_with_workspace(&s, &y, &mut ws);
-                    assert_eq!(m, ctx.mul_mont(&s, &y), "mul at {limbs} limbs");
+                    let s = ctx.square_residue_with(&x, &mut ws).expect("same context");
+                    assert_eq!(
+                        s,
+                        ctx.square_residue(&x).expect("same"),
+                        "sqr at {limbs} limbs"
+                    );
+                    let m = ctx.mul_residue_with(&s, &y, &mut ws).expect("same context");
+                    assert_eq!(
+                        m,
+                        ctx.mul_residue(&s, &y).expect("same"),
+                        "mul at {limbs} limbs"
+                    );
                     m
                 };
                 x = next;
             }
             // Decoded agreement with the reduction-based product: the domain
             // arithmetic and the ordinary arithmetic name the same value.
-            let product = ctx.mul_mont_with_workspace(&x, &y, &mut ws);
+            let product = ctx.mul_residue_with(&x, &y, &mut ws).expect("same context");
+            let x_out = ctx.from_residue(&x).expect("same context");
+            let y_out = ctx.from_residue(&y).expect("same context");
             assert_eq!(
-                ctx.decode(&product),
-                BigUint::mod_mul(&ctx.decode(&x), &ctx.decode(&y), &n),
+                ctx.from_residue(&product).expect("same context"),
+                BigUint::mod_mul(&x_out, &y_out, &n),
                 "domain product decodes to the modular product at {limbs} limbs"
             );
         }
@@ -5214,42 +5234,39 @@ mod tests {
         for &limbs in &[1usize, 4, 8, 32, 64] {
             let n = seeded_odd_modulus(limbs, &mut seed);
             let ctx = MontgomeryContext::new(&n).expect("odd modulus");
-            let a = ctx.encode(&seeded_biguint(limbs, &mut seed));
-            let b = ctx.encode(&seeded_biguint(limbs, &mut seed));
+            let a = ctx.to_residue(&seeded_biguint(limbs, &mut seed));
+            let b = ctx.to_residue(&seeded_biguint(limbs, &mut seed));
             let chunk = 256u32;
             let chunks = ((2_000_000 / (limbs * limbs)).max(4_000) as u32 / chunk).max(8);
 
-            let mut ws = Vec::new();
+            let mut ws = MontgomeryScratch::new();
             let mut sqr_passes = [0f64; 5];
             for pass in &mut sqr_passes {
                 *pass = paired_saving(
                     chunks,
                     chunk,
                     &mut || {
-                        black_box(ctx.square_mont(black_box(&a)));
+                        let _ = black_box(ctx.square_residue(black_box(&a)));
                     },
                     &mut || {
-                        black_box(ctx.square_mont_with_workspace(black_box(&a), &mut ws));
+                        let _ = black_box(ctx.square_residue_with(black_box(&a), &mut ws));
                     },
                 );
             }
             report("sqr", limbs, sqr_passes);
 
-            let mut ws2 = Vec::new();
+            let mut ws2 = MontgomeryScratch::new();
             let mut mul_passes = [0f64; 5];
             for pass in &mut mul_passes {
                 *pass = paired_saving(
                     chunks,
                     chunk,
                     &mut || {
-                        black_box(ctx.mul_mont(black_box(&a), black_box(&b)));
+                        let _ = black_box(ctx.mul_residue(black_box(&a), black_box(&b)));
                     },
                     &mut || {
-                        black_box(ctx.mul_mont_with_workspace(
-                            black_box(&a),
-                            black_box(&b),
-                            &mut ws2,
-                        ));
+                        let _ =
+                            black_box(ctx.mul_residue_with(black_box(&a), black_box(&b), &mut ws2));
                     },
                 );
             }
