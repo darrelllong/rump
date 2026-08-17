@@ -125,7 +125,7 @@ operation, so each 4096-bit trial cost seconds of setup and the session
 starved — too few trials to contain the 8 % tail. With the corrected pool the
 means are monotone through 6144 bits — 217 µs, 1.41 ms, 5.06 ms, 11.5 ms at
 2048, 4096, 5120, 6144 — with the tail present at every width;
-`bench/heavy_extended_hardy.md` holds the verification rows.) `sqrt_mod` has the same structure — a non-residue
+`bench/heavy_extended_hardy.md` holds the verification rows.) `mod_sqrt` has the same structure — a non-residue
 rejects after one Euler-criterion exponentiation, a modulus with
 `p ≡ 3 (mod 4)` takes a single exponentiation, and a high 2-adic valuation
 takes the full Tonelli–Shanks descent — plus one cost the harness cannot
@@ -133,7 +133,7 @@ avoid: each trial must generate a fresh random prime modulus, which at 4096
 bits on the Pi dominates the session and leaves that cell's sample thin (its
 confidence-interval column discloses this). For both operations the interval
 converges slowly (means carry the `~` mark) and the extrema columns are the
-primary result. The prime-conditioned rows (`isprime_true`, and `sqrt_mod`
+primary result. The prime-conditioned rows (`isprime_true`, and `mod_sqrt`
 throughout) carry one structural limit: every trial must first generate a
 random prime of the row's width, which beyond ~4 kbit costs tens of seconds
 per trial and bounds the session's trial count. On the M4, long trials also
@@ -158,12 +158,12 @@ degree of GF(2^m)):
 | `divrem` `modulo` | Knuth Algorithm D division, full width by half width |
 | `modmul` | one `mul` then a reduction, general (non-Montgomery) modulus |
 | `montmul` `montsqr` | one Montgomery multiply / square, operands already in the domain |
-| `montsetup` | building a `MontgomeryCtx` (the one division and R² setup) |
+| `montsetup` | building a `MontgomeryContext` (the one division and R² setup) |
 | `gcd` `gcdext` `modinv` `jacobi` | the number-theory family |
-| `sqrtmod` | `sqrt_mod` — a modular square root by Tonelli–Shanks (several exponentiations) |
+| `sqrtmod` | `mod_sqrt` — a modular square root by Tonelli–Shanks (several exponentiations) |
 | `isprime` | `is_probable_prime` on a fully random operand — the outcome mixture; its extrema carry the variable-time signal, its p99 the one-round composite cost |
-| `sqrtmod_blum` | `sqrt_mod` on a guaranteed residue, prime pinned to `p ≡ 3 (mod 4)` — the `(p+1)/4` shortcut, isolated |
-| `sqrtmod_descent` | `sqrt_mod` on a guaranteed residue, prime pinned to `p ≡ 1 (mod 4)` — the Tonelli–Shanks descent, isolated |
+| `sqrtmod_blum` | `mod_sqrt` on a guaranteed residue, prime pinned to `p ≡ 3 (mod 4)` — the `(p+1)/4` shortcut, isolated |
+| `sqrtmod_descent` | `mod_sqrt` on a guaranteed residue, prime pinned to `p ≡ 1 (mod 4)` — the Tonelli–Shanks descent, isolated |
 | `isprime_true` | `is_probable_prime` on a random prime of the row's width — the outcome-conditioned accept cost: the sieve plus all twelve Miller–Rabin rounds, the cost a caller plans around |
 | `gf2m_*` | binary-field multiply / square / sqrt / pow / inverse |
 
@@ -253,7 +253,7 @@ scaling graphs plot all four.
 
 Each cell is rump time / GMP time / ratio. Lower ratio is better; **1.0×** would
 mean parity. `isprime` is omitted here — its heavy-tailed mean makes the ratio
-meaningless (see Extrema). rump's Montgomery domain, `sqrt_mod`, and GF(2^m)
+meaningless (see Extrema). rump's Montgomery domain, `mod_sqrt`, and GF(2^m)
 have no `mpz` counterpart and so cannot appear in the comparison; their costs
 are in the tables above.
 
@@ -334,7 +334,7 @@ The comparison sorts rump's primitives into groups, and the grouping is by
   nanosecond (M4 `sub` at 256 bits) to ~130 ns (Pi at 4096).
 
 - **Operations with no `mpz` counterpart.** The public Montgomery domain
-  (`mul_mont`, `square_mont`, `pow`), `sqrt_mod`, and the GF(2^m) field
+  (`mul_mont`, `square_mont`, `pow`), `mod_sqrt`, and the GF(2^m) field
   operations cannot appear in this comparison because GMP's integer layer does
   not provide them; their costs are in the tables above.
 
@@ -364,7 +364,7 @@ This closes the backlog of rump-against-GMP ratio work: in the primitive
 comparison above, what still separates the columns is constant factors —
 GMP's assembly base cases, Toom against FFT — not algorithms. Measured work
 inside rump itself has since landed: Cipolla's square root now caps
-`sqrt_mod`'s 2-adic tail at its measured dispatch crossover (the extrema
+`mod_sqrt`'s 2-adic tail at its measured dispatch crossover (the extrema
 section below), and Montgomery's batch inversion trades one Lehmer
 inversion for three multiplications per element. Barrett's low half-product (HAC Note 14.45(ii)) has since landed too, worth
 1.4× on `reduce` at 512 bits, 1.26× at 1024 and 1.31× at 8192, where the
@@ -465,7 +465,7 @@ populations the conditioned rows separate:
 - **`isprime`** mixes a small-factor rejection in nanoseconds
   (overwhelmingly likely on a random operand) with a full twelve-round
   Miller–Rabin pass on a prime; `isprime_true` isolates the prime outcome.
-- **`sqrt_mod`** mixes three populations. Half of all inputs are
+- **`mod_sqrt`** mixes three populations. Half of all inputs are
   non-residues and exit at the Jacobi test — the row's minimum. Residues
   split again by the prime's 2-adic structure: `p ≡ 3 (mod 4)` takes the
   `(p+1)/4` shortcut (`sqrtmod_blum`, spreads 1.0–1.4 on every host), and
@@ -479,7 +479,7 @@ populations the conditioned rows separate:
   crossover cost, about 2.2× the shortcut at 1024 bits.
 
 **The mixture rows' medians must not be compared across sizes.** The
-non-residue population holds exactly half of `sqrt_mod`'s probability
+non-residue population holds exactly half of `mod_sqrt`'s probability
 mass, so its per-cell median is an order statistic sitting on a cluster
 boundary — a fair coin between the rejection cost and the extraction
 cost. A five-session re-measurement demonstrated it: the 2048-bit median
