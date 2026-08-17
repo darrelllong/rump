@@ -293,14 +293,21 @@ standing risk rather than a defect, and supplied the locations.
 
 Retire, in one integration change against a versioned rump:
 
-| rump API | consumer copy to delete |
-|---|---|
-| `PolyZ::roots_mod_prime_power` | `factoring/src/gnfs/select.rs:321` (lifting/counting around it) |
-| `PolyZ::balanced_base_expansion` | `factoring/src/gnfs/select.rs:393` |
-| `PolyZ::rem_monic` | `factoring/src/gnfs/sqrt.rs:234` |
-| `PolyZ::product_mod_monic` | `factoring/src/gnfs/sqrt.rs:186` |
-| `PolyZ::homogeneous_substitution` | `factoring/src/gnfs/lattice.rs:313` |
-| `PolyModP::symmetric_lift` / `with_modulus` | `factoring/src/gnfs/sqrt.rs:401-418` |
+The consumer's copies carry *different names* from the rump API that replaces
+them, so search by the name in the third column rather than by the first — a
+search for the rump name finds nothing and reads as "already migrated", which
+is the wrong answer. Line numbers are as of 2026-08-16 and will drift; the
+names will not.
+
+| rump API | consumer file | consumer's name for it |
+|---|---|---|
+| `PolyZ::roots_mod_prime_power` | `src/gnfs/select.rs:321` | `lifted_valuation` (the lifting/counting around it) |
+| `PolyZ::balanced_base_expansion` | `src/gnfs/select.rs:393` | `balanced_expansion` |
+| `PolyZ::rem_monic` | `src/gnfs/sqrt.rs:234` | `reduce` |
+| `PolyZ::product_mod_monic` | `src/gnfs/sqrt.rs:186` | `algebraic_product` |
+| `PolyZ::homogeneous_substitution` | `src/gnfs/lattice.rs:313` | `transformed_norm` |
+| `PolyModP::with_modulus` | `src/gnfs/sqrt.rs:401` | `widen` |
+| `PolyModP::symmetric_lift` | `src/gnfs/sqrt.rs:401-418` | (alongside `widen`) |
 
 Delivered 2026-08-16 in `src/poly.rs`:
 
