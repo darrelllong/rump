@@ -127,6 +127,9 @@ Algorithm M.
 | Homogeneous substitution | `PolyZ::homogeneous_substitution` | the homogenization `F(X,Y) = Yᵈ f(X/Y)` (classical projective construction); the algebraic-norm instance `bᵈ f(a/b)` is the sieve's, Lenstra & Lenstra (eds.), LNM 1554, §3. |
 | Roots rem a prime power (Hensel lifting, with branching) | `PolyZ::roots_mod_prime_power` | Cohen, §1.6 (Hensel's lemma) for the simple-root case; the branching case where `f′(r) ≡ 0 (mod p)` — all `p` lifts or none — is the general extension a root-finder needs and is not in the lemma as usually stated. |
 | Symmetric (balanced) lift from ℤ/mℤ | `PolyMod::symmetric_lift` | the same balanced convention as the expansion above, applied coefficientwise; it is what makes a modular computation's answer recoverable over ℤ once the modulus exceeds twice the height. |
+| All complex roots at once | `PolyZ::factor_real` (private `durand_kerner`) | Kerner, *Ein Gesamtschrittverfahren zur Berechnung der Nullstellen von Polynomen*, Numer. Math. 8 (1966), 290–294; independently Durand, *Solutions numériques des équations algébriques*, Tome I, Masson (1960); the underlying product factorisation is Weierstrass (1891). The whole-step form is the point: all `d` iterates advance together and the set converges quadratically once they separate. |
+| Starting circle for the iteration | private `cauchy_bound_f64` | Cauchy's bound, `1 + max|cᵢ/c_d|`, *Exercices de mathématiques*, Quatrième Année (1829): every root lies inside it, so a circle of that radius encloses the lot. |
+| Multiplicity before location | `PolyZ::factor_real`, `PolyZ::real_roots` | squarefree decomposition over ℤ (Yun's shape, and classical before it) so that floating point only ever locates roots whose count is already exact — at a repeated root the polynomial and its derivative vanish together and the iteration is ill conditioned, which is not something a tolerance can fix. |
 
 ## Lattice reduction (`src/lattice.rs`)
 

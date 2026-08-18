@@ -401,6 +401,117 @@ impl core::fmt::Display for RealRootError {
 
 impl std::error::Error for RealRootError {}
 
+/// Why [`PolyZ::factor_real`] could not answer.
+///
+/// Distinguished from an empty factorization, which is an answer: a constant
+/// has no roots and factors as itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum FactorRealError {
+    /// The zero polynomial, which has no leading coefficient and every number
+    /// as a root.
+    ZeroPolynomial,
+    /// A coefficient is too large to represent in `f64`, so the polynomial
+    /// cannot be evaluated in floating point at all.
+    CoefficientOutOfRange,
+    /// The iteration did not settle: an iterate left the finite range, or the
+    /// roots found do not account for the degree.
+    ///
+    /// Not the same as an inaccurate answer. A converged root that is
+    /// nonetheless poorly determined comes back with a large
+    /// [`ApproximateRoot::forward_error`], because how much accuracy is enough
+    /// is the caller's question and not this function's.
+    DidNotConverge,
+}
+
+impl core::fmt::Display for FactorRealError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::ZeroPolynomial => "every number is a root of the zero polynomial",
+            Self::CoefficientOutOfRange => "a coefficient does not fit f64",
+            Self::DidNotConverge => "the root iteration did not settle",
+        })
+    }
+}
+
+impl std::error::Error for FactorRealError {}
+
+/// One root of a real polynomial, and how far it may be wrong.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ApproximateRoot {
+    /// The real part.
+    pub real: f64,
+    /// The imaginary part. Exactly `0.0` for a root reported as real, and
+    /// strictly positive for the representative of a conjugate pair.
+    pub imaginary: f64,
+    /// Newton's forward-error estimate `|f(z)| / |f'(z)|` at this iterate,
+    /// against the squarefree factor the root was located in.
+    ///
+    /// An estimate of how far the reported root may be from a true one, in the
+    /// units the root itself is in. `f64::INFINITY` when the derivative
+    /// underflows, which is the honest answer: there the evaluation can say
+    /// nothing about where the root is.
+    ///
+    /// Measured against the squarefree factor rather than against the whole
+    /// polynomial, because that is what located the root. At a repeated root
+    /// the whole polynomial's derivative vanishes and the estimate would be
+    /// infinite for a root known exactly; the multiplicity is settled in ℤ
+    /// before any floating point happens, so the factor is well conditioned
+    /// where the polynomial is not.
+    ///
+    /// It is an estimate and not a bound. What counts as accurate enough
+    /// depends on what the roots are for, so this function reports the
+    /// quantity and refuses no root for being large.
+    pub forward_error: f64,
+}
+
+/// A real polynomial factored over the reals.
+///
+/// ```text
+/// f(x) = leading · ∏(x − rⱼ) · ∏((x − pₖ)² + qₖ²)
+/// ```
+///
+/// The real roots supply the linear factors and the conjugate pairs the
+/// quadratic ones, so a caller can evaluate `|f|` — or its logarithm, which is
+/// usually what is wanted — without owning any of the numerics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RealFactorization {
+    /// The leading coefficient, which the factored form does not otherwise
+    /// carry: the product of monic factors is monic.
+    pub leading: f64,
+    /// The real roots, ascending, each repeated according to its multiplicity.
+    pub real_roots: Vec<ApproximateRoot>,
+    /// One representative per conjugate pair, with `imaginary > 0`, ascending
+    /// by real part and then by imaginary part. Each stands for two roots, and
+    /// each is repeated according to its multiplicity.
+    ///
+    /// Only the half-plane, because the other root of a pair is the conjugate
+    /// and listing it would invite double counting in exactly the product the
+    /// type exists to support.
+    pub conjugate_pairs: Vec<ApproximateRoot>,
+}
+
+impl RealFactorization {
+    /// The degree the factorization accounts for: one per real root and two
+    /// per conjugate pair.
+    #[must_use]
+    pub fn degree(&self) -> usize {
+        self.real_roots.len() + 2 * self.conjugate_pairs.len()
+    }
+}
+
+/// Durand–Kerner iterations before the iteration is called unsettled.
+///
+/// Convergence is quadratic once the iterates separate, and the number of
+/// steps to get there grows with the coefficient range rather than with the
+/// degree. A cap large enough not to bind costs microseconds on the degrees
+/// this is used at, and a cap that binds returns iterates that are not roots.
+const DURAND_KERNER_STEPS: usize = 2_000;
+
+/// A root counts as real when its imaginary part is negligible beside its own
+/// magnitude.
+const REAL_ROOT_TOLERANCE: f64 = 1e-9;
+
 /// Bisection steps: enough to exhaust `f64` resolution on any bracket.
 const REAL_ROOT_BISECTIONS: usize = 200;
 
@@ -473,6 +584,137 @@ fn bisect_f64(coefficients: &[f64], mut low: f64, mut high: f64) -> Option<f64> 
         }
     }
     Some(low + (high - low) / 2.0)
+}
+
+// ─── Complex arithmetic, only as much as the root finder needs ─────────────
+//
+// A `(re, im)` pair rather than a type: these are four private functions used
+// by one algorithm, and a `Complex` in the public surface would be a promise
+// to grow one. If a second caller ever appears, that is when it earns a name.
+
+fn complex_add(x: (f64, f64), y: (f64, f64)) -> (f64, f64) {
+    (x.0 + y.0, x.1 + y.1)
+}
+
+fn complex_sub(x: (f64, f64), y: (f64, f64)) -> (f64, f64) {
+    (x.0 - y.0, x.1 - y.1)
+}
+
+fn complex_mul(x: (f64, f64), y: (f64, f64)) -> (f64, f64) {
+    (x.0 * y.0 - x.1 * y.1, x.0 * y.1 + x.1 * y.0)
+}
+
+/// `x / y`, by the conjugate. `None` when `y` is zero, which the caller must
+/// distinguish from a quotient rather than receive as an infinity.
+fn complex_div(x: (f64, f64), y: (f64, f64)) -> Option<(f64, f64)> {
+    let denominator = y.0 * y.0 + y.1 * y.1;
+    if denominator == 0.0 {
+        return None;
+    }
+    Some((
+        (x.0 * y.0 + x.1 * y.1) / denominator,
+        (x.1 * y.0 - x.0 * y.1) / denominator,
+    ))
+}
+
+/// Horner evaluation at a complex point, coefficients ascending.
+fn eval_complex(coefficients: &[f64], z: (f64, f64)) -> (f64, f64) {
+    coefficients.iter().rev().fold((0.0, 0.0), |acc, c| {
+        complex_add(complex_mul(acc, z), (*c, 0.0))
+    })
+}
+
+/// Every root of a squarefree real polynomial at once, by the
+/// Weierstrass–Durand–Kerner iteration.
+///
+/// Each iterate is corrected by `f(zᵢ) / ∏_{j≠i}(zᵢ − zⱼ)`, which is Newton's
+/// step for `f` divided by the linear factors the other iterates already
+/// stand for. All `d` roots move together and the whole set converges
+/// quadratically once the iterates separate — hence "Gesamtschrittverfahren",
+/// the whole-step method (Kerner, *Numer. Math.* 8 (1966), 290–294;
+/// independently Durand, *Solutions numériques des équations algébriques*,
+/// 1960; the underlying factorisation is Weierstrass's, 1891).
+///
+/// `None` if an iterate leaves the finite range.
+///
+/// The starting points sit on a circle of Cauchy's radius, which contains
+/// every root, spun by an angle that is not a rational multiple of `2π` so
+/// that no two of them coincide — coincident iterates make the denominator
+/// zero and the method has nothing to divide by.
+fn durand_kerner(coefficients: &[f64], degree: usize) -> Option<Vec<(f64, f64)>> {
+    let leading = coefficients[degree];
+    let monic: Vec<f64> = coefficients[..=degree]
+        .iter()
+        .map(|c| c / leading)
+        .collect();
+
+    let radius = cauchy_bound_f64(&monic, degree);
+    let mut roots: Vec<(f64, f64)> = (0..degree)
+        .map(|index| {
+            let angle = 0.4 + 2.0 * core::f64::consts::PI * index as f64 / degree as f64;
+            (radius * angle.cos(), radius * angle.sin())
+        })
+        .collect();
+
+    for _ in 0..DURAND_KERNER_STEPS {
+        let mut moved: f64 = 0.0;
+        for index in 0..degree {
+            let value = eval_complex(&monic, roots[index]);
+            let mut denominator = (1.0, 0.0);
+            for other in 0..degree {
+                if other != index {
+                    denominator = complex_mul(denominator, complex_sub(roots[index], roots[other]));
+                }
+            }
+            // Two iterates have collided. Leaving this one where it is lets
+            // the others move apart and the next sweep divides again.
+            let Some(step) = complex_div(value, denominator) else {
+                continue;
+            };
+            roots[index] = complex_sub(roots[index], step);
+            moved = moved.max(step.0.abs() + step.1.abs());
+        }
+        // Scaled to the iterates and not to the starting radius. Cauchy's
+        // bound can exceed the roots it contains by many orders of magnitude
+        // — for a polynomial with one huge coefficient it is that coefficient
+        // — so a tolerance measured against the radius is an absolute
+        // tolerance against roots that may be far smaller, and the iteration
+        // halts mid-descent with iterates that are not roots.
+        let scale = roots
+            .iter()
+            .map(|(re, im)| re.abs().max(im.abs()))
+            .fold(0.0f64, f64::max);
+        if moved <= f64::EPSILON * scale.max(1.0) * 4.0 {
+            break;
+        }
+    }
+
+    roots
+        .iter()
+        .all(|(re, im)| re.is_finite() && im.is_finite())
+        .then_some(roots)
+}
+
+/// Newton's forward-error estimate `|f(z)| / |f'(z)|`.
+///
+/// Infinite where the derivative underflows: there the evaluation can say
+/// nothing about where the root is, and reporting a small error would be a
+/// claim the arithmetic does not support.
+fn forward_error(coefficients: &[f64], degree: usize, z: (f64, f64)) -> f64 {
+    let derivative: Vec<f64> = coefficients[..=degree]
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(power, c)| c * power as f64)
+        .collect();
+    let value = eval_complex(coefficients, z);
+    let slope = eval_complex(&derivative, z);
+    let magnitude = value.0.hypot(value.1);
+    let steepness = slope.0.hypot(slope.1);
+    if !magnitude.is_finite() || !steepness.is_finite() || steepness == 0.0 {
+        return f64::INFINITY;
+    }
+    magnitude / steepness
 }
 
 /// The simple real roots of a squarefree polynomial, ascending.
@@ -1079,6 +1321,139 @@ impl PolyZ {
         }
         roots.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
         Ok(roots)
+    }
+
+    /// `self` factored over the reals: the leading coefficient, the real
+    /// roots, and one representative per conjugate pair.
+    ///
+    /// ```text
+    /// f(x) = leading · ∏(x − rⱼ) · ∏((x − pₖ)² + qₖ²)
+    /// ```
+    ///
+    /// so that `|f|` can be evaluated — or its logarithm, which is usually
+    /// what a caller wants and what the factored form is good at, since the
+    /// product becomes a sum and the terms near a root do not cancel.
+    ///
+    /// [`Self::real_roots`] answers the smaller question and is cheaper. This
+    /// one is for callers that need the whole factorization, including the
+    /// quadratic factors: a conjugate pair close to the real axis makes `|f|`
+    /// dip as sharply as a real root does, and a model that folds the pairs
+    /// into a constant is wrong by however many orders of magnitude the dip
+    /// is deep.
+    ///
+    /// # Multiplicity is decided exactly, as it is for the real roots
+    ///
+    /// Repeated roots are settled in ℤ first, by squarefree decomposition, and
+    /// each root is emitted as many times as its multiplicity. Floating point
+    /// is used only to *locate* roots whose count is already known. This is
+    /// not only tidier: at a repeated root the polynomial and its derivative
+    /// vanish together, the iteration is ill conditioned, and a solver working
+    /// on the whole polynomial converges stably onto a conjugate pair that is
+    /// nowhere near the true root. Each squarefree factor has simple roots and
+    /// none of that arises.
+    ///
+    /// # Accuracy is reported, not enforced
+    ///
+    /// Every root carries [`ApproximateRoot::forward_error`]. How accurate is
+    /// accurate enough depends on what the roots are for, so no root is
+    /// refused for being poorly determined and nothing here is tuned to a
+    /// downstream tolerance.
+    ///
+    /// # Ordering
+    ///
+    /// Real roots ascend. Conjugate pairs ascend by real part, then by
+    /// imaginary part, and each appears once, in the upper half plane. The
+    /// order is part of the contract: a caller comparing two factorizations,
+    /// or hashing one, needs it not to depend on where the iteration happened
+    /// to start.
+    ///
+    /// # Errors
+    ///
+    /// [`FactorRealError::ZeroPolynomial`] has no leading coefficient and
+    /// every number as a root. [`FactorRealError::CoefficientOutOfRange`] — a
+    /// coefficient exceeds `f64`, so there is nothing to evaluate.
+    /// [`FactorRealError::DidNotConverge`] — an iterate left the finite range,
+    /// or the roots found do not account for the degree. A constant is not an
+    /// error: it factors as itself, with no roots.
+    pub fn factor_real(&self) -> Result<RealFactorization, FactorRealError> {
+        if self.is_zero() {
+            return Err(FactorRealError::ZeroPolynomial);
+        }
+        let whole = poly_to_f64(self).ok_or(FactorRealError::CoefficientOutOfRange)?;
+        let Some(degree) = trimmed_degree_f64(&whole) else {
+            return Err(FactorRealError::ZeroPolynomial);
+        };
+        let leading = whole[degree];
+
+        let mut real_roots = Vec::new();
+        let mut conjugate_pairs = Vec::new();
+        for (multiplicity, factor) in self.squarefree_decomposition() {
+            let coefficients =
+                poly_to_f64(&factor).ok_or(FactorRealError::CoefficientOutOfRange)?;
+            let Some(factor_degree) = trimmed_degree_f64(&coefficients) else {
+                continue;
+            };
+            if factor_degree == 0 {
+                continue;
+            }
+            let roots = durand_kerner(&coefficients, factor_degree)
+                .ok_or(FactorRealError::DidNotConverge)?;
+            if roots.len() != factor_degree {
+                return Err(FactorRealError::DidNotConverge);
+            }
+
+            let mut factor_real = Vec::new();
+            let mut factor_pairs = Vec::new();
+            for z in roots {
+                let error = forward_error(&coefficients, factor_degree, z);
+                // Real when the imaginary part is negligible beside the root's
+                // own magnitude. A fixed absolute tolerance would call a root
+                // at 10¹² real and one at 10⁻¹² complex, on the same relative
+                // evidence.
+                let scale = (z.0.abs() + z.1.abs()).max(1.0);
+                if z.1.abs() <= scale * REAL_ROOT_TOLERANCE {
+                    factor_real.push(ApproximateRoot {
+                        real: z.0,
+                        imaginary: 0.0,
+                        forward_error: error,
+                    });
+                } else if z.1 > 0.0 {
+                    factor_pairs.push(ApproximateRoot {
+                        real: z.0,
+                        imaginary: z.1,
+                        forward_error: error,
+                    });
+                }
+                // The conjugate in the lower half plane is dropped: it is the
+                // partner of one already kept, and listing both would double
+                // count in the very product this exists to support.
+            }
+            // The halves must account for the factor. If they do not, a root
+            // was classified as neither -- which means the conjugates did not
+            // pair, and the factorization would be silently incomplete.
+            if factor_real.len() + 2 * factor_pairs.len() != factor_degree {
+                return Err(FactorRealError::DidNotConverge);
+            }
+
+            for _ in 0..multiplicity {
+                real_roots.extend(factor_real.iter().copied());
+                conjugate_pairs.extend(factor_pairs.iter().copied());
+            }
+        }
+
+        real_roots.sort_by(|a, b| a.real.partial_cmp(&b.real).expect("finite"));
+        conjugate_pairs.sort_by(|a, b| {
+            a.real
+                .partial_cmp(&b.real)
+                .expect("finite")
+                .then(a.imaginary.partial_cmp(&b.imaginary).expect("finite"))
+        });
+
+        Ok(RealFactorization {
+            leading,
+            real_roots,
+            conjugate_pairs,
+        })
     }
 
     /// `[(k, sₖ)]` where `self = ∏ sₖᵏ` up to content and every `sₖ` is
@@ -4898,7 +5273,8 @@ mod tests {
 
 #[cfg(test)]
 mod real_root_tests {
-    use super::{PolyZ, RealRootError};
+    use super::{FactorRealError, PolyZ, RealFactorization, RealRootError};
+    use crate::{BigInt, BigUint};
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
@@ -4940,6 +5316,180 @@ mod real_root_tests {
         assert!(close(roots[0], -2.0), "{roots:?}");
         for r in &roots[1..] {
             assert!(close(*r, 1.0), "{roots:?}");
+        }
+    }
+
+    /// The factored form reproduces the polynomial it came from.
+    ///
+    /// The strongest available check, and the one a caller actually depends
+    /// on: evaluate `leading · ∏(x − rⱼ) · ∏((x − pₖ)² + qₖ²)` and compare it
+    /// against `f(x)` at a spread of points.
+    fn assert_factorization_reproduces(f: &PolyZ, factored: &RealFactorization) {
+        for x in [-7.0f64, -3.0, -1.5, -0.5, 0.0, 0.5, 1.5, 3.0, 7.0, 11.0] {
+            let mut modelled = factored.leading;
+            for root in &factored.real_roots {
+                modelled *= x - root.real;
+            }
+            for pair in &factored.conjugate_pairs {
+                let real = x - pair.real;
+                modelled *= real * real + pair.imaginary * pair.imaginary;
+            }
+            let exact: f64 = f.coefficients().iter().rev().fold(0.0f64, |acc, c| {
+                let c: f64 = c.to_str_radix(10).parse().expect("finite");
+                acc * x + c
+            });
+            let scale = exact.abs().max(1.0);
+            assert!(
+                (modelled - exact).abs() <= scale * 1e-9,
+                "at x = {x} the factorization gives {modelled}, f gives {exact}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_split_cubic_factors_into_three_real_roots() {
+        // (x − 1)(x − 2)(x − 3) = x³ − 6x² + 11x − 6.
+        let f = PolyZ::from_i64_slice(&[-6, 11, -6, 1]);
+        let factored = f.factor_real().expect("finite coefficients");
+        assert_eq!(factored.leading, 1.0);
+        assert_eq!(factored.real_roots.len(), 3);
+        assert!(factored.conjugate_pairs.is_empty());
+        assert_eq!(factored.degree(), 3);
+        for (found, want) in factored.real_roots.iter().zip([1.0, 2.0, 3.0]) {
+            assert!((found.real - want).abs() < 1e-9, "{found:?} != {want}");
+            assert_eq!(found.imaginary, 0.0, "a real root has no imaginary part");
+            assert!(found.forward_error < 1e-9, "{found:?} is poorly determined");
+        }
+        assert_factorization_reproduces(&f, &factored);
+    }
+
+    #[test]
+    fn a_cubic_with_one_real_root_reports_the_pair_once() {
+        // x³ + 3x − 7: one real root and one conjugate pair.
+        let f = PolyZ::from_i64_slice(&[-7, 3, 0, 1]);
+        let factored = f.factor_real().expect("finite coefficients");
+        assert_eq!(factored.real_roots.len(), 1);
+        assert_eq!(
+            factored.conjugate_pairs.len(),
+            1,
+            "one representative, not two: the conjugate is implied"
+        );
+        assert!(
+            factored.conjugate_pairs[0].imaginary > 0.0,
+            "the representative is the one in the upper half plane"
+        );
+        assert_eq!(factored.degree(), 3);
+        assert_factorization_reproduces(&f, &factored);
+    }
+
+    #[test]
+    fn the_leading_coefficient_comes_back() {
+        // 5(x − 1)(x − 2) = 5x² − 15x + 10. The monic factors cannot carry it,
+        // so a caller that forgot it would be wrong by a constant everywhere.
+        let f = PolyZ::from_i64_slice(&[10, -15, 5]);
+        let factored = f.factor_real().expect("finite coefficients");
+        assert_eq!(factored.leading, 5.0);
+        assert_factorization_reproduces(&f, &factored);
+    }
+
+    #[test]
+    fn a_repeated_root_is_settled_in_the_integers() {
+        // (x − 2)³(x + 1) — the case floating point cannot decide. The
+        // multiplicity comes from the squarefree decomposition, so the root is
+        // emitted three times and each copy is located in a factor where it is
+        // simple and well conditioned.
+        let f = PolyZ::from_i64_slice(&[-8, 12, -6, 1]).mul(&PolyZ::from_i64_slice(&[1, 1]));
+        let factored = f.factor_real().expect("finite coefficients");
+        assert_eq!(factored.degree(), 4);
+        assert_eq!(factored.real_roots.len(), 4);
+        let twos = factored
+            .real_roots
+            .iter()
+            .filter(|r| (r.real - 2.0).abs() < 1e-6)
+            .count();
+        assert_eq!(twos, 3, "the triple root is emitted three times");
+        for root in &factored.real_roots {
+            assert!(
+                root.forward_error < 1e-6,
+                "a root located in its squarefree factor is well determined: {root:?}"
+            );
+        }
+        assert_factorization_reproduces(&f, &factored);
+    }
+
+    #[test]
+    fn a_constant_factors_as_itself() {
+        let factored = PolyZ::from_i64_slice(&[7]).factor_real().expect("finite");
+        assert_eq!(factored.leading, 7.0);
+        assert_eq!(factored.degree(), 0);
+        assert!(factored.real_roots.is_empty());
+        assert!(factored.conjugate_pairs.is_empty());
+    }
+
+    #[test]
+    fn the_zero_polynomial_and_a_huge_coefficient_are_refused_separately() {
+        assert_eq!(
+            PolyZ::zero().factor_real(),
+            Err(FactorRealError::ZeroPolynomial)
+        );
+        // A coefficient far past f64's range: 2^2000.
+        let huge = BigInt::from_biguint(BigUint::from_u64(2).pow_u64(2000));
+        assert_eq!(
+            PolyZ::new(vec![huge, BigInt::one()]).factor_real(),
+            Err(FactorRealError::CoefficientOutOfRange),
+        );
+    }
+
+    #[test]
+    fn the_order_does_not_depend_on_where_the_iteration_started() {
+        // The ordering is part of the contract, so it is checked rather than
+        // left to whatever the sweep happened to produce.
+        let f = PolyZ::from_i64_slice(&[-6, 11, -6, 1]).mul(&PolyZ::from_i64_slice(&[5, 0, 1]));
+        let factored = f.factor_real().expect("finite coefficients");
+        let reals: Vec<f64> = factored.real_roots.iter().map(|r| r.real).collect();
+        let mut sorted = reals.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        assert_eq!(reals, sorted, "real roots must ascend");
+        let pairs: Vec<(f64, f64)> = factored
+            .conjugate_pairs
+            .iter()
+            .map(|r| (r.real, r.imaginary))
+            .collect();
+        let mut sorted_pairs = pairs.clone();
+        sorted_pairs.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        assert_eq!(pairs, sorted_pairs, "pairs must ascend by (re, im)");
+        assert_factorization_reproduces(&f, &factored);
+    }
+
+    #[test]
+    fn real_roots_and_factor_real_agree_about_the_real_ones() {
+        // Two entry points, one answer. They share the squarefree
+        // decomposition and nothing else -- `real_roots` bisects, this
+        // iterates in the complex plane -- so agreement is evidence and not a
+        // tautology.
+        for coefficients in [
+            vec![-6i64, 11, -6, 1],
+            vec![-7, 3, 0, 1],
+            vec![1, 0, 1],
+            vec![-8, 12, -6, 1],
+            vec![0, -1, 0, 1],
+        ] {
+            let f = PolyZ::from_i64_slice(&coefficients);
+            let bisected = f.real_roots().expect("finite");
+            let factored = f.factor_real().expect("finite");
+            assert_eq!(
+                bisected.len(),
+                factored.real_roots.len(),
+                "different real-root counts for {coefficients:?}"
+            );
+            for (a, b) in bisected.iter().zip(&factored.real_roots) {
+                let scale = a.abs().max(1.0);
+                assert!(
+                    (a - b.real).abs() <= scale * 1e-8,
+                    "{a} against {} for {coefficients:?}",
+                    b.real
+                );
+            }
         }
     }
 

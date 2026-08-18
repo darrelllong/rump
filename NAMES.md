@@ -181,8 +181,29 @@ valid, so neither the type nor its message calls the offending value
 | Rng | random::RandomSource | done | trait supplies bytes; it chooses no entropy source |
 | factoring real-root solver | polynomial::PolyZ::real_roots | done in Rump; consumer transfer | `Result<Vec<f64>, RealRootError>`; only generic root finding moves, `NormModel` and acceptance policy stay downstream |
 | no public real-root error | polynomial::RealRootError | done | an empty vector must not mean both "no real roots" and "a coefficient does not fit `f64`" |
+| factoring complex-root solver | polynomial::PolyZ::factor_real | done | `Result<RealFactorization, FactorRealError>`; the generic half of what `norm_model.rs` held |
+| — | polynomial::RealFactorization | done | leading coefficient, real roots, one representative per conjugate pair |
+| — | polynomial::ApproximateRoot | done | a root and its forward-error estimate; accuracy is reported, not enforced |
+| — | polynomial::FactorRealError | done | zero polynomial, coefficient out of range, did not converge |
 
-`real_roots` returns `Result` because the current downstream version conflates
+`factor_real` is the whole factorisation where `real_roots` is half of it, and
+it exists because a conjugate pair near the real axis makes `|f|` dip as
+sharply as a real root does: a consumer that folds the pairs into a constant
+is wrong by however many orders of magnitude the dip is deep.
+
+Four things the contract states, because each was a question the downstream
+version answered only by accident. Coefficient conversion failure and
+non-convergence are separate variants, and neither is an empty answer.
+Repeated roots are settled in ℤ by squarefree decomposition before any
+floating point happens, so multiplicity is exact and each root is located in a
+factor where it is simple. Ordering is fixed — real roots ascending, pairs
+ascending by `(re, im)` — so it does not depend on where the iteration
+started. The leading coefficient is returned, because monic factors cannot
+carry it. And every root carries a forward-error estimate rather than being
+refused for being poorly determined: how accurate is accurate enough is the
+caller's question, and no downstream tolerance is encoded here.
+
+`real_roots` returns `Result` because the earlier downstream version conflates
 two outcomes in one empty vector: a polynomial with no real roots, and a
 polynomial whose coefficients cannot be represented in `f64`. The first is an
 answer and the second is a refusal. Repeated roots are part of the contract
@@ -254,7 +275,8 @@ Transfer state is maintained in both this file and the ownership rows in the
 | polynomial::PolyMod symmetric_lift/change_modulus | gnfs/algebraic_square_root.rs | Rump canonical; consumer transfer |
 | lattice::gauss_reduce_weighted | gnfs/lattice.rs | Rump canonical; consumer transfer |
 | gf2 dense/sparse solvers | qs/linalg.rs and qs/lanczos.rs | landed in Rump; consumer switch and deletion pending |
-| polynomial::PolyZ::real_roots | gnfs/norm_model.rs | landed in Rump; consumer switch pending, NormModel stays downstream |
+| polynomial::PolyZ::real_roots | gnfs/norm_model.rs | done; `NormModel` stays downstream |
+| polynomial::PolyZ::factor_real | gnfs/norm_model.rs | done; the Durand–Kerner solver and the complex helpers moved, `NormModel` and the acceptance policy stay downstream |
 | integer::WordReciprocal | six division sites | Rump canonical; consumer transfer |
 | number_theory::SmoothnessBase | relation confirmation | Rump canonical; consumer transfer |
 
