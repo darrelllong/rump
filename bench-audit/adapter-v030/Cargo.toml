@@ -1,0 +1,10 @@
+[package]
+name = "adapter-v030"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rump = { package = "rust-mp", path = "../../../rump-audit/v0.3.0" }
+
+[profile.release]
+opt-level = 3
