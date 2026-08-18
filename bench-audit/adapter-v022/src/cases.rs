@@ -725,6 +725,46 @@ pub fn build(case: &str, c: &Corpus) -> Work {
                 }),
             }
         }
+        "stream_add" => {
+            // Operands are generated here, not read: see the note in
+            // corpus-gen's `stream_corpus`. The working set is the point of
+            // the case, so it is stated in the corpus header and checked
+            // against what was actually built.
+            let bits: usize = c.note("bits").and_then(|v| v.parse().ok()).expect("bits");
+            let count: usize = c.note("count").and_then(|v| v.parse().ok()).expect("count");
+            let seed: u64 = c
+                .note("seed")
+                .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                .expect("seed");
+            let mut gen = SplitMix(seed);
+            let mut wide = || {
+                let mut n = BigUint::zero();
+                // Set the top bit first so the buffer is sized once, then
+                // fill the rest; growing it a bit at a time would dominate.
+                n.set_bit(bits - 1);
+                for index in 0..bits - 1 {
+                    if gen.next_u64() & 1 == 1 {
+                        n.set_bit(index);
+                    }
+                }
+                n
+            };
+            let data: Vec<(BigUint, BigUint)> = (0..count).map(|_| (wide(), wide())).collect();
+            let results = vec![format!(
+                "{} {}",
+                data.len(),
+                data.iter().fold(0usize, |acc, (a, b)| acc ^ a.add_ref(b).bits())
+            )];
+            Work {
+                ops: data.len(),
+                results,
+                run: Box::new(move || {
+                    for (a, b) in &data {
+                        black_box(a.add_ref(b));
+                    }
+                }),
+            }
+        }
         other => panic!("unknown case {other}"),
     }
 }

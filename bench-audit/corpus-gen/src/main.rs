@@ -427,6 +427,30 @@ fn poly_roots_corpus(degree: usize, shape: &str, bits: usize, seed: u64) -> Corp
     c
 }
 
+/// A streaming workload, declared rather than enumerated.
+///
+/// The point of these cells is a working set past the last-level cache, which
+/// at 96 MiB would mean a 192 MiB hex corpus — the file would cost more to
+/// move between hosts than the measurement costs to take. So the corpus
+/// carries only the header, and both adapters expand it from the stated seed
+/// with the same generator. Determinism is unaffected: the expansion lives in
+/// the byte-identical `shared.rs`, and the digest check confirms the two
+/// revisions built the same operands.
+///
+/// Working set per traversal is `count × 3 × bits / 8` bytes: two operands
+/// read and one result written.
+fn stream_corpus(bits: usize, count: usize, seed: u64) -> Corpus {
+    let bytes = count * 3 * bits / 8;
+    let mut c = Corpus::new(&format!("stream-{bits}-{count}"));
+    c.note("kind", "streaming")
+        .note("bits", &bits.to_string())
+        .note("count", &count.to_string())
+        .note("seed", &format!("{seed:#x}"))
+        .note("working-set-bytes", &bytes.to_string())
+        .note("layout", "header only; the adapter expands the operands from the seed");
+    c
+}
+
 struct Corpus {
     name: String,
     header: Vec<String>,
@@ -683,6 +707,11 @@ fn main() {
     for &degree in &[4usize, 16, 64] {
         corpora.push(poly_roots_corpus(degree, "generic", 32, 0x9014 ^ degree as u64));
     }
+
+    // Streaming: one working set well past any last-level cache, and one
+    // that fits comfortably inside it, so the pair brackets the crossover.
+    corpora.push(stream_corpus(524_288, 512, 0x57ea_a001));
+    corpora.push(stream_corpus(524_288, 16, 0x57ea_a002));
 
     // Sampling bounds.
     for &bits in &[256usize, 2048] {

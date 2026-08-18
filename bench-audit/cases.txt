@@ -223,3 +223,10 @@ mod_sqrt prime-1024-1mod4-32
 mod_sqrt prime-1024-3mod4-32
 mod_sqrt prime-2048-1mod4-32
 mod_sqrt prime-2048-3mod4-32
+
+# Streaming: a working set well past any last-level cache (96 MiB) against one
+# that fits inside it (3 MiB), so the pair brackets the crossover. The operands
+# are expanded from the corpus header rather than enumerated; a 96 MiB working
+# set would otherwise mean a 192 MiB hex file.
+stream_add stream-524288-512
+stream_add stream-524288-16
