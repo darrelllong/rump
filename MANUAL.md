@@ -33,7 +33,7 @@ use rump::number_theory::{
     rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, valuation,
     SmoothnessBase,
 };
-use rump::polynomial::{PolyMod, PolyZ};
+use rump::polynomial::{PolyMod, PolyZ, RealRootError};
 use rump::random::{
     random_below, random_coprime_below, random_nonzero_below, random_probable_prime, RandomSource,
 };
@@ -1108,6 +1108,40 @@ assert_eq!(108u64 * 108 % 343, 2);
 // A symmetric lift recovers the integer polynomial it came from.
 let wide = BigUint::from_u64(2).pow_u64(96);
 assert_eq!(PolyMod::from_poly_z(&a, &wide).symmetric_lift(), a);
+```
+
+### Real roots
+
+`PolyZ::real_roots` returns the real roots ascending, each repeated according
+to its multiplicity. Multiplicities are settled exactly in ℤ first — by the
+squarefree decomposition, from repeated gcd with the derivative — and floating
+point is then used only to *locate* roots whose count is already known. That
+matters because a bisection sees a root only where the polynomial changes
+sign, so an even-multiplicity root is invisible to it, and two nearby simple
+roots are indistinguishable from one double root at `f64` precision.
+
+An empty `Ok` means no real roots, which is the ordinary answer for an
+even-degree polynomial. The two refusals are distinct: `RealRootError::ZeroPolynomial`
+(every real number is a root) and `RealRootError::CoefficientOutOfRange` (a
+coefficient does not fit `f64`, so the polynomial cannot be evaluated at all).
+
+```rust
+// (x−1)(x−2)(x−3)
+let f = PolyZ::from_i64_slice(&[-6, 11, -6, 1]);
+let roots = f.real_roots().expect("finite coefficients");
+assert_eq!(roots.len(), 3);
+assert!((roots[0] - 1.0).abs() < 1e-9);
+assert!((roots[2] - 3.0).abs() < 1e-9);
+
+// (x−2)²: a double root, returned twice — bisection alone cannot see it.
+let squared = PolyZ::from_i64_slice(&[4, -4, 1]);
+assert_eq!(squared.real_roots().expect("finite").len(), 2);
+
+// No real roots is an answer, not a failure.
+assert_eq!(PolyZ::from_i64_slice(&[1, 0, 1]).real_roots(), Ok(Vec::new()));
+
+// The zero polynomial is a refusal.
+assert_eq!(PolyZ::zero().real_roots(), Err(RealRootError::ZeroPolynomial));
 ```
 
 ## Lattice reduction

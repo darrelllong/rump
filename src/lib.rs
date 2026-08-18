@@ -116,7 +116,7 @@ pub mod number_theory {
 
 /// Univariate polynomials over ℤ and over a residue ring.
 pub mod polynomial {
-    pub use crate::poly::{PolyMod, PolyZ, MAX_ENUMERATED_ROOTS};
+    pub use crate::poly::{PolyMod, PolyZ, RealRootError, MAX_ENUMERATED_ROOTS};
 }
 
 /// Linear algebra over GF(2): null space, pruning, Block Lanczos.

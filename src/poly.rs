@@ -374,6 +374,158 @@ fn check_root_level_width(current: usize, adding: u64, limit: usize) {
     );
 }
 
+/// Why [`PolyZ::real_roots`] could not answer.
+///
+/// Distinguished from an empty result, which is an answer: a polynomial can
+/// genuinely have no real roots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RealRootError {
+    /// The zero polynomial: every real number is a root, so no list describes
+    /// the answer.
+    ZeroPolynomial,
+    /// A coefficient is too large to represent in `f64`, so the polynomial
+    /// cannot be evaluated in floating point at all. Returning "no roots"
+    /// would be a wrong answer, so the caller is told instead.
+    CoefficientOutOfRange,
+}
+
+impl core::fmt::Display for RealRootError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::ZeroPolynomial => "every real number is a root of the zero polynomial",
+            Self::CoefficientOutOfRange => "a coefficient does not fit f64",
+        })
+    }
+}
+
+impl std::error::Error for RealRootError {}
+
+/// Bisection steps: enough to exhaust `f64` resolution on any bracket.
+const REAL_ROOT_BISECTIONS: usize = 200;
+
+/// Ascending `f64` coefficients, or `None` if any does not fit.
+fn poly_to_f64(f: &PolyZ) -> Option<Vec<f64>> {
+    let coefficients: Vec<f64> = f
+        .coefficients()
+        .iter()
+        .map(|c| {
+            let magnitude = c.magnitude().to_f64_lossy();
+            if c.sign() == Sign::Negative {
+                -magnitude
+            } else {
+                magnitude
+            }
+        })
+        .collect();
+    coefficients
+        .iter()
+        .all(|c| c.is_finite())
+        .then_some(coefficients)
+}
+
+/// Horner evaluation at a real point, coefficients ascending.
+fn eval_f64(coefficients: &[f64], x: f64) -> f64 {
+    coefficients.iter().rev().fold(0.0, |acc, c| acc * x + c)
+}
+
+/// Cauchy's bound: every root lies within this of the origin.
+fn cauchy_bound_f64(coefficients: &[f64], degree: usize) -> f64 {
+    let leading = coefficients[degree];
+    let largest = coefficients[..degree]
+        .iter()
+        .fold(0.0f64, |acc, c| acc.max((c / leading).abs()));
+    1.0 + largest
+}
+
+/// Index of the highest non-zero coefficient.
+fn trimmed_degree_f64(coefficients: &[f64]) -> Option<usize> {
+    coefficients.iter().rposition(|c| *c != 0.0)
+}
+
+/// Bisects for a root in `[low, high]`, or `None` if the ends agree in sign.
+fn bisect_f64(coefficients: &[f64], mut low: f64, mut high: f64) -> Option<f64> {
+    let mut low_value = eval_f64(coefficients, low);
+    let high_value = eval_f64(coefficients, high);
+    if low_value == 0.0 {
+        return Some(low);
+    }
+    if high_value == 0.0 {
+        return Some(high);
+    }
+    if low_value.signum() == high_value.signum() {
+        return None;
+    }
+    for _ in 0..REAL_ROOT_BISECTIONS {
+        let middle = low + (high - low) / 2.0;
+        if middle <= low || middle >= high {
+            break; // exhausted f64 resolution
+        }
+        let value = eval_f64(coefficients, middle);
+        if value == 0.0 {
+            return Some(middle);
+        }
+        if value.signum() == low_value.signum() {
+            low = middle;
+            low_value = value;
+        } else {
+            high = middle;
+        }
+    }
+    Some(low + (high - low) / 2.0)
+}
+
+/// The simple real roots of a squarefree polynomial, ascending.
+///
+/// The real roots of `f′` split the line into intervals on which `f` is
+/// monotone, so each holds at most one root and one bisection finds it;
+/// recursing on the derivative produces those split points.
+///
+/// It finds only roots where `f` changes sign, which is why the caller must
+/// hand it a squarefree polynomial: an even-multiplicity root does not change
+/// sign and would be missed entirely.
+fn simple_real_roots(coefficients: &[f64]) -> Vec<f64> {
+    let Some(degree) = trimmed_degree_f64(coefficients) else {
+        return Vec::new();
+    };
+    if degree == 0 {
+        return Vec::new();
+    }
+    if degree == 1 {
+        return vec![-coefficients[0] / coefficients[1]];
+    }
+
+    let derivative: Vec<f64> = coefficients
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(power, c)| c * power as f64)
+        .collect();
+    let mut critical = simple_real_roots(&derivative);
+    critical.retain(|value| value.is_finite());
+    critical.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+
+    let bound = cauchy_bound_f64(coefficients, degree);
+    let mut edges = Vec::with_capacity(critical.len() + 2);
+    edges.push(-bound);
+    edges.extend(critical.iter().copied().filter(|v| v.abs() <= bound));
+    edges.push(bound);
+
+    let mut roots = Vec::new();
+    for window in edges.windows(2) {
+        let (low, high) = (window[0], window[1]);
+        if low >= high {
+            continue;
+        }
+        if let Some(root) = bisect_f64(coefficients, low, high) {
+            roots.push(root);
+        }
+    }
+    roots.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+    roots.dedup_by(|a, b| (*a - *b).abs() <= f64::EPSILON * a.abs().max(1.0) * 8.0);
+    roots
+}
+
 /// The number of non-zero coefficients — one linear pass against the
 /// quadratic work the answer decides.
 fn count_nonzero<T>(coeffs: &[T], is_zero: impl Fn(&T) -> bool) -> usize {
@@ -884,6 +1036,125 @@ impl PolyZ {
         }
         coeffs.push(remaining);
         Self::new(coeffs)
+    }
+
+    /// The real roots of `self`, ascending, each repeated according to its
+    /// multiplicity.
+    ///
+    /// # Multiplicity is decided exactly, not inferred
+    ///
+    /// A bisection finds a root only where the polynomial changes sign, so an
+    /// even-multiplicity root — where it touches zero and turns back — is
+    /// invisible to it, and two nearby simple roots are indistinguishable from
+    /// one double root at `f64` precision. Neither can be settled in floating
+    /// point.
+    ///
+    /// So the multiplicities are settled in ℤ first. The repeated factors of
+    /// `f` are exactly those it shares with `f′`, so the squarefree
+    /// decomposition `f = s₁ · s₂² · s₃³ · …` follows from repeated exact gcd
+    /// over the integers. Each `sₖ` is squarefree, so its real roots are
+    /// simple and bisection finds all of them, and each is emitted `k` times.
+    /// Floating point is then used only to *locate* roots whose count is
+    /// already known.
+    ///
+    /// # Errors
+    ///
+    /// [`RealRootError::ZeroPolynomial`] — every real number is a root, so no
+    /// list is the answer. [`RealRootError::CoefficientOutOfRange`] — a
+    /// coefficient exceeds `f64`, so the polynomial cannot be evaluated in
+    /// floating point at all. An empty `Ok` means what it says: no real roots,
+    /// which is the ordinary answer for an even-degree polynomial.
+    pub fn real_roots(&self) -> Result<Vec<f64>, RealRootError> {
+        if self.is_zero() {
+            return Err(RealRootError::ZeroPolynomial);
+        }
+        let mut roots = Vec::new();
+        for (multiplicity, factor) in self.squarefree_decomposition() {
+            let coefficients = poly_to_f64(&factor).ok_or(RealRootError::CoefficientOutOfRange)?;
+            for root in simple_real_roots(&coefficients) {
+                for _ in 0..multiplicity {
+                    roots.push(root);
+                }
+            }
+        }
+        roots.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        Ok(roots)
+    }
+
+    /// `[(k, sₖ)]` where `self = ∏ sₖᵏ` up to content and every `sₖ` is
+    /// squarefree and coprime to the others.
+    ///
+    /// The classical decomposition, exact over ℤ throughout. `g = gcd(f, f′)`
+    /// carries every repeated factor one power down, and `w = f/g` is the
+    /// radical — every distinct factor exactly once. Peeling
+    /// `y = gcd(w, g)` off `w` then leaves precisely the factors of
+    /// multiplicity `k` at step `k`.
+    ///
+    /// Dividing by `g` repeatedly instead does *not* work, and fails in a way
+    /// worth recording: for `(x − 2)²` it emits the root once at multiplicity
+    /// one and again at multiplicity two, for a total of three.
+    fn squarefree_decomposition(&self) -> Vec<(usize, Self)> {
+        let f = self.primitive_part();
+        if f.degree().unwrap_or(0) == 0 {
+            return Vec::new();
+        }
+        let mut g = f.gcd_over_z(&f.derivative());
+        let Some(mut w) = f.exact_div(&g) else {
+            return vec![(1, f)];
+        };
+
+        let mut out = Vec::new();
+        let mut multiplicity = 1usize;
+        while w.degree().unwrap_or(0) > 0 {
+            let y = w.gcd_over_z(&g);
+            if let Some(factor) = w.exact_div(&y) {
+                if factor.degree().unwrap_or(0) > 0 {
+                    out.push((multiplicity, factor));
+                }
+            }
+            let Some(next_g) = g.exact_div(&y) else { break };
+            g = next_g;
+            w = y;
+            multiplicity += 1;
+            // `w` shrinks or `g` does at every step, so this terminates; the
+            // guard is against a division that unexpectedly did not divide.
+            if multiplicity > f.degree().unwrap_or(0) + 1 {
+                break;
+            }
+        }
+        out
+    }
+
+    /// `self / divisor` when the division is exact, as a primitive part.
+    fn exact_div(&self, divisor: &Self) -> Option<Self> {
+        if divisor.is_zero() {
+            return None;
+        }
+        if divisor.degree() == Some(0) {
+            return Some(self.primitive_part());
+        }
+        let (quotient, remainder) = self.pseudo_div_rem(divisor);
+        remainder.is_zero().then(|| quotient.primitive_part())
+    }
+
+    /// The primitive gcd of two polynomials over ℤ, by the Euclidean algorithm
+    /// on pseudo-remainders.
+    ///
+    /// Each remainder is reduced to its primitive part, which is what keeps
+    /// the coefficient growth of a pseudo-remainder sequence in check.
+    fn gcd_over_z(&self, other: &Self) -> Self {
+        let mut a = self.primitive_part();
+        let mut b = other.primitive_part();
+        while !b.is_zero() {
+            let (_, remainder) = a.pseudo_div_rem(&b);
+            a = b;
+            b = if remainder.is_zero() {
+                remainder
+            } else {
+                remainder.primitive_part()
+            };
+        }
+        a
     }
 
     /// The remainder of `self` modulo a monic `divisor`, without forming the
@@ -4622,5 +4893,124 @@ mod tests {
             modulus = next;
         }
         panic!("the lift did not converge");
+    }
+}
+
+#[cfg(test)]
+mod real_root_tests {
+    use super::{PolyZ, RealRootError};
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
+    }
+
+    /// `(x−1)(x−2)(x−3)`: three simple roots, found and ordered.
+    #[test]
+    fn simple_roots_are_found_in_order() {
+        // x^3 − 6x^2 + 11x − 6
+        let f = PolyZ::from_i64_slice(&[-6, 11, -6, 1]);
+        let roots = f.real_roots().expect("finite coefficients");
+        assert_eq!(roots.len(), 3);
+        for (got, want) in roots.iter().zip([1.0, 2.0, 3.0]) {
+            assert!(close(*got, want), "{roots:?}");
+        }
+    }
+
+    /// `(x−2)²`: an even-multiplicity root, which never changes sign.
+    ///
+    /// Bisection alone cannot see this root at all, which is exactly why the
+    /// multiplicities are settled in ℤ before any floating point is used.
+    #[test]
+    fn an_even_multiplicity_root_is_found_and_repeated() {
+        // x^2 − 4x + 4
+        let f = PolyZ::from_i64_slice(&[4, -4, 1]);
+        let roots = f.real_roots().expect("finite coefficients");
+        assert_eq!(roots.len(), 2, "a double root is returned twice: {roots:?}");
+        assert!(close(roots[0], 2.0) && close(roots[1], 2.0), "{roots:?}");
+    }
+
+    /// `(x−1)³(x+2)`: mixed multiplicities in one polynomial.
+    #[test]
+    fn multiplicities_are_counted_per_root() {
+        // (x−1)^3 = x^3 − 3x^2 + 3x − 1; times (x+2):
+        // x^4 − x^3 − 3x^2 + 5x − 2
+        let f = PolyZ::from_i64_slice(&[-2, 5, -3, -1, 1]);
+        let roots = f.real_roots().expect("finite coefficients");
+        assert_eq!(roots.len(), 4, "{roots:?}");
+        assert!(close(roots[0], -2.0), "{roots:?}");
+        for r in &roots[1..] {
+            assert!(close(*r, 1.0), "{roots:?}");
+        }
+    }
+
+    /// No real roots is an answer, not a failure.
+    #[test]
+    fn no_real_roots_is_an_empty_ok() {
+        // x^2 + 1
+        let f = PolyZ::from_i64_slice(&[1, 0, 1]);
+        assert_eq!(f.real_roots(), Ok(Vec::new()));
+    }
+
+    /// The two outcomes the downstream version conflated in one empty vector.
+    #[test]
+    fn the_two_refusals_are_distinguishable_from_an_empty_answer() {
+        assert_eq!(
+            PolyZ::zero().real_roots(),
+            Err(RealRootError::ZeroPolynomial)
+        );
+
+        // A coefficient far past f64's range: 2^2000.
+        let huge =
+            crate::bigint::BigInt::from_biguint(crate::bigint::BigUint::from_u64(2).pow_u64(2000));
+        let f = PolyZ::new(vec![huge, crate::bigint::BigInt::one()]);
+        assert_eq!(
+            f.real_roots(),
+            Err(RealRootError::CoefficientOutOfRange),
+            "an unrepresentable coefficient must not report as 'no roots'"
+        );
+    }
+
+    /// Every returned root really is one: `|f(r)|` is small relative to the
+    /// scale of the terms that produced it.
+    #[test]
+    fn returned_roots_evaluate_to_approximately_zero() {
+        let cases = [
+            vec![-6i64, 11, -6, 1],
+            vec![4, -4, 1],
+            vec![-2, 5, -3, -1, 1],
+            vec![0, -1, 0, 1],
+            vec![-1, 0, 0, 0, 1],
+        ];
+        for coefficients in cases {
+            let f = PolyZ::from_i64_slice(&coefficients);
+            for root in f.real_roots().expect("finite") {
+                let value: f64 = coefficients
+                    .iter()
+                    .rev()
+                    .fold(0.0, |acc, c| acc * root + *c as f64);
+                let scale: f64 = coefficients
+                    .iter()
+                    .enumerate()
+                    .map(|(k, c)| (*c as f64).abs() * root.abs().powi(k as i32))
+                    .fold(0.0, f64::max);
+                assert!(
+                    value.abs() <= 1e-9 * scale.max(1.0),
+                    "f({root}) = {value} for {coefficients:?}"
+                );
+            }
+        }
+    }
+
+    /// A linear polynomial, and a constant with no roots at all.
+    #[test]
+    fn degenerate_degrees() {
+        // 2x − 6
+        let f = PolyZ::from_i64_slice(&[-6, 2]);
+        let roots = f.real_roots().expect("finite");
+        assert_eq!(roots.len(), 1);
+        assert!(close(roots[0], 3.0));
+
+        // A non-zero constant has no roots.
+        assert_eq!(PolyZ::from_i64_slice(&[7]).real_roots(), Ok(Vec::new()));
     }
 }

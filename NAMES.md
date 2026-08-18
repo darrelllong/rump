@@ -179,8 +179,8 @@ valid, so neither the type nor its message calls the offending value
 | MAX_ROOT_LEVEL | polynomial::MAX_ENUMERATED_ROOTS | done | names resource limit, not algorithm level |
 | Gf2m | finite_field::Gf2m | done | conventional field notation |
 | Rng | random::RandomSource | done | trait supplies bytes; it chooses no entropy source |
-| factoring real-root solver | polynomial::PolyZ::real_roots | pending | `Result<Vec<f64>, RealRootError>`; only generic root finding moves, `NormModel` and acceptance policy stay downstream |
-| no public real-root error | polynomial::RealRootError | pending | an empty vector must not mean both "no real roots" and "a coefficient does not fit `f64`" |
+| factoring real-root solver | polynomial::PolyZ::real_roots | done in Rump; consumer transfer | `Result<Vec<f64>, RealRootError>`; only generic root finding moves, `NormModel` and acceptance policy stay downstream |
+| no public real-root error | polynomial::RealRootError | done | an empty vector must not mean both "no real roots" and "a coefficient does not fit `f64`" |
 
 `real_roots` returns `Result` because the current downstream version conflates
 two outcomes in one empty vector: a polynomial with no real roots, and a
@@ -254,7 +254,7 @@ Transfer state is maintained in both this file and the ownership rows in the
 | polynomial::PolyMod symmetric_lift/change_modulus | gnfs/algebraic_square_root.rs | Rump canonical; consumer transfer |
 | lattice::gauss_reduce_weighted | gnfs/lattice.rs | Rump canonical; consumer transfer |
 | gf2 dense/sparse solvers | qs/linalg.rs and qs/lanczos.rs | landed in Rump; consumer switch and deletion pending |
-| polynomial::PolyZ::real_roots | gnfs/norm_model.rs | contract ledgered; Rump implementation next |
+| polynomial::PolyZ::real_roots | gnfs/norm_model.rs | landed in Rump; consumer switch pending, NormModel stays downstream |
 | integer::WordReciprocal | six division sites | Rump canonical; consumer transfer |
 | number_theory::SmoothnessBase | relation confirmation | Rump canonical; consumer transfer |
 

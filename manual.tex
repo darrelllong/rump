@@ -152,7 +152,7 @@ use rump::number_theory::{
     rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, valuation,
     SmoothnessBase,
 };
-use rump::polynomial::{PolyMod, PolyZ};
+use rump::polynomial::{PolyMod, PolyZ, RealRootError};
 use rump::random::{
     random_below, random_coprime_below, random_nonzero_below, random_probable_prime, RandomSource,
 };
@@ -1637,6 +1637,44 @@ assert_eq!(sqrt2, vec![BigUint::from_u64(108), BigUint::from_u64(235)]);
 // A symmetric lift recovers the integer polynomial it came from.
 let wide = BigUint::from_u64(2).pow_u64(96);
 assert_eq!(PolyMod::from_poly_z(&a, &wide).symmetric_lift(), a);
+\end{lstlisting}
+
+
+\subsection{Real roots}
+
+\code{PolyZ::real\_roots} returns the real roots ascending, each repeated
+according to its multiplicity, as
+\code{Result<Vec<f64>, RealRootError>}.
+
+Multiplicities are settled exactly in $\Z$ before any floating point is used.
+A bisection locates a root only where the polynomial changes sign, so a root
+of even multiplicity --- where $f$ touches zero and turns back --- is
+invisible to it, and two nearby simple roots cannot be told from one double
+root at \code{f64} precision. The squarefree decomposition
+$f = s_1 s_2^2 s_3^3 \cdots$, obtained by repeated exact gcd with $f'$, makes
+each $s_k$ squarefree, so its real roots are simple and bracketing finds all
+of them; each is then emitted $k$ times. Floating point only \emph{locates}
+roots whose count is already known.
+
+An empty \code{Ok} is an answer --- no real roots, the ordinary case for even
+degree. The refusals are distinct: \code{ZeroPolynomial}, where every real
+number is a root, and \code{CoefficientOutOfRange}, where a coefficient does
+not fit \code{f64} and the polynomial cannot be evaluated at all.
+
+\begin{lstlisting}
+// (x-1)(x-2)(x-3)
+let f = PolyZ::from_i64_slice(&[-6, 11, -6, 1]);
+let roots = f.real_roots().expect("finite coefficients");
+assert_eq!(roots.len(), 3);
+assert!((roots[0] - 1.0).abs() < 1e-9);
+
+// (x-2)^2: a double root, returned twice.
+let squared = PolyZ::from_i64_slice(&[4, -4, 1]);
+assert_eq!(squared.real_roots().expect("finite").len(), 2);
+
+// No real roots is an answer; the zero polynomial is a refusal.
+assert_eq!(PolyZ::from_i64_slice(&[1, 0, 1]).real_roots(), Ok(Vec::new()));
+assert_eq!(PolyZ::zero().real_roots(), Err(RealRootError::ZeroPolynomial));
 \end{lstlisting}
 
 \section{Lattice reduction: \code{lll\_reduce}}
