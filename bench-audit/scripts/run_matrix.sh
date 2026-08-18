@@ -62,6 +62,12 @@ node_of() {
 # behaviour it was built to stress.
 STREAM_CONCURRENCY="${RUMP_STREAM_CONCURRENCY:-2}"
 
+# Which per-cell driver to use. `run_case.sh` is the paired path;
+# `run_case_single.sh` measures one revision alone, for the APIs the baseline
+# does not have. The single-arm driver takes the program as its fourth
+# argument and ignores the fifth, so both are called the same way.
+CASE_SCRIPT="${RUMP_CASE_SCRIPT:-run_case.sh}"
+
 slot=0
 
 run_list() {
@@ -77,7 +83,7 @@ run_list() {
         (
             numactl --membind="$node" -- \
             taskset -c "$core" \
-            "$HERE/scripts/run_case.sh" "$case" "$corpus" "$outdir" "$BASELINE" "$CANDIDATE" \
+            "$HERE/scripts/$CASE_SCRIPT" "$case" "$corpus" "$outdir" "$BASELINE" "$CANDIDATE" \
                 > "$outdir.log" 2>&1
             echo "$case,$corpus,$core,$?,$outdir" >> "$OUTROOT/index.csv"
         ) &
