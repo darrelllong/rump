@@ -56,30 +56,49 @@ node_of() {
     echo 0
 }
 
+# Concurrency for the streaming cells. Their working sets are sized to exceed
+# cache on purpose; packing thirty-two of them onto one machine would have them
+# evict each other, so each would measure its neighbours rather than the memory
+# behaviour it was built to stress.
+STREAM_CONCURRENCY="${RUMP_STREAM_CONCURRENCY:-2}"
+
 slot=0
-pids=()
-while read -r case corpus; do
-    [ -z "${case:-}" ] && continue
-    case "$case" in \#*) continue ;; esac
 
-    core="$(core_for "$slot")"
-    node="$(node_of "$core")"
-    outdir="$OUTROOT/$case-$corpus"
-    (
-        numactl --membind="$node" -- \
-        taskset -c "$core" \
-        "$HERE/scripts/run_case.sh" "$case" "$corpus" "$outdir" "$BASELINE" "$CANDIDATE" \
-            > "$outdir.log" 2>&1
-        echo "$case,$corpus,$core,$?,$outdir" >> "$OUTROOT/index.csv"
-    ) &
-    pids+=($!)
-    slot=$(( slot + 1 ))
+run_list() {
+    # $1: concurrency, then the "case corpus" lines on stdin.
+    local limit="$1"
+    (( limit < 1 )) && limit=1
+    while read -r case corpus; do
+        [ -z "${case:-}" ] && continue
 
-    # Throttle to the requested concurrency.
-    while (( $(jobs -rp | wc -l) >= CONCURRENCY )); do
-        sleep 1
+        core="$(core_for "$slot")"
+        node="$(node_of "$core")"
+        outdir="$OUTROOT/$case-$corpus"
+        (
+            numactl --membind="$node" -- \
+            taskset -c "$core" \
+            "$HERE/scripts/run_case.sh" "$case" "$corpus" "$outdir" "$BASELINE" "$CANDIDATE" \
+                > "$outdir.log" 2>&1
+            echo "$case,$corpus,$core,$?,$outdir" >> "$OUTROOT/index.csv"
+        ) &
+        slot=$(( slot + 1 ))
+
+        # Throttle to the requested concurrency.
+        while (( $(jobs -rp | wc -l) >= limit )); do
+            sleep 1
+        done
     done
-done < "$CASELIST"
+    wait
+}
 
-wait
+# Two passes, because the streaming cells need the machine to themselves in a
+# way the rest do not. Comments are stripped once, here, so neither pass has to.
+cases_only() { grep -vE '^\s*(#|$)' "$CASELIST"; }
+
+echo "pass 1: non-streaming cells at concurrency $CONCURRENCY"
+cases_only | grep -v '^stream_' | run_list "$CONCURRENCY"
+
+echo "pass 2: streaming cells at concurrency $STREAM_CONCURRENCY"
+cases_only | grep '^stream_' | run_list "$STREAM_CONCURRENCY"
+
 echo "matrix complete: $(( $(wc -l < "$OUTROOT/index.csv") - 1 )) cells"
