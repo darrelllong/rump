@@ -94,6 +94,13 @@ def classify(cell):
     if cell["valid_mean"] is not None and abs(cell["valid_mean"] - 1.0) > 1e-12:
         return "inconclusive", "a reading reported valid=0: correctness failure"
 
+    # A single-arm cell measures an absolute cost, not a ratio, so the
+    # regression bounds have nothing to say about it: there is no baseline it
+    # could be a regression against. It is published when Pilot's interval
+    # meets the requirement, and read as a baseline for future comparison.
+    if cell["arm"] == "single":
+        return "baseline", "absolute cost; no baseline revision to compare against"
+
     low, high = cell["low"], cell["high"]
     if low > REGRESSION_BOUND:
         return "regression", f"CI entirely above {REGRESSION_BOUND}"
@@ -109,7 +116,7 @@ def classify(cell):
 def collect(results_root):
     cells = []
     for session_dir in sorted(Path(results_root).glob("session-*")):
-        for arm in ("paired", "null"):
+        for arm in ("paired", "null", "single"):
             arm_dir = session_dir / arm
             if not arm_dir.is_dir():
                 continue
@@ -118,10 +125,17 @@ def collect(results_root):
                 if not env:
                     continue
                 pi = read_pi(case_dir / "summary.csv")
-                ratio = pi.get("0", {})
-                base = pi.get("1", {})
-                cand = pi.get("2", {})
-                valid = pi.get("3", {})
+                if arm == "single":
+                    # No baseline to divide by: piid 0 is the absolute cost in
+                    # ns/op and piid 1 is the validity flag.
+                    ratio = pi.get("0", {})
+                    base = cand = {}
+                    valid = pi.get("1", {})
+                else:
+                    ratio = pi.get("0", {})
+                    base = pi.get("1", {})
+                    cand = pi.get("2", {})
+                    valid = pi.get("3", {})
 
                 def num(row, key):
                     try:
@@ -150,7 +164,8 @@ def collect(results_root):
                 else:
                     cell["low"] = cell["high"] = None
                 cell["observed_range"] = reading_range(
-                    case_dir / "readings.csv", "candidate_over_baseline"
+                    case_dir / "readings.csv",
+                    "ns_per_op" if arm == "single" else "candidate_over_baseline",
                 )
                 cell["verdict"], cell["reason"] = classify(cell)
                 cells.append(cell)

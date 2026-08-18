@@ -86,7 +86,12 @@ def main():
             continue
         published += 1
 
-        for name, value in (("mean", mean), ("baseline_ns", base), ("candidate_ns", cand)):
+        # A single-arm cell has no baseline or candidate column: it measures
+        # one revision's absolute cost, so only the mean is required.
+        required = [("mean", mean)]
+        if r["arm"] != "single":
+            required += [("baseline_ns", base), ("candidate_ns", cand)]
+        for name, value in required:
             if value is None or not (value > 0) or value != value or value in (
                 float("inf"), float("-inf")
             ):
@@ -107,7 +112,8 @@ def main():
         # invariant that caught a corrupted reduction in this repository before:
         # a mean outside its sample's range cannot describe that sample.
         readings = Path(r["dir"]) / "readings.csv"
-        observed = reading_range(readings, "candidate_over_baseline")
+        column = "ns_per_op" if r["arm"] == "single" else "candidate_over_baseline"
+        observed = reading_range(readings, column)
         if observed is None:
             problems.append(f"{tag}: no raw readings to bound the mean")
         elif mean is not None and not (observed[0] - 1e-12 <= mean <= observed[1] + 1e-12):
