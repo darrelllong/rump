@@ -6,13 +6,50 @@
 //! `rem` for `modulo`, `BarrettContext`/`MontgomeryContext`,
 //! `to_residue`/`mul_residue`, `mod_sqrt`, `PolyMod`.
 
-use crate::shared::{calibrate, timed, Corpus, Digest};
+use crate::shared::{calibrate, small_primes, timed, Corpus, Digest, SplitMix};
 use std::hint::black_box;
 
 use rump::modular::{mod_inverse, mod_pow, mod_sqrt, BarrettContext, MontgomeryContext};
-use rump::number_theory::{gcd, gcd_extended, jacobi};
+use rump::finite_field::Gf2m;
+use rump::lattice::lll_reduce;
+use rump::modular::mod_inverse_batch;
+use rump::number_theory::{
+    gcd, gcd_extended, jacobi, product_tree, remainder_tree, smooth_parts,
+};
+use rump::random::{random_below, random_coprime_below, random_probable_prime, RandomSource};
 use rump::polynomial::PolyZ;
 use rump::{BigInt, BigUint};
+
+/// Fixed seed, so a case's draws are a property of the case and not of the run.
+const SEED: u64 = 0x5eed_0fa4_d17d;
+
+/// Bridges the shared generator to this revision's random-source trait.
+struct Adapter(SplitMix);
+
+impl RandomSource for Adapter {
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.0.fill(dest);
+    }
+}
+
+/// A `width`-bit integer drawn from the fixed seed, independent of any corpus
+/// value. Deterministic, so both revisions reduce the same modulus.
+fn independent_modulus(width: usize) -> BigUint {
+    let mut draw = SplitMix(SEED);
+    let digits = width.div_ceil(4).max(2);
+    let mut hexits = String::with_capacity(digits);
+    while hexits.len() < digits {
+        hexits.push_str(&format!("{:016x}", draw.next_u64()));
+    }
+    hexits.truncate(digits);
+    // Force the top hexit high so the value really is `width` bits wide, and
+    // the last bit set so it is odd and shares no factor two with a leaf.
+    let mut bytes: Vec<char> = hexits.chars().collect();
+    bytes[0] = 'f';
+    let last = bytes.len() - 1;
+    bytes[last] = 'd';
+    hex(&bytes.into_iter().collect::<String>())
+}
 
 /// A built workload: operands already parsed, ready to time.
 pub struct Work {
@@ -279,19 +316,11 @@ pub fn build(case: &str, c: &Corpus) -> Work {
             }
         }
         "mod_sqrt" => {
-            let data: Vec<(BigUint, BigUint)> = pairs(c)
-                .into_iter()
-                .map(|(a, m)| {
-                    let mut p = m;
-                    if !p.is_odd() {
-                        p = p.add(&BigUint::one());
-                    }
-                    (a, p)
-                })
-                .collect();
+            let prime = hex(&c.items[0]);
+            let data: Vec<BigUint> = c.items[1..].iter().map(|s| hex(s)).collect();
             let results = data
                 .iter()
-                .map(|(a, p)| match mod_sqrt(a, p) {
+                .map(|a| match mod_sqrt(a, &prime) {
                     Some(r) => r.to_str_radix(16),
                     None => "none".to_string(),
                 })
@@ -300,8 +329,8 @@ pub fn build(case: &str, c: &Corpus) -> Work {
                 ops: data.len(),
                 results,
                 run: Box::new(move || {
-                    for (a, p) in &data {
-                        black_box(mod_sqrt(a, p));
+                    for a in &data {
+                        black_box(mod_sqrt(a, &prime));
                     }
                 }),
             }
@@ -427,6 +456,276 @@ pub fn build(case: &str, c: &Corpus) -> Work {
                     for (f, g) in &data {
                         black_box(f.mul(g));
                     }
+                }),
+            }
+        }
+        "gf2m_mul" => {
+            let field = Gf2m::new(hex(&c.items[0])).expect("irreducible field polynomial");
+            let elements: Vec<BigUint> = c.items[1..].iter().map(|s| hex(s)).collect();
+            let data: Vec<(BigUint, BigUint)> = elements
+                .chunks(2)
+                .filter(|ch| ch.len() == 2)
+                .map(|ch| (ch[0].clone(), ch[1].clone()))
+                .collect();
+            let results = data
+                .iter()
+                .map(|(a, b)| field.mul(a, b).to_str_radix(16))
+                .collect();
+            Work {
+                ops: data.len(),
+                results,
+                run: Box::new(move || {
+                    for (a, b) in &data {
+                        black_box(field.mul(a, b));
+                    }
+                }),
+            }
+        }
+        "gf2m_square" => {
+            let field = Gf2m::new(hex(&c.items[0])).expect("irreducible field polynomial");
+            let data: Vec<BigUint> = c.items[1..].iter().map(|s| hex(s)).collect();
+            let results = data.iter().map(|a| field.square(a).to_str_radix(16)).collect();
+            Work {
+                ops: data.len(),
+                results,
+                run: Box::new(move || {
+                    for a in &data {
+                        black_box(field.square(a));
+                    }
+                }),
+            }
+        }
+        "gf2m_inverse" => {
+            let field = Gf2m::new(hex(&c.items[0])).expect("irreducible field polynomial");
+            let data: Vec<BigUint> = c.items[1..]
+                .iter()
+                .map(|s| hex(s))
+                .filter(|a| !a.is_zero())
+                .collect();
+            let results = data
+                .iter()
+                .map(|a| match field.inverse(a) {
+                    Some(i) => i.to_str_radix(16),
+                    None => "none".to_string(),
+                })
+                .collect();
+            Work {
+                ops: data.len(),
+                results,
+                run: Box::new(move || {
+                    for a in &data {
+                        black_box(field.inverse(a));
+                    }
+                }),
+            }
+        }
+        "gf2m_sqrt" => {
+            let field = Gf2m::new(hex(&c.items[0])).expect("irreducible field polynomial");
+            let data: Vec<BigUint> = c.items[1..].iter().map(|s| hex(s)).collect();
+            let results = data.iter().map(|a| field.sqrt(a).to_str_radix(16)).collect();
+            Work {
+                ops: data.len(),
+                results,
+                run: Box::new(move || {
+                    for a in &data {
+                        black_box(field.sqrt(a));
+                    }
+                }),
+            }
+        }
+        "lattice_lll" => {
+            // One basis per group; the reduction is in place, so each timed
+            // traversal works on a fresh clone. Cloning is inside the loop
+            // because the operation consumes its input, and the same clone cost
+            // is charged to both revisions identically.
+            let dimension: usize = c
+                .note("dimension")
+                .and_then(|d| d.parse().ok())
+                .expect("lattice corpus declares a dimension");
+            let bases: Vec<Vec<Vec<BigInt>>> = c
+                .groups
+                .iter()
+                .map(|g| {
+                    g.chunks(dimension)
+                        .map(|row| {
+                            row.iter()
+                                .map(|s| BigInt::from_biguint(hex(s)))
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            let results = bases
+                .iter()
+                .map(|b| {
+                    let mut work = b.clone();
+                    lll_reduce(&mut work);
+                    let mut out = String::new();
+                    for row in &work {
+                        for entry in row {
+                            out.push_str(&entry.to_str_radix(16));
+                            out.push(',');
+                        }
+                        out.push(';');
+                    }
+                    out
+                })
+                .collect();
+            Work {
+                ops: bases.len(),
+                results,
+                run: Box::new(move || {
+                    for b in &bases {
+                        let mut work = b.clone();
+                        lll_reduce(&mut work);
+                        black_box(&work);
+                    }
+                }),
+            }
+        }
+        "batch_mod_inverse" => {
+            let values: Vec<BigUint> = singles(c);
+            // A modulus coprime to the batch: the largest value plus two, made
+            // odd, so inversion succeeds for the whole batch.
+            let modulus = values
+                .iter()
+                .max()
+                .expect("non-empty batch")
+                .add(&BigUint::from_u64(2));
+            let results = match mod_inverse_batch(&values, &modulus) {
+                Some(v) => v.iter().map(|i| i.to_str_radix(16)).collect(),
+                None => vec!["none".to_string()],
+            };
+            Work {
+                ops: 1,
+                results,
+                run: Box::new(move || {
+                    black_box(mod_inverse_batch(&values, &modulus));
+                }),
+            }
+        }
+        "batch_smooth_parts" => {
+            let values: Vec<BigUint> = singles(c);
+            let primes = small_primes(512);
+            let results = smooth_parts(&values, &primes)
+                .iter()
+                .map(|s| s.to_str_radix(16))
+                .collect();
+            Work {
+                ops: 1,
+                results,
+                run: Box::new(move || {
+                    black_box(smooth_parts(&values, &primes));
+                }),
+            }
+        }
+        "rand_below" => {
+            let bounds: Vec<BigUint> = singles(c);
+            let results = {
+                let mut rng = Adapter(SplitMix(SEED));
+                bounds
+                    .iter()
+                    .map(|b| match random_below(&mut rng, b) {
+                        Some(v) => v.to_str_radix(16),
+                        None => "none".to_string(),
+                    })
+                    .collect()
+            };
+            Work {
+                ops: bounds.len(),
+                results,
+                run: Box::new(move || {
+                    let mut rng = Adapter(SplitMix(SEED));
+                    for b in &bounds {
+                        black_box(random_below(&mut rng, b));
+                    }
+                }),
+            }
+        }
+        "rand_coprime_below" => {
+            let bounds: Vec<BigUint> = singles(c);
+            // 2·3·5·7·11·13. Only φ(30030)/30030 ≈ 0.19 of the residues are
+            // coprime to it, so roughly four draws in five are rejected — the
+            // rejection loop is what this case is here to measure.
+            let coprime_to = BigUint::from_u64(30030);
+            let results = {
+                let mut rng = Adapter(SplitMix(SEED));
+                bounds
+                    .iter()
+                    .map(|b| match random_coprime_below(&mut rng, b, &coprime_to) {
+                        Some(v) => v.to_str_radix(16),
+                        None => "none".to_string(),
+                    })
+                    .collect()
+            };
+            Work {
+                ops: bounds.len(),
+                results,
+                run: Box::new(move || {
+                    let mut rng = Adapter(SplitMix(SEED));
+                    for b in &bounds {
+                        black_box(random_coprime_below(&mut rng, b, &coprime_to));
+                    }
+                }),
+            }
+        }
+        "rand_probable_prime" => {
+            // The bit width comes from the corpus note, not from the operands:
+            // this sampler takes a width, and the corpus is here to name it.
+            let bits: usize = c
+                .note("bits")
+                .and_then(|b| b.parse().ok())
+                .expect("bound corpus declares a width");
+            let results = {
+                let mut rng = Adapter(SplitMix(SEED));
+                vec![match random_probable_prime(&mut rng, bits) {
+                    Some(v) => v.to_str_radix(16),
+                    None => "none".to_string(),
+                }]
+            };
+            Work {
+                ops: 1,
+                results,
+                run: Box::new(move || {
+                    let mut rng = Adapter(SplitMix(SEED));
+                    black_box(random_probable_prime(&mut rng, bits));
+                }),
+            }
+        }
+        "batch_product_tree" => {
+            let values: Vec<BigUint> = singles(c);
+            let tree = product_tree(&values);
+            let results = match tree.root() {
+                Some(root) => vec![root.to_str_radix(16)],
+                None => vec!["empty".to_string()],
+            };
+            Work {
+                ops: 1,
+                results,
+                run: Box::new(move || {
+                    black_box(product_tree(&values));
+                }),
+            }
+        }
+        "batch_remainder_tree" => {
+            let values: Vec<BigUint> = singles(c);
+            let tree = product_tree(&values);
+            // A modulus drawn independently of the batch, at the width of the
+            // product. `root + k` for small `k` is what Bernstein's algorithm
+            // is *not* used for: it makes every remainder equal to `k`, which
+            // both trivialises the arithmetic and reduces the digest to a
+            // restatement of the batch size.
+            let width = tree.root().map_or(64, BigUint::bits);
+            let modulus = independent_modulus(width);
+            let results = remainder_tree(&tree, &modulus)
+                .iter()
+                .map(|r| r.to_str_radix(16))
+                .collect();
+            Work {
+                ops: 1,
+                results,
+                run: Box::new(move || {
+                    black_box(remainder_tree(&tree, &modulus));
                 }),
             }
         }

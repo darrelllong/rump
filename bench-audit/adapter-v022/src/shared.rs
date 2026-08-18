@@ -113,3 +113,41 @@ pub fn calibrate(target_ms: f64, mut body: impl FnMut()) -> usize {
         repeat = (repeat * factor.max(2)).max(repeat + 1);
     }
 }
+
+/// SplitMix64 (Steele, Lea & Flood, OOPSLA 2014), the same generator the
+/// corpus uses. Reseeded at the start of every timed traversal so both
+/// revisions draw the identical byte stream and therefore take the identical
+/// number of rejection rounds — otherwise the sampler comparison would be
+/// measuring two different amounts of work.
+pub struct SplitMix(pub u64);
+
+impl SplitMix {
+    pub fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    pub fn fill(&mut self, dest: &mut [u8]) {
+        for chunk in dest.chunks_mut(8) {
+            let word = self.next_u64().to_le_bytes();
+            chunk.copy_from_slice(&word[..chunk.len()]);
+        }
+    }
+}
+
+/// The first `count` primes, by trial division. Small and deterministic, so
+/// the smoothness base is identical in both adapters without a corpus file.
+pub fn small_primes(count: usize) -> Vec<u64> {
+    let mut primes: Vec<u64> = Vec::with_capacity(count);
+    let mut candidate = 2u64;
+    while primes.len() < count {
+        if primes.iter().take_while(|p| *p * *p <= candidate).all(|p| candidate % p != 0) {
+            primes.push(candidate);
+        }
+        candidate += 1;
+    }
+    primes
+}

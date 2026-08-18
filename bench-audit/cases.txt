@@ -113,8 +113,6 @@ mod_pow exp-2048-e256-8
 mod_pow exp-2048-full-8
 mod_inverse pair-256-dense-32
 mod_inverse pair-1024-dense-32
-mod_sqrt pair-256-dense-32
-mod_sqrt pair-1024-dense-32
 barrett_new modulus-odd-64-16
 barrett_new modulus-odd-256-16
 barrett_new modulus-odd-1024-16
@@ -140,3 +138,88 @@ poly_mul poly-32-64-8
 poly_mul poly-96-64-8
 poly_mul poly-128-64-8
 poly_mul poly-32-256-8
+
+# GF(2^m), lattices, batch algorithms and sampling. Added after the first
+# session; the paired matrix above was measured without them.
+#
+# `rand_probable_prime` is a single draw from a right-skewed distribution at a
+# fixed seed, so its absolute cost is the luck of that seed and not a
+# representative prime-search time. The paired ratio is still sound: both
+# revisions consume the identical byte stream and test the identical
+# candidates.
+gf2m_mul gf2m-163-8
+gf2m_square gf2m-163-8
+gf2m_inverse gf2m-163-8
+gf2m_sqrt gf2m-163-8
+gf2m_mul gf2m-233-8
+gf2m_square gf2m-233-8
+gf2m_inverse gf2m-233-8
+gf2m_sqrt gf2m-233-8
+gf2m_mul gf2m-571-8
+gf2m_square gf2m-571-8
+gf2m_inverse gf2m-571-8
+gf2m_sqrt gf2m-571-8
+lattice_lll lattice-2-32-random-4
+lattice_lll lattice-2-128-random-4
+lattice_lll lattice-2-512-random-4
+lattice_lll lattice-8-32-random-4
+lattice_lll lattice-8-128-random-4
+lattice_lll lattice-8-512-random-4
+lattice_lll lattice-16-32-random-4
+lattice_lll lattice-16-128-random-4
+lattice_lll lattice-16-512-random-4
+lattice_lll lattice-32-32-random-4
+lattice_lll lattice-32-128-random-4
+lattice_lll lattice-32-512-random-4
+lattice_lll lattice-8-128-illcond-4
+lattice_lll lattice-8-128-neardep-4
+batch_product_tree batch-1-256
+batch_remainder_tree batch-1-256
+batch_smooth_parts batch-1-256
+batch_mod_inverse batch-1-256
+batch_product_tree batch-8-256
+batch_remainder_tree batch-8-256
+batch_smooth_parts batch-8-256
+batch_mod_inverse batch-8-256
+batch_product_tree batch-64-256
+batch_remainder_tree batch-64-256
+batch_smooth_parts batch-64-256
+batch_mod_inverse batch-64-256
+batch_product_tree batch-512-256
+batch_remainder_tree batch-512-256
+batch_smooth_parts batch-512-256
+batch_mod_inverse batch-512-256
+batch_product_tree batch-4096-256
+batch_remainder_tree batch-4096-256
+batch_smooth_parts batch-4096-256
+batch_mod_inverse batch-4096-256
+batch_product_tree batch-512-64
+batch_remainder_tree batch-512-64
+batch_smooth_parts batch-512-64
+batch_mod_inverse batch-512-64
+batch_product_tree batch-512-1024
+batch_remainder_tree batch-512-1024
+batch_smooth_parts batch-512-1024
+batch_mod_inverse batch-512-1024
+rand_below bound-256-below2k-16
+rand_coprime_below bound-256-below2k-16
+rand_below bound-256-abovehalf-16
+rand_coprime_below bound-256-abovehalf-16
+rand_probable_prime bound-256-below2k-16
+rand_below bound-2048-below2k-16
+rand_coprime_below bound-2048-below2k-16
+rand_below bound-2048-abovehalf-16
+rand_coprime_below bound-2048-abovehalf-16
+rand_probable_prime bound-2048-below2k-16
+
+# Modular square roots, over genuinely prime moduli in both congruence
+# classes. The earlier mod_sqrt cells used random odd moduli, which are not
+# prime, so they measured the rejection exit and never computed a root.
+mod_sqrt prime-256-1mod4-32
+mod_sqrt prime-256-3mod4-32
+mod_sqrt prime-512-1mod4-32
+mod_sqrt prime-512-3mod4-32
+mod_sqrt prime-1024-1mod4-32
+mod_sqrt prime-1024-3mod4-32
+mod_sqrt prime-2048-1mod4-32
+mod_sqrt prime-2048-3mod4-32
