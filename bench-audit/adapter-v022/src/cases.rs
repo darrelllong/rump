@@ -63,6 +63,9 @@ impl Work {
         }
         d.finish()
     }
+    pub fn results(&self) -> &[String] {
+        &self.results
+    }
     pub fn calibrate(&mut self) -> usize {
         calibrate(20.0, &mut *self.run)
     }

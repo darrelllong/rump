@@ -16,7 +16,12 @@ use rump::modular::mod_inverse_batch;
 use rump::number_theory::{
     gcd, gcd_extended, jacobi, product_tree, remainder_tree, smooth_parts,
 };
+use rump::gf2::{block_lanczos_dependencies, dense_null_space, prune_singletons};
+use rump::lattice::gauss_reduce_weighted;
+use rump::integer::WordReciprocal;
+use rump::number_theory::SmoothnessBase;
 use rump::random::{random_below, random_coprime_below, random_probable_prime, RandomSource};
+use std::num::NonZeroU64;
 use rump::polynomial::PolyZ;
 use rump::{BigInt, BigUint};
 
@@ -51,6 +56,45 @@ fn independent_modulus(width: usize) -> BigUint {
     hex(&bytes.into_iter().collect::<String>())
 }
 
+/// Reads a packed GF(2) matrix: one row per line, space-separated hex words,
+/// column `c` at bit `c % 64` of word `c / 64`.
+fn gf2_matrix(c: &Corpus) -> (Vec<Vec<u64>>, usize) {
+    let columns: usize = c
+        .note("columns")
+        .and_then(|v| v.parse().ok())
+        .expect("gf2 matrix corpus declares a column count");
+    let rows = c
+        .items
+        .iter()
+        .map(|line| {
+            line.split_whitespace()
+                .map(|w| u64::from_str_radix(w, 16).expect("hex word"))
+                .collect()
+        })
+        .collect();
+    (rows, columns)
+}
+
+/// Word-sized divisors and dividends from a corpus of wide operands: the low
+/// 64 bits of each. Divisors are forced nonzero, since the reciprocal is only
+/// defined for a nonzero divisor.
+fn word_pairs(c: &Corpus) -> (Vec<NonZeroU64>, Vec<u64>) {
+    let mut divisors = Vec::new();
+    let mut values = Vec::new();
+    for pair in c.items.chunks(2) {
+        if pair.len() < 2 {
+            break;
+        }
+        let low = |s: &String| {
+            let tail = &s[s.len().saturating_sub(16)..];
+            u64::from_str_radix(tail, 16).unwrap_or(1)
+        };
+        divisors.push(NonZeroU64::new(low(&pair[0])).unwrap_or(NonZeroU64::MIN));
+        values.push(low(&pair[1]));
+    }
+    (divisors, values)
+}
+
 /// A built workload: operands already parsed, ready to time.
 pub struct Work {
     /// Operations per traversal, for the ns/op conversion.
@@ -67,6 +111,9 @@ impl Work {
             d.add(r);
         }
         d.finish()
+    }
+    pub fn results(&self) -> &[String] {
+        &self.results
     }
     pub fn calibrate(&mut self) -> usize {
         calibrate(20.0, &mut *self.run)
@@ -726,6 +773,184 @@ pub fn build(case: &str, c: &Corpus) -> Work {
                 results,
                 run: Box::new(move || {
                     black_box(remainder_tree(&tree, &modulus));
+                }),
+            }
+        }
+        // ---- v0.3.0-only cases -------------------------------------------
+        //
+        // These APIs do not exist in v0.2.2, so there is nothing to pair them
+        // against. They are measured for an absolute baseline, and the paired
+        // wrapper is not used on them.
+        "gf2_dense_null_space" => {
+            let (rows, columns) = gf2_matrix(c);
+            let results = dense_null_space(&rows, columns)
+                .iter()
+                .map(|dep| {
+                    let mut t = String::new();
+                    for index in dep {
+                        t.push_str(&index.to_string());
+                        t.push(',');
+                    }
+                    t
+                })
+                .collect();
+            Work {
+                ops: 1,
+                results,
+                run: Box::new(move || {
+                    black_box(dense_null_space(&rows, columns));
+                }),
+            }
+        }
+        "gf2_prune_singletons" => {
+            let (rows, columns) = gf2_matrix(c);
+            let pruned = prune_singletons(&rows, columns);
+            let results = vec![format!("{} {}", pruned.rows().len(), pruned.columns())];
+            Work {
+                ops: 1,
+                results,
+                run: Box::new(move || {
+                    black_box(prune_singletons(&rows, columns));
+                }),
+            }
+        }
+        "gf2_block_lanczos" => {
+            let (rows, columns) = gf2_matrix(c);
+            // Reseeded per traversal: the solver is randomised, and a fixed
+            // seed is what makes its cost a property of the matrix rather
+            // than of where the generator happened to be.
+            let results = {
+                let mut rng = Adapter(SplitMix(SEED));
+                match block_lanczos_dependencies(&rows, columns, &mut rng) {
+                    Some(d) => d
+                        .iter()
+                        .map(|dep| {
+                            let mut t = String::new();
+                            for index in dep {
+                                t.push_str(&index.to_string());
+                                t.push(',');
+                            }
+                            t
+                        })
+                        .collect(),
+                    None => vec!["none".to_string()],
+                }
+            };
+            Work {
+                ops: 1,
+                results,
+                run: Box::new(move || {
+                    let mut rng = Adapter(SplitMix(SEED));
+                    black_box(block_lanczos_dependencies(&rows, columns, &mut rng));
+                }),
+            }
+        }
+        "poly_real_roots" => {
+            let poly = PolyZ::new(
+                c.items
+                    .iter()
+                    .map(|line| BigInt::from_str_radix(line, 10).expect("signed decimal"))
+                    .collect(),
+            );
+            // The roots are f64, so the digest rounds them: printing full
+            // precision would make the digest depend on the last bit of a
+            // bisection, which is not the property being checked.
+            let results = match poly.real_roots() {
+                Ok(roots) => roots.iter().map(|r| format!("{r:.6}")).collect(),
+                Err(e) => vec![format!("{e}")],
+            };
+            Work {
+                ops: 1,
+                results,
+                run: Box::new(move || {
+                    black_box(poly.real_roots().ok());
+                }),
+            }
+        }
+        "word_reciprocal_rem" => {
+            let (divisors, values) = word_pairs(c);
+            let reciprocals: Vec<WordReciprocal> =
+                divisors.iter().map(|d| WordReciprocal::new(*d)).collect();
+            let results = reciprocals
+                .iter()
+                .zip(values.iter())
+                .map(|(r, v): (&WordReciprocal, &u64)| format!("{}", r.rem(*v)))
+                .collect();
+            Work {
+                ops: values.len(),
+                results,
+                run: Box::new(move || {
+                    for (r, v) in reciprocals.iter().zip(values.iter()) {
+                        black_box(r.rem(*v));
+                    }
+                }),
+            }
+        }
+        "word_reciprocal_div_rem" => {
+            let (divisors, values) = word_pairs(c);
+            let reciprocals: Vec<WordReciprocal> =
+                divisors.iter().map(|d| WordReciprocal::new(*d)).collect();
+            let results = reciprocals
+                .iter()
+                .zip(values.iter())
+                .map(|(r, v): (&WordReciprocal, &u64)| {
+                    let (q, m) = r.div_rem(*v);
+                    format!("{q} {m}")
+                })
+                .collect();
+            Work {
+                ops: values.len(),
+                results,
+                run: Box::new(move || {
+                    for (r, v) in reciprocals.iter().zip(values.iter()) {
+                        black_box(r.div_rem(*v));
+                    }
+                }),
+            }
+        }
+        "smoothness_base_new" => {
+            let primes = small_primes(1024);
+            let results = vec![match SmoothnessBase::new(&primes) {
+                Ok(_) => "ok".to_string(),
+                Err(e) => format!("{e}"),
+            }];
+            Work {
+                ops: 1,
+                results,
+                run: Box::new(move || {
+                    black_box(SmoothnessBase::new(&primes).ok());
+                }),
+            }
+        }
+        "lattice_gauss_weighted" => {
+            // 2×2 bases only, which is what the weighted reduction takes.
+            let weights = [
+                NonZeroU64::new(1).expect("nonzero"),
+                NonZeroU64::new(3).expect("nonzero"),
+            ];
+            let bases: Vec<[[i128; 2]; 2]> = c
+                .groups
+                .iter()
+                .filter(|g| g.len() >= 4)
+                .map(|g| {
+                    let e = |i: usize| i128::from_str_radix(&g[i], 16).unwrap_or(1);
+                    [[e(0), e(1)], [e(2), e(3)]]
+                })
+                .collect();
+            let results = bases
+                .iter()
+                .map(|b| match gauss_reduce_weighted(*b, weights) {
+                    Ok(r) => format!("{r:?}"),
+                    Err(e) => format!("{e}"),
+                })
+                .collect();
+            Work {
+                ops: bases.len(),
+                results,
+                run: Box::new(move || {
+                    for b in &bases {
+                        black_box(gauss_reduce_weighted(*b, weights));
+                    }
                 }),
             }
         }

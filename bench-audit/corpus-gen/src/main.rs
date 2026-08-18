@@ -373,12 +373,41 @@ fn poly_roots_corpus(degree: usize, shape: &str, bits: usize, seed: u64) -> Corp
     let coefficients: Vec<i128> = match shape {
         "split" => {
             // ∏ (x − r) for r = 1..=degree: `degree` distinct real roots.
+            //
+            // The degree is capped low, for two separate reasons.
+            //
+            // The constant term is `degree!`, which passes i128 at degree 34.
+            // The arithmetic below is checked rather than wrapping, because a
+            // release build wraps silently: an earlier version of this
+            // generator emitted a degree-64 "split" polynomial whose
+            // coefficients were wrap artefacts and whose roots were not
+            // 1..64 at all.
+            //
+            // The binding limit is smaller and is conditioning, not range.
+            // `∏ (x − r)` over `r = 1..n` is Wilkinson's polynomial, whose
+            // roots are famously hypersensitive to its coefficients; since
+            // `real_roots` isolates over f64, the isolator is working on a
+            // different polynomial than the one written down. Measured: at
+            // degree 32 it returns 8 roots rather than 32, drifting to 8.07
+            // where 8 was meant, and at degree 16 the middle roots are
+            // already wrong in the fifth decimal. Neither is a defect in
+            // `real_roots` — it is what f64 root isolation does to an
+            // ill-conditioned basis — but both make a poor benchmark input
+            // and a digest that would not survive a change of host rounding.
+            // 12 is the largest degree at which every root returns exact.
+            assert!(
+                degree <= 12,
+                "split degree {degree} is past the point where f64 isolation \
+                 recovers the roots; see the note above"
+            );
             let mut poly: Vec<i128> = vec![1];
             for r in 1..=degree as i128 {
                 let mut next = vec![0i128; poly.len() + 1];
                 for (i, &a) in poly.iter().enumerate() {
-                    next[i + 1] += a;
-                    next[i] -= a * r;
+                    next[i + 1] = next[i + 1].checked_add(a).expect("coefficient fits i128");
+                    next[i] = next[i]
+                        .checked_sub(a.checked_mul(r).expect("coefficient fits i128"))
+                        .expect("coefficient fits i128");
                 }
                 poly = next;
             }
@@ -648,8 +677,10 @@ fn main() {
     }
 
     // Integer polynomials for real-root isolation.
-    for &degree in &[4usize, 16, 64] {
+    for &degree in &[4usize, 8, 12] {
         corpora.push(poly_roots_corpus(degree, "split", 32, 0x9013 ^ degree as u64));
+    }
+    for &degree in &[4usize, 16, 64] {
         corpora.push(poly_roots_corpus(degree, "generic", 32, 0x9014 ^ degree as u64));
     }
 

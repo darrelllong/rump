@@ -1,6 +1,6 @@
 //! Rump performance-audit adapter, v0.3.0 API names.
 //!
-//! Protocol: `adapter --case NAME --corpus PATH [--repeat N] [--emit time|digest|calibrate]`
+//! Protocol: `adapter --case NAME --corpus PATH [--repeat N] [--emit time|digest|calibrate|results]`
 //!
 //! `--emit digest` prints a deterministic digest of canonicalized results and
 //! no timing. `--emit calibrate` prints the repeat count reaching 20 ms.
@@ -33,6 +33,14 @@ fn main() {
 
     match emit.as_str() {
         "digest" => println!("{}", work.digest()),
+        // The canonical results themselves, for checking that a case
+        // computes what its name claims rather than only that both
+        // revisions compute the same thing. Never used while timing.
+        "results" => {
+            for line in work.results() {
+                println!("{line}");
+            }
+        }
         "calibrate" => println!("{}", work.calibrate()),
         "time" => {
             let ns = work.time(repeat);

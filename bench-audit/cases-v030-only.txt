@@ -1,0 +1,37 @@
+# case corpus
+#
+# APIs introduced in v0.3.0. There is no v0.2.2 counterpart, so these cells are
+# measured for an absolute baseline and never run through the paired wrapper —
+# a ratio against a function that does not exist would be a fabrication.
+
+# GF(2) linear algebra, at the shape and weight a sieve produces.
+gf2_prune_singletons gf2mat-512-16-8
+gf2_prune_singletons gf2mat-2048-32-8
+gf2_prune_singletons gf2mat-8192-64-8
+gf2_prune_singletons gf2mat-2048-32-24
+gf2_dense_null_space gf2mat-512-16-8
+gf2_dense_null_space gf2mat-2048-32-8
+gf2_dense_null_space gf2mat-2048-32-24
+gf2_block_lanczos gf2mat-512-16-8
+gf2_block_lanczos gf2mat-2048-32-8
+gf2_block_lanczos gf2mat-8192-64-8
+gf2_block_lanczos gf2mat-2048-32-24
+
+# Real-root isolation. `split` has every root real and distinct; `generic`
+# has most roots complex, so the isolator exits early.
+poly_real_roots poly-4-split-32
+poly_real_roots poly-8-split-32
+poly_real_roots poly-12-split-32
+poly_real_roots poly-4-generic-32
+poly_real_roots poly-16-generic-32
+poly_real_roots poly-64-generic-32
+
+# Word-sized reciprocal division.
+word_reciprocal_rem pair-64-dense-32
+word_reciprocal_div_rem pair-64-dense-32
+
+# Smoothness base construction, over the first 1024 primes.
+smoothness_base_new batch-8-64
+
+# Weighted 2D lattice reduction.
+lattice_gauss_weighted lattice-2-32-random-4
