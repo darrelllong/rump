@@ -13,10 +13,40 @@ authority: nothing here computes a confidence interval.
 | `abba/` | the paired wrapper: runs `baseline, candidate, candidate, baseline` and prints one CSV row |
 | `scripts/setup.sh` | worktrees from tags, corpus, all executables |
 | `scripts/run_case.sh` | one deciding cell: calibrate, run Pilot, capture artifacts |
+| `cases.txt` | the paired matrix: every cell measured under both revisions |
+| `cases-v030-only.txt` | APIs introduced in v0.3.0, measured for an absolute baseline only |
 
 `adapter-*/src/shared.rs` and `src/main.rs` are byte-identical between the two
 revisions apart from a version banner; only `src/cases.rs` differs, and only
-where the 0.3.0 rename forces it.
+where the 0.3.0 rename forces it. A *case name* is harness vocabulary and
+means the same workload under both revisions even where the function it calls
+was renamed — `mod_sqrt` is the case, and v0.2.2 reaches it through
+`sqrt_mod`.
+
+`cases-v030-only.txt` holds cells with no v0.2.2 counterpart: GF(2) linear
+algebra, real-root isolation, word reciprocals, smoothness-base construction
+and weighted 2D reduction. The paired wrapper never runs on them, because a
+ratio against a function that does not exist would be a fabrication.
+
+## What a digest can and cannot say
+
+Every cell's results are digested, and the digests must agree across the two
+revisions before any timing of that cell means anything. A digest proves the
+two revisions *agree*; it cannot prove either one computes what the case name
+claims. Three cases passed the cross-revision check while measuring nothing of
+the kind:
+
+- `mod_sqrt` was given a random odd modulus, which is essentially never prime,
+  so every call took the rejection exit and no root was ever computed. It now
+  uses stated primes in both congruence classes mod 4.
+- `remainder_tree` was given `root + 2`, which makes every remainder equal
+  to 2.
+- `lattice_lll` digested its row length, so all three dimension-8 shapes
+  agreed trivially.
+
+`--emit results` prints the canonical results rather than their digest, which
+is how each of those was caught. A new case should be read once through
+`--emit results` before it is trusted.
 
 ## Rerunning from committed state alone
 
