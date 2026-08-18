@@ -12,7 +12,8 @@ Enforced:
   * matching result digests (the ABBA wrapper refuses to emit a row otherwise,
     so a published cell with valid != 1 is a harness failure);
   * complete host/session coverage against the declared case list;
-  * no result accepted from a stopped or failed Pilot session.
+  * no result accepted from a stopped or failed Pilot session;
+  * no directional cell in the null comparison.
 
 Usage:
     check_audit.py <reduced-dir> [--cases bench-audit/cases.txt]
@@ -68,6 +69,18 @@ def main():
 
         mean, low, high = number("mean"), number("low"), number("high")
         base, cand = number("baseline_ns"), number("candidate_ns")
+
+        # The null arm compares v0.3.0 against an independently built v0.3.0,
+        # so its true ratio is one. A directional verdict there means the rig
+        # can manufacture a difference where none exists, which puts every
+        # paired result in question — including, and especially, the ones that
+        # came out the way anyone expected. The reducer says so in prose; this
+        # is the check that stops the report being assembled anyway.
+        if r["arm"] == "null" and verdict in ("regression", "improvement"):
+            problems.append(
+                f"{tag}: null comparison is directional ({verdict}); the rig "
+                f"reports a difference between two builds of the same revision"
+            )
 
         if verdict == "inconclusive":
             continue
