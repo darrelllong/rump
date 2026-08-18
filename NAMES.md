@@ -266,7 +266,7 @@ not.
 
 | Repository | Revision | What it carries |
 |---|---|---|
-| rump | `c8fe2e661330a48e22ffadb0e9a2879601fc3cc5` | the 0.3.0 surface: canonical names, module topology, typed construction errors, `forbid(unsafe_code)`, portable checked sizing, `MontgomeryResidue` with collision-free `Arc` context identity |
+| rump | `587fedcc85a4ef064f33157bb6a7dec622dc4731` | the 0.3.0 surface: canonical names, module topology, typed construction errors, `forbid(unsafe_code)`, portable checked sizing, `MontgomeryResidue` with collision-free `Arc` context identity, the `gf2` solver, and `PolyZ::real_roots` |
 | factoring | `16231df83c2a27006ef1ef242b3fc064dfa548ec` | `rho.rs` on the residue API, and the ledger rows for it |
 
 Both repositories' gates are green at these revisions:
