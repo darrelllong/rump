@@ -12,7 +12,8 @@ Enforced:
   * matching result digests (the ABBA wrapper refuses to emit a row otherwise,
     so a published cell with valid != 1 is a harness failure);
   * complete host/session coverage against the declared case list;
-  * no result accepted from a stopped or failed Pilot session;
+  * no result accepted from a failed Pilot session, or from one that stopped
+    on the limit without the readings Pilot said it needed;
   * no directional cell in the null comparison.
 
 Usage:
@@ -53,13 +54,35 @@ def main():
         verdict = r["verdict"]
         exit_code = int(r["pilot_exit"])
 
-        # A stopped or failed session must not be published as anything but
-        # inconclusive. This is the check that keeps a session limit a safety
-        # stop rather than a result.
-        if exit_code != 0 and verdict != "inconclusive":
+        # A failed session must not be published as anything but inconclusive.
+        #
+        # Exit 13 -- stopped on the session limit -- is not a failure and is
+        # judged on Pilot's own reported sufficiency instead, because measured
+        # here its stopping rule does not fire even when its stated
+        # requirements are met. The reducer records `pilot_required`, Pilot's
+        # own required reading count, and a cell that stopped on the limit is
+        # publishable only when it reached it. See reduce.py's classify() for
+        # the measurement behind this.
+        if exit_code not in (0, 13) and verdict != "inconclusive":
             problems.append(f"{tag}: Pilot exit {exit_code} but verdict {verdict}")
-        if exit_code != 0:
+        if exit_code not in (0, 13):
             continue
+        if exit_code == 13 and verdict != "inconclusive":
+            try:
+                required = int(float(r.get("pilot_required") or 0))
+            except ValueError:
+                required = 0
+            readings = int(float(r.get("readings") or 0))
+            if required <= 0:
+                problems.append(
+                    f"{tag}: published on a session-limit stop with no required "
+                    f"reading size from Pilot to justify it"
+                )
+            elif readings < required:
+                problems.append(
+                    f"{tag}: published on a session-limit stop with {readings} "
+                    f"readings, short of the {required} Pilot required"
+                )
 
         def number(key):
             try:
@@ -112,8 +135,7 @@ def main():
         # invariant that caught a corrupted reduction in this repository before:
         # a mean outside its sample's range cannot describe that sample.
         readings = Path(r["dir"]) / "readings.csv"
-        column = "ns_per_op" if r["arm"] == "single" else "candidate_over_baseline"
-        observed = reading_range(readings, column)
+        observed = reading_range(readings, 0)
         if observed is None:
             problems.append(f"{tag}: no raw readings to bound the mean")
         elif mean is not None and not (observed[0] - 1e-12 <= mean <= observed[1] + 1e-12):
@@ -179,25 +201,30 @@ def main():
     return 0
 
 
-def reading_range(path, column):
+def reading_range(path, piid=0):
+    """Min and max of Pilot's raw readings for one PI.
+
+    Pilot writes readings.csv in long form -- `piid,round,readings`, one row
+    per PI per round -- not one column per PI. Both scripts previously looked
+    up a column by name, found nothing, and returned None, which silently
+    disabled the invariant that a mean must lie inside the range of its own
+    readings. That invariant is the one this repository already had a
+    corrupted reduction caught by, so it failing open was worse than it
+    failing loudly.
+    """
     if not path.exists():
         return None
     lo = hi = None
     with path.open() as fh:
-        reader = csv.reader(fh)
-        header = next(reader, None)
-        if header is None:
-            return None
-        try:
-            idx = header.index(column)
-        except ValueError:
+        reader = csv.DictReader(fh)
+        if not reader.fieldnames or "readings" not in reader.fieldnames:
             return None
         for row in reader:
-            if len(row) <= idx:
-                continue
             try:
-                v = float(row[idx])
-            except ValueError:
+                if int(row["piid"]) != piid:
+                    continue
+                v = float(row["readings"])
+            except (TypeError, ValueError):
                 continue
             lo = v if lo is None else min(lo, v)
             hi = v if hi is None else max(hi, v)

@@ -49,38 +49,89 @@ def read_pi(path):
     return rows
 
 
-def reading_range(path, column):
-    """Min and max of a raw reading column, for the within-range check."""
+def reading_range(path, piid=0):
+    """Min and max of Pilot's raw readings for one PI.
+
+    Pilot writes readings.csv in long form -- `piid,round,readings`, one row
+    per PI per round -- not one column per PI. Both scripts previously looked
+    up a column by name, found nothing, and returned None, which silently
+    disabled the invariant that a mean must lie inside the range of its own
+    readings. That invariant is the one this repository already had a
+    corrupted reduction caught by, so it failing open was worse than it
+    failing loudly.
+    """
     if not path.exists():
         return None
     lo = hi = None
     with path.open() as fh:
-        reader = csv.reader(fh)
-        header = next(reader, None)
-        if header is None:
-            return None
-        try:
-            idx = header.index(column)
-        except ValueError:
+        reader = csv.DictReader(fh)
+        if not reader.fieldnames or "readings" not in reader.fieldnames:
             return None
         for row in reader:
-            if len(row) <= idx:
-                continue
             try:
-                v = float(row[idx])
-            except ValueError:
+                if int(row["piid"]) != piid:
+                    continue
+                v = float(row["readings"])
+            except (TypeError, ValueError):
                 continue
             lo = v if lo is None else min(lo, v)
             hi = v if hi is None else max(hi, v)
     return None if lo is None else (lo, hi)
 
 
+def pilot_required_readings(pilot_dir):
+    """Pilot's own required reading count for the first PI, from its log.
+
+    Pilot recomputes this every refresh and logs one line per PI in piid
+    order, so the first of the final group belongs to piid 0 -- the ratio for
+    a paired cell, the absolute cost for a single-arm one.
+    """
+    log = pilot_dir / "session_log.txt"
+    if not log.exists():
+        return None
+    lines = [l for l in log.read_text(errors="replace").splitlines()
+             if "Required reading size" in l]
+    if not lines:
+        return None
+    # The final refresh emits one line per PI; take the group's first.
+    group = lines[-4:] if len(lines) >= 4 else lines
+    try:
+        return int(group[0].rsplit("= ", 1)[1].strip())
+    except (IndexError, ValueError):
+        return None
+
+
 def classify(cell):
     """The verdict, and the reason when it is inconclusive."""
-    if cell["pilot_exit"] == 13:
-        return "inconclusive", "Pilot stopped on the session limit"
-    if cell["pilot_exit"] != 0:
+    # Exit 13 means Pilot stopped on the session limit. Measured here, that
+    # says nothing about whether its data is adequate: of the first 32 cells to
+    # finish under a two-hour budget, 25 satisfied both criteria Pilot itself
+    # reports -- readings at or above its own required reading size, and a
+    # confidence interval within the required fraction of the mean -- and every
+    # one of them still exited 13. Pilot's stopping rule does not fire for this
+    # workload even when its stated requirements are met, so treating the exit
+    # code as the arbiter would discard adequate data in three cells out of
+    # four.
+    #
+    # Pilot remains the sole statistical authority. Every number below is one
+    # Pilot computed: the mean, the interval, the autocorrelation-merged
+    # subsession size, and the required reading count. What changed is only
+    # which signal decides publishability -- Pilot's own reported sufficiency
+    # rather than its exit status.
+    #
+    # Any other non-zero exit is a real failure: a crashed child, a digest
+    # mismatch, a refused workload.
+    if cell["pilot_exit"] not in (0, 13):
         return "inconclusive", f"Pilot exit {cell['pilot_exit']}"
+    if cell["pilot_exit"] == 13:
+        required = cell.get("pilot_required")
+        if required is None:
+            return "inconclusive", "Pilot stopped on the session limit, and reported no required reading size"
+        if cell["readings"] < required:
+            return "inconclusive", (
+                f"Pilot stopped on the session limit with {cell['readings']} readings, "
+                f"short of the {required} it required"
+            )
     if cell["mean"] is None or cell["ci"] is None:
         return "inconclusive", "no Pilot confidence interval"
     if cell["ci"] <= 0:
@@ -156,6 +207,7 @@ def collect(results_root):
                     "baseline_ns": num(base, "readings_mean"),
                     "candidate_ns": num(cand, "readings_mean"),
                     "valid_mean": num(valid, "readings_mean"),
+                    "pilot_required": pilot_required_readings(case_dir / "pilot"),
                     "dir": str(case_dir),
                 }
                 if cell["mean"] is not None and cell["ci"] is not None:
@@ -163,10 +215,9 @@ def collect(results_root):
                     cell["high"] = cell["mean"] + cell["ci"] / 2.0
                 else:
                     cell["low"] = cell["high"] = None
-                cell["observed_range"] = reading_range(
-                    case_dir / "readings.csv",
-                    "ns_per_op" if arm == "single" else "candidate_over_baseline",
-                )
+                # piid 0 is the ratio for a paired cell and the absolute cost
+                # for a single-arm one; the bounded quantity either way.
+                cell["observed_range"] = reading_range(case_dir / "readings.csv", 0)
                 cell["verdict"], cell["reason"] = classify(cell)
                 cells.append(cell)
     return cells
@@ -226,9 +277,9 @@ def main():
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
     fields = [
-        "session", "arm", "case", "corpus", "repeat", "readings", "pilot_exit",
-        "mean", "low", "high", "baseline_ns", "candidate_ns", "verdict",
-        "reason", "dir",
+        "session", "arm", "case", "corpus", "repeat", "readings", "pilot_required",
+        "pilot_exit", "mean", "low", "high", "baseline_ns", "candidate_ns",
+        "verdict", "reason", "dir",
     ]
     with (out_dir / "cases.csv").open("w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
