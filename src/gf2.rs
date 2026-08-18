@@ -787,10 +787,12 @@ mod tests {
 
     /// Every dependency Block Lanczos returns is a genuine one.
     ///
-    /// This is the property that matters: the method is randomized and may
-    /// find fewer than the full null space, but it must never return a set
-    /// that is not dependent. `None` is an acceptable outcome and a wrong
-    /// answer is not.
+    /// The weaker public contract, over inputs the method is not promised to
+    /// solve: it is randomized, so `None` is a legitimate outcome here and is
+    /// accepted. What is never acceptable is a returned set that is not
+    /// dependent. Convergence itself is pinned separately, on fixed input, by
+    /// `block_lanczos_recovers_a_known_subspace_on_fixed_input` — this test
+    /// deliberately cannot detect a solver that always gives up.
     #[test]
     fn block_lanczos_returns_only_genuine_dependencies() {
         for &(relations, columns, weight) in
@@ -843,30 +845,50 @@ mod tests {
         rank
     }
 
-    /// Whatever it finds lies inside the exact solver's null space.
+    /// On fixed input with a fixed generator, the solver must converge and
+    /// recover a specific subspace.
     ///
-    /// The comparison is on *rank*, not on count. `dense_null_space` returns a
-    /// basis — `rows − rank` independent vectors — while Block Lanczos returns
-    /// candidate combinations that need not be independent of one another, so
-    /// it can hand back more sets than the null space has dimensions. An
-    /// earlier version of this test compared the counts and failed on correct
-    /// output: 114 genuine dependencies spanning a 92-dimensional space.
+    /// Both halves matter. `expect` rather than `if let Some`, so an
+    /// implementation that always returns `None` fails here rather than
+    /// passing vacuously. And the rank is pinned to a measured value rather
+    /// than bounded, because `rank <= exact` follows automatically from every
+    /// returned vector being a genuine dependency — it would hold for a solver
+    /// that returned a single dependency and nothing else.
+    ///
+    /// The pinned ranks are *below* the exact null space's dimension, and that
+    /// is the method rather than a defect: sixty-four vectors ride in the bits
+    /// of one word, so one run recovers a subspace bounded by that block width
+    /// and not the whole space. A caller wanting more re-runs with a different
+    /// generator or falls back to [`dense_null_space`]. These numbers are
+    /// therefore a regression pin, not a target: a change in them means the
+    /// iteration changed, which is exactly what this test is for.
     #[test]
-    fn block_lanczos_agrees_with_the_exact_solver() {
-        for &(relations, columns, weight) in &[(160usize, 96usize, 8usize), (192, 120, 9)] {
+    fn block_lanczos_recovers_a_known_subspace_on_fixed_input() {
+        for &(relations, columns, weight, expected_rank, exact_dimension) in &[
+            (160usize, 96usize, 8usize, 60usize, 92usize),
+            (192, 120, 9, 64, 72),
+        ] {
             let rows = sparse_rows(relations, columns, weight, 0x0bad_c0de);
-            let exact = dense_null_space(&rows, columns).len();
+            assert_eq!(
+                dense_null_space(&rows, columns).len(),
+                exact_dimension,
+                "the fixture's null space changed"
+            );
+
             let mut rng = TestRng(0x5eed_1234);
-            if let Some(deps) = block_lanczos_dependencies(&rows, columns, &mut rng) {
-                for dep in &deps {
-                    assert!(sums_to_zero(&rows, columns, dep));
-                }
-                let spanned = rank_of(&deps, relations);
+            let dependencies = block_lanczos_dependencies(&rows, columns, &mut rng)
+                .expect("this fixture must converge");
+            for dep in &dependencies {
                 assert!(
-                    spanned <= exact,
-                    "spans {spanned} dimensions where the null space has {exact}"
+                    sums_to_zero(&rows, columns, dep),
+                    "returned a set that does not sum to zero"
                 );
             }
+            assert_eq!(
+                rank_of(&dependencies, relations),
+                expected_rank,
+                "{relations}x{columns} recovered a different subspace"
+            );
         }
     }
 
