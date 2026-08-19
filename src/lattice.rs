@@ -434,12 +434,27 @@ fn round_div(numerator: i128, denominator: i128) -> Option<i128> {
 /// is not a basis), a weight is not positive, or the arithmetic leaves
 /// `i128`.
 ///
-/// That last is a real restriction and tighter than it looks. The rounding
-/// step forms `2·⟨u,v⟩ + ‖u‖²` over `2‖u‖²`, so it is *twice* the norm that
-/// must be representable: the working condition is
-/// `(w₀·x)² + (w₁·y)² < 2¹²⁶` for every vector the reduction visits, which
-/// holds comfortably when each of `|w₀·x|` and `|w₁·y|` stays below `2⁶²`.
-/// A basis whose norms fill `i128` to the top yields `None` rather than a
+/// That last is a real restriction and tighter than it looks. Write `S` for
+/// the largest weighted squared norm the reduction visits. The rounding step
+/// forms `2·⟨u,v⟩ + ‖u‖²`, and `|⟨u,v⟩| ≤ S` by Cauchy–Schwarz, so the
+/// largest intermediate is `3S` and the working condition is
+///
+/// ```text
+/// 3·S ≤ i128::MAX,   i.e.   S ≤ (2¹²⁷ − 1)/3 ≈ 2^125.415
+/// ```
+///
+/// Per coordinate: `|w₀·x| ≤ M` and `|w₁·y| ≤ M` give `S ≤ 2M²` and an
+/// intermediate of at most `6M²`, so `M ≤ 2^62.2075`. Keeping each of
+/// `|w₀·x|` and `|w₁·y|` below `2⁶²` therefore holds comfortably — but `2⁶³`
+/// does not, since `6·(2⁶³)² = 2^128.585`.
+///
+/// This bound was previously stated as `(w₀·x)² + (w₁·y)² < 2¹²⁶`, which is
+/// one and a half times too generous: a basis with `S` between `2^125.415`
+/// and `2¹²⁶` satisfies it and is still refused, and a downstream reader who
+/// derived a per-coordinate rail from it arrived at `2⁶³`, which overflows.
+/// The refusal was always correct; only the sentence was not.
+///
+/// A basis whose norms fill `i128` to the top yields an error rather than a
 /// wrapped answer — a wrapped norm compares wrongly and would return an
 /// unreduced basis with no indication.
 pub fn gauss_reduce_weighted(

@@ -289,14 +289,21 @@ pub fn prune_singletons(rows: &[Vec<u64>], columns: usize) -> PrunedMatrix {
 //
 // # Provenance
 //
-// The recurrence is Montgomery's, and it is transcribed rather than
-// remembered: equations (18)–(20) and the subspace selection of figure 1 from
-// *A Block Lanczos Algorithm for Finding Dependencies over GF(2)*, EUROCRYPT
-// '95, pages 106–120. The correspondence was checked against Sebastian
-// Wouters' BSD-licensed C++ implementation (`github.com/SebWouters/blanczos`),
-// which annotates its variables with Montgomery's names. The coefficients are
+// The recurrence is Montgomery's: equations (18)–(20) and the subspace
+// selection of figure 1 from *A Block Lanczos Algorithm for Finding
+// Dependencies over GF(2)*, EUROCRYPT '95, pages 106–120. The equations are
+// copied from the paper rather than recalled, because the coefficients are
 // easy to misremember and a wrong one yields *no* dependencies rather than
-// wrong ones — a silent failure — so none of them is reconstructed here.
+// wrong ones, which is a silent failure. Equations from a published paper are
+// mathematics; the code below is this repository's own expression of them,
+// and no line of it comes from anywhere else.
+//
+// While checking that the paper had been read correctly, Sebastian Wouters'
+// BSD-licensed C++ implementation (`github.com/SebWouters/blanczos`) was
+// consulted, because it annotates its variables with Montgomery's names and
+// so makes a misreading of the indices obvious. Reading it, not taking from
+// it: the data structures here (a sparse matrix held by rows and by columns
+// at once, a `[u64; 64]` block) share nothing with its.
 //
 // # The two things that make it delicate
 //
