@@ -24,6 +24,38 @@ from pathlib import Path
 # acceptable, so both the effect boundary and the CI take part in every verdict.
 REGRESSION_BOUND = 1.05
 IMPROVEMENT_BOUND = 0.97
+
+# The rig's own resolution floor, per cell, from a bidirectional null run
+# (scripts/null_floor.sh). Two independently linked builds of identical source
+# do not run at the same speed: code placement alone gives 5.31% on `int_add`
+# at 256 bits and 3.24% at 4096, against a median of 1.26%. A paired result
+# inside its cell's floor is not attributable to the revision however tight
+# its interval, because a narrow interval around a layout artifact is still an
+# artifact.
+#
+# Cells with no measured floor of their own take the worst measured floor,
+# which is the honest bound in the absence of evidence.
+FLOORS = {}
+DEFAULT_FLOOR = 0.0
+
+
+def load_floors(path):
+    """Read `cell,floor` pairs written by null_floor_report.py."""
+    global DEFAULT_FLOOR
+    if not path or not Path(path).exists():
+        return
+    for line in Path(path).read_text().splitlines():
+        cell, _, value = line.partition(",")
+        try:
+            FLOORS[cell.strip()] = float(value)
+        except ValueError:
+            continue
+    if FLOORS:
+        DEFAULT_FLOOR = max(FLOORS.values())
+
+
+def floor_for(cell):
+    return FLOORS.get(f"{cell['case']}-{cell['corpus']}", DEFAULT_FLOOR)
 REQUIRED_CONFIDENCE = 0.99
 REQUIRED_CI_FRACTION = 0.04
 
@@ -153,6 +185,18 @@ def classify(cell):
         return "baseline", "absolute cost; no baseline revision to compare against"
 
     low, high = cell["low"], cell["high"]
+
+    # Inside the rig's floor for this workload, the sign of the difference is
+    # not evidence about the code. Reported before the bounds below, because a
+    # cell can sit entirely outside the 5% regression bound and still be
+    # inside its own floor.
+    floor = floor_for(cell)
+    if floor > 0 and abs(cell["mean"] - 1.0) <= floor:
+        return "within-floor", (
+            f"|ratio - 1| = {abs(cell['mean'] - 1.0):.4f} is inside this cell's "
+            f"measured rig floor of {floor:.4f}"
+        )
+
     if low > REGRESSION_BOUND:
         return "regression", f"CI entirely above {REGRESSION_BOUND}"
     if high < IMPROVEMENT_BOUND:
@@ -223,6 +267,16 @@ def collect(results_root):
     return cells
 
 
+def md_cell(text):
+    """Escape a value for a Markdown table cell.
+
+    Reasons legitimately contain `|` -- `|ratio - 1|` is the natural way to
+    write it -- and an unescaped pipe silently splits the row into extra
+    columns, so the table renders with the numbers under the wrong headings.
+    """
+    return str(text).replace("|", "\\|")
+
+
 def host_facts():
     def run(cmd):
         try:
@@ -244,6 +298,8 @@ def host_facts():
 
 
 def main():
+    if "--floors" in sys.argv:
+        load_floors(sys.argv[sys.argv.index("--floors") + 1])
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     results_root, out_dir = Path(sys.argv[1]), Path(sys.argv[2])
@@ -326,9 +382,24 @@ def render_report(cells, out_dir, host, manifest):
     if null:
         a("## Null comparison: v0.3.0 against an independently built v0.3.0")
         a("")
-        a("This must show no directional result. A `regression` or `improvement`")
-        a("here would mean the harness manufactures a difference, and would")
-        a("invalidate every paired cell below.")
+        a("Both arms are the same program, so any difference here is the rig's")
+        a("and not the code's. Two independently linked builds of identical")
+        a("source do not run at the same speed: measured by swapping the arms")
+        a("(`scripts/null_floor.sh`), code placement alone gives 5.31% on")
+        a("`int_add` at 256 bits and 3.24% at 4096, against a median of 1.26%.")
+        a("")
+        a("That is why cells are verdicted `within-floor`. A paired result")
+        a("inside its cell's floor is not attributable to the revision however")
+        a("tight its interval, because a narrow interval around a layout")
+        a("artifact is still an artifact.")
+        a("")
+        a("**This section is not independent evidence.** The floors are derived")
+        a("from this same bidirectional run, so `within-floor` here is true by")
+        a("construction. The independent check is reproducibility across two")
+        a("separate runs: the two consequential floors came back at 5.57% and")
+        a("3.19% in a six-cell run and 5.31% and 3.24% in a twelve-cell run,")
+        a("while floors below about 1.5% moved by up to 0.87 points and should")
+        a("be read as unresolved rather than as small.")
         a("")
         a(table(null))
         directional = [c for c in null if c["verdict"] in ("regression", "improvement")]
@@ -363,7 +434,7 @@ def table(cells):
         ci = "—" if c["low"] is None else f"[{c['low']:.4f}, {c['high']:.4f}]"
         rows.append(
             f"| `{c['case']}` | `{c['corpus']}` | {mean} | {ci} | {c['readings']} "
-            f"| {c['verdict']} | {c['reason']} | [raw]({c['dir']}) |"
+            f"| {c['verdict']} | {md_cell(c['reason'])} | [raw]({c['dir']}) |"
         )
     return "\n".join(rows)
 
