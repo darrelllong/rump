@@ -274,6 +274,7 @@ Transfer state is maintained in both this file and the ownership rows in the
 | polynomial::PolyZ::homogeneous_substitution | gnfs/lattice.rs | Rump canonical; consumer transfer |
 | polynomial::PolyMod symmetric_lift/change_modulus | gnfs/algebraic_square_root.rs | Rump canonical; consumer transfer |
 | lattice::gauss_reduce_weighted | gnfs/lattice.rs | Rump canonical; consumer transfer |
+| gf2::block_lanczos_dependencies takes `threads` | both sieves | done — the applies fan out by output ranges when each thread gets thousands of folds; results bit-identical at any count, tested |
 | gf2 dense/sparse solvers | qs/linalg.rs and qs/lanczos.rs | landed in Rump; consumer switch and deletion pending |
 | polynomial::PolyZ::real_roots | gnfs/norm_model.rs | done; `NormModel` stays downstream |
 | polynomial::PolyZ::factor_real | gnfs/norm_model.rs | done; the Durand–Kerner solver and the complex helpers moved, `NormModel` and the acceptance policy stay downstream |

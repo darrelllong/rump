@@ -381,32 +381,61 @@ impl Sparse {
     }
 
     /// `M·x`: a block over the relations becomes one over the columns.
-    fn forward(&self, x: &[u64]) -> Vec<u64> {
-        self.by_column
-            .iter()
-            .map(|relations| {
-                relations
-                    .iter()
-                    .fold(0u64, |total, &index| total ^ x[index as usize])
-            })
-            .collect()
+    fn forward(&self, x: &[u64], threads: usize) -> Vec<u64> {
+        Self::mapped(&self.by_column, x, threads)
     }
 
     /// `Mᵀ·y`: a block over the columns becomes one over the relations.
-    fn backward(&self, y: &[u64]) -> Vec<u64> {
-        self.by_relation
-            .iter()
-            .map(|columns| {
-                columns
-                    .iter()
-                    .fold(0u64, |total, &column| total ^ y[column as usize])
-            })
-            .collect()
+    fn backward(&self, y: &[u64], threads: usize) -> Vec<u64> {
+        Self::mapped(&self.by_relation, y, threads)
+    }
+
+    /// One output word per index list: the XOR-fold of `x` at those indices,
+    /// fanned over `threads` when there is enough work to pay for them.
+    ///
+    /// Each output word is an independent fold, so the split is by output
+    /// ranges and the concatenation is in range order: the result is
+    /// identical to the serial map whatever the thread count, which
+    /// `dependencies_do_not_depend_on_the_thread_count` asserts rather than
+    /// assumes. One thread, or too little work per thread to hide a spawn,
+    /// runs inline.
+    fn mapped(lists: &[Vec<u32>], x: &[u64], threads: usize) -> Vec<u64> {
+        let fold = |lists: &[Vec<u32>]| -> Vec<u64> {
+            lists
+                .iter()
+                .map(|indices| {
+                    indices
+                        .iter()
+                        .fold(0u64, |total, &index| total ^ x[index as usize])
+                })
+                .collect()
+        };
+        // A fold is a handful of nanoseconds; a spawn is tens of
+        // microseconds. A thread that gets fewer than a few thousand folds
+        // spends longer being born than working.
+        const MINIMUM_PER_THREAD: usize = 4_096;
+        let threads = threads.min(lists.len() / MINIMUM_PER_THREAD).max(1);
+        if threads <= 1 {
+            return fold(lists);
+        }
+        let per = lists.len().div_ceil(threads);
+        let chunks: Vec<&[Vec<u32>]> = lists.chunks(per).collect();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = chunks
+                .iter()
+                .map(|chunk| scope.spawn(move || fold(chunk)))
+                .collect();
+            let mut out = Vec::with_capacity(lists.len());
+            for handle in handles {
+                out.extend(handle.join().expect("a fold worker panicked"));
+            }
+            out
+        })
     }
 
     /// `A·x` with `A = MᵀM`, the symmetric operator the iteration runs on.
-    fn apply(&self, x: &[u64]) -> Vec<u64> {
-        self.backward(&self.forward(x))
+    fn apply(&self, x: &[u64], threads: usize) -> Vec<u64> {
+        self.backward(&self.forward(x, threads), threads)
     }
 }
 
@@ -571,6 +600,7 @@ pub fn block_lanczos_dependencies<R: RandomSource + ?Sized>(
     rows: &[Vec<u64>],
     columns: usize,
     rng: &mut R,
+    threads: usize,
 ) -> Option<Vec<Vec<usize>>> {
     if rows.is_empty() || columns == 0 {
         return None;
@@ -589,12 +619,12 @@ pub fn block_lanczos_dependencies<R: RandomSource + ?Sized>(
 
     // X starts as Y and accumulates the solution; Q = V[0] = A·Y never moves.
     let mut x: Vec<u64> = (0..count).map(|_| draw()).collect();
-    let q = matrix.apply(&x);
+    let q = matrix.apply(&x, threads);
 
     let mut v0 = q.clone();
     let mut v1 = vec![0u64; count];
     let mut v2 = vec![0u64; count];
-    let mut av0 = matrix.apply(&v0);
+    let mut av0 = matrix.apply(&v0, threads);
     let mut t0 = dot(&v0, &av0);
     let mut t1 = [0u64; WIDTH];
     let (mut w1i, mut w2i) = ([0u64; WIDTH], [0u64; WIDTH]);
@@ -668,7 +698,7 @@ pub fn block_lanczos_dependencies<R: RandomSource + ?Sized>(
         xor_into(&mut next, &mul_block(&v2, &f));
 
         v2 = std::mem::replace(&mut v1, std::mem::replace(&mut v0, next));
-        av0 = matrix.apply(&v0);
+        av0 = matrix.apply(&v0, threads);
         w2i = w1i;
         w1i = w0i;
         t1 = t0;
@@ -679,7 +709,7 @@ pub fn block_lanczos_dependencies<R: RandomSource + ?Sized>(
     // vector can be orthogonal to itself. So take the 128 candidates that came
     // out — the columns of X and of the last V — and ask a small elimination
     // which of their combinations M actually annihilates.
-    let images = [matrix.forward(&x), matrix.forward(&v0)];
+    let images = [matrix.forward(&x, threads), matrix.forward(&v0, threads)];
     let candidates: Vec<Vec<u64>> = (0..2 * WIDTH)
         .map(|index| lane(&images[index / WIDTH], index % WIDTH))
         .collect();
@@ -801,13 +831,24 @@ mod tests {
     /// `block_lanczos_recovers_a_known_subspace_on_fixed_input` — this test
     /// deliberately cannot detect a solver that always gives up.
     #[test]
+    fn dependencies_do_not_depend_on_the_thread_count() {
+        // The applies split by output ranges and concatenate in order, so the
+        // whole iteration -- and therefore the dependency sets -- must be
+        // bit-identical at any thread count, given the same starting block.
+        let rows = sparse_rows(512, 96, 8, 0x00c0_ffee);
+        let one = block_lanczos_dependencies(&rows, 96, &mut TestRng(7), 1);
+        let eight = block_lanczos_dependencies(&rows, 96, &mut TestRng(7), 8);
+        assert_eq!(one, eight);
+    }
+
+    #[test]
     fn block_lanczos_returns_only_genuine_dependencies() {
         for &(relations, columns, weight) in
             &[(160usize, 96usize, 8usize), (200, 128, 10), (300, 200, 12)]
         {
             let rows = sparse_rows(relations, columns, weight, 0x1234_5678);
             let mut rng = TestRng(0xdead_beef);
-            if let Some(deps) = block_lanczos_dependencies(&rows, columns, &mut rng) {
+            if let Some(deps) = block_lanczos_dependencies(&rows, columns, &mut rng, 1) {
                 assert!(!deps.is_empty(), "Some(...) must not be an empty set");
                 for dep in &deps {
                     assert!(!dep.is_empty());
@@ -883,7 +924,7 @@ mod tests {
             );
 
             let mut rng = TestRng(0x5eed_1234);
-            let dependencies = block_lanczos_dependencies(&rows, columns, &mut rng)
+            let dependencies = block_lanczos_dependencies(&rows, columns, &mut rng, 1)
                 .expect("this fixture must converge");
             for dep in &dependencies {
                 assert!(
@@ -903,8 +944,8 @@ mod tests {
     #[test]
     fn block_lanczos_refuses_the_degenerate_shapes() {
         let mut rng = TestRng(1);
-        assert!(block_lanczos_dependencies(&[], 8, &mut rng).is_none());
-        assert!(block_lanczos_dependencies(&[vec![0u64]], 0, &mut rng).is_none());
+        assert!(block_lanczos_dependencies(&[], 8, &mut rng, 1).is_none());
+        assert!(block_lanczos_dependencies(&[vec![0u64]], 0, &mut rng, 1).is_none());
     }
 
     /// The generator is the caller's: the same source gives the same answer,
@@ -912,11 +953,11 @@ mod tests {
     #[test]
     fn block_lanczos_is_driven_by_the_callers_generator() {
         let rows = sparse_rows(160, 96, 8, 0xfeed_face);
-        let first = block_lanczos_dependencies(&rows, 96, &mut TestRng(7));
-        let again = block_lanczos_dependencies(&rows, 96, &mut TestRng(7));
+        let first = block_lanczos_dependencies(&rows, 96, &mut TestRng(7), 1);
+        let again = block_lanczos_dependencies(&rows, 96, &mut TestRng(7), 1);
         assert_eq!(first, again, "the same source must give the same answer");
 
-        if let Some(deps) = block_lanczos_dependencies(&rows, 96, &mut TestRng(99)) {
+        if let Some(deps) = block_lanczos_dependencies(&rows, 96, &mut TestRng(99), 1) {
             for dep in &deps {
                 assert!(sums_to_zero(&rows, 96, dep));
             }
