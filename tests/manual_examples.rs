@@ -13,11 +13,11 @@ use rump::modular::{
     BarrettContext, ModulusError, MontgomeryContext, MontgomeryScratch,
 };
 use rump::number_theory::{
-    crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
-    is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre, miller_rabin_with_bases,
-    miller_rabin_witness, primes_below, product_tree, rational_reconstruct,
-    rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, valuation,
-    SmoothnessBase,
+    crt_combine, crt_combine_balanced, gcd, gcd_extended, gcd_u64, is_probable_prime,
+    is_probable_prime_bpsw, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
+    miller_rabin_with_bases, miller_rabin_witness, primes_below, product_tree,
+    rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
+    smooth_parts, valuation, SmoothnessBase,
 };
 use rump::polynomial::{PolyMod, PolyZ, RealRootError};
 use rump::random::{
@@ -475,6 +475,17 @@ fn manual_number_theory_modular() {
     ])
     .expect("moduli are pairwise coprime");
     assert_eq!(x, BigUint::from_u64(23));
+    assert_eq!(
+        crt_combine_balanced(
+            &[
+                (BigUint::from_u64(2), BigUint::from_u64(3)),
+                (BigUint::from_u64(3), BigUint::from_u64(5)),
+                (BigUint::from_u64(2), BigUint::from_u64(7)),
+            ],
+            4,
+        ),
+        Some(x)
+    );
 }
 
 #[test]

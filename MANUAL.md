@@ -27,11 +27,11 @@ use rump::modular::{
     BarrettContext, ModulusError, MontgomeryContext, MontgomeryScratch,
 };
 use rump::number_theory::{
-    crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
-    is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre, miller_rabin_with_bases,
-    miller_rabin_witness, primes_below, product_tree, rational_reconstruct,
-    rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, valuation,
-    SmoothnessBase,
+    crt_combine, crt_combine_balanced, gcd, gcd_extended, gcd_u64, is_probable_prime,
+    is_probable_prime_bpsw, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
+    miller_rabin_with_bases, miller_rabin_witness, primes_below, product_tree,
+    rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
+    smooth_parts, valuation, SmoothnessBase,
 };
 use rump::polynomial::{PolyMod, PolyZ, RealRootError};
 use rump::random::{
@@ -609,9 +609,12 @@ assert_eq!(kronecker(&BigUint::one(), &BigUint::zero()), 1); // (1/0) = 1
 companion), `mod_sqrt` by Tonelli–Shanks with a
 dispatch to Cipolla's algorithm where the prime's 2-adic depth makes the
 descent quadratic (`None` for non-residues; the result is verified by
-squaring, so a composite modulus also yields `None`), and `crt_combine`
-for Chinese remaindering (`None` when the moduli are not pairwise
-coprime).
+squaring, so a composite modulus also yields `None`). `crt_combine` performs
+ordered Chinese remaindering; `crt_combine_balanced` gives the same canonical
+answer through balanced partial products and bounded parallel workers. Both
+return `None` when the moduli are empty, zero, or not pairwise coprime. The
+balanced form takes a maximum worker count, caps it at reported machine
+parallelism, and treats zero as an explicit serial request.
 
 ```rust
 let p = BigUint::from_u64(41);
@@ -644,6 +647,17 @@ let x = crt_combine(&[
 ])
 .expect("moduli are pairwise coprime");
 assert_eq!(x, BigUint::from_u64(23));
+assert_eq!(
+    crt_combine_balanced(
+        &[
+            (BigUint::from_u64(2), BigUint::from_u64(3)),
+            (BigUint::from_u64(3), BigUint::from_u64(5)),
+            (BigUint::from_u64(2), BigUint::from_u64(7)),
+        ],
+        4,
+    ),
+    Some(x)
+);
 ```
 
 ### Batch inversion
