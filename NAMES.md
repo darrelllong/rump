@@ -307,5 +307,15 @@ uses the paired Rump revision, both repositories' gates pass, and searches for
 every removed spelling find only changelog/history references.
 
 Pure portable safe Rust and forbid(unsafe_code) are non-negotiable in both
-crates. No assembly, FFI, intrinsics, raw-pointer tricks, target-only layouts,
-or target-specific public API may be used to implement this ledger.
+crates' default builds. Rump's one sanctioned exception is the opt-in `wipe`
+cargo feature (ledgered below), whose volatile scrub has no safe expression;
+it relaxes the crate attribute to deny(unsafe_code) and admits exactly two
+audited `unsafe` sites: the scrub helper and its raw read-back test. No
+assembly, FFI, intrinsics, raw-pointer tricks, target-only layouts, or
+target-specific public API may be used to implement this ledger.
+
+## Post-cut additions
+
+| Current | Canonical | State | Notes |
+|---|---|---|---|
+| — | cargo feature `wipe` | done | opt-in drop-time zeroization; restores the pre-0.3.0 scrub the 0.3.0 cut removed, behind a feature so the default build keeps forbid(unsafe_code). Owner: consumer crates handling key material (cryptography-rs enables it). |
