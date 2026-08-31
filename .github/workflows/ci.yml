@@ -78,3 +78,36 @@ jobs:
         run: cargo check --target i686-unknown-linux-gnu --all-targets
       - name: check (wipe)
         run: cargo check --target i686-unknown-linux-gnu --all-targets --features wipe
+
+  # A breaking push should turn THIS repository's CI red, not the consumers'
+  # next push. The downstream crates build and test against the exact rump
+  # commit under test, checked out side-by-side the way the path
+  # dependencies expect.
+  downstream:
+    name: downstream (cryptography, entropy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: rump
+      - uses: actions/checkout@v4
+        with:
+          repository: darrelllong/cryptography
+          path: cryptography
+      - uses: actions/checkout@v4
+        with:
+          repository: darrelllong/entropy
+          path: entropy
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cryptography
+            entropy
+      - name: cryptography tests against this rump
+        working-directory: cryptography
+        run: cargo test
+      - name: entropy tests against this rump
+        working-directory: entropy
+        run: cargo test
