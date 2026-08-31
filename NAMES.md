@@ -154,7 +154,7 @@ public.
 | is_strong_lucas_probable_prime | same under number_theory | done | |
 | ProductTree | number_theory::ProductTree | done | typed invariant is canonical |
 | product_tree / remainder_tree | same under number_theory | done | algorithmic one-shot pair |
-| — | number_theory::crt_combine_balanced | pending | balanced product tree, bounded parallel workers; distinct cost contract from the ordered one-shot fold |
+| — | number_theory::crt_combine_balanced | done | balanced product tree, bounded parallel workers; distinct cost contract from the ordered one-shot fold |
 | SmoothBase | number_theory::SmoothnessBase | done | reusable smoothness context |
 | free smooth_parts | number_theory::smooth_parts | done | one-shot convenience through context |
 | SmoothBase::new returning Option | SmoothnessBase::new returning Result<Self, SmoothnessBaseError> | done | entries below two are invalid input |

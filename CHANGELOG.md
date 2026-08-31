@@ -7,6 +7,14 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **`number_theory::crt_combine_balanced`.** It has the same exact validation
+  and canonical result as `crt_combine`, but combines equal-width partial
+  products through a balanced tree and can run independent pairs on a bounded
+  number of scoped workers, never exceeding the machine's reported parallelism.
+  This is the reusable machine needed by NFS
+  coefficient reconstruction; Rump owns the CRT, while the consumer owns what
+  its residues mean.
+
 - **`wipe` cargo feature — the option to wipe is back.** 0.3.0 removed the
   drop-time scrub to reach `forbid(unsafe_code)`; that traded away a guarantee
   the parent cryptography crate depended on. The scrub returns as an opt-in

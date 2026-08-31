@@ -2852,6 +2852,94 @@ pub fn crt_combine(congruences: &[(BigUint, BigUint)]) -> Option<BigUint> {
     Some(solution)
 }
 
+/// Chinese remaindering through a balanced product tree.
+///
+/// The mathematical contract is [`crt_combine`]'s: return the unique residue
+/// below the product of pairwise-coprime, non-zero moduli, and return `None`
+/// for empty or invalid input. The cost contract is different. The ordered
+/// fold combines one new modulus with an ever-growing product; this combines
+/// equal-width partial products at every level, so multiplication and
+/// inversion see balanced operands. Independent pairs at one level run on at
+/// most `threads` scoped workers and never more than
+/// [`std::thread::available_parallelism`] reports. Zero threads means the
+/// serial path, not an invalid mathematical input.
+///
+/// The answer is independent of thread count. Each pair is tagged with its
+/// tree index and gathered in that order before the next level, and the final
+/// residue is the same canonical value [`crt_combine`] returns.
+#[must_use]
+pub fn crt_combine_balanced(congruences: &[(BigUint, BigUint)], threads: usize) -> Option<BigUint> {
+    if congruences.is_empty() {
+        return None;
+    }
+    let mut level = congruences
+        .iter()
+        .map(|(residue, modulus)| {
+            if modulus.is_zero() {
+                None
+            } else {
+                Some((residue.rem(modulus), modulus.clone()))
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    while level.len() > 1 {
+        let pairs = level.len().div_ceil(2);
+        let workers = if threads == 0 {
+            1
+        } else {
+            threads.min(available).min(pairs)
+        };
+        let combine = |pair: usize| -> Option<(BigUint, BigUint)> {
+            let first = &level[2 * pair];
+            let Some(second) = level.get(2 * pair + 1) else {
+                return Some(first.clone());
+            };
+            let inverse = mod_inverse(&first.1, &second.1)?;
+            let difference = second.0.add(&second.1).sub(&first.0.rem(&second.1));
+            let k = BigUint::mod_mul(&difference, &inverse, &second.1);
+            Some((first.0.add(&first.1.mul(&k)), first.1.mul(&second.1)))
+        };
+
+        let next = if workers == 1 {
+            (0..pairs).map(combine).collect::<Option<Vec<_>>>()?
+        } else {
+            let cursor = std::sync::atomic::AtomicUsize::new(0);
+            let mut tagged = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..workers)
+                    .map(|_| {
+                        let cursor = &cursor;
+                        let combine = &combine;
+                        scope.spawn(move || {
+                            let mut mine = Vec::new();
+                            loop {
+                                let pair =
+                                    cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if pair >= pairs {
+                                    break;
+                                }
+                                mine.push((pair, combine(pair)));
+                            }
+                            mine
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| handle.join().expect("a CRT worker panicked"))
+                    .collect::<Vec<_>>()
+            });
+            tagged.sort_unstable_by_key(|(pair, _)| *pair);
+            tagged
+                .into_iter()
+                .map(|(_, result)| result)
+                .collect::<Option<Vec<_>>>()?
+        };
+        level = next;
+    }
+    Some(level.pop().expect("a non-empty tree has a root").0)
+}
+
 // ─── Primality ─────────────────────────────────────────────────────────────────
 
 /// Fixed Miller-Rabin witness set used by the bigint probable-prime test.
@@ -4583,6 +4671,53 @@ mod tests {
         assert_eq!(super::crt_combine(&[]), None);
         assert_eq!(
             super::crt_combine(&[(BigUint::one(), BigUint::zero())]),
+            None
+        );
+    }
+
+    #[test]
+    fn balanced_crt_matches_the_ordered_fold_at_every_thread_count() {
+        let moduli: Vec<BigUint> = super::primes_below(2_000)
+            .into_iter()
+            .filter(|&prime| prime >= 101)
+            .take(63)
+            .map(BigUint::from_u64)
+            .collect();
+        let product = moduli.iter().fold(BigUint::one(), |acc, m| acc.mul(m));
+        let value = product.sub(&BigUint::from_u64(123_456_789));
+        let congruences: Vec<(BigUint, BigUint)> = moduli
+            .iter()
+            .map(|modulus| (value.rem(modulus), modulus.clone()))
+            .collect();
+        let expected = super::crt_combine(&congruences);
+        for threads in [0usize, 1, 2, 7, 64, 1_000] {
+            assert_eq!(
+                super::crt_combine_balanced(&congruences, threads),
+                expected,
+                "threads={threads}"
+            );
+        }
+
+        let mut reversed = congruences;
+        reversed.reverse();
+        assert_eq!(super::crt_combine_balanced(&reversed, 8), Some(value));
+        assert_eq!(super::crt_combine_balanced(&[], 8), None);
+        assert_eq!(
+            super::crt_combine_balanced(&[(BigUint::from_u64(14), BigUint::from_u64(5))], 8,),
+            Some(BigUint::from_u64(4))
+        );
+        assert_eq!(
+            super::crt_combine_balanced(&[(BigUint::one(), BigUint::zero())], 8),
+            None
+        );
+        assert_eq!(
+            super::crt_combine_balanced(
+                &[
+                    (BigUint::one(), BigUint::from_u64(6)),
+                    (BigUint::from_u64(2), BigUint::from_u64(9)),
+                ],
+                8,
+            ),
             None
         );
     }

@@ -119,9 +119,9 @@ pub mod modular {
 /// Divisibility, symbols, primality, reconstruction, and batching.
 pub mod number_theory {
     pub use crate::number_theory_impl::{
-        crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
-        is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker, lcm, legendre,
-        miller_rabin_with_bases, miller_rabin_witness, primes_below, product_tree,
+        crt_combine, crt_combine_balanced, gcd, gcd_extended, gcd_u64, is_probable_prime,
+        is_probable_prime_bpsw, is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker, lcm,
+        legendre, miller_rabin_with_bases, miller_rabin_witness, primes_below, product_tree,
         rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
         smooth_parts, valuation, ProductTree, SmoothnessBase, SmoothnessBaseError,
     };
