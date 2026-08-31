@@ -13,7 +13,7 @@ use rump::modular::{
     BarrettContext, ModulusError, MontgomeryContext, MontgomeryScratch,
 };
 use rump::number_theory::{
-    crt_combine, crt_combine_balanced, gcd, gcd_extended, gcd_u64, is_probable_prime,
+    crt_combine, crt_combine_balanced, gcd, gcd_extended, gcd_u64, is_prime_aks, is_probable_prime,
     is_probable_prime_bpsw, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
     miller_rabin_with_bases, miller_rabin_witness, primes_below, product_tree,
     rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
@@ -644,6 +644,13 @@ fn manual_number_theory_baillie_psw() {
     // 5459 is a strong Lucas pseudoprime; the base-2 stage rejects it.
     assert!(is_strong_lucas_probable_prime(&BigUint::from_u64(5_459)));
     assert!(!is_probable_prime_bpsw(&BigUint::from_u64(5_459)));
+}
+
+#[test]
+fn manual_number_theory_aks() {
+    // Unlike the probable-prime predicates, AKS is an unconditional proof.
+    assert!(is_prime_aks(&BigUint::from_u64(101)));
+    assert!(!is_prime_aks(&BigUint::from_u64(561))); // Carmichael
 }
 
 /// xorshift64: deterministic and compact. Fine for a manual; NOT a CSPRNG.

@@ -7,10 +7,11 @@
 //! above it; the Jacobi symbol runs on binary reciprocity, on the Lehmer
 //! quotient sequence, or through that same recursion; modular square roots
 //! take the `p ≡ 3 (mod 4)` shortcut, the Tonelli–Shanks descent, or
-//! Cipolla's algorithm; primality is trial division followed by fixed-base
-//! Miller-Rabin or by Baillie–PSW. Around those sit Garner's CRT, rational
-//! reconstruction, Bernstein's product and remainder trees, and the p-adic
-//! valuation.
+//! Cipolla's algorithm; practical primality is trial division followed by
+//! fixed-base Miller-Rabin or by Baillie–PSW, while [`is_prime_aks`] supplies
+//! the exact deterministic AKS proof algorithm. Around those sit Garner's
+//! CRT, rational reconstruction, Bernstein's product and remainder trees,
+//! and the p-adic valuation.
 //!
 //! Adversarially *hardened* primality testing lives with its consumer (the
 //! parent cryptography crate), where the hash lives. Prime generation is in
@@ -19,6 +20,7 @@
 //! own.
 
 use crate::bigint::{BarrettContext, BigInt, BigUint, MontgomeryContext, Sign};
+use crate::poly::PolyMod;
 
 // ─── Divisibility ──────────────────────────────────────────────────────────────
 
@@ -3109,6 +3111,166 @@ pub fn is_probable_prime(n: &BigUint) -> bool {
     mr_probable_prime(n, &MR_BASES)
 }
 
+/// Exact deterministic primality test by Agrawal, Kayal, and Saxena (AKS).
+///
+/// This is the unconditional polynomial-time *proof* algorithm: it rejects
+/// perfect powers, finds a modulus `r` for which the multiplicative order of
+/// `n mod r` exceeds `log₂(n)²`, checks small gcds, then verifies
+///
+/// `(X + a)^n = X^n + a  (mod X^r - 1, n)`
+///
+/// for enough consecutive values of `a`. The integer bounds used here are
+/// conservative ceilings of the real-valued bounds in the paper: requiring
+/// order greater than `bits(n)²`, and checking through
+/// `bits(n)·⌈√φ(r)⌉`, can only add work; it cannot admit a composite
+/// excluded by the published bounds. Polynomial arithmetic is performed by
+/// [`PolyMod`] over `ℤ/nℤ`; reduction by the monic `X^r - 1` needs no
+/// field assumption even when the candidate is composite.
+///
+/// AKS is exposed for applications that specifically require this algorithm
+/// or its unconditional complexity result. It is dramatically slower in
+/// practice than [`is_probable_prime`] or [`is_probable_prime_bpsw`], and is
+/// not used by either of them.
+///
+/// # Panics
+///
+/// Panics if the square of the candidate's bit length, or a derived vector
+/// length, does not fit `usize`. Such an input cannot be represented by the
+/// dense quotient-ring calculation on this target; the function panics
+/// rather than return an unproved verdict.
+///
+/// Reference: Manindra Agrawal, Neeraj Kayal, and Nitin Saxena, *PRIMES is
+/// in P*, Annals of Mathematics 160 (2004), §4. The 2019 erratum
+/// corrects the proof of the bound on the order-search modulus; the algorithm
+/// itself is unchanged.
+#[must_use]
+pub fn is_prime_aks(n: &BigUint) -> bool {
+    if n < &BigUint::from_u64(2) {
+        return false;
+    }
+    if *n == BigUint::from_u64(2) {
+        return true;
+    }
+    if !n.is_odd() || n.is_perfect_power() {
+        return false;
+    }
+
+    // The paper asks for ord_r(n) > log₂(n)². `bits` is ceil(log₂ n)
+    // for the non-power-of-two candidates that reach here, so its square is
+    // a conservative integer threshold. Since ord_r(n) < r, no r at or below
+    // threshold + 1 can possibly work; begin after that impossible prefix.
+    let bits = n.bits();
+    let order_threshold = bits
+        .checked_mul(bits)
+        .expect("AKS bit-length square must fit usize");
+    let r = aks_order_modulus(n, order_threshold);
+
+    // A proper gcd with any a <= r proves compositeness. Work word-sized:
+    // gcd(a, n) = gcd(a, n mod a), so no multiprecision gcd is needed here.
+    for a in 2..=r {
+        let a_word = u64::try_from(a).expect("AKS modulus fits u64");
+        let divisor = gcd_u64(n.rem_u64(a_word), a_word);
+        if divisor > 1 && *n != BigUint::from_u64(divisor) {
+            return false;
+        }
+    }
+
+    let r_word = u64::try_from(r).expect("AKS modulus fits u64");
+    if *n <= BigUint::from_u64(r_word) {
+        return true;
+    }
+
+    let phi = euler_phi_usize(r);
+    let limit = bits
+        .checked_mul(ceil_sqrt_usize(phi))
+        .expect("AKS congruence bound must fit usize");
+    let x_index = usize::try_from(n.rem_u64(r_word)).expect("residue modulo r fits usize");
+
+    (1..=limit).all(|a| aks_polynomial_congruence(n, r, x_index, a))
+}
+
+/// The first modulus whose multiplicative order clears the AKS threshold.
+/// Values at or below `threshold + 1` are impossible because `ord_r(n) < r`.
+fn aks_order_modulus(n: &BigUint, threshold: usize) -> usize {
+    let mut modulus = threshold
+        .checked_add(2)
+        .expect("AKS order-search modulus must fit usize");
+    while !aks_order_exceeds(n, modulus, threshold) {
+        modulus = modulus
+            .checked_add(1)
+            .expect("AKS order-search modulus must fit usize");
+    }
+    modulus
+}
+
+/// Whether `ord_modulus(n)` is greater than `threshold`, without first
+/// factoring `phi(modulus)`: if any of the first `threshold` powers is one,
+/// the order is too small. A non-unit has no multiplicative order.
+fn aks_order_exceeds(n: &BigUint, modulus: usize, threshold: usize) -> bool {
+    let modulus_word = u64::try_from(modulus).expect("AKS modulus fits u64");
+    let residue = n.rem_u64(modulus_word);
+    if gcd_u64(residue, modulus_word) != 1 {
+        return false;
+    }
+    let mut power = residue;
+    for _ in 1..=threshold {
+        if power == 1 {
+            return false;
+        }
+        power = (u128::from(power) * u128::from(residue) % u128::from(modulus_word)) as u64;
+    }
+    true
+}
+
+/// Euler's totient for the word-sized AKS order-search modulus.
+fn euler_phi_usize(mut value: usize) -> usize {
+    let mut result = value;
+    let mut prime = 2usize;
+    while prime <= value / prime {
+        if value.is_multiple_of(prime) {
+            while value.is_multiple_of(prime) {
+                value /= prime;
+            }
+            result -= result / prime;
+        }
+        prime = if prime == 2 { 3 } else { prime + 2 };
+    }
+    if value > 1 {
+        result -= result / value;
+    }
+    result
+}
+
+/// The least integer `s` with `s² >= value`, without an overflowing square.
+fn ceil_sqrt_usize(value: usize) -> usize {
+    debug_assert!(value > 0);
+    let (mut low, mut high) = (1usize, value);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if middle >= value.div_ceil(middle) {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    low
+}
+
+/// One AKS identity in `(Z/nZ)[X] / (X^r - 1)`.
+fn aks_polynomial_congruence(n: &BigUint, r: usize, x_index: usize, a: usize) -> bool {
+    let a = BigUint::from_u64(u64::try_from(a).expect("AKS base fits u64"));
+    let base = PolyMod::new(vec![a.clone(), BigUint::one()], n);
+    let left = base.mod_pow_xn_minus_one(n, r);
+
+    let mut right_coefficients = vec![BigUint::zero(); x_index + 1];
+    right_coefficients[0] = a.rem(n);
+    right_coefficients[x_index] =
+        BigUint::mod_add(&right_coefficients[x_index], &BigUint::one(), n);
+    let right = PolyMod::new(right_coefficients, n);
+
+    left == right
+}
+
 /// Trial division against every prime below 1000, then Miller-Rabin over
 /// `bases`.
 ///
@@ -3472,6 +3634,110 @@ pub fn is_probable_prime_bpsw(n: &BigUint) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aks_matches_an_independent_sieve_through_127() {
+        let primes = primes_below(128);
+        for value in 0u64..128 {
+            assert_eq!(
+                is_prime_aks(&BigUint::from_u64(value)),
+                primes.binary_search(&value).is_ok(),
+                "AKS verdict for {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn aks_rejects_structured_composites() {
+        for value in [9u64, 25, 27, 49, 81, 121, 125, 341, 561, 645, 1_105, 1_729] {
+            assert!(
+                !is_prime_aks(&BigUint::from_u64(value)),
+                "AKS accepted composite {value}"
+            );
+        }
+        for value in [2u64, 3, 5, 31, 97, 101, 127, 1_009] {
+            assert!(
+                is_prime_aks(&BigUint::from_u64(value)),
+                "AKS rejected prime {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn aks_rejects_after_reaching_the_polynomial_stage() {
+        // 1_022_117 = 1009 * 1013. Both factors lie above the chosen r, so
+        // neither the order search nor the complete a <= r gcd pass can
+        // expose them: rejection must come from the polynomial identity.
+        let candidate = BigUint::from_u64(1_022_117);
+        let threshold = candidate.bits() * candidate.bits();
+        let r = aks_order_modulus(&candidate, threshold);
+        assert!(
+            r < 1_009,
+            "test construction needs both factors above r={r}"
+        );
+        for a in 2..=r {
+            assert_eq!(
+                gcd_u64(candidate.rem_u64(a as u64), a as u64),
+                1,
+                "gcd stage unexpectedly decided at a={a}"
+            );
+        }
+        assert!(!is_prime_aks(&candidate));
+    }
+
+    #[test]
+    fn aks_order_predicate_matches_direct_orders() {
+        for n in 2u64..40 {
+            for modulus in 2usize..50 {
+                let modulus_word = modulus as u64;
+                let order = if gcd_u64(n % modulus_word, modulus_word) == 1 {
+                    let mut power = 1u64;
+                    (1..=modulus).find(|_| {
+                        power = (u128::from(power) * u128::from(n) % modulus as u128) as u64;
+                        power == 1
+                    })
+                } else {
+                    None
+                };
+                for threshold in 0usize..12 {
+                    assert_eq!(
+                        aks_order_exceeds(&BigUint::from_u64(n), modulus, threshold),
+                        order.is_some_and(|order| order > threshold),
+                        "n={n}, modulus={modulus}, threshold={threshold}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aks_word_bounds_are_exact() {
+        for value in 1usize..1_000 {
+            let expected_phi = (1..=value)
+                .filter(|candidate| gcd_u64(*candidate as u64, value as u64) == 1)
+                .count();
+            assert_eq!(euler_phi_usize(value), expected_phi, "phi({value})");
+
+            let root = ceil_sqrt_usize(value);
+            assert!(root >= value.div_ceil(root));
+            if root > 1 {
+                assert!(root - 1 < value.div_ceil(root - 1));
+            }
+        }
+    }
+
+    #[test]
+    fn aks_polynomial_identity_handles_cyclic_collisions() {
+        // Every prime satisfies the identity for every r. Here n mod r = 0,
+        // so X^n folds onto the constant term and must be added to a there.
+        let five = BigUint::from_u64(5);
+        assert!(aks_polynomial_congruence(&five, 5, 0, 1));
+
+        // The full polynomial identity, unlike the scalar Fermat congruence,
+        // exposes 15 immediately.
+        let fifteen = BigUint::from_u64(15);
+        assert!(!aks_polynomial_congruence(&fifteen, 7, 1, 1));
+    }
 
     #[test]
     fn gcd_u64_agrees_with_the_wide_one() {

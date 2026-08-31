@@ -38,7 +38,8 @@ the breaking API cut uses no compatibility shims or duplicate public paths.
   (`is_probable_prime`, `miller_rabin_with_bases`), the reusable
   per-round primitive `miller_rabin_witness` for callers that bring their
   own witness schedule, and Baillie-PSW (`is_probable_prime_bpsw`, with
-  the strong Lucas stage exposed as `is_strong_lucas_probable_prime`);
+  the strong Lucas stage exposed as `is_strong_lucas_probable_prime`), plus
+  the exact deterministic AKS proof algorithm (`is_prime_aks`);
   batch inversion (`mod_inverse_batch`, Montgomery's trick);
   rational reconstruction (`rational_reconstruct`,
   `rational_reconstruct_bounded`) recovering the unique bounded fraction

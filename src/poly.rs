@@ -2225,6 +2225,24 @@ fn bareiss_determinant(mut matrix: Vec<Vec<BigInt>>) -> BigInt {
     }
 }
 
+/// Fold coefficients through `X^degree = 1`. Inputs are already reduced
+/// modulo `modulus`; a slot can receive several reduced coefficients, so each
+/// accumulation returns to the canonical residue range.
+fn fold_xn_minus_one(coefficients: &[BigUint], degree: usize, modulus: &BigUint) -> Vec<BigUint> {
+    debug_assert!(degree > 0);
+    let copied = coefficients.len().min(degree);
+    let mut folded = coefficients[..copied].to_vec();
+    folded.resize_with(degree, BigUint::zero);
+    for (offset, coefficient) in coefficients[copied..].iter().enumerate() {
+        if coefficient.is_zero() {
+            continue;
+        }
+        let slot = (copied + offset) % degree;
+        folded[slot] = BigUint::mod_add(&folded[slot], coefficient, modulus);
+    }
+    folded
+}
+
 /// A univariate polynomial over ℤ/mℤ for a fixed modulus `m ≥ 2`,
 /// coefficients low-to-high and reduced, normalized to drop trailing
 /// zeros.
@@ -2745,6 +2763,75 @@ impl PolyMod {
             }
         }
         result
+    }
+
+    /// `self^exponent` in `(Z/mZ)[X] / (X^degree - 1)`.
+    ///
+    /// This is the cyclic quotient-ring specialization used by AKS. A
+    /// product of two reduced representatives has degree below `2*degree`,
+    /// so reduction is one fold: coefficient `i` is added to slot
+    /// `i mod degree`. It is the same operation as [`Self::mod_pow`] with
+    /// modulus polynomial `X^degree - 1`, but it avoids a general polynomial
+    /// long division after every square and product. The coefficient modulus
+    /// may be composite; no inverse is taken.
+    pub(crate) fn mod_pow_xn_minus_one(&self, exponent: &BigUint, degree: usize) -> Self {
+        assert!(degree > 0, "cyclic polynomial degree must be positive");
+        if exponent.is_zero() {
+            return Self::new(vec![BigUint::one()], &self.modulus);
+        }
+
+        let base = self.reduce_xn_minus_one(degree);
+        let mut result = base.clone();
+        for bit in (0..exponent.bits() - 1).rev() {
+            result = result.square_xn_minus_one(degree);
+            if exponent.bit(bit) {
+                result = result.mul_xn_minus_one(&base, degree);
+            }
+        }
+        result
+    }
+
+    /// Canonical representative modulo `X^degree - 1`, with degree below
+    /// `degree`. Each input coefficient is already reduced modulo `m`.
+    fn reduce_xn_minus_one(&self, degree: usize) -> Self {
+        assert!(degree > 0, "cyclic polynomial degree must be positive");
+        if self.coeffs.len() <= degree {
+            return self.clone();
+        }
+        Self::from_reduced(
+            fold_xn_minus_one(&self.coeffs, degree, &self.modulus),
+            &self.modulus,
+        )
+    }
+
+    /// Product modulo `X^degree - 1`; both operands are folded first so the
+    /// convolution needs exactly one cyclic fold.
+    fn mul_xn_minus_one(&self, other: &Self, degree: usize) -> Self {
+        self.check_modulus(other);
+        if self.is_zero() || other.is_zero() {
+            return Self::zero(&self.modulus);
+        }
+        let left = self.reduce_xn_minus_one(degree);
+        let right = other.reduce_xn_minus_one(degree);
+        let product = convolve_modp(&left.coeffs, &right.coeffs, &self.modulus);
+        Self::from_reduced(
+            fold_xn_minus_one(&product, degree, &self.modulus),
+            &self.modulus,
+        )
+    }
+
+    /// Square modulo `X^degree - 1`, retaining the half-convolution square
+    /// used by the general exponentiation ladder.
+    fn square_xn_minus_one(&self, degree: usize) -> Self {
+        if self.is_zero() {
+            return Self::zero(&self.modulus);
+        }
+        let value = self.reduce_xn_minus_one(degree);
+        let square = convolve_square_modp(&value.coeffs, &self.modulus);
+        Self::from_reduced(
+            fold_xn_minus_one(&square, degree, &self.modulus),
+            &self.modulus,
+        )
     }
 
     /// `self²` (mod m), by the dedicated squaring convolution
@@ -4793,6 +4880,51 @@ mod tests {
             }
             assert_eq!(by_pow, by_mul, "mod_pow vs repeated multiply");
         }
+    }
+
+    #[test]
+    fn cyclic_mod_pow_matches_general_monic_reduction() {
+        // AKS runs over Z/nZ while n may be composite. The oracle is the
+        // general PolyMod ladder with the explicit monic X^r - 1; monicity
+        // makes its long division valid over every modulus in this table.
+        for modulus_word in [2u64, 4, 6, 15, 17] {
+            let modulus = BigUint::from_u64(modulus_word);
+            for degree in 1usize..=8 {
+                let mut modulus_coefficients = vec![BigUint::zero(); degree + 1];
+                modulus_coefficients[0] = modulus.sub(&BigUint::one());
+                modulus_coefficients[degree] = BigUint::one();
+                let modulus_polynomial = PolyMod::new(modulus_coefficients, &modulus);
+
+                for seed in 0u64..5 {
+                    // Longer than r, so the specialized ladder's initial
+                    // fold is exercised as well as every product fold.
+                    let coefficients = (0..degree + 3)
+                        .map(|index| {
+                            BigUint::from_u64(
+                                (seed + 3 * index as u64 + index as u64 * index as u64)
+                                    % (2 * modulus_word),
+                            )
+                        })
+                        .collect();
+                    let base = PolyMod::new(coefficients, &modulus);
+                    for exponent in 0u64..=16 {
+                        let exponent = BigUint::from_u64(exponent);
+                        assert_eq!(
+                            base.mod_pow_xn_minus_one(&exponent, degree),
+                            base.mod_pow(&exponent, &modulus_polynomial),
+                            "m={modulus_word}, r={degree}, seed={seed}, exponent={exponent}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "cyclic polynomial degree must be positive")]
+    fn cyclic_mod_pow_rejects_zero_degree() {
+        let polynomial = PolyMod::new(vec![BigUint::one()], &BigUint::from_u64(7));
+        let _ = polynomial.mod_pow_xn_minus_one(&BigUint::one(), 0);
     }
 
     #[test]

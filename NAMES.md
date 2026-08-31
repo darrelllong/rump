@@ -149,7 +149,7 @@ public.
 |---|---|---|---|
 | is_probable_prime | number_theory::is_probable_prime | done | fixed twelve-base Miller–Rabin default; not BPSW |
 | is_probable_prime_bpsw | number_theory::is_probable_prime_bpsw | done | distinct Baillie–PSW contract, not an alias |
-| — | number_theory::is_prime_aks | pending | exact deterministic AKS test; algorithm-visible because its proof-oriented polynomial-time cost is categorically different from the probable-prime APIs |
+| — | number_theory::is_prime_aks | done | exact deterministic AKS test; algorithm-visible because its proof-oriented polynomial-time cost is categorically different from the probable-prime APIs |
 | is_probable_prime_with_bases | number_theory::miller_rabin_with_bases | done | algorithm is visible |
 | miller_rabin_witness | same under number_theory | done | |
 | is_strong_lucas_probable_prime | same under number_theory | done | |

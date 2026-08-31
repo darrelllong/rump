@@ -7,6 +7,13 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **`number_theory::is_prime_aks`.** An exact, unconditional deterministic
+  implementation of the Agrawal–Kayal–Saxena primality test. The polynomial
+  stage uses a dedicated cyclic `X^r − 1` reduction in Rump's `PolyMod`
+  engine, differentially checked against general monic polynomial reduction
+  over both prime and composite coefficient moduli. This is the proof-oriented
+  AKS algorithm, not a replacement for the much faster probable-prime APIs.
+
 - **`number_theory::crt_combine_balanced`.** It has the same exact validation
   and canonical result as `crt_combine`, but combines equal-width partial
   products through a balanced tree and can run independent pairs on a bounded
