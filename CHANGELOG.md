@@ -11,8 +11,11 @@ what a consumer must change, not everything that moved.
   implementation of the Agrawal–Kayal–Saxena primality test. The polynomial
   stage uses a dedicated cyclic `X^r − 1` reduction in Rump's `PolyMod`
   engine, differentially checked against general monic polynomial reduction
-  over both prime and composite coefficient moduli. This is the proof-oriented
-  AKS algorithm, not a replacement for the much faster probable-prime APIs.
+  over both prime and composite coefficient moduli, and against a separate
+  scalar repeated-multiplication oracle. An ignored parallel stress test checks
+  arbitrary exhaustive ranges against an independent sieve while never using
+  more workers than the machine reports. This is the proof-oriented AKS
+  algorithm, not a replacement for the much faster probable-prime APIs.
 
 - **`number_theory::crt_combine_balanced`.** It has the same exact validation
   and canonical result as `crt_combine`, but combines equal-width partial

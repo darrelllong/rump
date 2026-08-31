@@ -3130,7 +3130,8 @@ pub fn is_probable_prime(n: &BigUint) -> bool {
 /// AKS is exposed for applications that specifically require this algorithm
 /// or its unconditional complexity result. It is dramatically slower in
 /// practice than [`is_probable_prime`] or [`is_probable_prime_bpsw`], and is
-/// not used by either of them.
+/// not used by either of them. `true` is an unconditional primality proof,
+/// not a probable-prime verdict; `false` means the input is composite.
 ///
 /// # Panics
 ///
@@ -3635,16 +3636,84 @@ pub fn is_probable_prime_bpsw(n: &BigUint) -> bool {
 mod tests {
     use super::*;
 
+    /// A deliberately plain oracle with no shared production code: mark each
+    /// composite from its first possible prime factor onward.
+    fn reference_prime_sieve(bound: usize) -> Vec<bool> {
+        let mut prime = vec![true; bound];
+        if bound > 0 {
+            prime[0] = false;
+        }
+        if bound > 1 {
+            prime[1] = false;
+        }
+        let mut factor = 2usize;
+        while factor <= bound.saturating_sub(1) / factor {
+            if prime[factor] {
+                let mut multiple = factor * factor;
+                while multiple < bound {
+                    prime[multiple] = false;
+                    multiple += factor;
+                }
+            }
+            factor += 1;
+        }
+        prime
+    }
+
     #[test]
     fn aks_matches_an_independent_sieve_through_127() {
-        let primes = primes_below(128);
+        let primes = reference_prime_sieve(128);
         for value in 0u64..128 {
             assert_eq!(
                 is_prime_aks(&BigUint::from_u64(value)),
-                primes.binary_search(&value).is_ok(),
+                primes[value as usize],
                 "AKS verdict for {value}"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "parallel exhaustive AKS stress test; run explicitly in release mode"]
+    fn aks_stress_matches_an_independent_sieve() {
+        let inclusive_bound = std::env::var("RUMP_AKS_STRESS_BOUND")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .expect("RUMP_AKS_STRESS_BOUND must be a non-negative integer")
+            })
+            .unwrap_or(10_000);
+        let length = inclusive_bound
+            .checked_add(1)
+            .expect("stress bound must fit usize");
+        let expected = reference_prime_sieve(length);
+        let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let workers = available.min(length).max(1);
+        eprintln!("checking 0..={inclusive_bound} with {workers} workers");
+
+        // Interleaving, rather than contiguous chunks, spreads the much more
+        // expensive primes across workers. The count is bounded solely by
+        // reported machine parallelism and the number of candidates.
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|worker| {
+                    let expected = &expected;
+                    scope.spawn(move || {
+                        for value in (worker..length).step_by(workers) {
+                            assert_eq!(
+                                is_prime_aks(&BigUint::from_u64(
+                                    u64::try_from(value).expect("usize fits u64"),
+                                )),
+                                expected[value],
+                                "AKS stress verdict for {value}"
+                            );
+                        }
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().expect("AKS stress worker panicked");
+            }
+        });
     }
 
     #[test]
@@ -3711,6 +3780,21 @@ mod tests {
     }
 
     #[test]
+    fn aks_order_search_returns_the_first_valid_modulus() {
+        for n in 2u64..40 {
+            let n = BigUint::from_u64(n);
+            for threshold in [0usize, 1, 2, 4, 9, 16, 25] {
+                let modulus = aks_order_modulus(&n, threshold);
+                assert!(aks_order_exceeds(&n, modulus, threshold));
+                assert!(
+                    (2..modulus).all(|candidate| !aks_order_exceeds(&n, candidate, threshold)),
+                    "n={n}, threshold={threshold}, chosen modulus={modulus} was not minimal"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn aks_word_bounds_are_exact() {
         for value in 1usize..1_000 {
             let expected_phi = (1..=value)
@@ -3737,6 +3821,45 @@ mod tests {
         // exposes 15 immediately.
         let fifteen = BigUint::from_u64(15);
         assert!(!aks_polynomial_congruence(&fifteen, 7, 1, 1));
+    }
+
+    /// Scalar repeated multiplication by `X + a` in the cyclic quotient
+    /// ring. This shares neither PolyMod nor exponentiation code with AKS.
+    fn reference_aks_polynomial_congruence(n: u64, r: usize, a: u64) -> bool {
+        let mut coefficients = vec![0u64; r];
+        coefficients[0] = 1 % n;
+        for _ in 0..n {
+            let mut next = vec![0u64; r];
+            for index in 0..r {
+                let scaled = u128::from(a) * u128::from(coefficients[index]);
+                let x_term = coefficients[(index + r - 1) % r];
+                next[index] = ((scaled + u128::from(x_term)) % u128::from(n)) as u64;
+            }
+            coefficients = next;
+        }
+
+        let mut expected = vec![0u64; r];
+        expected[0] = a % n;
+        let x_index = n as usize % r;
+        expected[x_index] = (expected[x_index] + 1) % n;
+        coefficients == expected
+    }
+
+    #[test]
+    fn aks_polynomial_identity_matches_scalar_reference() {
+        for n in 2u64..=31 {
+            let candidate = BigUint::from_u64(n);
+            for r in 1usize..=12 {
+                let x_index = n as usize % r;
+                for a in 0u64..=n + 2 {
+                    assert_eq!(
+                        aks_polynomial_congruence(&candidate, r, x_index, a as usize),
+                        reference_aks_polynomial_congruence(n, r, a),
+                        "n={n}, r={r}, a={a}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

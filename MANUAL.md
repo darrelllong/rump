@@ -939,7 +939,8 @@ proves its answer unconditionally by checking polynomial congruences in
 small-gcd stages. Its polynomial running-time result is theoretically
 important, but the constants are large: use the Miller–Rabin or Baillie–PSW
 interfaces for practical probable-prime testing, and call AKS when this exact
-algorithm is specifically required.
+algorithm is specifically required. A `true` AKS result is an unconditional
+primality proof, not a probable-prime verdict; `false` means composite.
 
 ```rust
 // Unlike the probable-prime predicates, AKS is an unconditional proof.
