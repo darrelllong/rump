@@ -67,6 +67,16 @@ impl MontgomeryScratch {
     }
 }
 
+#[cfg(feature = "wipe")]
+impl Drop for MontgomeryScratch {
+    fn drop(&mut self) {
+        // The scratch is reused across residue operations and can hold
+        // secret-derived intermediates from the last one; wipe at end of
+        // life like a `BigUint`'s limbs.
+        crate::scrub::zeroize_slice(self.limbs.as_mut_slice());
+    }
+}
+
 /// A residue was used with a context that did not produce it.
 ///
 /// The type system cannot express "this residue belongs to that context" for
@@ -401,6 +411,8 @@ impl MontgomeryContext {
         // The ladder runs on fixed-width buffers with a swap after each step,
         // so the whole exponentiation performs no allocation and no
         // intermediate wipes; every buffer that touched secret-derived state
+        // is wiped once on the way out (under the `wipe` feature; the calls
+        // compile to nothing otherwise).
         let mut acc = vec![0u64; width];
         let mut tmp = vec![0u64; width];
 
@@ -432,6 +444,7 @@ impl MontgomeryContext {
             }
 
             debug_assert!(seeded, "bits counts up to a set bit");
+            crate::scrub::zeroize_slice(power.as_mut_slice());
             acc
         } else {
             // Fixed 4-bit window, scanned left to right (the k-ary method:
@@ -507,9 +520,12 @@ impl MontgomeryContext {
                 }
             }
 
+            crate::scrub::zeroize_slice(table.as_mut_slice());
             acc
         };
 
+        crate::scrub::zeroize_slice(tmp.as_mut_slice());
+        crate::scrub::zeroize_slice(scratch);
         let mut result = BigUint { limbs: result };
         result.normalize();
         result

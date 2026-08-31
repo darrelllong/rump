@@ -186,6 +186,11 @@ impl Clone for BigUint {
     /// allocate a fresh one, which is the cost this type exists to avoid on
     /// its cheapest operations.
     fn clone_from(&mut self, source: &Self) {
+        if self.limbs.len() > source.limbs.len() {
+            // The truncation strands the high limbs in spare capacity, out
+            // of reach of the drop-time scrub, so wipe them first.
+            crate::scrub::zeroize_slice(&mut self.limbs[source.limbs.len()..]);
+        }
         self.limbs.clone_from(&source.limbs);
     }
 }
@@ -1274,6 +1279,11 @@ impl BigUint {
         };
         // Shape the buffer to the working width.
         let n = long.limbs.len();
+        if self.limbs.len() > n {
+            // The shrinking resize strands the high limbs in spare capacity;
+            // wipe them before they leave the drop-time scrub's reach.
+            crate::scrub::zeroize_slice(&mut self.limbs[n..]);
+        }
         self.limbs.resize(n, 0);
         let mut carry = 0u128;
         for i in 0..n {
@@ -1308,6 +1318,10 @@ impl BigUint {
         assert!(lhs.cmp(rhs) != Ordering::Less, "BigUint underflow");
         // Shape the buffer as in `add_into`.
         let n = lhs.limbs.len();
+        if self.limbs.len() > n {
+            // As in `add_into`: wipe the limbs the shrinking resize strands.
+            crate::scrub::zeroize_slice(&mut self.limbs[n..]);
+        }
         self.limbs.resize(n, 0);
         let mut borrow = 0u128;
         for i in 0..n {
@@ -1333,6 +1347,10 @@ impl BigUint {
     /// *other* operand's minus this one's. Panics if `minuend < self`.
     fn rsub_assign_ref(&mut self, minuend: &Self) {
         assert!(minuend.cmp(self) != Ordering::Less, "BigUint underflow");
+        debug_assert!(
+            self.limbs.len() <= minuend.limbs.len(),
+            "self <= minuend, so the resize only grows"
+        );
         self.limbs.resize(minuend.limbs.len(), 0);
         let mut borrow = 0u128;
         for i in 0..self.limbs.len() {
@@ -2195,7 +2213,10 @@ impl BigUint {
         let bit_shifts = (n % 64) as u32;
 
         if limb_shifts >= self.limbs.len() {
-            // Everything shifts out.
+            // Everything shifts out. Wipe before clearing: `clear` only
+            // shortens the vector, leaving the limbs in spare capacity where
+            // the drop-time scrub cannot reach them.
+            crate::scrub::zeroize_slice(self.limbs.as_mut_slice());
             self.limbs.clear();
             return;
         }
@@ -2205,6 +2226,7 @@ impl BigUint {
         if limb_shifts > 0 {
             let kept = self.limbs.len() - limb_shifts;
             self.limbs.copy_within(limb_shifts.., 0);
+            crate::scrub::zeroize_slice(&mut self.limbs[kept..]);
             self.limbs.truncate(kept);
         }
 
@@ -2614,6 +2636,7 @@ impl BigUint {
             limbs: out[..width].to_vec(),
         };
         result.normalize();
+        crate::scrub::zeroize_slice(workspace.as_mut_slice());
         result
     }
 
@@ -2655,6 +2678,7 @@ impl BigUint {
             limbs: out[..width].to_vec(),
         };
         result.normalize();
+        crate::scrub::zeroize_slice(workspace.as_mut_slice());
         result
     }
 }
@@ -2841,6 +2865,16 @@ pub(crate) fn bit_span(limbs: usize, per_limb: usize) -> usize {
     limbs
         .checked_mul(per_limb)
         .expect("operand too wide to index by bit on this target")
+}
+
+#[cfg(feature = "wipe")]
+impl Drop for BigUint {
+    fn drop(&mut self) {
+        // BigUint values may hold secrets — private exponents, prime
+        // factors, nonces. Clear the limb buffer on drop so they do not
+        // linger in freed heap memory.
+        crate::scrub::zeroize_slice(self.limbs.as_mut_slice());
+    }
 }
 
 /// The low 64 bits of a `u128` accumulator as a limb. Every kernel here
@@ -3127,7 +3161,9 @@ impl BigInt {
                 self.sign = sign;
             }
             Ordering::Equal => {
-                // The capacity is kept for reuse.
+                // Wipe before clearing: `Drop` covers only the initialized
+                // prefix, and the capacity is kept for reuse.
+                crate::scrub::zeroize_slice(self.magnitude.limbs.as_mut_slice());
                 self.magnitude.limbs.clear();
                 self.sign = Sign::Zero;
             }
@@ -4698,6 +4734,65 @@ mod tests {
     fn sub_into_panics_on_underflow() {
         let mut out = BigUint::zero();
         out.sub_into(&BigUint::from_u64(3), &BigUint::from_u64(5));
+    }
+
+    /// The verification counterpart of the `wipe` feature's audited scrub
+    /// exception: reading a buffer's abandoned tail cannot be expressed in
+    /// safe Rust, so proving the shrink paths scrub it requires one raw
+    /// read-back. Confined to this test; the pointers are captured while
+    /// the limbs are live and the buffer's identity is asserted unchanged
+    /// before each read.
+    #[test]
+    #[cfg(feature = "wipe")]
+    #[allow(unsafe_code)]
+    fn shrinking_paths_scrub_abandoned_limbs() {
+        let read8 =
+            |p: *const u64| -> Vec<u64> { (0..8).map(|i| unsafe { p.add(i).read() }).collect() };
+        let wide = BigUint {
+            limbs: vec![0xdead_beef_0bad_cafe; 8],
+        };
+        let narrow = BigUint::from_u64(1);
+
+        let mut x = wide.clone();
+        let p = x.limbs.as_ptr();
+        x.clone_from(&narrow);
+        assert_eq!(x.limbs.as_ptr(), p, "clone_from reuses the buffer");
+        assert!(
+            read8(p)[1..].iter().all(|&w| w == 0),
+            "clone_from stranded live limbs"
+        );
+
+        let mut out = wide.clone();
+        let p = out.limbs.as_ptr();
+        out.add_into(&narrow, &narrow);
+        assert_eq!(out.limbs.as_ptr(), p, "add_into reuses the buffer");
+        assert!(
+            read8(p)[1..].iter().all(|&w| w == 0),
+            "add_into stranded live limbs"
+        );
+
+        let mut out2 = wide.clone();
+        let p = out2.limbs.as_ptr();
+        out2.sub_into(&narrow, &narrow);
+        assert_eq!(out2.limbs.as_ptr(), p, "sub_into reuses the buffer");
+        assert!(
+            read8(p).iter().all(|&w| w == 0),
+            "sub_into stranded live limbs"
+        );
+
+        let a = BigInt::from_parts(Sign::Positive, wide.clone());
+        let mut z = a.clone();
+        let p = z.magnitude.limbs.as_ptr();
+        z -= &a;
+        assert_eq!(
+            z.magnitude.limbs.as_ptr(),
+            p,
+            "cancellation keeps the buffer"
+        );
+        assert!(
+            read8(p).iter().all(|&w| w == 0),
+            "cancellation stranded live limbs"
+        );
     }
 
     #[test]

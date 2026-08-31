@@ -25,17 +25,28 @@
 //!
 //! - **Variable-time, for non-secret data.** Operations take data-dependent
 //!   paths; do not use them where timing must not leak secrets.
-//! - **Not a secret-scrubbing or constant-time type.** Nothing is wiped:
-//!   values live in ordinary heap buffers, freed memory keeps its contents,
-//!   and `Debug` prints every limb. Cryptographic memory hygiene and
-//!   constant-time operation are out of scope, and a consumer that handles
-//!   key material adds them at that layer with a purpose-built representation
-//!   rather than relying on anything here.
+//! - **Not a secret-scrubbing or constant-time type by default.** In the
+//!   default build nothing is wiped: values live in ordinary heap buffers,
+//!   freed memory keeps its contents, and `Debug` prints every limb. The
+//!   opt-in **`wipe` cargo feature** restores the drop-time scrub as cheap
+//!   defense in depth: every [`BigUint`] volatile-wipes its live limbs on
+//!   drop, the in-place shrink paths wipe the limbs they abandon, the
+//!   exponentiation ladder and the Montgomery workspaces wipe on exit, and
+//!   the samplers wipe their drawn byte buffers. The caveats are unchanged
+//!   from when this was the default: spare capacity and buffers freed by
+//!   reallocation are not wiped, `Debug` still prints every limb, and none
+//!   of it makes any operation constant-time. Constant-time operation stays
+//!   out of scope either way; a consumer needing it adds it at its own layer
+//!   with a purpose-built representation.
 //!
-//! Safety policy: `#![forbid(unsafe_code)]` crate-wide, with no exceptions —
-//! `forbid` rather than `deny` precisely because an inner `allow` cannot lift
-//! it, so the guarantee is enforced by the compiler against the crate's own
-//! code rather than being a default it could override. `#![deny(missing_docs)]`
+//! Safety policy: `#![forbid(unsafe_code)]` crate-wide in the default build,
+//! with no exceptions — `forbid` rather than `deny` precisely because an
+//! inner `allow` cannot lift it, so the guarantee is enforced by the compiler
+//! against the crate's own code rather than being a default it could
+//! override. The `wipe` feature relaxes the attribute to `deny(unsafe_code)`
+//! because a volatile scrub cannot be expressed in safe Rust; the two audited
+//! `unsafe` sites it admits are the scrub helper in `src/scrub.rs` and the
+//! read-back test that verifies it. `#![deny(missing_docs)]`
 //! holds every public item to a doc comment, and `MANUAL.md` carries a worked,
 //! test-pinned example for each.
 //!
@@ -67,7 +78,8 @@
 //! assert_eq!(jacobi(&a, &p), Some(1));
 //! ```
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "wipe"), forbid(unsafe_code))]
+#![cfg_attr(feature = "wipe", deny(unsafe_code))]
 #![deny(missing_docs)]
 
 // Implementation modules are private; every public path below is a facade, so
@@ -83,6 +95,7 @@ mod number_theory_impl;
 mod poly;
 #[path = "random.rs"]
 mod random_impl;
+mod scrub;
 
 pub use bigint::{BigInt, BigUint, Sign};
 

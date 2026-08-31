@@ -1,9 +1,10 @@
 # rump
 
 **RU**st **M**ulti**P**recision: multiprecision integer arithmetic in Rust,
-implemented directly from the literature, with no dependencies and no
-`unsafe` at all — `#![forbid(unsafe_code)]`, which an inner `allow` cannot
-lift. Extracted from
+implemented directly from the literature, with no dependencies and, in the
+default build, no `unsafe` at all — `#![forbid(unsafe_code)]`, which an inner
+`allow` cannot lift (the opt-in `wipe` feature admits one audited volatile
+scrub; see Properties). Extracted from
 [darrelllong/cryptography](https://github.com/darrelllong/cryptography) so the
 arithmetic can serve consumers beyond cryptography, with the crate boundary
 enforcing a clean API.
@@ -77,17 +78,25 @@ inputs. Adversarially hardened primality testing lives with its consumer
 
 ## Properties
 
-- `#![forbid(unsafe_code)]`, with no exceptions. `forbid` rather than `deny`
-  deliberately: an inner `allow` cannot lift it, so the guarantee is enforced
-  by the compiler against the crate's own code rather than being a default it
-  could override.
+- `#![forbid(unsafe_code)]`, with no exceptions, in the default build.
+  `forbid` rather than `deny` deliberately: an inner `allow` cannot lift it,
+  so the guarantee is enforced by the compiler against the crate's own code
+  rather than being a default it could override. The opt-in `wipe` feature
+  relaxes the attribute to `deny(unsafe_code)` because a volatile scrub has
+  no safe expression; its two audited `unsafe` sites are the scrub helper
+  and the raw read-back test that proves the shrink paths use it.
 - **Variable-time, for non-secret data.** Operations take data-dependent
   paths. Do not use this crate where timing must not leak secrets.
-- **Not a secret-scrubbing or constant-time type, and does not pretend to be.**
-  Nothing is wiped: values live in ordinary heap buffers, freed memory keeps
-  its contents, and `Debug` prints every limb. Cryptographic memory hygiene
-  and constant-time operation are out of scope; a consumer handling key
-  material adds them at that layer with a purpose-built representation.
+- **Not a secret-scrubbing or constant-time type by default.** In the
+  default build nothing is wiped: values live in ordinary heap buffers,
+  freed memory keeps its contents, and `Debug` prints every limb. The
+  opt-in **`wipe` feature** restores drop-time zeroization as cheap defense
+  in depth: every `BigUint` volatile-wipes its live limbs on drop, the
+  in-place shrink paths wipe the limbs they abandon, the exponentiation
+  ladder and Montgomery workspaces wipe on exit, and the samplers wipe
+  drawn bytes. Spare capacity and buffers freed by reallocation are still
+  not wiped, and nothing becomes constant-time; a consumer needing more
+  adds it at its own layer with a purpose-built representation.
 
 ## Benchmarks
 

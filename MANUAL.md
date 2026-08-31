@@ -42,10 +42,16 @@ use rump::{BigInt, BigUint, Sign};
 
 Two properties define the intended use. Operations are **variable-time** (do
 not use them where timing must not leak secrets), and rump is **for non-secret
-data — not a secret-scrubbing or constant-time type**. Nothing is wiped:
-values live in ordinary heap buffers, freed memory keeps its contents, and
-`Debug` prints every limb. Cryptographic memory hygiene and constant-time
-operation are out of scope, left to a consumer that handles key material.
+data — not a secret-scrubbing or constant-time type by default**. In the
+default build nothing is wiped: values live in ordinary heap buffers, freed
+memory keeps its contents, and `Debug` prints every limb. The opt-in `wipe`
+cargo feature restores the drop-time scrub as cheap defense in depth — every
+`BigUint` volatile-wipes its live limbs on drop, the in-place shrink paths
+wipe the limbs they abandon, the exponentiation ladder and Montgomery
+workspaces wipe on exit, and the samplers wipe drawn bytes — with the old
+caveats unchanged: spare capacity and buffers freed on reallocation are not
+wiped, and nothing becomes constant-time. Constant-time operation is out of
+scope either way, left to a consumer that handles key material.
 
 ## BigUint
 

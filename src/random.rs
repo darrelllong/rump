@@ -5,6 +5,8 @@
 //! source. Cryptographic callers must supply a CSPRNG (the parent
 //! cryptography crate bridges its DRBGs here); simulations may supply any
 //! deterministic generator. Temporary buffers holding drawn bytes are wiped
+//! before each sampler returns when the crate's `wipe` feature is enabled;
+//! the default build leaves them to the allocator.
 //!
 //! Every sampler here is a rejection sampler: it draws from an enclosing set
 //! that is easy to sample and discards draws outside the target set. This
@@ -138,6 +140,9 @@ pub fn random_below<R: RandomSource + ?Sized>(
         bytes[0] &= top_mask;
         let candidate = BigUint::from_be_bytes(&bytes);
         if candidate < *upper_exclusive {
+            // The buffer holds the returned draw's bytes; wipe it so a
+            // secret sample does not linger in the freed allocation.
+            crate::scrub::zeroize_slice(bytes.as_mut_slice());
             return Some(candidate);
         }
     }
@@ -355,6 +360,9 @@ pub fn random_probable_prime<R: RandomSource + ?Sized>(
             continue;
         }
         if is_probable_prime(&candidate) {
+            // The buffer holds the returned prime's bytes; wipe it so a
+            // secret draw does not linger in the freed allocation.
+            crate::scrub::zeroize_slice(bytes.as_mut_slice());
             return Some(candidate);
         }
         stalled = 0;

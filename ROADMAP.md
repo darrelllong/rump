@@ -152,6 +152,18 @@ and the measured cost on the operations this crate exists to perform does not
 justify removing a hygiene measure the parent crate audited. Revisit if a
 consumer's profile is dominated by temporary churn.
 
+**Reconciliation (2026-08-31).** The disposition above did not survive the
+0.3.0 cut: the next day's `forbid(unsafe_code)` commit (`3a70a28`) removed the
+scrub, the `Drop` policy, and the read-back probe, and promised this section
+would be reconciled — it was not, until now. The final disposition is both at
+once: the default build is `forbid(unsafe_code)` and wipes nothing, and the
+opt-in `wipe` cargo feature restores the scrub exactly as measured here (drop
+wipe, shrink-path wipes, ladder and workspace wipes, sampler buffer wipes,
+read-back test), relaxing the attribute to `deny(unsafe_code)` with the two
+audited sites. The parent cryptography crate enables the feature
+unconditionally. The measurements in this section describe the feature's cost
+and remain the record of it.
+
 ## 1. Arbitrary-precision integers
 
 **Efficient — all of it.** Core ops (`add` … `trailing_zeros`), integer

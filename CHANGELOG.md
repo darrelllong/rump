@@ -3,6 +3,25 @@
 Releases are git tags; nothing here is published to crates.io. Entries record
 what a consumer must change, not everything that moved.
 
+## Unreleased
+
+### Added
+
+- **`wipe` cargo feature — the option to wipe is back.** 0.3.0 removed the
+  drop-time scrub to reach `forbid(unsafe_code)`; that traded away a guarantee
+  the parent cryptography crate depended on. The scrub returns as an opt-in
+  feature: `BigUint` volatile-wipes its live limbs on drop, `clone_from` /
+  `add_into` / `sub_into` and the shift/cancellation paths wipe the limbs
+  their in-place shrinks strand in spare capacity, the exponentiation ladder
+  wipes its table and temporaries on exit, the Montgomery workspaces and
+  `MontgomeryScratch` wipe theirs, and the samplers wipe drawn byte buffers.
+  The raw read-back test that proves the shrink paths scrub returns with it.
+  Under the feature the crate attribute relaxes to `deny(unsafe_code)` with
+  exactly those two audited `unsafe` sites; the default build is unchanged —
+  `forbid(unsafe_code)`, nothing wiped. The old caveats are restated rather
+  than improved: spare capacity and buffers freed by reallocation are not
+  wiped, and nothing becomes constant-time.
+
 ## 0.3.0 — unreleased
 
 ### Breaking

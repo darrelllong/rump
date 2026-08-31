@@ -20,3 +20,12 @@ name = "rump"
 path = "src/lib.rs"
 
 [dependencies]
+
+[features]
+# Opt-in drop-time zeroization: BigUint wipes its live limbs on drop, the
+# in-place shrink paths wipe abandoned limbs, the exponentiation ladder and
+# Montgomery workspaces wipe on exit, and the samplers wipe drawn bytes.
+# Uses one audited volatile-write helper (src/scrub.rs), so the crate-wide
+# forbid(unsafe_code) relaxes to deny(unsafe_code) under this feature; the
+# default build keeps forbid with no exceptions and wipes nothing.
+wipe = []
