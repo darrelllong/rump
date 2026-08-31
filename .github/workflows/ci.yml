@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The release gate's portable legs, run in both feature configurations:
+  # the default build (forbid(unsafe_code), nothing wiped) and --features
+  # wipe (deny(unsafe_code), drop-time scrub). The whitespace leg is
+  # meaningless on a clean checkout and the package leg needs no matrix, so
+  # it runs once below.
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.rust }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rust: stable
+          - os: macos-latest
+            rust: stable
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ matrix.rust }}
+        run: rustup toolchain install ${{ matrix.rust }} --profile minimal --component clippy,rustfmt && rustup default ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy (default)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: clippy (wipe)
+        run: cargo clippy --all-targets --features wipe -- -D warnings
+      - name: rustdoc (deny warnings)
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+      - name: test (default)
+        run: cargo test --all-targets && cargo test --doc
+      - name: test (wipe)
+        run: cargo test --features wipe --all-targets && cargo test --features wipe --doc
+      - name: manual.tex listings run against the crate
+        run: bash scripts/check_manual_tex.sh
+      - name: package
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo package --allow-dirty --no-verify
+
+  # MSRV — keep in sync with rust-version in Cargo.toml. check only, the
+  # release gate's msrv leg semantics.
+  msrv:
+    name: ubuntu-latest / 1.87
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.87
+        run: rustup toolchain install 1.87 --profile minimal && rustup default 1.87
+      - uses: Swatinem/rust-cache@v2
+      - name: check (default)
+        run: cargo check --all-targets
+      - name: check (wipe)
+        run: cargo check --all-targets --features wipe
+
+  # The 32-bit leg the crate root promises: every limb-count-to-bit-index
+  # conversion is checked, and i686 is where that boundary is reachable.
+  # check, not test — the release gate's cross leg semantics.
+  cross-32bit:
+    name: i686-unknown-linux-gnu / stable
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust with i686 target
+        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable && rustup target add i686-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: check (default)
+        run: cargo check --target i686-unknown-linux-gnu --all-targets
+      - name: check (wipe)
+        run: cargo check --target i686-unknown-linux-gnu --all-targets --features wipe

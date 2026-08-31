@@ -37,8 +37,10 @@ run() {
 # repository whose workspace reaches sibling crates — it will rewrite them.
 run "fmt"            cargo fmt --all -- --check
 run "clippy"         cargo clippy --all-targets -- -D warnings
+run "clippy-wipe"    cargo clippy --all-targets --features wipe -- -D warnings
 run "rustdoc"        env RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 run "test"           cargo test --all-targets
+run "test-wipe"      cargo test --features wipe --all-targets
 run "doctests"       cargo test --doc
 run "test-release"   cargo test --release --all-targets
 run "manual.tex"     bash scripts/check_manual_tex.sh
