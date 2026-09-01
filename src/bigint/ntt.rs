@@ -29,7 +29,7 @@ const PRIME_PRODUCT: u64 = PRIME_0 * PRIME_1;
 // Linear transform passes need enough values per context to repay one scoped
 // worker wave. This grain is measured by the ignored phase/scaling probes and
 // limits workers by work size in addition to the caller's hardware ceiling.
-const MIN_LINEAR_VALUES_PER_WORKER: usize = 1 << 16;
+const MIN_LINEAR_VALUES_PER_WORKER: usize = 1 << 18;
 
 // Below 2^16 coefficients NTT loses to the recursive multiplication ladder
 // even with four contexts on the crossover host. Keeping forced small-kernel
