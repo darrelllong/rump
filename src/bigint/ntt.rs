@@ -60,36 +60,31 @@ pub(super) fn automatic_worker_count(transform_len: usize) -> usize {
     worker_count(transform_len, available)
 }
 
-/// Select a radix-compatible worker count from a hard context ceiling.
+/// Select a measured radix-compatible worker count from a hard context ceiling.
 ///
-/// With `w = 2^k` fixed segments, `log2(n) - k` stages run in one retained
-/// scoped wave and the `k` stages that join segments each require another
-/// synchronized wave. Charging one unit of launch/barrier latency per joining
-/// wave gives `(log2(n) - k) / w + k`; choose its exact integer-rational
-/// minimum instead of imposing an unrelated maximum. At the present 2^26
-/// transform ceiling the model itself never selects more than 16 workers.
+/// The targets follow the exact-worker scaling curve through every supported
+/// transform decade. They grow from four workers at 2^16 values to 64 at the
+/// 2^24–2^26 ceiling; 128 and 256 contexts were explicitly slower at 2^24,
+/// 2^25, and 2^26. The target is then rounded down to a power of two no larger
+/// than `max_contexts`, so a smaller machine uses only what it reports.
 pub(super) fn worker_count(transform_len: usize, max_contexts: usize) -> usize {
     debug_assert!(transform_len.is_power_of_two());
     if transform_len < PARALLEL_TRANSFORM_MIN_LEN || max_contexts <= 1 {
         return 1;
     }
-    let depth = transform_len.ilog2() as usize;
-    let maximum = max_contexts.min(transform_len);
-    let maximum_power = 1usize << maximum.ilog2();
-    let mut best_workers = 1usize;
-    let mut best_numerator = depth;
-    let mut workers = 2usize;
-    let mut joining_stages = 1usize;
-    while workers <= maximum_power {
-        let numerator = depth - joining_stages + joining_stages * workers;
-        if numerator * best_workers < best_numerator * workers {
-            best_workers = workers;
-            best_numerator = numerator;
-        }
-        workers <<= 1;
-        joining_stages += 1;
-    }
-    best_workers
+    let target = if transform_len <= 1 << 16 {
+        4
+    } else if transform_len <= 1 << 18 {
+        8
+    } else if transform_len <= 1 << 21 {
+        16
+    } else if transform_len <= 1 << 23 {
+        32
+    } else {
+        64
+    };
+    let maximum = max_contexts.min(target);
+    1usize << maximum.ilog2()
 }
 
 /// Multiply two non-zero values through an exact two-prime NTT convolution.
@@ -1196,9 +1191,15 @@ mod tests {
         assert_eq!(worker_count(1 << 16, 1), 1);
         assert_eq!(worker_count(1 << 16, 2), 2);
         assert_eq!(worker_count(1 << 16, 6), 4);
-        assert_eq!(worker_count(1 << 16, 256), 8);
+        assert_eq!(worker_count(1 << 16, 256), 4);
+        assert_eq!(worker_count(1 << 17, 256), 8);
+        assert_eq!(worker_count(1 << 18, 256), 8);
         assert_eq!(worker_count(1 << 19, 256), 16);
-        assert_eq!(worker_count(MAX_TRANSFORM_LEN, 256), 16);
+        assert_eq!(worker_count(1 << 21, 256), 16);
+        assert_eq!(worker_count(1 << 22, 256), 32);
+        assert_eq!(worker_count(1 << 23, 256), 32);
+        assert_eq!(worker_count(1 << 24, 256), 64);
+        assert_eq!(worker_count(MAX_TRANSFORM_LEN, 256), 64);
         for available in 1usize..=256 {
             let workers = worker_count(MAX_TRANSFORM_LEN, available);
             assert!(workers <= available);

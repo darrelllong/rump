@@ -503,16 +503,24 @@ work admits 11 (the first post-doubling four-worker boundary is therefore
 11,916 limbs, also measured directly). Unsupported lengths and
 inefficient shapes fall back to Toom-4.
 
-Parallelism is inside the general `BigUint` NTT, not the factoring crate. A
-global bit-reversal is followed by radix-aligned disjoint segments; early
-stages run in one scoped wave, and the few stages that join segments divide
-their independent blocks and butterfly lanes over the same budget. The budget
-is never larger than `available_parallelism`, and detection failure is serial.
-For `w = 2^k` segments, the selector minimizes the exact rational model
-`(log2(n)-k)/w + k`, where `k` is the number of additional synchronized joining
-waves. At the supported 2^26 transform ceiling that model itself selects at
-most 16 contexts; 16 is not a machine cap. Inputs are expanded directly into
-bit-reversed positions, removing four full permutation passes from a product.
+Parallelism is inside the general `BigUint` NTT, not the factoring crate.
+Radix-aligned workers expand input into disjoint bit-reversed destination
+segments; the two independent forward transforms then run concurrently while
+splitting, rather than duplicating, the context budget. Early transform stages
+retain fixed segments and joining stages divide independent butterfly lanes.
+At 2^19 values and above, a decimation-in-frequency inverse uses the dead right
+operand buffer for parallel normalization and natural-order output; smaller
+transforms retain the faster in-place inverse. Pointwise multiplication,
+residue conversion, clearing, and CRT residue combination use a measured
+2^18-value minimum grain, while the dependent carry remains serial.
+
+The budget is never larger than `available_parallelism`, and detection failure
+is serial. Exact-worker curves through the 2^26 ceiling select measured radix
+targets of 4, 8, 16, 32, then 64 contexts as transforms grow; each target is
+rounded down to a power of two no larger than the machine reports. These are
+transform-size targets, not machine caps: deepcore measurements explicitly
+included 128 and all 256 reported contexts, both of which lost to 64 at the
+largest supported transform.
 
 M4 release timings below use equal random operands on the six-context crossover
 host; automatic NTT therefore uses four contexts. They are a directional
@@ -521,25 +529,45 @@ sweep above:
 
 | limbs | Toom-4 | serial NTT | automatic NTT | NTT square |
 |---:|---:|---:|---:|---:|
-| 8,192 | 15.63 ms | 16.06 ms | 7.62 ms | 5.18 ms |
-| 12,288 | 23.69 ms | 32.27 ms | 14.53 ms | 9.98 ms |
-| 16,384 | 30.37 ms | 32.85 ms | 14.90 ms | 10.19 ms |
-| 24,576 | 53.65 ms | 71.98 ms | 29.41 ms | 20.36 ms |
-| 32,768 | 86.65 ms | 70.55 ms | 30.61 ms | 20.82 ms |
-| 49,152 | 166.76 ms | 149.45 ms | 63.11 ms | 43.29 ms |
-| 65,536 | 171.75 ms | 151.68 ms | 64.74 ms | 44.14 ms |
-| 98,304 | 217.84 ms | 320.73 ms | 128.09 ms | 88.46 ms |
-| 114,688 | 219.17 ms | 319.31 ms | 129.97 ms | 89.30 ms |
-| 131,072 | 551.91 ms | 326.89 ms | 135.05 ms | 91.38 ms |
+| 8,192 | 15.55 ms | 15.46 ms | 6.70 ms | 5.05 ms |
+| 11,916 | 20.64 ms | 33.85 ms | 13.36 ms | 9.60 ms |
+| 16,384 | 30.88 ms | 34.68 ms | 13.64 ms | 9.83 ms |
+| 32,768 | 85.69 ms | 72.15 ms | 28.62 ms | 20.55 ms |
+| 65,536 | 151.80 ms | 154.67 ms | 57.30 ms | 42.94 ms |
+| 131,072 | 546.12 ms | 328.56 ms | 110.64 ms | 87.86 ms |
 
-At 65,536 limbs automatic multiplication is 2.34x faster than the identical
-serial NTT; at 131,072 it is 2.42x. Specialized NTT squaring is another
-1.47–1.48x faster because it performs one forward transform and pointwise
-self-products per prime instead of transforming two identical inputs. It also
-uses one `u64` transform array instead of two. General multiplication retains
-two transform arrays, one compact `u32` residue array, and the returned limb
-vector; both kernels reuse their arrays for the second prime and allocate no
-separate input-digit vectors.
+At 65,536 limbs automatic multiplication is 2.70x faster than the identical
+serial NTT; at 131,072 it is 2.97x. Specialized NTT squaring remains faster
+because it performs one forward transform and pointwise self-products per
+prime instead of transforming two identical inputs. It also uses one `u64`
+transform array instead of two. General multiplication retains two transform
+arrays, one compact `u32` residue array, and the returned limb vector; both
+kernels reuse their arrays for the second prime and allocate no separate
+input-digit vectors.
+
+The many-core curve was measured on deepcore, a dual-socket AMD EPYC 7702 with
+256 reported contexts and 1 TiB RAM, reached through the firewall jump host.
+Every worker point first compared its complete product with a serial NTT
+oracle. Best repeated release timings were:
+
+| limbs | transform | selected workers | product |
+|---:|---:|---:|---:|
+| 8,192 | 2^16 | 4 | 17.41 ms |
+| 16,384 | 2^17 | 8 | 27.60 ms |
+| 32,768 | 2^18 | 8 | 39.72 ms |
+| 65,536 | 2^19 | 16 | 68.87 ms |
+| 131,072 | 2^20 | 16 | 97.70 ms |
+| 262,144 | 2^21 | 16 | 163.29 ms |
+| 524,288 | 2^22 | 32 | 216.83 ms |
+| 1,048,576 | 2^23 | 32 | 351.68 ms |
+| 2,097,152 | 2^24 | 64 | 585.40 ms |
+| 4,194,304 | 2^25 | 64 | 1.101 s |
+| 8,388,608 | 2^26 | 64 | 2.150 s |
+
+At the 2^26 ceiling, 128 workers took 2.194 s and 256 took 2.174 s: using every
+reported context is measurably worse than the geometry-selected 64. Relative
+to the first deepcore version of the parallel NTT, the final path is about 33%
+faster at 131,072 limbs and 60% faster at 1,048,576 limbs.
 
 **The Euclidean family now retains its linear-transform storage.** Lehmer
 batches formerly allocated positive, negative, and difference vectors for

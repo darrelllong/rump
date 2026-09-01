@@ -11,13 +11,17 @@ what a consumer must change, not everything that moved.
   base-2^16 digits per limb are convolved under two 31-bit NTT primes and
   reconstructed by CRT, so recovery is deterministic and has no floating-point
   rounding. Radix-2 stages use scoped disjoint-slice workers bounded by
-  `available_parallelism`; their count comes from transform geometry, not a
-  fixed machine cap, and detection failure is serial. Hardware-aware M4
+  `available_parallelism`; exact-worker curves through the full 2^26 ceiling
+  select size targets from 4 through 64, not a fixed machine cap, and detection
+  failure is serial. Hardware-aware M4
   crossovers are 65,536 limbs serially, 32,768 with two useful contexts, and
   8,192 with four or more, plus a measured padding gate because transform work
   doubles discontinuously. Input expansion writes directly into bit-reversed
-  positions, and `BigUint::square` has a one-buffer NTT square rather than
-  duplicating a general product's transform. Prime/root proofs, transform
+  positions in parallel disjoint segments; independent forward transforms run
+  concurrently within the same budget, and large inverses use DIF with the
+  dead operand buffer as natural-order output. Linear passes parallelize above
+  a measured grain. `BigUint::square` has a one-buffer NTT square rather than
+  duplicating a general product's transform. Prime/root proofs, DIT/DIF
   round trips and worker-count independence, CRT boundaries, schoolbook
   differential products/squares, maximal carry chains, and public threshold
   dispatch are tested.

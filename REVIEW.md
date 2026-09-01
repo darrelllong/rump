@@ -39,19 +39,22 @@ fixture now exceeds the parallel threshold instead of testing two inline
 paths.
 
 The integer layer's exact NTT is now hardware-aware without importing a thread
-runtime or a machine-specific cap. Early radix-2 stages run on fixed disjoint
-segments; joining stages divide independent blocks and butterfly lanes over the
-same scoped budget. The budget never exceeds `available_parallelism`, falls
-back to one when detection fails, and is selected by the transform's stage/
-synchronization geometry (at the present 2^26 ceiling that model selects at
-most 16). Digit expansion writes directly into bit-reversed positions, removing
-four serial permutation passes per product. M4 release probes measure 2.34x
-over the identical serial NTT at 65,536 limbs and 2.42x at 131,072. A true NTT
-square uses one transform buffer and one forward transform per prime; it is
-about 1.47x faster than general NTT multiplication at those sizes and halves
-transform-array storage. Differential tests cover serial/parallel transform
-identity, random and maximal-carry products and squares, the one-coefficient
-transform, and deterministic worker-aware dispatch boundaries.
+runtime or a machine-specific CPU cap. Inputs are expanded in parallel into
+disjoint bit-reversed segments, independent forward transforms share the
+budget concurrently, and large inverses use DIF plus the dead operand buffer
+for parallel permutation/normalization. Pointwise, residue, clear, and CRT
+combination passes are parallel above a measured grain; only the carry chain
+remains serial. The budget never exceeds `available_parallelism` and falls
+back to one when detection fails. Exact-worker measurements through the full
+2^26 ceiling select 4, 8, 16, 32, then 64 contexts; 128 and 256 were slower at
+the ceiling. M4 release probes now measure 2.70x over identical serial NTT at
+65,536 limbs and 2.97x at 131,072. On 256-context deepcore, 131,072 limbs fell
+from 146.55 ms in the first parallel version to 97.70 ms, and 1,048,576 limbs
+from 877.52 ms at its then-selected 16 workers to 351.68 ms at 32. A true NTT
+square retains one transform buffer and one forward transform per prime.
+Differential tests cover serial/parallel transform identity, DIT/DIF inverse
+identity, segmented input identity, random and maximal-carry products and
+squares, the one-coefficient transform, and deterministic worker dispatch.
 
 ---
 
@@ -295,7 +298,10 @@ NTT primes, reconstructs by CRT, and carries back to base 2^64. Its measured
 admission is worker-aware: 65,536 limbs serially, 32,768 with two useful
 contexts, and 8,192 with four or more, plus padding gates for the radix-2
 staircase. Scoped stage workers never exceed reported parallelism and produce
-the same ordered transform as one worker. `square` pointwise-squares one
+the same ordered transform as one worker. The selected transform targets grow
+from 4 workers at 2^16 values to 64 at 2^24–2^26, always reduced to the
+machine's reported availability; deepcore tests included 128 and 256 workers.
+`square` pointwise-squares one
 transform buffer instead of repeating a general product. The coefficient bound
 is asserted, the 2^26 transform ceiling is explicit, and unsupported sizes fall
 back to Toom. Independent schoolbook comparisons cover irregular shapes,
