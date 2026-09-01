@@ -186,7 +186,7 @@ fn multiply_impl_selecting_workers(
         lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
     );
     convolve_mod::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
-    let residues_0: Vec<u32> = left[..convolution_len]
+    let residues_0: Vec<u32> = right[..convolution_len]
         .iter()
         .map(|&value| value as u32)
         .collect();
@@ -198,7 +198,7 @@ fn multiply_impl_selecting_workers(
     );
     convolve_mod::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
 
-    reconstruct(&residues_0, &left, convolution_len)
+    reconstruct(&residues_0, &right, convolution_len)
 }
 
 /// Wall-clock phase breakdown for the ignored NTT profiling probe.
@@ -254,11 +254,11 @@ pub(super) fn multiply_profiled(
     pointwise_multiply::<PRIME_0>(&mut left, &right);
     let mut pointwise = started.elapsed();
     let started = Instant::now();
-    transform::<PRIME_0, ROOT_0>(&mut left, true, workers);
+    inverse_to_natural::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
     let mut inverse = started.elapsed();
 
     let started = Instant::now();
-    let residues_0: Vec<u32> = left[..convolution_len]
+    let residues_0: Vec<u32> = right[..convolution_len]
         .iter()
         .map(|&residue| residue as u32)
         .collect();
@@ -281,11 +281,11 @@ pub(super) fn multiply_profiled(
     pointwise_multiply::<PRIME_1>(&mut left, &right);
     pointwise += started.elapsed();
     let started = Instant::now();
-    transform::<PRIME_1, ROOT_1>(&mut left, true, workers);
+    inverse_to_natural::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
     inverse += started.elapsed();
 
     let started = Instant::now();
-    let product = reconstruct(&residues_0, &left, convolution_len);
+    let product = reconstruct(&residues_0, &right, convolution_len);
     let reconstruct = started.elapsed();
 
     (
@@ -463,7 +463,10 @@ fn convolve_mod<const MODULUS: u64, const ROOT: u64>(
     debug_assert_eq!(left.len(), right.len());
     forward_transform_pair::<MODULUS, ROOT>(left, right, workers);
     pointwise_multiply::<MODULUS>(left, right);
-    transform::<MODULUS, ROOT>(left, true, workers);
+    // `right` is dead after the pointwise product, so it becomes the
+    // natural-order inverse output without allocating another transform-sized
+    // buffer.
+    inverse_to_natural::<MODULUS, ROOT>(left, right, workers);
 }
 
 fn forward_transform_pair<const MODULUS: u64, const ROOT: u64>(
@@ -546,7 +549,9 @@ fn transform_from_bit_reversed<const MODULUS: u64, const ROOT: u64>(
     // worker count is required to keep every segment aligned to every radix-2
     // stage; rounding down also guarantees that this call never exceeds its
     // detected or explicitly supplied context budget.
-    let worker_limit = max_contexts.max(1).min(values.len());
+    // A radix-2 stage has only n/2 butterflies, so more contexts cannot do
+    // work and would make the narrowest per-context lane empty.
+    let worker_limit = max_contexts.max(1).min((values.len() / 2).max(1));
     let workers = 1usize << worker_limit.ilog2();
     let segment_len = values.len() / workers;
     if workers > 1 {
@@ -579,6 +584,200 @@ fn transform_from_bit_reversed<const MODULUS: u64, const ROOT: u64>(
         for value in values {
             *value = mul_mod::<MODULUS>(*value, inverse_len);
         }
+    }
+}
+
+/// Inverse a natural-order spectrum into natural-order coefficients.
+///
+/// A decimation-in-frequency inverse emits bit-reversed coefficients without
+/// a leading permutation. The final parallel gather both restores natural
+/// order and applies `n^-1`, replacing the serial bit-reversal and serial
+/// normalization passes used by the general in-place transform.
+fn inverse_to_natural<const MODULUS: u64, const ROOT: u64>(
+    values: &mut [u64],
+    output: &mut [u64],
+    max_contexts: usize,
+) {
+    debug_assert_eq!(values.len(), output.len());
+    debug_assert!(values.len().is_power_of_two());
+    debug_assert!((MODULUS - 1).is_multiple_of(values.len() as u64));
+
+    let worker_limit = max_contexts.max(1).min((values.len() / 2).max(1));
+    let workers = 1usize << worker_limit.ilog2();
+    let segment_len = values.len() / workers;
+
+    // Wide DIF stages cross retained-segment boundaries, so execute them
+    // first. Once the width reaches one segment, all remaining stages are
+    // independent and each worker retains its slice to the end.
+    let mut width = values.len();
+    while width > segment_len {
+        let root = inverse_stage_root::<MODULUS, ROOT>(width);
+        inverse_dif_joining_stage::<MODULUS>(values, width, root, workers);
+        width >>= 1;
+    }
+    if workers > 1 {
+        std::thread::scope(|scope| {
+            let mut segments = values.chunks_exact_mut(segment_len);
+            let caller_segment = segments
+                .next()
+                .expect("a non-empty inverse transform has a caller segment");
+            for segment in segments {
+                let _ =
+                    scope.spawn(move || inverse_dif_stages::<MODULUS, ROOT>(segment, segment_len));
+            }
+            inverse_dif_stages::<MODULUS, ROOT>(caller_segment, segment_len);
+        });
+    } else {
+        inverse_dif_stages::<MODULUS, ROOT>(values, segment_len);
+    }
+
+    let inverse_len = pow_mod::<MODULUS>(values.len() as u64, MODULUS - 2);
+    gather_bit_reversed_normalized::<MODULUS>(values, output, inverse_len, workers);
+}
+
+fn inverse_stage_root<const MODULUS: u64, const ROOT: u64>(width: usize) -> u64 {
+    let forward = pow_mod::<MODULUS>(ROOT, (MODULUS - 1) / width as u64);
+    pow_mod::<MODULUS>(forward, MODULUS - 2)
+}
+
+fn inverse_dif_stages<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], mut width: usize) {
+    while width >= 2 {
+        let root = inverse_stage_root::<MODULUS, ROOT>(width);
+        for block in values.chunks_exact_mut(width) {
+            let (low, high) = block.split_at_mut(width / 2);
+            inverse_dif_pairs::<MODULUS>(low, high, root, 1);
+        }
+        width >>= 1;
+    }
+}
+
+fn inverse_dif_joining_stage<const MODULUS: u64>(
+    values: &mut [u64],
+    width: usize,
+    root: u64,
+    workers: usize,
+) {
+    let blocks = values.len() / width;
+    debug_assert!(blocks <= workers);
+    debug_assert_eq!(workers % blocks, 0);
+    let contexts_per_block = workers / blocks;
+    std::thread::scope(|scope| {
+        let mut block_slices = values.chunks_exact_mut(width);
+        let caller_block = block_slices
+            .next()
+            .expect("a DIF joining stage has a caller block");
+        for block in block_slices {
+            let _ =
+                scope.spawn(move || inverse_dif_block::<MODULUS>(block, root, contexts_per_block));
+        }
+        inverse_dif_block::<MODULUS>(caller_block, root, contexts_per_block);
+    });
+}
+
+fn inverse_dif_block<const MODULUS: u64>(block: &mut [u64], root: u64, contexts: usize) {
+    let (low, high) = block.split_at_mut(block.len() / 2);
+    debug_assert_eq!(low.len(), high.len());
+    debug_assert_eq!(low.len() % contexts, 0);
+    if contexts == 1 {
+        inverse_dif_pairs::<MODULUS>(low, high, root, 1);
+        return;
+    }
+
+    let chunk_len = low.len() / contexts;
+    std::thread::scope(|scope| {
+        let mut chunks = low
+            .chunks_exact_mut(chunk_len)
+            .zip(high.chunks_exact_mut(chunk_len));
+        let (caller_low, caller_high) = chunks
+            .next()
+            .expect("a parallel DIF butterfly has a caller chunk");
+        for (chunk, (low, high)) in chunks.enumerate() {
+            let start = (chunk + 1) * chunk_len;
+            let _ = scope.spawn(move || {
+                inverse_dif_pairs::<MODULUS>(
+                    low,
+                    high,
+                    root,
+                    pow_mod::<MODULUS>(root, start as u64),
+                )
+            });
+        }
+        inverse_dif_pairs::<MODULUS>(caller_low, caller_high, root, 1);
+    });
+}
+
+fn inverse_dif_pairs<const MODULUS: u64>(
+    low: &mut [u64],
+    high: &mut [u64],
+    root: u64,
+    mut weight: u64,
+) {
+    debug_assert_eq!(low.len(), high.len());
+    for (even, odd) in low.iter_mut().zip(high) {
+        let lhs = *even;
+        let rhs = *odd;
+        let sum = lhs + rhs;
+        *even = if sum >= MODULUS { sum - MODULUS } else { sum };
+        let difference = if lhs >= rhs {
+            lhs - rhs
+        } else {
+            lhs + MODULUS - rhs
+        };
+        *odd = mul_mod::<MODULUS>(difference, weight);
+        weight = mul_mod::<MODULUS>(weight, root);
+    }
+}
+
+fn gather_bit_reversed_normalized<const MODULUS: u64>(
+    source: &[u64],
+    output: &mut [u64],
+    inverse_len: u64,
+    workers: usize,
+) {
+    let transform_bits = source.len().ilog2();
+    let chunk_len = output.len() / workers;
+    std::thread::scope(|scope| {
+        let mut chunks = output.chunks_exact_mut(chunk_len).enumerate();
+        let (caller_index, caller_chunk) = chunks
+            .next()
+            .expect("a non-empty inverse output has a caller chunk");
+        for (chunk_index, chunk) in chunks {
+            let start = chunk_index * chunk_len;
+            let _ = scope.spawn(move || {
+                gather_bit_reversed_chunk::<MODULUS>(
+                    source,
+                    chunk,
+                    start,
+                    transform_bits,
+                    inverse_len,
+                )
+            });
+        }
+        gather_bit_reversed_chunk::<MODULUS>(
+            source,
+            caller_chunk,
+            caller_index * chunk_len,
+            transform_bits,
+            inverse_len,
+        );
+    });
+}
+
+fn gather_bit_reversed_chunk<const MODULUS: u64>(
+    source: &[u64],
+    output: &mut [u64],
+    start: usize,
+    transform_bits: u32,
+    inverse_len: u64,
+) {
+    for (offset, value) in output.iter_mut().enumerate() {
+        let index = start + offset;
+        let reversed = if transform_bits == 0 {
+            0
+        } else {
+            index.reverse_bits() >> (usize::BITS - transform_bits)
+        };
+        *value = mul_mod::<MODULUS>(source[reversed], inverse_len);
     }
 }
 
@@ -765,6 +964,23 @@ mod tests {
             transform::<PRIME_0, ROOT_0>(&mut transformed, false, 1);
             transform::<PRIME_0, ROOT_0>(&mut transformed, true, 1);
             assert_eq!(transformed, original);
+        }
+    }
+
+    #[test]
+    fn dif_inverse_matches_original_at_every_context_limit() {
+        for len in [1usize, 2, 4, 8, 32, 256, 4096] {
+            let original: Vec<u64> = (0..len)
+                .map(|index| (index as u64 * 7_654_321 + 123) % PRIME_0)
+                .collect();
+            let mut spectrum = original.clone();
+            transform::<PRIME_0, ROOT_0>(&mut spectrum, false, 1);
+            for contexts in [1usize, 2, 3, 4, 5, 8] {
+                let mut transformed = spectrum.clone();
+                let mut actual = vec![0u64; len];
+                inverse_to_natural::<PRIME_0, ROOT_0>(&mut transformed, &mut actual, contexts);
+                assert_eq!(actual, original, "DIF inverse at {contexts} contexts");
+            }
         }
     }
 
