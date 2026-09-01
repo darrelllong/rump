@@ -5,6 +5,19 @@ what a consumer must change, not everything that moved.
 
 ## Unreleased
 
+### Changed
+
+- **Sparse GF(2) solves retain their bounded fold workers and use byte-sliced
+  64-by-64 products.** `gf2::block_lanczos_dependencies` no longer creates a
+  scoped thread set for both halves of every `MᵀM` application. Useful workers
+  live for one solver call, remain bounded by the caller's `threads` value,
+  and gather output ranges deterministically. Dense block words now multiply
+  through eight byte lookups rather than an average of 32 dependent set-bit
+  steps, and recurrence equation (18) is fused without three full-vector
+  temporaries. The public result and random-source consumption are unchanged;
+  scalar-equation oracles and a fixture that crosses the parallel threshold
+  check bit-identical results at one and eight workers.
+
 ### Added
 
 - **`number_theory::is_prime_aks`.** An exact, unconditional deterministic

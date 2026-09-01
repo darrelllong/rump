@@ -14,6 +14,32 @@ hot path. **nit** = local quality.
 
 ---
 
+## Remediation update — 2026-09-01
+
+This document's verdict and issue list preserve the original 0.2.2 review;
+they are not the state of the current 0.3.0 tree. The small-prime identity no
+longer depends on `2¹⁰`, Montgomery sequences have caller-reusable
+`MontgomeryScratch`, the citation ledger was completed, and the later
+cross-repository review's correctness findings were fixed and regression-
+tested. Rump also now supplies the general machines the factoring work
+needed—GF(2) pruning and Block Lanczos, weighted lattice reduction, balanced
+CRT, and exact AKS primality—without importing factoring policy into the
+library.
+
+The latest performance pass stayed at that ownership boundary. Block Lanczos
+retains a bounded sparse-fold pool for one solver call, replaces dense 64×64
+GF(2) set-bit walks with byte-sliced products, and fuses recurrence equation
+(18). The recurrence remains serial. On Deepcore, successive balanced ABBA
+sessions over Factoring's complete 16-input balanced-40 GNFS corpus measured
+candidate/baseline ratios of 0.913999 and 0.951728, about 13% cumulative, with
+identical canonical answers. The representative first balanced-55 input fell
+from the previously recorded 63.11 s to 52.77 s at 256 workers. Direct scalar
+oracles cover the fused operations; the one-worker/eight-worker dependency
+fixture now exceeds the parallel threshold instead of testing two inline
+paths.
+
+---
+
 ## Verdict
 
 This is not a toy multiprecision library. Knuth D, a public Montgomery
