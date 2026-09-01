@@ -5964,6 +5964,16 @@ mod tests {
                     .collect()
             },
         );
+        let configured_rounds = std::env::var("RUMP_NTT_SCALING_ROUNDS").ok().map(|rounds| {
+            rounds
+                .parse::<usize>()
+                .expect("RUMP_NTT_SCALING_ROUNDS must be a positive count")
+        });
+        assert_ne!(
+            configured_rounds,
+            Some(0),
+            "scaling rounds must be positive"
+        );
         eprintln!("available contexts: {available}");
         eprintln!("{:>7} {:>7} {:>12}", "words", "workers", "product_us");
         for words in word_sizes {
@@ -5976,7 +5986,7 @@ mod tests {
                 }
                 let actual = lhs.mul_ntt_with_workers_ref(&rhs, workers);
                 assert_eq!(actual, expected, "NTT product at {workers} workers");
-                let rounds = if words < 65_536 { 3 } else { 2 };
+                let rounds = configured_rounds.unwrap_or(if words < 65_536 { 3 } else { 2 });
                 let mut best = f64::INFINITY;
                 for _ in 0..rounds {
                     black_box(lhs.mul_ntt_with_workers_ref(&rhs, workers));
