@@ -108,7 +108,7 @@ pub(super) fn square(value: &BigUint) -> BigUint {
     let workers = automatic_worker_count(transform_len);
 
     let mut values = vec![0u64; transform_len];
-    write_digits_bit_reversed(value, digit_len, &mut values);
+    write_digits_bit_reversed(value, digit_len, &mut values, workers);
     square_mod::<PRIME_0, ROOT_0>(&mut values, workers);
     let residues_0: Vec<u32> = values[..convolution_len]
         .iter()
@@ -116,7 +116,7 @@ pub(super) fn square(value: &BigUint) -> BigUint {
         .collect();
 
     values.fill(0);
-    write_digits_bit_reversed(value, digit_len, &mut values);
+    write_digits_bit_reversed(value, digit_len, &mut values, workers);
     square_mod::<PRIME_1, ROOT_1>(&mut values, workers);
     reconstruct(&residues_0, &values, convolution_len)
 }
@@ -182,8 +182,9 @@ fn multiply_impl_selecting_workers(
 
     let mut left = vec![0u64; transform_len];
     let mut right = vec![0u64; transform_len];
-    write_digits_bit_reversed(lhs, lhs_digits, &mut left);
-    write_digits_bit_reversed(rhs, rhs_digits, &mut right);
+    write_input_pair_bit_reversed(
+        lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
+    );
     convolve_mod::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
     let residues_0: Vec<u32> = left[..convolution_len]
         .iter()
@@ -192,8 +193,9 @@ fn multiply_impl_selecting_workers(
 
     left.fill(0);
     right.fill(0);
-    write_digits_bit_reversed(lhs, lhs_digits, &mut left);
-    write_digits_bit_reversed(rhs, rhs_digits, &mut right);
+    write_input_pair_bit_reversed(
+        lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
+    );
     convolve_mod::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
 
     reconstruct(&residues_0, &left, convolution_len)
@@ -240,8 +242,9 @@ pub(super) fn multiply_profiled(
     let allocate = started.elapsed();
 
     let started = Instant::now();
-    write_digits_bit_reversed(lhs, lhs_digits, &mut left);
-    write_digits_bit_reversed(rhs, rhs_digits, &mut right);
+    write_input_pair_bit_reversed(
+        lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
+    );
     let mut prepare_inputs = started.elapsed();
 
     let started = Instant::now();
@@ -266,8 +269,9 @@ pub(super) fn multiply_profiled(
     right.fill(0);
     let clear = started.elapsed();
     let started = Instant::now();
-    write_digits_bit_reversed(lhs, lhs_digits, &mut left);
-    write_digits_bit_reversed(rhs, rhs_digits, &mut right);
+    write_input_pair_bit_reversed(
+        lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
+    );
     prepare_inputs += started.elapsed();
 
     let started = Instant::now();
@@ -348,24 +352,88 @@ fn significant_digit_len(value: &BigUint) -> usize {
 /// Expand directly into the permutation expected by a decimation-in-time
 /// transform. This removes four full-array bit-reversal passes per product;
 /// zero padding is already present in the destination allocation/fill.
-fn write_digits_bit_reversed(value: &BigUint, digit_len: usize, digits: &mut [u64]) {
+fn write_digits_bit_reversed(
+    value: &BigUint,
+    digit_len: usize,
+    digits: &mut [u64],
+    workers: usize,
+) {
     debug_assert!(digits.len().is_power_of_two());
-    let transform_bits = digits.len().ilog2();
-    let mut index = 0usize;
-    for &limb in &value.limbs {
-        for shift in (0..64).step_by(DIGIT_BITS) {
-            if index == digit_len {
-                return;
-            }
-            let reversed = if transform_bits == 0 {
-                0
-            } else {
-                index.reverse_bits() >> (usize::BITS - transform_bits)
-            };
-            digits[reversed] = (limb >> shift) & DIGIT_MASK;
-            index += 1;
-        }
+    debug_assert!(workers.is_power_of_two() && workers <= digits.len());
+    if workers == 1 {
+        write_digit_segment_bit_reversed(value, digit_len, digits, 0, 1);
+        return;
     }
+
+    let segment_len = digits.len() / workers;
+    std::thread::scope(|scope| {
+        let mut segments = digits.chunks_exact_mut(segment_len).enumerate();
+        let (caller_index, caller_segment) = segments
+            .next()
+            .expect("a non-empty transform has a caller input segment");
+        for (segment_index, segment) in segments {
+            let _ = scope.spawn(move || {
+                write_digit_segment_bit_reversed(value, digit_len, segment, segment_index, workers)
+            });
+        }
+        write_digit_segment_bit_reversed(value, digit_len, caller_segment, caller_index, workers);
+    });
+}
+
+/// Fill one aligned segment of a globally bit-reversed transform input.
+///
+/// Reversing an index swaps the high bits that select the destination segment
+/// with the low bits of the source index. Consequently segment `s` owns every
+/// source digit whose low `log2(workers)` bits equal `reverse(s)`. This gives
+/// each worker a disjoint mutable slice without locks or unsafe code.
+fn write_digit_segment_bit_reversed(
+    value: &BigUint,
+    digit_len: usize,
+    segment: &mut [u64],
+    segment_index: usize,
+    workers: usize,
+) {
+    let worker_bits = workers.ilog2();
+    let source_offset = if worker_bits == 0 {
+        0
+    } else {
+        segment_index.reverse_bits() >> (usize::BITS - worker_bits)
+    };
+    let segment_bits = segment.len().ilog2();
+    for source_index in (source_offset..digit_len).step_by(workers) {
+        let local_source = source_index >> worker_bits;
+        let destination = if segment_bits == 0 {
+            0
+        } else {
+            local_source.reverse_bits() >> (usize::BITS - segment_bits)
+        };
+        let limb = value.limbs[source_index / DIGITS_PER_LIMB];
+        let shift = DIGIT_BITS * (source_index % DIGITS_PER_LIMB);
+        segment[destination] = (limb >> shift) & DIGIT_MASK;
+    }
+}
+
+fn write_input_pair_bit_reversed(
+    lhs: &BigUint,
+    lhs_digits: usize,
+    rhs: &BigUint,
+    rhs_digits: usize,
+    left: &mut [u64],
+    right: &mut [u64],
+    workers: usize,
+) {
+    debug_assert_eq!(left.len(), right.len());
+    if workers == 1 {
+        write_digits_bit_reversed(lhs, lhs_digits, left, 1);
+        write_digits_bit_reversed(rhs, rhs_digits, right, 1);
+        return;
+    }
+
+    let input_workers = workers / 2;
+    std::thread::scope(|scope| {
+        let _ = scope.spawn(|| write_digits_bit_reversed(lhs, lhs_digits, left, input_workers));
+        write_digits_bit_reversed(rhs, rhs_digits, right, input_workers);
+    });
 }
 
 /// Recover `x < PRIME_0·PRIME_1` from its two residues.
@@ -697,6 +765,28 @@ mod tests {
             transform::<PRIME_0, ROOT_0>(&mut transformed, false, 1);
             transform::<PRIME_0, ROOT_0>(&mut transformed, true, 1);
             assert_eq!(transformed, original);
+        }
+    }
+
+    #[test]
+    fn parallel_bit_reversed_input_matches_serial_for_partial_limbs() {
+        let values = [
+            BigUint::from_limbs(vec![1]),
+            BigUint::from_limbs(vec![u64::MAX]),
+            BigUint::from_limbs(vec![0x0123_4567_89ab_cdef, 1]),
+            BigUint::from_limbs(vec![u64::MAX, 0, 0x1234_5678]),
+            BigUint::from_limbs(vec![0, u64::MAX, 7, 0, 1]),
+        ];
+        for value in values {
+            let digit_len = significant_digit_len(&value);
+            let transform_len = (digit_len * 2).next_power_of_two();
+            let mut expected = vec![0u64; transform_len];
+            write_digits_bit_reversed(&value, digit_len, &mut expected, 1);
+            for workers in [2usize, 4, 8].into_iter().filter(|&w| w <= transform_len) {
+                let mut actual = vec![0u64; transform_len];
+                write_digits_bit_reversed(&value, digit_len, &mut actual, workers);
+                assert_eq!(actual, expected, "bit-reversed input at {workers} workers");
+            }
         }
     }
 
