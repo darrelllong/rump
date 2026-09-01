@@ -26,6 +26,11 @@ const ROOT_1: u64 = 13;
 const MAX_TRANSFORM_LEN: usize = 1 << 26;
 const PRIME_PRODUCT: u64 = PRIME_0 * PRIME_1;
 
+// Linear transform passes need enough values per context to repay one scoped
+// worker wave. This grain is measured by the ignored phase/scaling probes and
+// limits workers by work size in addition to the caller's hardware ceiling.
+const MIN_LINEAR_VALUES_PER_WORKER: usize = 1 << 16;
+
 // Below 2^16 coefficients NTT loses to the recursive multiplication ladder
 // even with four contexts on the crossover host. Keeping forced small-kernel
 // tests serial also prevents thread-launch time from dominating their work.
@@ -110,15 +115,12 @@ pub(super) fn square(value: &BigUint) -> BigUint {
     let mut values = vec![0u64; transform_len];
     write_digits_bit_reversed(value, digit_len, &mut values, workers);
     square_mod::<PRIME_0, ROOT_0>(&mut values, workers);
-    let residues_0: Vec<u32> = values[..convolution_len]
-        .iter()
-        .map(|&residue| residue as u32)
-        .collect();
+    let residues_0 = copy_residues(&values, convolution_len, workers);
 
     values.fill(0);
     write_digits_bit_reversed(value, digit_len, &mut values, workers);
     square_mod::<PRIME_1, ROOT_1>(&mut values, workers);
-    reconstruct(&residues_0, &values, convolution_len)
+    reconstruct(&residues_0, &mut values, convolution_len, workers)
 }
 
 /// Serial reference for differential and crossover measurement.
@@ -186,19 +188,15 @@ fn multiply_impl_selecting_workers(
         lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
     );
     convolve_mod::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
-    let residues_0: Vec<u32> = right[..convolution_len]
-        .iter()
-        .map(|&value| value as u32)
-        .collect();
+    let residues_0 = copy_residues(&right, convolution_len, workers);
 
-    left.fill(0);
-    right.fill(0);
+    clear_pair(&mut left, &mut right, workers);
     write_input_pair_bit_reversed(
         lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
     );
     convolve_mod::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
 
-    reconstruct(&residues_0, &right, convolution_len)
+    reconstruct(&residues_0, &mut right, convolution_len, workers)
 }
 
 /// Wall-clock phase breakdown for the ignored NTT profiling probe.
@@ -251,22 +249,18 @@ pub(super) fn multiply_profiled(
     forward_transform_pair::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
     let mut forward = started.elapsed();
     let started = Instant::now();
-    pointwise_multiply::<PRIME_0>(&mut left, &right);
+    pointwise_multiply::<PRIME_0>(&mut left, &right, workers);
     let mut pointwise = started.elapsed();
     let started = Instant::now();
     inverse_to_natural::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
     let mut inverse = started.elapsed();
 
     let started = Instant::now();
-    let residues_0: Vec<u32> = right[..convolution_len]
-        .iter()
-        .map(|&residue| residue as u32)
-        .collect();
+    let residues_0 = copy_residues(&right, convolution_len, workers);
     let residue_copy = started.elapsed();
 
     let started = Instant::now();
-    left.fill(0);
-    right.fill(0);
+    clear_pair(&mut left, &mut right, workers);
     let clear = started.elapsed();
     let started = Instant::now();
     write_input_pair_bit_reversed(
@@ -278,14 +272,14 @@ pub(super) fn multiply_profiled(
     forward_transform_pair::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
     forward += started.elapsed();
     let started = Instant::now();
-    pointwise_multiply::<PRIME_1>(&mut left, &right);
+    pointwise_multiply::<PRIME_1>(&mut left, &right, workers);
     pointwise += started.elapsed();
     let started = Instant::now();
     inverse_to_natural::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
     inverse += started.elapsed();
 
     let started = Instant::now();
-    let product = reconstruct(&residues_0, &right, convolution_len);
+    let product = reconstruct(&residues_0, &mut right, convolution_len, workers);
     let reconstruct = started.elapsed();
 
     (
@@ -304,9 +298,16 @@ pub(super) fn multiply_profiled(
 }
 
 /// Reconstruct coefficients and carry directly into packed 64-bit limbs.
-fn reconstruct(residues_0: &[u32], residues_1: &[u64], convolution_len: usize) -> BigUint {
+fn reconstruct(
+    residues_0: &[u32],
+    residues_1: &mut [u64],
+    convolution_len: usize,
+    workers: usize,
+) -> BigUint {
     debug_assert_eq!(residues_0.len(), convolution_len);
     debug_assert!(residues_1.len() >= convolution_len);
+    let coefficients = &mut residues_1[..convolution_len];
+    reconstruct_coefficients(residues_0, coefficients, workers);
     let mut limbs = Vec::with_capacity((convolution_len + DIGITS_PER_LIMB) / 4);
     let mut word = 0u64;
     let mut digit_in_word = 0usize;
@@ -321,8 +322,8 @@ fn reconstruct(residues_0: &[u32], residues_1: &[u64], convolution_len: usize) -
         }
     };
 
-    for (&residue_0, &residue_1) in residues_0.iter().zip(residues_1) {
-        let coefficient = u128::from(crt_two(u64::from(residue_0), residue_1)) + carry;
+    for &raw_coefficient in coefficients.iter() {
+        let coefficient = u128::from(raw_coefficient) + carry;
         push_digit((coefficient as u64) & DIGIT_MASK);
         carry = coefficient >> DIGIT_BITS;
     }
@@ -334,6 +335,29 @@ fn reconstruct(residues_0: &[u32], residues_1: &[u64], convolution_len: usize) -
         limbs.push(word);
     }
     BigUint::from_limbs(limbs)
+}
+
+fn reconstruct_coefficients(residues_0: &[u32], coefficients: &mut [u64], workers: usize) {
+    let workers = linear_worker_count(coefficients.len(), workers);
+    let chunk_len = coefficients.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut chunks = residues_0
+            .chunks(chunk_len)
+            .zip(coefficients.chunks_mut(chunk_len));
+        let (caller_0, caller_coefficients) = chunks
+            .next()
+            .expect("an NTT convolution has at least one coefficient");
+        for (residues_0, coefficients) in chunks {
+            let _ = scope.spawn(move || reconstruct_coefficient_chunk(residues_0, coefficients));
+        }
+        reconstruct_coefficient_chunk(caller_0, caller_coefficients);
+    });
+}
+
+fn reconstruct_coefficient_chunk(residues_0: &[u32], coefficients: &mut [u64]) {
+    for (&residue_0, residue_1) in residues_0.iter().zip(coefficients) {
+        *residue_1 = crt_two(u64::from(residue_0), *residue_1);
+    }
 }
 
 fn significant_digit_len(value: &BigUint) -> usize {
@@ -462,7 +486,7 @@ fn convolve_mod<const MODULUS: u64, const ROOT: u64>(
 ) {
     debug_assert_eq!(left.len(), right.len());
     forward_transform_pair::<MODULUS, ROOT>(left, right, workers);
-    pointwise_multiply::<MODULUS>(left, right);
+    pointwise_multiply::<MODULUS>(left, right, workers);
     // `right` is dead after the pointwise product, so it becomes the
     // natural-order inverse output without allocating another transform-sized
     // buffer.
@@ -492,18 +516,114 @@ fn forward_transform_pair<const MODULUS: u64, const ROOT: u64>(
     }
 }
 
-fn pointwise_multiply<const MODULUS: u64>(left: &mut [u64], right: &[u64]) {
-    for (lhs, &rhs) in left.iter_mut().zip(right.iter()) {
+fn pointwise_multiply<const MODULUS: u64>(left: &mut [u64], right: &[u64], workers: usize) {
+    let workers = linear_worker_count(left.len(), workers);
+    let chunk_len = left.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut chunks = left.chunks_mut(chunk_len).zip(right.chunks(chunk_len));
+        let (caller_left, caller_right) = chunks
+            .next()
+            .expect("a non-empty transform has a caller pointwise chunk");
+        for (left, right) in chunks {
+            let _ = scope.spawn(move || pointwise_chunk::<MODULUS>(left, right));
+        }
+        pointwise_chunk::<MODULUS>(caller_left, caller_right);
+    });
+}
+
+fn pointwise_chunk<const MODULUS: u64>(left: &mut [u64], right: &[u64]) {
+    for (lhs, &rhs) in left.iter_mut().zip(right) {
         *lhs = mul_mod::<MODULUS>(*lhs, rhs);
     }
 }
 
+fn linear_worker_count(len: usize, max_workers: usize) -> usize {
+    debug_assert!(len != 0 && max_workers != 0);
+    let maximum_by_work = (len / MIN_LINEAR_VALUES_PER_WORKER).max(1);
+    let maximum = max_workers.min(maximum_by_work);
+    1usize << maximum.ilog2()
+}
+
+fn copy_residues(values: &[u64], len: usize, workers: usize) -> Vec<u32> {
+    let mut residues = vec![0u32; len];
+    let workers = linear_worker_count(len, workers);
+    let chunk_len = len.div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut chunks = values[..len]
+            .chunks(chunk_len)
+            .zip(residues.chunks_mut(chunk_len));
+        let (caller_values, caller_residues) = chunks
+            .next()
+            .expect("an NTT convolution has at least one residue");
+        for (values, residues) in chunks {
+            let _ = scope.spawn(move || copy_residue_chunk(values, residues));
+        }
+        copy_residue_chunk(caller_values, caller_residues);
+    });
+    residues
+}
+
+fn copy_residue_chunk(values: &[u64], residues: &mut [u32]) {
+    for (&value, residue) in values.iter().zip(residues) {
+        *residue = value as u32;
+    }
+}
+
+fn clear_pair(left: &mut [u64], right: &mut [u64], workers: usize) {
+    debug_assert_eq!(left.len(), right.len());
+    let workers = linear_worker_count(left.len().saturating_mul(2), workers);
+    if workers == 1 {
+        left.fill(0);
+        right.fill(0);
+        return;
+    }
+
+    let workers_per_buffer = workers / 2;
+    std::thread::scope(|scope| {
+        let _ = scope.spawn(|| parallel_fill_zero(left, workers_per_buffer));
+        parallel_fill_zero(right, workers_per_buffer);
+    });
+}
+
+fn parallel_fill_zero(values: &mut [u64], workers: usize) {
+    if workers == 1 {
+        values.fill(0);
+        return;
+    }
+    let chunk_len = values.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut chunks = values.chunks_mut(chunk_len);
+        let caller_chunk = chunks
+            .next()
+            .expect("a non-empty transform has a caller clear chunk");
+        for chunk in chunks {
+            let _ = scope.spawn(move || chunk.fill(0));
+        }
+        caller_chunk.fill(0);
+    });
+}
+
 fn square_mod<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], max_contexts: usize) {
     transform_from_bit_reversed::<MODULUS, ROOT>(values, false, max_contexts);
-    for value in values.iter_mut() {
+    let workers = linear_worker_count(values.len(), max_contexts);
+    let chunk_len = values.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut chunks = values.chunks_mut(chunk_len);
+        let caller_chunk = chunks
+            .next()
+            .expect("a non-empty transform has a caller square chunk");
+        for chunk in chunks {
+            let _ = scope.spawn(move || pointwise_square_chunk::<MODULUS>(chunk));
+        }
+        pointwise_square_chunk::<MODULUS>(caller_chunk);
+    });
+    transform::<MODULUS, ROOT>(values, true, max_contexts);
+}
+
+fn pointwise_square_chunk<const MODULUS: u64>(values: &mut [u64]) {
+    for value in values {
         *value = mul_mod::<MODULUS>(*value, *value);
     }
-    transform::<MODULUS, ROOT>(values, true, max_contexts);
 }
 
 /// In-place iterative radix-2 Cooley–Tukey transform.
