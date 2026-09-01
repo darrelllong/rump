@@ -7,6 +7,24 @@ what a consumer must change, not everything that moved.
 
 ### Changed
 
+- **Large `BigUint` multiplication now dispatches to an exact NTT.** Four
+  base-2^16 digits per limb are convolved under two 31-bit NTT primes and
+  reconstructed by CRT, so recovery is deterministic and has no floating-point
+  rounding. The M4 crossover is 65,536 limbs (4 Mbit), with an additional
+  measured padding gate because a radix-2 transform doubles discontinuously;
+  inefficient and unsupported shapes remain on Toom-4. Prime/root proofs,
+  transform round trips, CRT boundaries, schoolbook differential products,
+  maximal carry chains, and public threshold dispatch are tested.
+
+- **The Euclidean family reuses Lehmer/HGCD work buffers.** GCD, extended GCD,
+  modular inverse, Jacobi, rational reconstruction, and the HGCD base loop keep
+  their positive/negative transform buckets and recycle operand/cofactor limb
+  vectors into subsequent outputs. Difference bit lengths no longer allocate,
+  guarded HGCD division retains its threshold and adjusted dividend, and matrix
+  row steps mutate in place. The classical-Euclid differential suite is
+  unchanged; the deterministic M4 crossover probe improves Lehmer by 18–35%
+  through 2,048 limbs and HGCD by 10–34% through 4,096 limbs.
+
 - **Sparse GF(2) solves retain their bounded fold workers and use byte-sliced
   64-by-64 products.** `gf2::block_lanczos_dependencies` no longer creates a
   scoped thread set for both halves of every `MᵀM` application. Useful workers

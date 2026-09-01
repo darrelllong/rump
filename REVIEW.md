@@ -43,7 +43,7 @@ paths.
 ## Verdict
 
 This is not a toy multiprecision library. Knuth D, a public Montgomery
-domain, Karatsuba / Toom-3 / Toom-4 with measured crossovers and an
+domain, Karatsuba / Toom-3 / Toom-4 / exact NTT with measured crossovers and an
 unbalanced block decomposition, Lehmer + Half-GCD, binary / Lehmer / HGCD
 Jacobi, Tonelli–Shanks / Cipolla, twelve-base Miller–Rabin to the *right*
 bound, BPSW with Selfridge Method A, Cohen’s integral LLL, and a real
@@ -273,10 +273,26 @@ LE `u64` limbs, canonical (no leading zero). `Eq`/`Ord` ride that.
 `clone_from` scrubs the abandoned tail.
 
 **Multiplication.** Schoolbook → Karatsuba (`long < 2·short`, 32 limbs)
-→ Toom-3 (128) → Toom-4 (3072) → unbalanced block decomposition
-(`short ≥ 256` and `long ≥ 2·short`), each block re-entering `mul_ref`.
-Thresholds carry measured crossovers. Tests include the 2:1 boundary
-and both operand orders.
+→ Toom-3 (128) → Toom-4 (3072) → exact two-prime NTT (65,536 plus a
+padding-efficiency gate); lopsided operands use block decomposition (`short ≥
+256` and `long ≥ 2·short`), each block re-entering `mul`. The NTT splits
+limbs into base-2^16 digits, convolves modulo two proven NTT primes, reconstructs
+by CRT, and carries back to base 2^64. The coefficient bound is asserted, the
+2^26 transform ceiling is explicit, and unsupported sizes fall back to Toom.
+Independent schoolbook comparisons cover irregular shapes and maximal carries;
+the public dispatch is checked at the actual threshold. Thresholds carry
+measured crossovers, including the radix-2 padding staircase rather than a
+single monotone size guess.
+
+**Euclidean allocation.** Lehmer, extended GCD, inverse, Jacobi, rational
+reconstruction, and HGCD's base case retain two transform buckets and recycle
+the old operand/cofactor limb buffers into the next batch outputs. The previous
+three fresh vectors per transformed output are gone. `abs_diff_bits` now scans
+the borrow chain without materializing `|a-b|`; guarded HGCD division retains
+its `2^s` threshold and adjusted-dividend buffer; matrix row steps mutate in
+place. Deterministic before/after probes on M4 show roughly 18–35% lower Lehmer
+time through 2,048 limbs and 10–27% lower HGCD time through 4,096 limbs, with
+the gain diminishing once large matrix multiplication dominates.
 
 **Division.** Single-limb Horner; multi-limb Knuth D with
 normalization, two-limb estimate, third-limb correction, one add-back.

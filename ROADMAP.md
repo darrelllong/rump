@@ -173,11 +173,14 @@ since 2026-08-16 by `digit_count(radix)` = floor(log_r n) + 1, with
 `bits()` the base-2 form; a bare floor-log remains unimplemented), radix
 string I/O, and
 signed byte I/O. Already present: the core ops, byte I/O, `sqrt_floor`, and
-the multiplication ladder through Toom-4.
-
-**Bounded:** FFT/NTT multiplication is efficient but only pays above roughly
-200 kbit; build it when the toolkit's own workloads (factorization, lattices)
-routinely live there, not before.
+the multiplication ladder through Toom-4 and exact two-prime NTT convolution.
+The production NTT crossover was measured rather than inherited from GMP: on
+M4 it is 65,536 limbs (4 Mbit), not the earlier estimate of 200 kbit.
+Because radix-2 padding doubles at power-of-two boundaries, dispatch also
+requires a measured padding-efficiency gate; Toom-4 remains faster at 98,304
+limbs while NTT wins again at 114,688. The transform's 2^26 coefficient ceiling
+is explicit and unsupported larger shapes fall back to Toom rather than losing
+exactness.
 
 ## 2. Divisibility and Euclidean algorithms
 

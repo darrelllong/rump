@@ -164,8 +164,8 @@ proceeds past them only because they are known and named here.
 |---|---|---|---|---|---|
 | `add` | O(n) | 0.85 | 0.73 | 0.82 | 0.78 |
 | `sub` | O(n) | 0.91 | 0.72 | 0.74 | 0.94 |
-| `mul` | schoolbook → Karatsuba → Toom-3/4 | 1.88 | 1.80 | 1.81 | 1.91 |
-| `sqr` | schoolbook → Karatsuba → Toom-3/4 | 1.85 | 1.72 | 1.83 | 1.83 |
+| `mul` | schoolbook → Karatsuba → Toom-3/4 → exact NTT | 1.88 | 1.80 | 1.81 | 1.91 |
+| `sqr` | schoolbook → Karatsuba → Toom-3/4 → exact NTT | 1.85 | 1.72 | 1.83 | 1.83 |
 | `divrem` | O(n²) Algorithm D | 1.08 | 1.05 | 1.14 | 1.02 |
 | `modulo` | O(n²) | 1.09 | 1.06 | 1.14 | 1.02 |
 | `modmul` | O(n²) mul + reduce | 1.51 | 1.48 | 1.52 | 1.43 |
@@ -417,10 +417,11 @@ The comparison sorts rump's primitives into groups, and the grouping is by
   fixed per-call overhead amortizes.)
 
 - **`mul`/`sqr` — 1.3–7.5×, widening on the wide cores.** rump climbs
-  schoolbook → Karatsuba → **Toom-3 → Toom-4**; Toom-3 crosses in above ~8192
-  bits, so at crypto sizes (≤4096 bits) rump is on Karatsuba and the gap is GMP's
-  assembly base-case, not the algorithm. GMP escalates to Toom-6.5/8.5 → FFT far
-  above rump's range.
+  schoolbook → Karatsuba → **Toom-3 → Toom-4 → exact NTT**; Toom-3 crosses
+  in above ~8192 bits, so at crypto sizes (≤4096 bits) rump is on Karatsuba and
+  the gap is GMP's assembly base-case, not the algorithm. The host sweep in
+  this table predates the NTT tier and stops far below its 4-Mbit crossover;
+  the dedicated measurements below cover that tier.
 
 - **`add`/`sub` — 1.2–4.5×, formerly 2–15×.** Both pilots now measure the
   same shape: the result written into long-lived storage (GMP's
@@ -478,6 +479,72 @@ half-the-products ceiling, and applied between 8 and 448 limbs — outside
 that range squaring is the general multiplication and the saving is zero. The queue's remaining constant-factor candidates —
 Note 14.45(i)'s approximate high half, the perfect-power residue filters —
 are recorded in ROADMAP.md.
+
+## Exact NTT multiplication and Euclidean workspace reuse (2026-09-01)
+
+Two changes after the four-host sweep address the dominant pure-Rust costs at
+large sizes. They are recorded separately rather than silently rewriting the
+historical tables above.
+
+**Multiplication now ends in an exact NTT.** Each `u64` limb becomes four
+base-2^16 digits. Two radix-2 transforms run modulo 2,013,265,921 and
+1,811,939,329; both primitive roots and both primes have independent unit
+tests. Their 62-bit product exceeds the largest possible raw convolution
+coefficient at the supported 2^26 transform ceiling, so two-prime CRT recovers
+every coefficient uniquely and an integer carry pass returns to base 2^64.
+There is no floating-point rounding or probabilistic check.
+
+A size threshold alone is wrong for radix-2 transforms: one extra input limb
+can double the padded transform. Dispatch therefore requires both a 65,536-limb
+(4-Mbit) shorter operand and a padding-efficiency bound measured by the same
+probe. At 98,304 equal limbs the padded transform is still slower than Toom-4;
+at 114,688 it is 1.39x faster. Unsupported lengths and inefficient padding
+fall back to Toom-4. M4 release timings, equal random operands:
+
+| limbs per operand | Toom-4 | exact NTT | winner |
+|---:|---:|---:|---:|
+| 32,768 | 92.1 ms | 85.9 ms | NTT 1.07x |
+| 49,152 | 129.0 ms | 172.3 ms | Toom-4 1.34x |
+| 61,440 | 169.4 ms | 171.4 ms | parity |
+| 65,536 | 172.7 ms | 166.1 ms | NTT 1.04x |
+| 98,304 | 317.5 ms | 357.1 ms | Toom-4 1.12x |
+| 114,688 | 501.4 ms | 361.2 ms | NTT 1.39x |
+| 122,880 | 510.7 ms | 341.4 ms | NTT 1.50x |
+| 131,072 | 533.7 ms | 338.5 ms | NTT 1.58x |
+
+The kernel allocates two transform arrays, one compact `u32` residue array,
+and the returned limb vector. Input digits are written directly into the
+transform arrays; an earlier prototype's two additional digit vectors cost
+about 8% at 65,536 limbs (180.3 ms before, 166.1 ms after).
+
+**The Euclidean family now retains its linear-transform storage.** Lehmer
+batches formerly allocated positive, negative, and difference vectors for
+every transformed output. GCD, extended GCD, modular inverse, Jacobi, rational
+reconstruction, and HGCD's base loop now retain two buckets and recycle the old
+operand/cofactor limb buffers as the next outputs. `abs_diff_bits` scans the
+borrow chain without constructing `|a-b|`; guarded division retains its `2^s`
+threshold and adjusted dividend; matrix row steps mutate in place.
+
+The table is the existing deterministic crossover probe on the same M4, one
+baseline pass from `HEAD` followed by the changed build. It is a directional
+A/B, not a replacement for the multi-host confidence-interval sweep:
+
+| limbs | Lehmer before | Lehmer after | HGCD before | HGCD after |
+|---:|---:|---:|---:|---:|
+| 64 | 0.166 ms | 0.107 ms | 0.146 ms | 0.097 ms |
+| 128 | 0.387 ms | 0.274 ms | 0.377 ms | 0.271 ms |
+| 256 | 1.019 ms | 0.788 ms | 0.968 ms | 0.708 ms |
+| 512 | 3.024 ms | 2.369 ms | 3.004 ms | 2.303 ms |
+| 1,024 | 9.943 ms | 8.112 ms | 10.070 ms | 8.374 ms |
+| 2,048 | 37.505 ms | 29.432 ms | 30.712 ms | 23.782 ms |
+| 4,096 | 136.164 ms | 115.446 ms | 79.495 ms | 71.233 ms |
+| 8,192 | 521.761 ms | 458.428 ms | 213.687 ms | 213.977 ms |
+
+The allocation work buys 18–35% in Lehmer through 2,048 limbs and 10–34% in
+HGCD through 4,096 limbs in this pass. By 8,192 limbs, HGCD is dominated by
+its large matrix multiplications; workspace reuse no longer moves that row.
+That is the boundary the NTT tier eventually addresses, once the matrix
+operands themselves cross its measured admission size.
 
 ## GCD at scale
 

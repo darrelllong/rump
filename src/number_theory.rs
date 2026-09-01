@@ -244,9 +244,13 @@ fn cmp_slices(a: &[u64], b: &[u64]) -> core::cmp::Ordering {
     core::cmp::Ordering::Equal
 }
 
-/// `a - b` for equal-length little-endian slices with `a >= b`.
-fn sub_slices(a: &[u64], b: &[u64]) -> Vec<u64> {
-    let mut out = vec![0u64; a.len()];
+/// Write `a - b` for equal-length little-endian slices with `a >= b`, reusing
+/// `out`'s allocation.
+fn sub_slices_into(out: &mut Vec<u64>, a: &[u64], b: &[u64]) {
+    if out.len() > a.len() {
+        crate::scrub::zeroize_slice(&mut out[a.len()..]);
+    }
+    out.resize(a.len(), 0);
     let mut borrow = 0i128;
     for i in 0..a.len() {
         let diff = i128::from(a[i]) - i128::from(b[i]) - borrow;
@@ -259,54 +263,95 @@ fn sub_slices(a: &[u64], b: &[u64]) -> Vec<u64> {
         }
     }
     debug_assert!(borrow == 0, "sub_slices requires a >= b");
-    out
 }
 
-/// `c0·x0 + c1·x1` as a `BigUint`, for a result the Lehmer transform guarantees
-/// is non-negative (the remainder sequence).
-fn combine_unsigned(c0: i128, x0: &BigUint, c1: i128, x1: &BigUint) -> BigUint {
+/// Reusable positive and negative buckets for Lehmer's two-word linear
+/// combinations. The destination's own limb buffer holds the final
+/// difference, so a complete GCD run needs two scratch allocations rather
+/// than three allocations per transformed output.
+#[derive(Default)]
+struct LinearScratch {
+    pos: Vec<u64>,
+    neg: Vec<u64>,
+}
+
+impl LinearScratch {
+    fn clear_to(&mut self, width: usize) {
+        if self.pos.len() > width {
+            crate::scrub::zeroize_slice(&mut self.pos[width..]);
+        }
+        if self.neg.len() > width {
+            crate::scrub::zeroize_slice(&mut self.neg[width..]);
+        }
+        self.pos.resize(width, 0);
+        self.neg.resize(width, 0);
+        self.pos.fill(0);
+        self.neg.fill(0);
+    }
+}
+
+/// Write `c0·x0 + c1·x1` into `out`, for a result the Lehmer transform
+/// guarantees is non-negative (the remainder sequence).
+fn combine_unsigned_into(
+    out: &mut BigUint,
+    scratch: &mut LinearScratch,
+    c0: i128,
+    x0: &BigUint,
+    c1: i128,
+    x1: &BigUint,
+) {
     let width = x0.limbs().len().max(x1.limbs().len()) + 3;
-    let mut pos = vec![0u64; width];
-    let mut neg = vec![0u64; width];
-    route_term(&mut pos, &mut neg, c0, false, x0.limbs());
-    route_term(&mut pos, &mut neg, c1, false, x1.limbs());
+    scratch.clear_to(width);
+    route_term(&mut scratch.pos, &mut scratch.neg, c0, false, x0.limbs());
+    route_term(&mut scratch.pos, &mut scratch.neg, c1, false, x1.limbs());
     debug_assert!(
-        cmp_slices(&pos, &neg) != core::cmp::Ordering::Less,
+        cmp_slices(&scratch.pos, &scratch.neg) != core::cmp::Ordering::Less,
         "Lehmer transform keeps the remainder sequence non-negative"
     );
-    BigUint::from_limbs(sub_slices(&pos, &neg))
+    let mut limbs = core::mem::replace(out, BigUint::zero()).into_limbs();
+    sub_slices_into(&mut limbs, &scratch.pos, &scratch.neg);
+    *out = BigUint::from_limbs(limbs);
 }
 
-/// `c0·x0 + c1·x1` as a signed `BigInt`, for the Bézout cofactor sequences.
-fn combine_signed(c0: i128, x0: &BigInt, c1: i128, x1: &BigInt) -> BigInt {
+/// Write `c0·x0 + c1·x1` into `out`, for the signed Bézout cofactor
+/// sequences, retaining `out`'s magnitude allocation between batches.
+fn combine_signed_into(
+    out: &mut BigInt,
+    scratch: &mut LinearScratch,
+    c0: i128,
+    x0: &BigInt,
+    c1: i128,
+    x1: &BigInt,
+) {
     let width = x0
         .magnitude()
         .limbs()
         .len()
         .max(x1.magnitude().limbs().len())
         + 3;
-    let mut pos = vec![0u64; width];
-    let mut neg = vec![0u64; width];
+    scratch.clear_to(width);
     route_term(
-        &mut pos,
-        &mut neg,
+        &mut scratch.pos,
+        &mut scratch.neg,
         c0,
         x0.sign() == Sign::Negative,
         x0.magnitude().limbs(),
     );
     route_term(
-        &mut pos,
-        &mut neg,
+        &mut scratch.pos,
+        &mut scratch.neg,
         c1,
         x1.sign() == Sign::Negative,
         x1.magnitude().limbs(),
     );
-    match cmp_slices(&pos, &neg) {
-        core::cmp::Ordering::Less => {
-            BigInt::from_parts(Sign::Negative, BigUint::from_limbs(sub_slices(&neg, &pos)))
-        }
-        _ => BigInt::from_parts(Sign::Positive, BigUint::from_limbs(sub_slices(&pos, &neg))),
-    }
+    let previous = core::mem::replace(out, BigInt::zero());
+    let mut limbs = previous.into_magnitude().into_limbs();
+    let (sign, larger, smaller) = match cmp_slices(&scratch.pos, &scratch.neg) {
+        core::cmp::Ordering::Less => (Sign::Negative, &scratch.neg, &scratch.pos),
+        _ => (Sign::Positive, &scratch.pos, &scratch.neg),
+    };
+    sub_slices_into(&mut limbs, larger, smaller);
+    *out = BigInt::from_parts(sign, BigUint::from_limbs(limbs));
 }
 
 // ─── Jacobi state machine ───────────────────────────────────────────────────
@@ -486,11 +531,16 @@ impl Mat2 {
 
     /// The matrix product `self · other`.
     fn compose(&self, other: &Self) -> Self {
+        let dot = |a: &BigInt, b: &BigInt, c: &BigInt, d: &BigInt| {
+            let mut result = a.mul(c);
+            result.add_assign_ref(&b.mul(d));
+            result
+        };
         Self {
-            m00: self.m00.mul(&other.m00).add(&self.m01.mul(&other.m10)),
-            m01: self.m00.mul(&other.m01).add(&self.m01.mul(&other.m11)),
-            m10: self.m10.mul(&other.m00).add(&self.m11.mul(&other.m10)),
-            m11: self.m10.mul(&other.m01).add(&self.m11.mul(&other.m11)),
+            m00: dot(&self.m00, &self.m01, &other.m00, &other.m10),
+            m01: dot(&self.m00, &self.m01, &other.m01, &other.m11),
+            m10: dot(&self.m10, &self.m11, &other.m00, &other.m10),
+            m11: dot(&self.m10, &self.m11, &other.m01, &other.m11),
         }
     }
 
@@ -512,36 +562,24 @@ impl Mat2 {
 
     /// Fold in the non-swapping Euclid step `a ← a − q·b` (used when `a > b`):
     /// left-multiply the transform by `[[1, −q], [0, 1]]`, i.e. `row0 −= q·row1`.
-    fn reduce_top(&self, q: &BigUint) -> Self {
-        Self {
-            m00: self.m00.sub(&self.m10.mul_biguint(q)),
-            m01: self.m01.sub(&self.m11.mul_biguint(q)),
-            m10: self.m10.clone(),
-            m11: self.m11.clone(),
-        }
+    fn reduce_top_assign(&mut self, q: &BigUint) {
+        self.m00.sub_assign_ref(&self.m10.mul_biguint(q));
+        self.m01.sub_assign_ref(&self.m11.mul_biguint(q));
     }
 
     /// Fold in the non-swapping Euclid step `b ← b − q·a` (used when `b > a`):
     /// left-multiply by `[[1, 0], [−q, 1]]`, i.e. `row1 −= q·row0`.
-    fn reduce_bottom(&self, q: &BigUint) -> Self {
-        Self {
-            m00: self.m00.clone(),
-            m01: self.m01.clone(),
-            m10: self.m10.sub(&self.m00.mul_biguint(q)),
-            m11: self.m11.sub(&self.m01.mul_biguint(q)),
-        }
+    fn reduce_bottom_assign(&mut self, q: &BigUint) {
+        self.m10.sub_assign_ref(&self.m00.mul_biguint(q));
+        self.m11.sub_assign_ref(&self.m01.mul_biguint(q));
     }
 
     /// Fold in the swapping Euclid step `(a, b) ← (b, a − q·b)` — the shape
     /// the gcd drivers use, which keeps the pair ordered by moving the old
     /// smaller element on top: left-multiply by `[[0, 1], [1, −q]]`.
-    fn step_swap(&self, q: &BigUint) -> Self {
-        Self {
-            m00: self.m10.clone(),
-            m01: self.m11.clone(),
-            m10: self.m00.sub(&self.m10.mul_biguint(q)),
-            m11: self.m01.sub(&self.m11.mul_biguint(q)),
-        }
+    fn step_swap_assign(&mut self, q: &BigUint) {
+        self.swap_rows();
+        self.reduce_bottom_assign(q);
     }
 
     /// Exchange the rows — the transform-side mirror of swapping the pair.
@@ -553,9 +591,21 @@ impl Mat2 {
 
 /// `x >> bits`, out of place.
 fn shr(x: &BigUint, bits: usize) -> BigUint {
-    let mut y = x.clone();
-    y.shr_bits(bits);
-    y
+    let word_shift = bits / 64;
+    if word_shift >= x.limbs().len() {
+        return BigUint::zero();
+    }
+    let bit_shift = bits % 64;
+    if bit_shift == 0 {
+        return BigUint::from_limbs(x.limbs()[word_shift..].to_vec());
+    }
+    let source = &x.limbs()[word_shift..];
+    let mut limbs = Vec::with_capacity(source.len());
+    for index in 0..source.len() {
+        let high = source.get(index + 1).copied().unwrap_or(0);
+        limbs.push((source[index] >> bit_shift) | (high << (64 - bit_shift)));
+    }
+    BigUint::from_limbs(limbs)
 }
 
 /// `#(a, b)` — bit-size of the larger element.
@@ -597,9 +647,9 @@ fn hgcd_adjust(
     let attach = |high: &BigUint, r: &BigInt, s: &BigInt| {
         let mut shifted = high.clone();
         shifted.shl_bits(p);
-        let sum = BigInt::from_biguint(shifted)
-            .add(&r.mul_biguint(&a_low))
-            .add(&s.mul_biguint(&b_low));
+        let mut sum = BigInt::from_biguint(shifted);
+        sum.add_assign_ref(&r.mul_biguint(&a_low));
+        sum.add_assign_ref(&s.mul_biguint(&b_low));
         debug_assert!(
             sum.sign() == Sign::Positive,
             "adjusted pair stays positive (Möller Lemma 6)"
@@ -611,11 +661,26 @@ fn hgcd_adjust(
 
 /// `#(a − b)` — bit-size of the absolute difference.
 fn abs_diff_bits(a: &BigUint, b: &BigUint) -> usize {
-    if a >= b {
-        a.sub(b).bits()
-    } else {
-        b.sub(a).bits()
+    let (larger, smaller) = if a >= b { (a, b) } else { (b, a) };
+    let mut borrow = false;
+    let mut highest_nonzero = None;
+    for index in 0..larger.limbs().len() {
+        let lhs = larger.limbs()[index];
+        let rhs = smaller.limbs().get(index).copied().unwrap_or(0);
+        let (difference, borrow_0) = lhs.overflowing_sub(rhs);
+        let (difference, borrow_1) = difference.overflowing_sub(u64::from(borrow));
+        borrow = borrow_0 || borrow_1;
+        if difference != 0 {
+            highest_nonzero = Some((index, difference));
+        }
     }
+    debug_assert!(!borrow, "larger - smaller cannot borrow past the top limb");
+    highest_nonzero.map_or(0, |(index, limb)| {
+        index
+            .checked_mul(64)
+            .and_then(|bits| bits.checked_add(64 - limb.leading_zeros() as usize))
+            .expect("BigUint bit length fits usize")
+    })
 }
 
 /// One size-guarded division step — Möller's `sdiv`: reduce the larger element
@@ -631,11 +696,27 @@ fn abs_diff_bits(a: &BigUint, b: &BigUint) -> usize {
 /// the recursion never saw, and every conclusion drawn after it would be
 /// unsound. So the step refuses — reduction stalls at the boundary by design,
 /// and the caller decides what happens next.
+struct SdivScratch {
+    threshold: BigUint,
+    adjusted: BigUint,
+}
+
+impl SdivScratch {
+    fn new(boundary_bits: usize) -> Self {
+        let mut threshold = BigUint::zero();
+        threshold.set_bit(boundary_bits);
+        Self {
+            threshold,
+            adjusted: BigUint::zero(),
+        }
+    }
+}
+
 fn sdiv_step(
     a: &mut BigUint,
     b: &mut BigUint,
     t: &mut Mat2,
-    s: usize,
+    scratch: &mut SdivScratch,
     state: Option<&mut JacobiState>,
 ) -> bool {
     let a_is_larger = *a >= *b;
@@ -647,32 +728,29 @@ fn sdiv_step(
     // the ordinary Euclidean quotient whenever `hi mod lo` already clears the
     // boundary, and backs off by exactly as much as needed otherwise — Möller's
     // sdiv, which never lets the remainder fall to or below `s` bits.
-    let threshold = {
-        let mut t = BigUint::zero();
-        t.set_bit(s);
-        t
-    };
-    if *hi < threshold {
+    if *hi < scratch.threshold {
         return false; // hi already sits at or below the boundary
     }
-    let (q, rem) = hi.sub(&threshold).div_rem(lo);
+    scratch.adjusted.clone_from(hi);
+    scratch.adjusted.sub_assign_ref(&scratch.threshold);
+    let (q, rem) = scratch.adjusted.div_rem(lo);
     if q.is_zero() {
         return false; // reducing even once would cross the boundary
     }
     // Since `hi − 2^s = q·lo + rem`, the guarded remainder `hi − q·lo` is just
     // `rem + 2^s` — no multiplication needed to rebuild it.
     let mut r = rem;
-    r.add_assign_ref(&threshold);
+    r.add_assign_ref(&scratch.threshold);
     if let Some(st) = state {
         // The as-applied quotient, after any size-guard back-off.
         st.update(u8::from(a_is_larger), (q.limbs()[0] & 3) as u8);
     }
     if a_is_larger {
         *a = r;
-        *t = t.reduce_top(&q);
+        t.reduce_top_assign(&q);
     } else {
         *b = r;
-        *t = t.reduce_bottom(&q);
+        t.reduce_bottom_assign(&q);
     }
     true
 }
@@ -706,6 +784,14 @@ fn hgcd_base(
     let mut aa = a.clone();
     let mut bb = b.clone();
     let mut t = Mat2::identity();
+    let mut next_hi = BigUint::zero();
+    let mut next_lo = BigUint::zero();
+    let mut new_hi_0 = BigInt::zero();
+    let mut new_hi_1 = BigInt::zero();
+    let mut new_lo_0 = BigInt::zero();
+    let mut new_lo_1 = BigInt::zero();
+    let mut scratch = LinearScratch::default();
+    let mut sdiv_scratch = SdivScratch::new(s);
 
     while abs_diff_bits(&aa, &bb) > s {
         if pair_min_size(&aa, &bb) > s + LEHMER_MARGIN {
@@ -718,8 +804,8 @@ fn hgcd_base(
             // lopsided for its leading windows to overlap — and division is
             // the only way forward.
             if m01 != 0 {
-                let next_hi = combine_unsigned(m00, hi, m01, lo);
-                let next_lo = combine_unsigned(m10, hi, m11, lo);
+                combine_unsigned_into(&mut next_hi, &mut scratch, m00, hi, m01, lo);
+                combine_unsigned_into(&mut next_lo, &mut scratch, m10, hi, m11, lo);
                 // The batch is linear, so it composes with `t` by acting on
                 // t's rows exactly as it acts on the values — with the same
                 // care for which row currently plays hi and which lo.
@@ -728,14 +814,10 @@ fn hgcd_base(
                 } else {
                     ((&t.m10, &t.m11), (&t.m00, &t.m01))
                 };
-                let new_hi_row = (
-                    combine_signed(m00, row_hi.0, m01, row_lo.0),
-                    combine_signed(m00, row_hi.1, m01, row_lo.1),
-                );
-                let new_lo_row = (
-                    combine_signed(m10, row_hi.0, m11, row_lo.0),
-                    combine_signed(m10, row_hi.1, m11, row_lo.1),
-                );
+                combine_signed_into(&mut new_hi_0, &mut scratch, m00, row_hi.0, m01, row_lo.0);
+                combine_signed_into(&mut new_hi_1, &mut scratch, m00, row_hi.1, m01, row_lo.1);
+                combine_signed_into(&mut new_lo_0, &mut scratch, m10, row_hi.0, m11, row_lo.0);
+                combine_signed_into(&mut new_lo_1, &mut scratch, m10, row_hi.1, m11, row_lo.1);
                 if let Some(st) = state.as_deref_mut() {
                     replay_batch(st, a_is_larger, &log);
                 }
@@ -744,34 +826,38 @@ fn hgcd_base(
                 // remainder pair. The transform rows follow the same
                 // placement, so the matrix, the values, and the symbol
                 // state's fixed slots stay aligned.
-                let even_steps = log.len.is_multiple_of(2);
-                let (hi_slot_val, lo_slot_val) = if even_steps {
-                    (next_hi, next_lo)
-                } else {
-                    (next_lo, next_hi)
-                };
-                let (hi_slot_row, lo_slot_row) = if even_steps {
-                    (new_hi_row, new_lo_row)
-                } else {
-                    (new_lo_row, new_hi_row)
-                };
+                if !log.len.is_multiple_of(2) {
+                    core::mem::swap(&mut next_hi, &mut next_lo);
+                    core::mem::swap(&mut new_hi_0, &mut new_lo_0);
+                    core::mem::swap(&mut new_hi_1, &mut new_lo_1);
+                }
                 if a_is_larger {
-                    (t.m00, t.m01) = hi_slot_row;
-                    (t.m10, t.m11) = lo_slot_row;
-                    aa = hi_slot_val;
-                    bb = lo_slot_val;
+                    core::mem::swap(&mut t.m00, &mut new_hi_0);
+                    core::mem::swap(&mut t.m01, &mut new_hi_1);
+                    core::mem::swap(&mut t.m10, &mut new_lo_0);
+                    core::mem::swap(&mut t.m11, &mut new_lo_1);
+                    core::mem::swap(&mut aa, &mut next_hi);
+                    core::mem::swap(&mut bb, &mut next_lo);
                 } else {
-                    (t.m10, t.m11) = hi_slot_row;
-                    (t.m00, t.m01) = lo_slot_row;
-                    bb = hi_slot_val;
-                    aa = lo_slot_val;
+                    core::mem::swap(&mut t.m10, &mut new_hi_0);
+                    core::mem::swap(&mut t.m11, &mut new_hi_1);
+                    core::mem::swap(&mut t.m00, &mut new_lo_0);
+                    core::mem::swap(&mut t.m01, &mut new_lo_1);
+                    core::mem::swap(&mut bb, &mut next_hi);
+                    core::mem::swap(&mut aa, &mut next_lo);
                 }
                 continue;
             }
         }
         // Within a batch-width of the boundary a batch could sail past it, so
         // the last stretch goes one guarded division at a time.
-        if !sdiv_step(&mut aa, &mut bb, &mut t, s, state.as_deref_mut()) {
+        if !sdiv_step(
+            &mut aa,
+            &mut bb,
+            &mut t,
+            &mut sdiv_scratch,
+            state.as_deref_mut(),
+        ) {
             break;
         }
     }
@@ -837,6 +923,7 @@ fn hgcd(a: &BigUint, b: &BigUint, mut state: Option<&mut JacobiState>) -> (Mat2,
     if n <= HGCD_BASE_LIMBS * 64 {
         return hgcd_base(&aa, &bb, s, state);
     }
+    let mut sdiv_scratch = SdivScratch::new(s);
 
     // First recursive call (Step 2): only when the smaller element clears
     // ⌊3N/4⌋ + 2, which puts both top halves above the sub-call's boundary.
@@ -853,7 +940,13 @@ fn hgcd(a: &BigUint, b: &BigUint, mut state: Option<&mut JacobiState>) -> (Mat2,
     // against the bits it saw, so its last step or two may be wrong for the
     // full operands. At most four full-width guarded steps make it right.
     while pair_size(&aa, &bb) > 3 * n / 4 + 1 && abs_diff_bits(&aa, &bb) > s {
-        if !sdiv_step(&mut aa, &mut bb, &mut t, s, state.as_deref_mut()) {
+        if !sdiv_step(
+            &mut aa,
+            &mut bb,
+            &mut t,
+            &mut sdiv_scratch,
+            state.as_deref_mut(),
+        ) {
             break;
         }
     }
@@ -873,7 +966,13 @@ fn hgcd(a: &BigUint, b: &BigUint, mut state: Option<&mut JacobiState>) -> (Mat2,
 
     // Repair the second splice and land on the target (Step 20).
     while abs_diff_bits(&aa, &bb) > s {
-        if !sdiv_step(&mut aa, &mut bb, &mut t, s, state.as_deref_mut()) {
+        if !sdiv_step(
+            &mut aa,
+            &mut bb,
+            &mut t,
+            &mut sdiv_scratch,
+            state.as_deref_mut(),
+        ) {
             break;
         }
     }
@@ -976,7 +1075,7 @@ fn gcd_extended_via_hgcd(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) 
         let boundary = aa.bits() / 2 + 1;
         if bb.bits() <= boundary || abs_diff_bits(&aa, &bb) <= boundary {
             let (q, r) = aa.div_rem(&bb);
-            acc = acc.step_swap(&q);
+            acc.step_swap_assign(&q);
             aa = core::mem::replace(&mut bb, r);
             continue;
         }
@@ -1041,6 +1140,9 @@ fn gcd_lehmer(lhs: &BigUint, rhs: &BigUint) -> BigUint {
     } else {
         (rhs.clone(), lhs.clone())
     };
+    let mut next_a = BigUint::zero();
+    let mut next_b = BigUint::zero();
+    let mut scratch = LinearScratch::default();
     loop {
         if b.is_zero() {
             return a;
@@ -1067,10 +1169,10 @@ fn gcd_lehmer(lhs: &BigUint, rhs: &BigUint) -> BigUint {
             a = b;
             b = remainder;
         } else {
-            let next_a = combine_unsigned(m00, &a, m01, &b);
-            let next_b = combine_unsigned(m10, &a, m11, &b);
-            a = next_a;
-            b = next_b;
+            combine_unsigned_into(&mut next_a, &mut scratch, m00, &a, m01, &b);
+            combine_unsigned_into(&mut next_b, &mut scratch, m10, &a, m11, &b);
+            core::mem::swap(&mut a, &mut next_a);
+            core::mem::swap(&mut b, &mut next_b);
             debug_assert!(a >= b, "Lehmer transform preserves a >= b");
         }
     }
@@ -1176,6 +1278,10 @@ fn gcd_extended_lehmer(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
     let (mut r0, mut r1) = (a.clone(), b.clone());
     let (mut s0, mut s1) = (BigInt::from_biguint(BigUint::one()), BigInt::zero());
     let (mut t0, mut t1) = (BigInt::zero(), BigInt::from_biguint(BigUint::one()));
+    let (mut next_r0, mut next_r1) = (BigUint::zero(), BigUint::zero());
+    let (mut next_s0, mut next_s1) = (BigInt::zero(), BigInt::zero());
+    let (mut next_t0, mut next_t1) = (BigInt::zero(), BigInt::zero());
+    let mut scratch = LinearScratch::default();
 
     while !r1.is_zero() {
         let n = r1.limbs().len();
@@ -1185,15 +1291,18 @@ fn gcd_extended_lehmer(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
             let (u_hat, v_hat) = leading_pair(&r0, &r1);
             let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, None);
             if m01 != 0 {
-                let next_r0 = combine_unsigned(m00, &r0, m01, &r1);
-                let next_r1 = combine_unsigned(m10, &r0, m11, &r1);
-                let next_s0 = combine_signed(m00, &s0, m01, &s1);
-                let next_s1 = combine_signed(m10, &s0, m11, &s1);
-                let next_t0 = combine_signed(m00, &t0, m01, &t1);
-                let next_t1 = combine_signed(m10, &t0, m11, &t1);
-                (r0, r1) = (next_r0, next_r1);
-                (s0, s1) = (next_s0, next_s1);
-                (t0, t1) = (next_t0, next_t1);
+                combine_unsigned_into(&mut next_r0, &mut scratch, m00, &r0, m01, &r1);
+                combine_unsigned_into(&mut next_r1, &mut scratch, m10, &r0, m11, &r1);
+                combine_signed_into(&mut next_s0, &mut scratch, m00, &s0, m01, &s1);
+                combine_signed_into(&mut next_s1, &mut scratch, m10, &s0, m11, &s1);
+                combine_signed_into(&mut next_t0, &mut scratch, m00, &t0, m01, &t1);
+                combine_signed_into(&mut next_t1, &mut scratch, m10, &t0, m11, &t1);
+                core::mem::swap(&mut r0, &mut next_r0);
+                core::mem::swap(&mut r1, &mut next_r1);
+                core::mem::swap(&mut s0, &mut next_s0);
+                core::mem::swap(&mut s1, &mut next_s1);
+                core::mem::swap(&mut t0, &mut next_t0);
+                core::mem::swap(&mut t1, &mut next_t1);
                 debug_assert!(r0 >= r1, "Lehmer transform preserves r0 >= r1");
                 continue;
             }
@@ -1201,11 +1310,11 @@ fn gcd_extended_lehmer(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
         // One ordinary Euclid step: (r0, r1) → (r1, r0 mod r1), each cofactor
         // pair following the same quotient.
         let (quotient, remainder) = r0.div_rem(&r1);
-        let next_s1 = s0.sub(&s1.mul_biguint(&quotient));
-        let next_t1 = t0.sub(&t1.mul_biguint(&quotient));
+        s0.sub_assign_ref(&s1.mul_biguint(&quotient));
+        t0.sub_assign_ref(&t1.mul_biguint(&quotient));
         r0 = core::mem::replace(&mut r1, remainder);
-        s0 = core::mem::replace(&mut s1, next_s1);
-        t0 = core::mem::replace(&mut t1, next_t1);
+        core::mem::swap(&mut s0, &mut s1);
+        core::mem::swap(&mut t0, &mut t1);
     }
 
     (r0, s0, t0)
@@ -1581,6 +1690,9 @@ pub fn rational_reconstruct_bounded(
     // Invariant: r0 ≡ t0·x and r1 ≡ t1·x (mod m); r0 > r1 after entry.
     let (mut r0, mut r1) = (m.clone(), x);
     let (mut t0, mut t1) = (BigInt::zero(), BigInt::from_biguint(BigUint::one()));
+    let (mut next_r0, mut next_r1) = (BigUint::zero(), BigUint::zero());
+    let (mut next_t0, mut next_t1) = (BigInt::zero(), BigInt::zero());
+    let mut scratch = LinearScratch::default();
 
     while r1 > *num_bound {
         let n = r1.limbs().len();
@@ -1588,25 +1700,27 @@ pub fn rational_reconstruct_bounded(
             let (u_hat, v_hat) = leading_pair(&r0, &r1);
             let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, None);
             if m01 != 0 {
-                let next_r1 = combine_unsigned(m10, &r0, m11, &r1);
+                combine_unsigned_into(&mut next_r1, &mut scratch, m10, &r0, m11, &r1);
                 // Commit only while the batch stays strictly above the stop
                 // line; a batch that crosses it may skip the exact row the
                 // theorem names, so that stretch is walked step by step.
                 if next_r1 > *num_bound {
-                    let next_r0 = combine_unsigned(m00, &r0, m01, &r1);
-                    let next_t0 = combine_signed(m00, &t0, m01, &t1);
-                    let next_t1 = combine_signed(m10, &t0, m11, &t1);
-                    (r0, r1) = (next_r0, next_r1);
-                    (t0, t1) = (next_t0, next_t1);
+                    combine_unsigned_into(&mut next_r0, &mut scratch, m00, &r0, m01, &r1);
+                    combine_signed_into(&mut next_t0, &mut scratch, m00, &t0, m01, &t1);
+                    combine_signed_into(&mut next_t1, &mut scratch, m10, &t0, m11, &t1);
+                    core::mem::swap(&mut r0, &mut next_r0);
+                    core::mem::swap(&mut r1, &mut next_r1);
+                    core::mem::swap(&mut t0, &mut next_t0);
+                    core::mem::swap(&mut t1, &mut next_t1);
                     debug_assert!(r0 >= r1, "Lehmer transform preserves r0 >= r1");
                     continue;
                 }
             }
         }
         let (quotient, remainder) = r0.div_rem(&r1);
-        let next_t1 = t0.sub(&t1.mul_biguint(&quotient));
+        t0.sub_assign_ref(&t1.mul_biguint(&quotient));
         r0 = core::mem::replace(&mut r1, remainder);
-        t0 = core::mem::replace(&mut t1, next_t1);
+        core::mem::swap(&mut t0, &mut t1);
     }
 
     // The candidate row: p = ±r1, q = |t1|.
@@ -2191,6 +2305,9 @@ fn jacobi_lehmer_with_state(x: BigUint, y: BigUint, state: JacobiState) -> i8 {
     let mut x = x;
     let mut y = y;
     let mut state = state;
+    let mut next_hi = BigUint::zero();
+    let mut next_lo = BigUint::zero();
+    let mut scratch = LinearScratch::default();
     loop {
         if x.is_zero() {
             return if y.is_one() { state.finish() } else { 0 };
@@ -2208,20 +2325,20 @@ fn jacobi_lehmer_with_state(x: BigUint, y: BigUint, state: JacobiState) -> i8 {
             let mut log = QuotientLog::new();
             let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, Some(&mut log));
             if m01 != 0 {
-                let next_hi = combine_unsigned(m00, hi, m01, lo);
-                let next_lo = combine_unsigned(m10, hi, m11, lo);
+                combine_unsigned_into(&mut next_hi, &mut scratch, m00, hi, m01, lo);
+                combine_unsigned_into(&mut next_lo, &mut scratch, m10, hi, m11, lo);
                 replay_batch(&mut state, x_is_hi, &log);
                 // Parity places the results: the slot that held r₀ now holds
                 // the even-indexed remainder of the final pair.
-                let even_steps = log.len.is_multiple_of(2);
-                let hi_slot_gets = if even_steps { &next_hi } else { &next_lo };
-                let lo_slot_gets = if even_steps { &next_lo } else { &next_hi };
+                if !log.len.is_multiple_of(2) {
+                    core::mem::swap(&mut next_hi, &mut next_lo);
+                }
                 if x_is_hi {
-                    x = hi_slot_gets.clone();
-                    y = lo_slot_gets.clone();
+                    core::mem::swap(&mut x, &mut next_hi);
+                    core::mem::swap(&mut y, &mut next_lo);
                 } else {
-                    y = hi_slot_gets.clone();
-                    x = lo_slot_gets.clone();
+                    core::mem::swap(&mut y, &mut next_hi);
+                    core::mem::swap(&mut x, &mut next_lo);
                 }
                 continue;
             }
@@ -2658,6 +2775,9 @@ pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
     // coefficient u0 is the inverse.
     let (mut r0, mut r1) = (n.clone(), reduced);
     let (mut u0, mut u1) = (BigInt::zero(), BigInt::from_biguint(BigUint::one()));
+    let (mut next_r0, mut next_r1) = (BigUint::zero(), BigUint::zero());
+    let (mut next_u0, mut next_u1) = (BigInt::zero(), BigInt::zero());
+    let mut scratch = LinearScratch::default();
 
     while !r1.is_zero() {
         let m = r1.limbs().len();
@@ -2665,20 +2785,22 @@ pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
             let (u_hat, v_hat) = leading_pair(&r0, &r1);
             let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, None);
             if m01 != 0 {
-                let next_r0 = combine_unsigned(m00, &r0, m01, &r1);
-                let next_r1 = combine_unsigned(m10, &r0, m11, &r1);
-                let next_u0 = combine_signed(m00, &u0, m01, &u1);
-                let next_u1 = combine_signed(m10, &u0, m11, &u1);
-                (r0, r1) = (next_r0, next_r1);
-                (u0, u1) = (next_u0, next_u1);
+                combine_unsigned_into(&mut next_r0, &mut scratch, m00, &r0, m01, &r1);
+                combine_unsigned_into(&mut next_r1, &mut scratch, m10, &r0, m11, &r1);
+                combine_signed_into(&mut next_u0, &mut scratch, m00, &u0, m01, &u1);
+                combine_signed_into(&mut next_u1, &mut scratch, m10, &u0, m11, &u1);
+                core::mem::swap(&mut r0, &mut next_r0);
+                core::mem::swap(&mut r1, &mut next_r1);
+                core::mem::swap(&mut u0, &mut next_u0);
+                core::mem::swap(&mut u1, &mut next_u1);
                 debug_assert!(r0 >= r1, "Lehmer transform preserves r0 >= r1");
                 continue;
             }
         }
         let (quotient, remainder) = r0.div_rem(&r1);
-        let next_u1 = u0.sub(&u1.mul_biguint(&quotient));
+        u0.sub_assign_ref(&u1.mul_biguint(&quotient));
         r0 = core::mem::replace(&mut r1, remainder);
-        u0 = core::mem::replace(&mut u1, next_u1);
+        core::mem::swap(&mut u0, &mut u1);
     }
 
     if !r0.is_one() {
@@ -4263,13 +4385,15 @@ mod tests {
         let id = Mat2::identity();
         assert_eq!(id.apply(&a, &b), (a.clone(), b.clone()));
         // reduce_top by 5: a ← a − 5·b = 10, b unchanged.
-        let m = id.reduce_top(&BigUint::from_u64(5));
+        let mut m = id;
+        m.reduce_top_assign(&BigUint::from_u64(5));
         assert_eq!(
             m.apply(&a, &b),
             (BigUint::from_u64(10), BigUint::from_u64(46))
         );
         // reduce_bottom by 4: b ← b − 4·a' = 46 − 40 = 6.
-        let m2 = m.reduce_bottom(&BigUint::from_u64(4));
+        let mut m2 = m;
+        m2.reduce_bottom_assign(&BigUint::from_u64(4));
         assert_eq!(
             m2.apply(&a, &b),
             (BigUint::from_u64(10), BigUint::from_u64(6))
