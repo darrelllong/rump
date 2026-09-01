@@ -31,6 +31,12 @@ const PRIME_PRODUCT: u64 = PRIME_0 * PRIME_1;
 // limits workers by work size in addition to the caller's hardware ceiling.
 const MIN_LINEAR_VALUES_PER_WORKER: usize = 1 << 18;
 
+// Below this length, the extra gather pass of the parallel DIF inverse costs
+// more than the in-place DIT inverse's serial permutation. The crossover is
+// measured by `ntt_worker_scaling_timing` on both the local and many-core
+// benchmark hosts.
+const DIF_INVERSE_MIN_LEN: usize = 1 << 19;
+
 // Below 2^16 coefficients NTT loses to the recursive multiplication ladder
 // even with four contexts on the crossover host. Keeping forced small-kernel
 // tests serial also prevents thread-launch time from dominating their work.
@@ -187,16 +193,24 @@ fn multiply_impl_selecting_workers(
     write_input_pair_bit_reversed(
         lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
     );
-    convolve_mod::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
-    let residues_0 = copy_residues(&right, convolution_len, workers);
+    let result_in_right = convolve_mod::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
+    let residues_0 = if result_in_right {
+        copy_residues(&right, convolution_len, workers)
+    } else {
+        copy_residues(&left, convolution_len, workers)
+    };
 
     clear_pair(&mut left, &mut right, workers);
     write_input_pair_bit_reversed(
         lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
     );
-    convolve_mod::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
+    let result_in_right = convolve_mod::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
 
-    reconstruct(&residues_0, &mut right, convolution_len, workers)
+    if result_in_right {
+        reconstruct(&residues_0, &mut right, convolution_len, workers)
+    } else {
+        reconstruct(&residues_0, &mut left, convolution_len, workers)
+    }
 }
 
 /// Wall-clock phase breakdown for the ignored NTT profiling probe.
@@ -252,11 +266,15 @@ pub(super) fn multiply_profiled(
     pointwise_multiply::<PRIME_0>(&mut left, &right, workers);
     let mut pointwise = started.elapsed();
     let started = Instant::now();
-    inverse_to_natural::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
+    let result_in_right = inverse_product::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
     let mut inverse = started.elapsed();
 
     let started = Instant::now();
-    let residues_0 = copy_residues(&right, convolution_len, workers);
+    let residues_0 = if result_in_right {
+        copy_residues(&right, convolution_len, workers)
+    } else {
+        copy_residues(&left, convolution_len, workers)
+    };
     let residue_copy = started.elapsed();
 
     let started = Instant::now();
@@ -275,11 +293,15 @@ pub(super) fn multiply_profiled(
     pointwise_multiply::<PRIME_1>(&mut left, &right, workers);
     pointwise += started.elapsed();
     let started = Instant::now();
-    inverse_to_natural::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
+    let result_in_right = inverse_product::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
     inverse += started.elapsed();
 
     let started = Instant::now();
-    let product = reconstruct(&residues_0, &mut right, convolution_len, workers);
+    let product = if result_in_right {
+        reconstruct(&residues_0, &mut right, convolution_len, workers)
+    } else {
+        reconstruct(&residues_0, &mut left, convolution_len, workers)
+    };
     let reconstruct = started.elapsed();
 
     (
@@ -483,14 +505,29 @@ fn convolve_mod<const MODULUS: u64, const ROOT: u64>(
     left: &mut [u64],
     right: &mut [u64],
     workers: usize,
-) {
+) -> bool {
     debug_assert_eq!(left.len(), right.len());
     forward_transform_pair::<MODULUS, ROOT>(left, right, workers);
     pointwise_multiply::<MODULUS>(left, right, workers);
-    // `right` is dead after the pointwise product, so it becomes the
-    // natural-order inverse output without allocating another transform-sized
-    // buffer.
-    inverse_to_natural::<MODULUS, ROOT>(left, right, workers);
+    inverse_product::<MODULUS, ROOT>(left, right, workers)
+}
+
+/// Invert the product and report whether its natural-order coefficients are
+/// in `right` (parallel DIF) or `left` (classic in-place DIT).
+fn inverse_product<const MODULUS: u64, const ROOT: u64>(
+    left: &mut [u64],
+    right: &mut [u64],
+    workers: usize,
+) -> bool {
+    if left.len() >= DIF_INVERSE_MIN_LEN {
+        // `right` is dead after the pointwise product, so it becomes the
+        // natural-order inverse output without another transform allocation.
+        inverse_to_natural::<MODULUS, ROOT>(left, right, workers);
+        true
+    } else {
+        transform::<MODULUS, ROOT>(left, true, workers);
+        false
+    }
 }
 
 fn forward_transform_pair<const MODULUS: u64, const ROOT: u64>(
