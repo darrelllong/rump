@@ -290,15 +290,29 @@ fn crt_two(residue_0: u64, residue_1: u64) -> u64 {
 fn convolve_mod<const MODULUS: u64, const ROOT: u64>(
     left: &mut [u64],
     right: &mut [u64],
-    max_contexts: usize,
+    workers: usize,
 ) {
     debug_assert_eq!(left.len(), right.len());
-    transform_from_bit_reversed::<MODULUS, ROOT>(left, false, max_contexts);
-    transform_from_bit_reversed::<MODULUS, ROOT>(right, false, max_contexts);
+    if workers == 1 {
+        transform_from_bit_reversed::<MODULUS, ROOT>(left, false, 1);
+        transform_from_bit_reversed::<MODULUS, ROOT>(right, false, 1);
+    } else {
+        // The two forward transforms are independent. Running both at once
+        // with half the worker budget removes one whole transform from the
+        // critical path while keeping the total live contexts at `workers`.
+        // The inverse has no independent peer and uses the full budget.
+        let forward_workers = workers / 2;
+        std::thread::scope(|scope| {
+            let _ = scope.spawn(|| {
+                transform_from_bit_reversed::<MODULUS, ROOT>(left, false, forward_workers)
+            });
+            transform_from_bit_reversed::<MODULUS, ROOT>(right, false, forward_workers);
+        });
+    }
     for (lhs, &rhs) in left.iter_mut().zip(right.iter()) {
         *lhs = mul_mod::<MODULUS>(*lhs, rhs);
     }
-    transform::<MODULUS, ROOT>(left, true, max_contexts);
+    transform::<MODULUS, ROOT>(left, true, workers);
 }
 
 fn square_mod<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], max_contexts: usize) {
