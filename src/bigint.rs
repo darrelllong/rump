@@ -1564,6 +1564,12 @@ impl BigUint {
         ntt::multiply_with_contexts(self, other, max_contexts)
     }
 
+    /// Exact NTT with a forced worker count for scaling probes.
+    #[cfg(test)]
+    fn mul_ntt_with_workers_ref(&self, other: &Self, workers: usize) -> Self {
+        ntt::multiply_with_workers(self, other, workers)
+    }
+
     /// Exact large squaring through one modular transform buffer and CRT.
     fn sqr_ntt_ref(&self) -> Self {
         ntt::square(self)
@@ -5917,6 +5923,69 @@ mod tests {
             eprintln!(
                 "{words:7} {toom4:12.3} {serial:12.3} {two:12.3} {automatic:12.3} {square:12.3}  {best}"
             );
+        }
+    }
+
+    #[test]
+    #[ignore = "timing probe for exact NTT worker scaling; run with --ignored"]
+    fn ntt_worker_scaling_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let mut seed = 0xbb67_ae85_84ca_a73b;
+        let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let word_sizes = std::env::var("RUMP_NTT_SCALING_WORDS").map_or_else(
+            |_| vec![8_192usize, 16_384, 32_768, 65_536, 131_072],
+            |list| {
+                list.split(',')
+                    .map(|word| {
+                        word.trim()
+                            .parse::<usize>()
+                            .expect("RUMP_NTT_SCALING_WORDS entries must be limb counts")
+                    })
+                    .collect()
+            },
+        );
+        let worker_counts = std::env::var("RUMP_NTT_SCALING_WORKERS").map_or_else(
+            |_| vec![1usize, 2, 4, 8, 16, 32, 64],
+            |list| {
+                list.split(',')
+                    .map(|worker| {
+                        let workers = worker
+                            .trim()
+                            .parse::<usize>()
+                            .expect("RUMP_NTT_SCALING_WORKERS entries must be worker counts");
+                        assert!(
+                            workers.is_power_of_two(),
+                            "worker counts must be powers of two"
+                        );
+                        workers
+                    })
+                    .collect()
+            },
+        );
+        eprintln!("available contexts: {available}");
+        eprintln!("{:>7} {:>7} {:>12}", "words", "workers", "product_us");
+        for words in word_sizes {
+            let lhs = seeded_biguint(words, &mut seed);
+            let rhs = seeded_biguint(words, &mut seed);
+            let expected = lhs.mul_ntt_serial_ref(&rhs);
+            for &workers in &worker_counts {
+                if workers > available {
+                    continue;
+                }
+                let actual = lhs.mul_ntt_with_workers_ref(&rhs, workers);
+                assert_eq!(actual, expected, "NTT product at {workers} workers");
+                let rounds = if words < 65_536 { 3 } else { 2 };
+                let mut best = f64::INFINITY;
+                for _ in 0..rounds {
+                    black_box(lhs.mul_ntt_with_workers_ref(&rhs, workers));
+                    let started = Instant::now();
+                    black_box(lhs.mul_ntt_with_workers_ref(&rhs, workers));
+                    best = best.min(started.elapsed().as_secs_f64() * 1e6);
+                }
+                eprintln!("{words:7} {workers:7} {best:12.3}");
+            }
         }
     }
 

@@ -134,6 +134,26 @@ pub(super) fn multiply_with_contexts(lhs: &BigUint, rhs: &BigUint, max_contexts:
 }
 
 fn multiply_impl(lhs: &BigUint, rhs: &BigUint, max_contexts: usize) -> BigUint {
+    multiply_impl_selecting_workers(lhs, rhs, |transform_len| {
+        worker_count(transform_len, max_contexts)
+    })
+}
+
+/// Forced exact worker count for scaling measurements.
+#[cfg(test)]
+pub(super) fn multiply_with_workers(lhs: &BigUint, rhs: &BigUint, workers: usize) -> BigUint {
+    assert!(
+        workers.is_power_of_two(),
+        "NTT worker count must be a power of two"
+    );
+    multiply_impl_selecting_workers(lhs, rhs, |transform_len| workers.min(transform_len))
+}
+
+fn multiply_impl_selecting_workers(
+    lhs: &BigUint,
+    rhs: &BigUint,
+    select_workers: impl FnOnce(usize) -> usize,
+) -> BigUint {
     debug_assert!(!lhs.limbs.is_empty() && !rhs.limbs.is_empty());
 
     let lhs_digits = significant_digit_len(lhs);
@@ -157,7 +177,8 @@ fn multiply_impl(lhs: &BigUint, rhs: &BigUint, max_contexts: usize) -> BigUint {
     let coefficient_bound =
         (lhs_digits.min(rhs_digits) as u128) * u128::from(DIGIT_MASK) * u128::from(DIGIT_MASK);
     assert!(coefficient_bound < u128::from(PRIME_PRODUCT));
-    let workers = worker_count(transform_len, max_contexts);
+    let workers = select_workers(transform_len);
+    debug_assert!(workers.is_power_of_two() && workers <= transform_len);
 
     let mut left = vec![0u64; transform_len];
     let mut right = vec![0u64; transform_len];
