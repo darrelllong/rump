@@ -6,7 +6,10 @@
 //! coefficient uniquely; an ordinary carry pass then returns to base 2^64.
 //! This is the modular-transform form of Schönhage and Strassen's fast integer
 //! multiplication (Computing 7 (1971), 281–292), with iterative radix-2
-//! Cooley–Tukey transforms.
+//! Cooley–Tukey transforms. Digit expansion supplies bit-reversed forward
+//! input directly. Scoped workers divide disjoint stages and butterfly lanes
+//! without exceeding reported machine parallelism; squaring uses one transform
+//! buffer and pointwise self-products.
 
 use super::BigUint;
 
@@ -23,6 +26,11 @@ const ROOT_1: u64 = 13;
 const MAX_TRANSFORM_LEN: usize = 1 << 26;
 const PRIME_PRODUCT: u64 = PRIME_0 * PRIME_1;
 
+// Below 2^16 coefficients NTT loses to the recursive multiplication ladder
+// even with four contexts on the crossover host. Keeping forced small-kernel
+// tests serial also prevents thread-launch time from dominating their work.
+const PARALLEL_TRANSFORM_MIN_LEN: usize = 1 << 16;
+
 /// Padded transform length for full-width operands, when supported.
 pub(super) fn transform_len(lhs_limbs: usize, rhs_limbs: usize) -> Option<usize> {
     let lhs_digits = lhs_limbs.checked_mul(DIGITS_PER_LIMB)?;
@@ -35,8 +43,97 @@ pub(super) fn transform_len(lhs_limbs: usize, rhs_limbs: usize) -> Option<usize>
         .filter(|&len| len <= MAX_TRANSFORM_LEN)
 }
 
+/// Number of execution contexts the automatic transform will actually use.
+pub(super) fn automatic_worker_count(transform_len: usize) -> usize {
+    let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    worker_count(transform_len, available)
+}
+
+/// Select a radix-compatible worker count from a hard context ceiling.
+///
+/// With `w = 2^k` fixed segments, `log2(n) - k` stages run in one retained
+/// scoped wave and the `k` stages that join segments each require another
+/// synchronized wave. Charging one unit of launch/barrier latency per joining
+/// wave gives `(log2(n) - k) / w + k`; choose its exact integer-rational
+/// minimum instead of imposing an unrelated maximum. At the present 2^26
+/// transform ceiling the model itself never selects more than 16 workers.
+pub(super) fn worker_count(transform_len: usize, max_contexts: usize) -> usize {
+    debug_assert!(transform_len.is_power_of_two());
+    if transform_len < PARALLEL_TRANSFORM_MIN_LEN || max_contexts <= 1 {
+        return 1;
+    }
+    let depth = transform_len.ilog2() as usize;
+    let maximum = max_contexts.min(transform_len);
+    let maximum_power = 1usize << maximum.ilog2();
+    let mut best_workers = 1usize;
+    let mut best_numerator = depth;
+    let mut workers = 2usize;
+    let mut joining_stages = 1usize;
+    while workers <= maximum_power {
+        let numerator = depth - joining_stages + joining_stages * workers;
+        if numerator * best_workers < best_numerator * workers {
+            best_workers = workers;
+            best_numerator = numerator;
+        }
+        workers <<= 1;
+        joining_stages += 1;
+    }
+    best_workers
+}
+
 /// Multiply two non-zero values through an exact two-prime NTT convolution.
 pub(super) fn multiply(lhs: &BigUint, rhs: &BigUint) -> BigUint {
+    let contexts = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    multiply_impl(lhs, rhs, contexts)
+}
+
+/// Square one non-zero value through one transform buffer and exact CRT.
+pub(super) fn square(value: &BigUint) -> BigUint {
+    debug_assert!(!value.limbs.is_empty());
+
+    let digit_len = significant_digit_len(value);
+    let convolution_len = digit_len
+        .checked_mul(2)
+        .and_then(|sum| sum.checked_sub(1))
+        .expect("NTT square convolution length fits usize");
+    let transform_len = convolution_len
+        .checked_next_power_of_two()
+        .expect("NTT square transform length fits usize");
+    assert!(
+        transform_len <= MAX_TRANSFORM_LEN,
+        "NTT square transform exceeds the supported 2^26 coefficients"
+    );
+    let coefficient_bound = (digit_len as u128) * u128::from(DIGIT_MASK) * u128::from(DIGIT_MASK);
+    assert!(coefficient_bound < u128::from(PRIME_PRODUCT));
+    let workers = automatic_worker_count(transform_len);
+
+    let mut values = vec![0u64; transform_len];
+    write_digits_bit_reversed(value, digit_len, &mut values);
+    square_mod::<PRIME_0, ROOT_0>(&mut values, workers);
+    let residues_0: Vec<u32> = values[..convolution_len]
+        .iter()
+        .map(|&residue| residue as u32)
+        .collect();
+
+    values.fill(0);
+    write_digits_bit_reversed(value, digit_len, &mut values);
+    square_mod::<PRIME_1, ROOT_1>(&mut values, workers);
+    reconstruct(&residues_0, &values, convolution_len)
+}
+
+/// Serial reference for differential and crossover measurement.
+#[cfg(test)]
+pub(super) fn multiply_serial(lhs: &BigUint, rhs: &BigUint) -> BigUint {
+    multiply_impl(lhs, rhs, 1)
+}
+
+/// Forced context limit for parallel-scaling measurement.
+#[cfg(test)]
+pub(super) fn multiply_with_contexts(lhs: &BigUint, rhs: &BigUint, max_contexts: usize) -> BigUint {
+    multiply_impl(lhs, rhs, max_contexts.max(1))
+}
+
+fn multiply_impl(lhs: &BigUint, rhs: &BigUint, max_contexts: usize) -> BigUint {
     debug_assert!(!lhs.limbs.is_empty() && !rhs.limbs.is_empty());
 
     let lhs_digits = significant_digit_len(lhs);
@@ -60,12 +157,13 @@ pub(super) fn multiply(lhs: &BigUint, rhs: &BigUint) -> BigUint {
     let coefficient_bound =
         (lhs_digits.min(rhs_digits) as u128) * u128::from(DIGIT_MASK) * u128::from(DIGIT_MASK);
     assert!(coefficient_bound < u128::from(PRIME_PRODUCT));
+    let workers = worker_count(transform_len, max_contexts);
 
     let mut left = vec![0u64; transform_len];
     let mut right = vec![0u64; transform_len];
-    write_digits(lhs, &mut left[..lhs_digits]);
-    write_digits(rhs, &mut right[..rhs_digits]);
-    convolve_mod::<PRIME_0, ROOT_0>(&mut left, &mut right);
+    write_digits_bit_reversed(lhs, lhs_digits, &mut left);
+    write_digits_bit_reversed(rhs, rhs_digits, &mut right);
+    convolve_mod::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
     let residues_0: Vec<u32> = left[..convolution_len]
         .iter()
         .map(|&value| value as u32)
@@ -73,11 +171,17 @@ pub(super) fn multiply(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 
     left.fill(0);
     right.fill(0);
-    write_digits(lhs, &mut left[..lhs_digits]);
-    write_digits(rhs, &mut right[..rhs_digits]);
-    convolve_mod::<PRIME_1, ROOT_1>(&mut left, &mut right);
+    write_digits_bit_reversed(lhs, lhs_digits, &mut left);
+    write_digits_bit_reversed(rhs, rhs_digits, &mut right);
+    convolve_mod::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
 
-    // Reconstruct coefficients and carry directly into packed 64-bit limbs.
+    reconstruct(&residues_0, &left, convolution_len)
+}
+
+/// Reconstruct coefficients and carry directly into packed 64-bit limbs.
+fn reconstruct(residues_0: &[u32], residues_1: &[u64], convolution_len: usize) -> BigUint {
+    debug_assert_eq!(residues_0.len(), convolution_len);
+    debug_assert!(residues_1.len() >= convolution_len);
     let mut limbs = Vec::with_capacity((convolution_len + DIGITS_PER_LIMB) / 4);
     let mut word = 0u64;
     let mut digit_in_word = 0usize;
@@ -92,7 +196,7 @@ pub(super) fn multiply(lhs: &BigUint, rhs: &BigUint) -> BigUint {
         }
     };
 
-    for (&residue_0, &residue_1) in residues_0.iter().zip(&left) {
+    for (&residue_0, &residue_1) in residues_0.iter().zip(residues_1) {
         let coefficient = u128::from(crt_two(u64::from(residue_0), residue_1)) + carry;
         push_digit((coefficient as u64) & DIGIT_MASK);
         carry = coefficient >> DIGIT_BITS;
@@ -120,14 +224,24 @@ fn significant_digit_len(value: &BigUint) -> usize {
         .expect("NTT digit length fits usize")
 }
 
-fn write_digits(value: &BigUint, digits: &mut [u64]) {
+/// Expand directly into the permutation expected by a decimation-in-time
+/// transform. This removes four full-array bit-reversal passes per product;
+/// zero padding is already present in the destination allocation/fill.
+fn write_digits_bit_reversed(value: &BigUint, digit_len: usize, digits: &mut [u64]) {
+    debug_assert!(digits.len().is_power_of_two());
+    let transform_bits = digits.len().ilog2();
     let mut index = 0usize;
     for &limb in &value.limbs {
         for shift in (0..64).step_by(DIGIT_BITS) {
-            if index == digits.len() {
+            if index == digit_len {
                 return;
             }
-            digits[index] = (limb >> shift) & DIGIT_MASK;
+            let reversed = if transform_bits == 0 {
+                0
+            } else {
+                index.reverse_bits() >> (usize::BITS - transform_bits)
+            };
+            digits[reversed] = (limb >> shift) & DIGIT_MASK;
             index += 1;
         }
     }
@@ -152,18 +266,34 @@ fn crt_two(residue_0: u64, residue_1: u64) -> u64 {
     residue_0 + PRIME_0 * multiplier
 }
 
-fn convolve_mod<const MODULUS: u64, const ROOT: u64>(left: &mut [u64], right: &mut [u64]) {
+fn convolve_mod<const MODULUS: u64, const ROOT: u64>(
+    left: &mut [u64],
+    right: &mut [u64],
+    max_contexts: usize,
+) {
     debug_assert_eq!(left.len(), right.len());
-    transform::<MODULUS, ROOT>(left, false);
-    transform::<MODULUS, ROOT>(right, false);
+    transform_from_bit_reversed::<MODULUS, ROOT>(left, false, max_contexts);
+    transform_from_bit_reversed::<MODULUS, ROOT>(right, false, max_contexts);
     for (lhs, &rhs) in left.iter_mut().zip(right.iter()) {
         *lhs = mul_mod::<MODULUS>(*lhs, rhs);
     }
-    transform::<MODULUS, ROOT>(left, true);
+    transform::<MODULUS, ROOT>(left, true, max_contexts);
+}
+
+fn square_mod<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], max_contexts: usize) {
+    transform_from_bit_reversed::<MODULUS, ROOT>(values, false, max_contexts);
+    for value in values.iter_mut() {
+        *value = mul_mod::<MODULUS>(*value, *value);
+    }
+    transform::<MODULUS, ROOT>(values, true, max_contexts);
 }
 
 /// In-place iterative radix-2 Cooley–Tukey transform.
-fn transform<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], inverse: bool) {
+fn transform<const MODULUS: u64, const ROOT: u64>(
+    values: &mut [u64],
+    inverse: bool,
+    max_contexts: usize,
+) {
     debug_assert!(values.len().is_power_of_two());
     debug_assert!((MODULUS - 1).is_multiple_of(values.len() as u64));
 
@@ -181,36 +311,161 @@ fn transform<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], inverse: b
         }
     }
 
-    let mut width = 2usize;
-    while width <= values.len() {
-        let mut root = pow_mod::<MODULUS>(ROOT, (MODULUS - 1) / width as u64);
-        if inverse {
-            root = pow_mod::<MODULUS>(root, MODULUS - 2);
-        }
-        for block in values.chunks_exact_mut(width) {
-            let (low, high) = block.split_at_mut(width / 2);
-            let mut weight = 1u64;
-            for (even, odd) in low.iter_mut().zip(high.iter_mut()) {
-                let lhs = *even;
-                let rhs = mul_mod::<MODULUS>(*odd, weight);
-                let sum = lhs + rhs;
-                *even = if sum >= MODULUS { sum - MODULUS } else { sum };
-                *odd = if lhs >= rhs {
-                    lhs - rhs
-                } else {
-                    lhs + MODULUS - rhs
-                };
-                weight = mul_mod::<MODULUS>(weight, root);
+    transform_from_bit_reversed::<MODULUS, ROOT>(values, inverse, max_contexts);
+}
+
+/// Transform input already in bit-reversed order into natural order.
+fn transform_from_bit_reversed<const MODULUS: u64, const ROOT: u64>(
+    values: &mut [u64],
+    inverse: bool,
+    max_contexts: usize,
+) {
+    debug_assert!(values.len().is_power_of_two());
+    debug_assert!((MODULUS - 1).is_multiple_of(values.len() as u64));
+
+    // After global bit reversal, every butterfly through `segment_len` stays
+    // inside one aligned segment. Those early stages therefore run on
+    // disjoint mutable slices with no locks or unsafe code. The remaining
+    // log2(workers) stages join segments; those split their independent blocks
+    // and butterfly lanes over the same worker budget below. A power-of-two
+    // worker count is required to keep every segment aligned to every radix-2
+    // stage; rounding down also guarantees that this call never exceeds its
+    // detected or explicitly supplied context budget.
+    let worker_limit = max_contexts.max(1).min(values.len());
+    let workers = 1usize << worker_limit.ilog2();
+    let segment_len = values.len() / workers;
+    if workers > 1 {
+        std::thread::scope(|scope| {
+            let mut segments = values.chunks_exact_mut(segment_len);
+            let caller_segment = segments
+                .next()
+                .expect("a non-empty transform has a caller segment");
+            for segment in segments {
+                // Dropping the handle avoids a per-wave handle Vec; the scope
+                // still joins every child and propagates an unjoined panic.
+                let _ = scope.spawn(move || {
+                    transform_stages::<MODULUS, ROOT>(segment, inverse, 2, segment_len)
+                });
             }
-        }
-        width <<= 1;
+            transform_stages::<MODULUS, ROOT>(caller_segment, inverse, 2, segment_len);
+        });
+    } else {
+        transform_stages::<MODULUS, ROOT>(values, inverse, 2, segment_len);
     }
+    transform_joining_stages::<MODULUS, ROOT>(
+        values,
+        inverse,
+        segment_len.saturating_mul(2),
+        workers,
+    );
 
     if inverse {
         let inverse_len = pow_mod::<MODULUS>(values.len() as u64, MODULUS - 2);
         for value in values {
             *value = mul_mod::<MODULUS>(*value, inverse_len);
         }
+    }
+}
+
+fn transform_stages<const MODULUS: u64, const ROOT: u64>(
+    values: &mut [u64],
+    inverse: bool,
+    mut width: usize,
+    final_width: usize,
+) {
+    while width <= final_width {
+        let mut root = pow_mod::<MODULUS>(ROOT, (MODULUS - 1) / width as u64);
+        if inverse {
+            root = pow_mod::<MODULUS>(root, MODULUS - 2);
+        }
+        for block in values.chunks_exact_mut(width) {
+            let (low, high) = block.split_at_mut(width / 2);
+            butterfly_pairs::<MODULUS>(low, high, root, 1);
+        }
+        width <<= 1;
+    }
+}
+
+/// Stages wider than a retained segment. There are fewer blocks than workers,
+/// so blocks run concurrently and each block divides its independent
+/// low/high butterfly pairs among the remaining contexts. Nested scoped
+/// workers include their calling block worker in the budget: the total live
+/// execution contexts is exactly `workers`, never `workers + callers`.
+fn transform_joining_stages<const MODULUS: u64, const ROOT: u64>(
+    values: &mut [u64],
+    inverse: bool,
+    mut width: usize,
+    workers: usize,
+) {
+    while width <= values.len() {
+        let mut root = pow_mod::<MODULUS>(ROOT, (MODULUS - 1) / width as u64);
+        if inverse {
+            root = pow_mod::<MODULUS>(root, MODULUS - 2);
+        }
+        let blocks = values.len() / width;
+        debug_assert!(blocks < workers);
+        debug_assert_eq!(workers % blocks, 0);
+        let contexts_per_block = workers / blocks;
+        std::thread::scope(|scope| {
+            let mut block_slices = values.chunks_exact_mut(width);
+            let caller_block = block_slices
+                .next()
+                .expect("a joining stage has a caller block");
+            for block in block_slices {
+                let _ = scope
+                    .spawn(move || butterfly_block::<MODULUS>(block, root, contexts_per_block));
+            }
+            butterfly_block::<MODULUS>(caller_block, root, contexts_per_block);
+        });
+        width <<= 1;
+    }
+}
+
+fn butterfly_block<const MODULUS: u64>(block: &mut [u64], root: u64, contexts: usize) {
+    let (low, high) = block.split_at_mut(block.len() / 2);
+    debug_assert_eq!(low.len(), high.len());
+    debug_assert_eq!(low.len() % contexts, 0);
+    if contexts == 1 {
+        butterfly_pairs::<MODULUS>(low, high, root, 1);
+        return;
+    }
+
+    let chunk_len = low.len() / contexts;
+    std::thread::scope(|scope| {
+        let mut chunks = low
+            .chunks_exact_mut(chunk_len)
+            .zip(high.chunks_exact_mut(chunk_len));
+        let (caller_low, caller_high) = chunks
+            .next()
+            .expect("a parallel butterfly has a caller chunk");
+        for (chunk, (low, high)) in chunks.enumerate() {
+            let start = (chunk + 1) * chunk_len;
+            let _ = scope.spawn(move || {
+                butterfly_pairs::<MODULUS>(low, high, root, pow_mod::<MODULUS>(root, start as u64))
+            });
+        }
+        butterfly_pairs::<MODULUS>(caller_low, caller_high, root, 1);
+    });
+}
+
+fn butterfly_pairs<const MODULUS: u64>(
+    low: &mut [u64],
+    high: &mut [u64],
+    root: u64,
+    mut weight: u64,
+) {
+    debug_assert_eq!(low.len(), high.len());
+    for (even, odd) in low.iter_mut().zip(high) {
+        let lhs = *even;
+        let rhs = mul_mod::<MODULUS>(*odd, weight);
+        let sum = lhs + rhs;
+        *even = if sum >= MODULUS { sum - MODULUS } else { sum };
+        *odd = if lhs >= rhs {
+            lhs - rhs
+        } else {
+            lhs + MODULUS - rhs
+        };
+        weight = mul_mod::<MODULUS>(weight, root);
     }
 }
 
@@ -292,9 +547,28 @@ mod tests {
                 .map(|index| (index as u64 * 1_234_567 + 89) % PRIME_0)
                 .collect();
             let mut transformed = original.clone();
-            transform::<PRIME_0, ROOT_0>(&mut transformed, false);
-            transform::<PRIME_0, ROOT_0>(&mut transformed, true);
+            transform::<PRIME_0, ROOT_0>(&mut transformed, false, 1);
+            transform::<PRIME_0, ROOT_0>(&mut transformed, true, 1);
             assert_eq!(transformed, original);
+        }
+    }
+
+    #[test]
+    fn transform_is_independent_of_context_limit() {
+        let original: Vec<u64> = (0..4096)
+            .map(|index| (index as u64 * 1_234_567 + 89) % PRIME_0)
+            .collect();
+        let mut serial = original.clone();
+        transform::<PRIME_0, ROOT_0>(&mut serial, false, 1);
+        for contexts in [2usize, 3, 4, 5, 8] {
+            let mut parallel = original.clone();
+            transform::<PRIME_0, ROOT_0>(&mut parallel, false, contexts);
+            assert_eq!(parallel, serial, "forward transform at {contexts} contexts");
+            transform::<PRIME_0, ROOT_0>(&mut parallel, true, contexts);
+            assert_eq!(
+                parallel, original,
+                "inverse transform at {contexts} contexts"
+            );
         }
     }
 
@@ -304,5 +578,21 @@ mod tests {
         // under eight transform coefficients per limb.
         assert_eq!(transform_len(1 << 23, 1 << 23), Some(MAX_TRANSFORM_LEN));
         assert_eq!(transform_len((1 << 23) + 1, (1 << 23) + 1), None);
+    }
+
+    #[test]
+    fn worker_count_is_hardware_bounded_and_geometry_selected() {
+        assert_eq!(worker_count(1 << 15, 256), 1);
+        assert_eq!(worker_count(1 << 16, 1), 1);
+        assert_eq!(worker_count(1 << 16, 2), 2);
+        assert_eq!(worker_count(1 << 16, 6), 4);
+        assert_eq!(worker_count(1 << 16, 256), 8);
+        assert_eq!(worker_count(1 << 19, 256), 16);
+        assert_eq!(worker_count(MAX_TRANSFORM_LEN, 256), 16);
+        for available in 1usize..=256 {
+            let workers = worker_count(MAX_TRANSFORM_LEN, available);
+            assert!(workers <= available);
+            assert!(workers.is_power_of_two());
+        }
     }
 }

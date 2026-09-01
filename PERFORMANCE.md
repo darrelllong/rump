@@ -495,27 +495,51 @@ every coefficient uniquely and an integer carry pass returns to base 2^64.
 There is no floating-point rounding or probabilistic check.
 
 A size threshold alone is wrong for radix-2 transforms: one extra input limb
-can double the padded transform. Dispatch therefore requires both a 65,536-limb
-(4-Mbit) shorter operand and a padding-efficiency bound measured by the same
-probe. At 98,304 equal limbs the padded transform is still slower than Toom-4;
-at 114,688 it is 1.39x faster. Unsupported lengths and inefficient padding
-fall back to Toom-4. M4 release timings, equal random operands:
+can double the padded transform. Dispatch uses both reported parallelism and a
+padding-efficiency bound measured by the same probe. The shorter-operand
+threshold is 65,536 limbs serially, 32,768 when two transform workers are
+useful, and 8,192 with four or more. The padding ratio is 10 serially; parallel
+work admits 11 (the first post-doubling four-worker boundary is therefore
+11,916 limbs, also measured directly). Unsupported lengths and
+inefficient shapes fall back to Toom-4.
 
-| limbs per operand | Toom-4 | exact NTT | winner |
-|---:|---:|---:|---:|
-| 32,768 | 92.1 ms | 85.9 ms | NTT 1.07x |
-| 49,152 | 129.0 ms | 172.3 ms | Toom-4 1.34x |
-| 61,440 | 169.4 ms | 171.4 ms | parity |
-| 65,536 | 172.7 ms | 166.1 ms | NTT 1.04x |
-| 98,304 | 317.5 ms | 357.1 ms | Toom-4 1.12x |
-| 114,688 | 501.4 ms | 361.2 ms | NTT 1.39x |
-| 122,880 | 510.7 ms | 341.4 ms | NTT 1.50x |
-| 131,072 | 533.7 ms | 338.5 ms | NTT 1.58x |
+Parallelism is inside the general `BigUint` NTT, not the factoring crate. A
+global bit-reversal is followed by radix-aligned disjoint segments; early
+stages run in one scoped wave, and the few stages that join segments divide
+their independent blocks and butterfly lanes over the same budget. The budget
+is never larger than `available_parallelism`, and detection failure is serial.
+For `w = 2^k` segments, the selector minimizes the exact rational model
+`(log2(n)-k)/w + k`, where `k` is the number of additional synchronized joining
+waves. At the supported 2^26 transform ceiling that model itself selects at
+most 16 contexts; 16 is not a machine cap. Inputs are expanded directly into
+bit-reversed positions, removing four full permutation passes from a product.
 
-The kernel allocates two transform arrays, one compact `u32` residue array,
-and the returned limb vector. Input digits are written directly into the
-transform arrays; an earlier prototype's two additional digit vectors cost
-about 8% at 65,536 limbs (180.3 ms before, 166.1 ms after).
+M4 release timings below use equal random operands on the six-context crossover
+host; automatic NTT therefore uses four contexts. They are a directional
+best-of probe rather than a replacement for the four-host confidence-interval
+sweep above:
+
+| limbs | Toom-4 | serial NTT | automatic NTT | NTT square |
+|---:|---:|---:|---:|---:|
+| 8,192 | 15.63 ms | 16.06 ms | 7.62 ms | 5.18 ms |
+| 12,288 | 23.69 ms | 32.27 ms | 14.53 ms | 9.98 ms |
+| 16,384 | 30.37 ms | 32.85 ms | 14.90 ms | 10.19 ms |
+| 24,576 | 53.65 ms | 71.98 ms | 29.41 ms | 20.36 ms |
+| 32,768 | 86.65 ms | 70.55 ms | 30.61 ms | 20.82 ms |
+| 49,152 | 166.76 ms | 149.45 ms | 63.11 ms | 43.29 ms |
+| 65,536 | 171.75 ms | 151.68 ms | 64.74 ms | 44.14 ms |
+| 98,304 | 217.84 ms | 320.73 ms | 128.09 ms | 88.46 ms |
+| 114,688 | 219.17 ms | 319.31 ms | 129.97 ms | 89.30 ms |
+| 131,072 | 551.91 ms | 326.89 ms | 135.05 ms | 91.38 ms |
+
+At 65,536 limbs automatic multiplication is 2.34x faster than the identical
+serial NTT; at 131,072 it is 2.42x. Specialized NTT squaring is another
+1.47–1.48x faster because it performs one forward transform and pointwise
+self-products per prime instead of transforming two identical inputs. It also
+uses one `u64` transform array instead of two. General multiplication retains
+two transform arrays, one compact `u32` residue array, and the returned limb
+vector; both kernels reuse their arrays for the second prime and allocate no
+separate input-digit vectors.
 
 **The Euclidean family now retains its linear-transform storage.** Lehmer
 batches formerly allocated positive, negative, and difference vectors for

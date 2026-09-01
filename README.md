@@ -19,8 +19,10 @@ the breaking API cut uses no compatibility shims or duplicate public paths.
 - **`BigUint`, `BigInt`** — unsigned and signed integers on little-endian
   `u64` limbs. Schoolbook (Knuth's Algorithm M), Karatsuba, Toom–Cook three-
   and four-way, and exact two-prime NTT multiplication with CRT recovery at
-  very large sizes; Knuth's Algorithm D division (*TAOCP* vol. 2, §4.3.1)
-  with a Horner path for single-limb divisors.
+  very large sizes; NTT stages use only geometry-useful execution contexts and
+  never more than the machine reports, while NTT squaring removes the duplicate
+  input transform and transform buffer. Knuth's Algorithm D division (*TAOCP*
+  vol. 2, §4.3.1) has a Horner path for single-limb divisors.
 - **`MontgomeryContext`** — a public Montgomery domain (Montgomery 1985; the
   separated-operand-scanning shape from Koç, Acar & Kaliski, IEEE Micro 1996):
   encode once, compute in-domain (`mul_mont`, `square_mont`, their
@@ -117,7 +119,8 @@ Montgomery); the Euclid family — `gcd`, `gcd_extended`, `mod_inverse` — is
 **4–13×** and `jacobi` **2–12×**, down from **17–89×** on classical Euclid,
 after switching to **Lehmer's gcd** and a **division-free binary Jacobi**.
 `mul`/`sqr` climb schoolbook → Karatsuba → **Toom-3/Toom-4 → exact NTT**;
-the **1.3–7.5×**
+the NTT is hardware-aware, bounded by reported parallelism, and retains a
+specialized one-buffer square. The **1.3–7.5×**
 that remains at crypto sizes is GMP's assembly inner loops, not the algorithm
 (on the Raspberry Pi, where that assembly edge shrinks, `mul` is only 1.3–1.9×).
 Above ~131 kbit, `gcd` dispatches to **Half-GCD** (Möller, Math. Comp. 77

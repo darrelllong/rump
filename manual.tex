@@ -283,6 +283,19 @@ $O(n^{\log_3 5}) \approx O(n^{1.465})$; Toom-4 at seven points,
 $O(n^{\log_4 7}) \approx O(n^{1.404})$. Interpolation is exact: its
 divisions by small constants leave no remainder.
 
+\paragraph{Exact two-prime NTT.}
+At very large balanced sizes each limb is split into four base-$2^{16}$
+digits and the digit convolution is evaluated modulo two 31-bit NTT primes.
+Their product exceeds the asserted maximum coefficient through the supported
+$2^{26}$ transform length, so CRT recovery and the carry pass are exact; no
+floating-point rounding or probabilistic check is involved. Radix-2 stages
+run on scoped disjoint slices, use no more execution contexts than
+\code{available\_parallelism} reports, and fall back to one if detection
+fails. The measured shorter-operand crossovers are 65,536 limbs serially,
+32,768 with two useful contexts, and 8,192 with four or more, with an
+additional padding-efficiency gate because a power-of-two transform doubles
+discontinuously.
+
 \paragraph{Unbalanced operands (256 limbs).}
 The balanced kernels all bound the length ratio of their operands. A
 lopsided product ($\text{long} \ge 2 \cdot \text{short}$) whose shorter
@@ -324,14 +337,16 @@ $2a_ia_j$ term from overflowing a \code{u128} accumulator), then adds the
 diagonal; the doubling cannot overflow, since twice the upper triangle is
 at most $a^2 < \beta^{2n}$.
 
-Three regimes, each measured against the kernel it displaces: below 8 limbs
+Four regimes, each measured against the kernel it displaces: below 8 limbs
 the passes do not repay themselves and the general multiplication is used;
 from there to the Karatsuba crossover the schoolbook squaring; from there
-to 256 limbs a Karatsuba squaring, whose three sub-products are themselves
-squares, since $z_1 = (a_0+a_1)^2 - a_0^2 - a_1^2$; and at 256 limbs and
-above the Toom kernels win outright and it hands back. End to end the
-saving is 15\% at 8 limbs, 36\% at 16, 27\% at 64, and parity outside the
-specialized range.
+to 448 limbs a Karatsuba squaring, whose three sub-products are themselves
+squares, since $z_1 = (a_0+a_1)^2 - a_0^2 - a_1^2$; above 448 limbs the
+Toom kernels win until NTT admission. NTT squaring uses one transform array,
+one forward transform per prime, and pointwise self-products rather than a
+general product's duplicate input transform. On the M4 crossover host it is
+about 1.47 times faster than general NTT multiplication and uses half the
+transform-array storage.
 
 \subsection{Division and remainder}
 

@@ -174,13 +174,15 @@ since 2026-08-16 by `digit_count(radix)` = floor(log_r n) + 1, with
 string I/O, and
 signed byte I/O. Already present: the core ops, byte I/O, `sqrt_floor`, and
 the multiplication ladder through Toom-4 and exact two-prime NTT convolution.
-The production NTT crossover was measured rather than inherited from GMP: on
-M4 it is 65,536 limbs (4 Mbit), not the earlier estimate of 200 kbit.
-Because radix-2 padding doubles at power-of-two boundaries, dispatch also
-requires a measured padding-efficiency gate; Toom-4 remains faster at 98,304
-limbs while NTT wins again at 114,688. The transform's 2^26 coefficient ceiling
-is explicit and unsupported larger shapes fall back to Toom rather than losing
-exactness.
+The production NTT crossover was measured rather than inherited from GMP. On
+M4 it is 65,536 limbs (4 Mbit) serially, 32,768 with two useful execution
+contexts, and 8,192 with four or more. Contexts come from radix-2 stage geometry
+and are bounded by `available_parallelism`; a failed detection is serial.
+Because padding doubles at power-of-two boundaries, dispatch also requires a
+worker-aware measured padding-efficiency gate. The transform's 2^26 coefficient
+ceiling is explicit and unsupported larger shapes fall back to Toom rather than
+losing exactness. `square` retains the exact NTT but uses one transform array and
+one forward transform per prime.
 
 ## 2. Divisibility and Euclidean algorithms
 

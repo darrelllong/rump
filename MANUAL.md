@@ -170,8 +170,10 @@ three-operand forms — the result written into `self`, whose buffer is
 reused: a long-lived output allocates only until its capacity covers the
 result, then never again (the shape of GMP's `mpz_add`).
 `Clone::clone_from` likewise copies a value into existing storage.
-`square` squares, and `sqrt_floor` is the integer square root (largest
-`r` with `r² ≤ self`). Subtraction panics on underflow — the type is
+`square` squares, retaining specialized schoolbook/Karatsuba kernels and a
+one-buffer exact NTT square at very large sizes; NTT execution never uses more
+contexts than the machine reports. `sqrt_floor` is the integer square root
+(largest `r` with `r² ≤ self`). Subtraction panics on underflow — the type is
 unsigned; use
 [`BigInt`](#signed-integers-bigint-and-sign) when signs can go negative.
 

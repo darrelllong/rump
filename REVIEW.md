@@ -38,6 +38,21 @@ oracles cover the fused operations; the one-worker/eight-worker dependency
 fixture now exceeds the parallel threshold instead of testing two inline
 paths.
 
+The integer layer's exact NTT is now hardware-aware without importing a thread
+runtime or a machine-specific cap. Early radix-2 stages run on fixed disjoint
+segments; joining stages divide independent blocks and butterfly lanes over the
+same scoped budget. The budget never exceeds `available_parallelism`, falls
+back to one when detection fails, and is selected by the transform's stage/
+synchronization geometry (at the present 2^26 ceiling that model selects at
+most 16). Digit expansion writes directly into bit-reversed positions, removing
+four serial permutation passes per product. M4 release probes measure 2.34x
+over the identical serial NTT at 65,536 limbs and 2.42x at 131,072. A true NTT
+square uses one transform buffer and one forward transform per prime; it is
+about 1.47x faster than general NTT multiplication at those sizes and halves
+transform-array storage. Differential tests cover serial/parallel transform
+identity, random and maximal-carry products and squares, the one-coefficient
+transform, and deterministic worker-aware dispatch boundaries.
+
 ---
 
 ## Verdict
@@ -47,7 +62,7 @@ domain, Karatsuba / Toom-3 / Toom-4 / exact NTT with measured crossovers and an
 unbalanced block decomposition, Lehmer + Half-GCD, binary / Lehmer / HGCD
 Jacobi, Tonelli–Shanks / Cipolla, twelve-base Miller–Rabin to the *right*
 bound, BPSW with Selfridge Method A, Cohen’s integral LLL, and a real
-`PolyModP` factorizer sit behind `deny(unsafe_code)` and
+`PolyModP` factorizer sit behind default-build `forbid(unsafe_code)` and
 `deny(missing_docs)`. The crate says it is variable-time and not a
 secret-scrubbing type, and the code matches that claim. Differential
 tests exist against oracles that share no kernel code. MANUAL.md cannot
@@ -273,16 +288,19 @@ LE `u64` limbs, canonical (no leading zero). `Eq`/`Ord` ride that.
 `clone_from` scrubs the abandoned tail.
 
 **Multiplication.** Schoolbook → Karatsuba (`long < 2·short`, 32 limbs)
-→ Toom-3 (128) → Toom-4 (3072) → exact two-prime NTT (65,536 plus a
-padding-efficiency gate); lopsided operands use block decomposition (`short ≥
-256` and `long ≥ 2·short`), each block re-entering `mul`. The NTT splits
-limbs into base-2^16 digits, convolves modulo two proven NTT primes, reconstructs
-by CRT, and carries back to base 2^64. The coefficient bound is asserted, the
-2^26 transform ceiling is explicit, and unsupported sizes fall back to Toom.
-Independent schoolbook comparisons cover irregular shapes and maximal carries;
-the public dispatch is checked at the actual threshold. Thresholds carry
-measured crossovers, including the radix-2 padding staircase rather than a
-single monotone size guess.
+→ Toom-3 (128) → Toom-4 (3072) → exact two-prime NTT; lopsided operands use
+block decomposition (`short ≥ 256` and `long ≥ 2·short`), each block re-entering
+`mul`. The NTT splits limbs into base-2^16 digits, convolves modulo two proven
+NTT primes, reconstructs by CRT, and carries back to base 2^64. Its measured
+admission is worker-aware: 65,536 limbs serially, 32,768 with two useful
+contexts, and 8,192 with four or more, plus padding gates for the radix-2
+staircase. Scoped stage workers never exceed reported parallelism and produce
+the same ordered transform as one worker. `square` pointwise-squares one
+transform buffer instead of repeating a general product. The coefficient bound
+is asserted, the 2^26 transform ceiling is explicit, and unsupported sizes fall
+back to Toom. Independent schoolbook comparisons cover irregular shapes,
+one-coefficient and partial-digit inputs, and maximal carries; deterministic
+tests pin serial and parallel dispatch boundaries.
 
 **Euclidean allocation.** Lehmer, extended GCD, inverse, Jacobi, rational
 reconstruction, and HGCD's base case retain two transform buckets and recycle
