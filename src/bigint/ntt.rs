@@ -199,6 +199,106 @@ fn multiply_impl_selecting_workers(
     reconstruct(&residues_0, &left, convolution_len)
 }
 
+/// Wall-clock phase breakdown for the ignored NTT profiling probe.
+#[cfg(test)]
+pub(super) struct MultiplicationProfile {
+    pub(super) allocate: std::time::Duration,
+    pub(super) prepare_inputs: std::time::Duration,
+    pub(super) forward: std::time::Duration,
+    pub(super) pointwise: std::time::Duration,
+    pub(super) inverse: std::time::Duration,
+    pub(super) residue_copy: std::time::Duration,
+    pub(super) clear: std::time::Duration,
+    pub(super) reconstruct: std::time::Duration,
+}
+
+/// Multiply while measuring the high-level phases without changing their
+/// implementation. This exists only in test builds so production calls do not
+/// pay for timestamps or carry a profiling interface.
+#[cfg(test)]
+pub(super) fn multiply_profiled(
+    lhs: &BigUint,
+    rhs: &BigUint,
+    workers: usize,
+) -> (BigUint, MultiplicationProfile) {
+    use std::time::Instant;
+
+    assert!(
+        workers.is_power_of_two(),
+        "NTT worker count must be a power of two"
+    );
+    let lhs_digits = significant_digit_len(lhs);
+    let rhs_digits = significant_digit_len(rhs);
+    let convolution_len = lhs_digits + rhs_digits - 1;
+    let transform_len = convolution_len.next_power_of_two();
+    assert!(transform_len <= MAX_TRANSFORM_LEN);
+    let workers = workers.min(transform_len);
+
+    let started = Instant::now();
+    let mut left = vec![0u64; transform_len];
+    let mut right = vec![0u64; transform_len];
+    let allocate = started.elapsed();
+
+    let started = Instant::now();
+    write_digits_bit_reversed(lhs, lhs_digits, &mut left);
+    write_digits_bit_reversed(rhs, rhs_digits, &mut right);
+    let mut prepare_inputs = started.elapsed();
+
+    let started = Instant::now();
+    forward_transform_pair::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
+    let mut forward = started.elapsed();
+    let started = Instant::now();
+    pointwise_multiply::<PRIME_0>(&mut left, &right);
+    let mut pointwise = started.elapsed();
+    let started = Instant::now();
+    transform::<PRIME_0, ROOT_0>(&mut left, true, workers);
+    let mut inverse = started.elapsed();
+
+    let started = Instant::now();
+    let residues_0: Vec<u32> = left[..convolution_len]
+        .iter()
+        .map(|&residue| residue as u32)
+        .collect();
+    let residue_copy = started.elapsed();
+
+    let started = Instant::now();
+    left.fill(0);
+    right.fill(0);
+    let clear = started.elapsed();
+    let started = Instant::now();
+    write_digits_bit_reversed(lhs, lhs_digits, &mut left);
+    write_digits_bit_reversed(rhs, rhs_digits, &mut right);
+    prepare_inputs += started.elapsed();
+
+    let started = Instant::now();
+    forward_transform_pair::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
+    forward += started.elapsed();
+    let started = Instant::now();
+    pointwise_multiply::<PRIME_1>(&mut left, &right);
+    pointwise += started.elapsed();
+    let started = Instant::now();
+    transform::<PRIME_1, ROOT_1>(&mut left, true, workers);
+    inverse += started.elapsed();
+
+    let started = Instant::now();
+    let product = reconstruct(&residues_0, &left, convolution_len);
+    let reconstruct = started.elapsed();
+
+    (
+        product,
+        MultiplicationProfile {
+            allocate,
+            prepare_inputs,
+            forward,
+            pointwise,
+            inverse,
+            residue_copy,
+            clear,
+            reconstruct,
+        },
+    )
+}
+
 /// Reconstruct coefficients and carry directly into packed 64-bit limbs.
 fn reconstruct(residues_0: &[u32], residues_1: &[u64], convolution_len: usize) -> BigUint {
     debug_assert_eq!(residues_0.len(), convolution_len);
@@ -293,6 +393,16 @@ fn convolve_mod<const MODULUS: u64, const ROOT: u64>(
     workers: usize,
 ) {
     debug_assert_eq!(left.len(), right.len());
+    forward_transform_pair::<MODULUS, ROOT>(left, right, workers);
+    pointwise_multiply::<MODULUS>(left, right);
+    transform::<MODULUS, ROOT>(left, true, workers);
+}
+
+fn forward_transform_pair<const MODULUS: u64, const ROOT: u64>(
+    left: &mut [u64],
+    right: &mut [u64],
+    workers: usize,
+) {
     if workers == 1 {
         transform_from_bit_reversed::<MODULUS, ROOT>(left, false, 1);
         transform_from_bit_reversed::<MODULUS, ROOT>(right, false, 1);
@@ -309,10 +419,12 @@ fn convolve_mod<const MODULUS: u64, const ROOT: u64>(
             transform_from_bit_reversed::<MODULUS, ROOT>(right, false, forward_workers);
         });
     }
+}
+
+fn pointwise_multiply<const MODULUS: u64>(left: &mut [u64], right: &[u64]) {
     for (lhs, &rhs) in left.iter_mut().zip(right.iter()) {
         *lhs = mul_mod::<MODULUS>(*lhs, rhs);
     }
-    transform::<MODULUS, ROOT>(left, true, workers);
 }
 
 fn square_mod<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], max_contexts: usize) {

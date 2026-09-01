@@ -5990,6 +5990,59 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "wall-clock phase profile for exact NTT; run with --ignored"]
+    fn ntt_phase_profile() {
+        let words = std::env::var("RUMP_NTT_PROFILE_WORDS").map_or(131_072usize, |words| {
+            words
+                .parse()
+                .expect("RUMP_NTT_PROFILE_WORDS must be a limb count")
+        });
+        let mut seed = 0x3c6e_f372_fe94_f82b;
+        let lhs = seeded_biguint(words, &mut seed);
+        let rhs = seeded_biguint(words, &mut seed);
+        let transform_len =
+            super::ntt::transform_len(words, words).expect("profile transform is supported");
+        let workers = std::env::var("RUMP_NTT_PROFILE_WORKERS").map_or_else(
+            |_| super::ntt::automatic_worker_count(transform_len),
+            |workers| {
+                workers
+                    .parse()
+                    .expect("RUMP_NTT_PROFILE_WORKERS must be a worker count")
+            },
+        );
+        let expected = lhs.mul_ntt_serial_ref(&rhs);
+        let (actual, profile) = super::ntt::multiply_profiled(&lhs, &rhs, workers);
+        assert_eq!(actual, expected);
+
+        let phases = [
+            ("allocate", profile.allocate),
+            ("prepare", profile.prepare_inputs),
+            ("forward", profile.forward),
+            ("pointwise", profile.pointwise),
+            ("inverse", profile.inverse),
+            ("residues", profile.residue_copy),
+            ("clear", profile.clear),
+            ("crt/carry", profile.reconstruct),
+        ];
+        let total: std::time::Duration = phases.iter().map(|(_, elapsed)| *elapsed).sum();
+        eprintln!("words={words} workers={workers} transform={transform_len}");
+        eprintln!("{:>12} {:>12} {:>8}", "phase", "microseconds", "percent");
+        for (phase, elapsed) in phases {
+            eprintln!(
+                "{phase:>12} {:12.3} {:7.2}%",
+                elapsed.as_secs_f64() * 1e6,
+                elapsed.as_secs_f64() / total.as_secs_f64() * 100.0
+            );
+        }
+        eprintln!(
+            "{:>12} {:12.3} {:7.2}%",
+            "total",
+            total.as_secs_f64() * 1e6,
+            100.0
+        );
+    }
+
+    #[test]
     fn shr_bits_inverts_shl_bits_and_matches_division() {
         let mut seed = 0x6a09_e667_f3bc_c908;
         let shifts = [0usize, 1, 7, 63, 64, 65, 127, 128, 200];
