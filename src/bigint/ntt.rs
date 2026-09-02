@@ -4,9 +4,14 @@
 //! primes.  Their product exceeds every possible raw convolution coefficient
 //! at the supported transform lengths, so two-prime CRT recovers each integer
 //! coefficient uniquely; an ordinary carry pass then returns to base 2^64.
-//! This is the modular-transform form of Schönhage and Strassen's fast integer
-//! multiplication (Computing 7 (1971), 281–292), with iterative radix-2
-//! Cooley–Tukey transforms. Digit expansion supplies bit-reversed forward
+//! This is the small-prime (finite-field) number-theoretic transform:
+//! Pollard, *The Fast Fourier Transform in a Finite Field*, Math. Comp. 25
+//! (1971), 365–374, with iterative radix-2 transforms after Cooley & Tukey,
+//! *An Algorithm for the Machine Calculation of Complex Fourier Series*,
+//! Math. Comp. 19 (1965), 297–301. It is not the recursive Schönhage–Strassen
+//! scheme over Z/(2^n+1); the transform length is fixed-capped by the primes'
+//! 2-adic valuation rather than recursed. Digit expansion supplies
+//! bit-reversed forward
 //! input directly. Scoped workers divide disjoint stages and butterfly lanes
 //! without exceeding reported machine parallelism; squaring uses one transform
 //! buffer and pointwise self-products.
