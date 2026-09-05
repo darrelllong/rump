@@ -1409,6 +1409,7 @@ mod tests {
 pub struct FilteredMatrix {
     rows: Vec<Vec<u64>>,
     columns: usize,
+    live_columns: usize,
     /// Ascending original-row indices whose XOR is the corresponding row.
     compositions: Vec<Vec<usize>>,
 }
@@ -1421,10 +1422,22 @@ impl FilteredMatrix {
     }
 
     /// The column count, unchanged from the input; eliminated columns are
-    /// simply empty.
+    /// simply empty. This is the width the packed rows carry, and what the
+    /// solvers must be told.
     #[must_use]
     pub fn columns(&self) -> usize {
         self.columns
+    }
+
+    /// Columns still touched by a surviving row. This — not [`Self::columns`]
+    /// — is the number an over-determination test must compare row counts
+    /// against: comparing against the full width once declared every
+    /// filtered matrix under-determined and sent a run widening forever,
+    /// since filtering removes a row per eliminated column but the width
+    /// never moves.
+    #[must_use]
+    pub fn live_columns(&self) -> usize {
+        self.live_columns
     }
 
     /// The original rows whose XOR forms filtered row `index`.
@@ -1571,9 +1584,11 @@ pub fn filter_merge(rows: &[Vec<u64>], columns: usize, merge_bound: usize) -> Fi
             kept_compositions.push(compositions[index].clone());
         }
     }
+    let live_columns = occupants.iter().filter(|&&count| count > 0).count();
     FilteredMatrix {
         rows: kept_rows,
         columns,
+        live_columns,
         compositions: kept_compositions,
     }
 }
@@ -1729,6 +1744,31 @@ mod filter_tests {
         assert!(
             filtered.rows().len() < sparse.len(),
             "a sparse matrix full of light columns did not shrink"
+        );
+    }
+
+    #[test]
+    fn live_columns_track_the_filtering() {
+        // The over-determination contract: an input with more rows than
+        // live columns must still show that relationship after filtering,
+        // because each elimination retires a row and a column together.
+        let columns = 4_000;
+        let sparse = random_matrix(13, 4_600, columns, 1_600);
+        let filtered = filter_merge(&sparse, columns, 2);
+        assert!(filtered.live_columns() <= filtered.columns());
+        // Count nonempty columns independently.
+        let mut seen = vec![false; columns];
+        for row in filtered.rows() {
+            for c in 0..columns {
+                if row[c / 64] & (1 << (c % 64)) != 0 {
+                    seen[c] = true;
+                }
+            }
+        }
+        assert_eq!(
+            seen.iter().filter(|&&s| s).count(),
+            filtered.live_columns(),
+            "live column count disagrees with the rows"
         );
     }
 
