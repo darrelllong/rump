@@ -525,3 +525,90 @@ mod tests {
         assert_eq!(product, expected);
     }
 }
+
+/// Whether a `u64` is prime, decided deterministically.
+///
+/// Strong-pseudoprime tests (Miller, *Riemann's hypothesis and tests for
+/// primality*, JCSS 13 (1976); Rabin, *Probabilistic algorithm for testing
+/// primality*, J. Number Theory 12 (1980)) to the first twelve primes as
+/// bases. Sorenson & Webster, *Strong pseudoprimes to twelve prime bases*,
+/// Mathematics of Computation 86 (2017), 985–1003, computed the least
+/// composite passing all twelve as 3 186 65…×10²⁴ — beyond 2⁶⁴ — so within a
+/// word the answer is a theorem, not a probability.
+///
+/// Runs on [`Montgomery64`], so a test is a few dozen register-width
+/// exponentiation steps and no allocation: the width of candidate this
+/// serves — sieve cofactors, rho survivors — arrives by the million.
+#[must_use]
+pub fn is_prime_u64(candidate: u64) -> bool {
+    if candidate < 2 {
+        return false;
+    }
+    for &small in &[2u64, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37] {
+        if candidate == small {
+            return true;
+        }
+        if candidate % small == 0 {
+            return false;
+        }
+    }
+    let domain = Montgomery64::new(candidate).expect("odd: even candidates fell to the base 2");
+    // candidate − 1 = 2^s · d with d odd.
+    let trailing = (candidate - 1).trailing_zeros();
+    let odd_part = (candidate - 1) >> trailing;
+    let minus_one = domain.sub(domain.zero(), domain.one());
+    'bases: for &base in &[2u64, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37] {
+        let mut x = domain.pow(domain.enter(base), odd_part);
+        if x == domain.one() || x == minus_one {
+            continue;
+        }
+        for _ in 1..trailing {
+            x = domain.square(x);
+            if x == minus_one {
+                continue 'bases;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod primality_tests {
+    use super::is_prime_u64;
+
+    #[test]
+    fn agrees_with_bpsw_across_a_mixed_sample() {
+        let mut state = 0x1234_5678_9abc_def1u64;
+        for _ in 0..2_000 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let candidate = state | 1;
+            let reference = rump_bpsw(candidate);
+            assert_eq!(
+                is_prime_u64(candidate),
+                reference,
+                "disagreement at {candidate}"
+            );
+        }
+    }
+
+    fn rump_bpsw(candidate: u64) -> bool {
+        crate::number_theory_impl::is_probable_prime_bpsw(&crate::BigUint::from_u64(candidate))
+    }
+
+    #[test]
+    fn the_edges_are_right() {
+        assert!(!is_prime_u64(0));
+        assert!(!is_prime_u64(1));
+        assert!(is_prime_u64(2));
+        assert!(is_prime_u64(3));
+        assert!(!is_prime_u64(4));
+        assert!(is_prime_u64((1 << 61) - 1), "a Mersenne prime");
+        assert!(!is_prime_u64(u64::MAX), "3 divides 2^64 - 1");
+        // Strong pseudoprimes to base 2 must not slip through.
+        assert!(!is_prime_u64(2_047)); // 23 · 89
+        assert!(!is_prime_u64(3_215_031_751)); // psp to bases 2,3,5,7
+    }
+}

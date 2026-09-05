@@ -56,6 +56,7 @@ Algorithm M.
 |---|---|---|
 | Word-width Montgomery contexts | `Montgomery64`, `Montgomery128` | Montgomery, *Modular Multiplication Without Trial Division*, Math. Comp. 44 (1985), 519–521 — the same REDC as the `BigUint` context, specialised to one and two words. |
 | 2-adic Newton inverse for the word constant | `Montgomery64::new`, `Montgomery128::new` | Newton–Hensel doubling of a 2-adic inverse; folklore refinement of the word-level constant of Dussé & Kaliski, *A Cryptographic Library for the Motorola DSP56000*, EUROCRYPT '90. |
+| Deterministic word primality | `is_prime_u64` | Miller, *Riemann's hypothesis and tests for primality*, JCSS 13 (1976), 300–317; Rabin, *Probabilistic algorithm for testing primality*, J. Number Theory 12 (1980), 128–138; determinism below 2⁶⁴ from Sorenson & Webster, *Strong pseudoprimes to twelve prime bases*, Math. Comp. 86 (2017), 985–1003. |
 
 ## Montgomery and Barrett modular reduction (`src/bigint.rs`)
 
