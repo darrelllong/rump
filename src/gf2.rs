@@ -1612,6 +1612,20 @@ fn symmetric_difference(a: &[usize], b: &[usize]) -> Vec<usize> {
 mod filter_tests {
     use super::*;
 
+    /// The splitmix64 output finalizer (Stafford's Mix13, as fixed in
+    /// Vigna's splitmix64 reference implementation): a bijective mixer
+    /// whose output bits all depend on all input bits. A raw
+    /// power-of-two-modulus LCG must not be reduced by a small modulus —
+    /// its low bits have short periods, and `% density` on them once
+    /// selected the same column set in every row, a bimodal "random"
+    /// matrix no filter could shrink.
+    fn mix(value: u64) -> u64 {
+        let mut z = value;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
     fn random_matrix(seed: u64, rows: usize, columns: usize, density: u64) -> Vec<Vec<u64>> {
         let words = words_for(columns);
         let mut state = seed;
@@ -1625,11 +1639,7 @@ mod filter_tests {
             .map(|_| {
                 let mut row = vec![0u64; words];
                 for column in 0..columns {
-                    // High bits: a power-of-two-modulus LCG's low bits have
-                    // short periods, and `% density` on them once selected
-                    // the same column set in every row — a bimodal
-                    // "random" matrix that no filter could shrink.
-                    if (next() >> 33) % density == 0 {
+                    if mix(next()) % density == 0 {
                         row[column / 64] |= 1 << (column % 64);
                     }
                 }
