@@ -1584,6 +1584,18 @@ impl SmoothnessBase {
         &self.primes
     }
 
+    /// The bit length of the base's product.
+    ///
+    /// A batching caller sizes its chunks from this: the remainder tree's
+    /// first operation reduces the product against the chunk's own product,
+    /// so a chunk far smaller than the base wastes that division —
+    /// Bouillaguet, Fleury, Fouque & Kirchner (*We Are on the Same Side*,
+    /// ePrint 2023/801, §2) size batches at about half the product's bits.
+    #[must_use]
+    pub fn product_bits(&self) -> usize {
+        self.product.bits()
+    }
+
     /// The smooth part of each value over this base, in the input's order.
     ///
     /// The answer is [`smooth_parts`]'s; only the setup is hoisted. A value
