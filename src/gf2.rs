@@ -1391,3 +1391,300 @@ mod tests {
         assert_eq!(pruned.original(), &[0, 1, 2]);
     }
 }
+
+/// A filtered `GF(2)` matrix: rows merged and pruned, each carrying the set
+/// of original rows it is the sum of.
+///
+/// The classical NFS filtering step (structured Gaussian elimination —
+/// Lenstra & Manasse's large-prime experience made it standard, and the
+/// modern treatment is Bouillaguet & Zimmermann, *Parallel Structured
+/// Gaussian Elimination for the Number Field Sieve*, 2019): columns of low
+/// weight are eliminated by combining the rows that share them, shrinking
+/// the matrix the solver sees. Correctness travels with the data rather
+/// than a separate history: every surviving row records which original
+/// rows it is the XOR of, so a dependency over the filtered matrix expands
+/// to the original by symmetric difference of those sets — an identity a
+/// test can check directly against the original rows.
+#[derive(Clone, Debug)]
+pub struct FilteredMatrix {
+    rows: Vec<Vec<u64>>,
+    columns: usize,
+    /// Ascending original-row indices whose XOR is the corresponding row.
+    compositions: Vec<Vec<usize>>,
+}
+
+impl FilteredMatrix {
+    /// The surviving rows, packed as the input was.
+    #[must_use]
+    pub fn rows(&self) -> &[Vec<u64>] {
+        &self.rows
+    }
+
+    /// The column count, unchanged from the input; eliminated columns are
+    /// simply empty.
+    #[must_use]
+    pub fn columns(&self) -> usize {
+        self.columns
+    }
+
+    /// The original rows whose XOR forms filtered row `index`.
+    #[must_use]
+    pub fn composition(&self, index: usize) -> &[usize] {
+        &self.compositions[index]
+    }
+
+    /// Expands a dependency over the filtered rows to one over the
+    /// original rows, by symmetric difference of the compositions.
+    #[must_use]
+    pub fn expand(&self, dependency: &[usize]) -> Vec<usize> {
+        let mut counts: std::collections::BTreeMap<usize, u32> = std::collections::BTreeMap::new();
+        for &row in dependency {
+            for &original in &self.compositions[row] {
+                *counts.entry(original).or_insert(0) += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .filter_map(|(original, count)| (count % 2 == 1).then_some(original))
+            .collect()
+    }
+}
+
+/// Filters a matrix by singleton pruning and low-weight column merges.
+///
+/// Repeats to a fixed point: a column touched by exactly one live row
+/// removes that row (nothing can cancel it); a column touched by exactly
+/// `2..=merge_bound` rows is eliminated by XOR-ing one of them — the
+/// lightest, the Markowitz-style choice at this weight — into the others,
+/// which removes the column and one row. Each merge records itself in the
+/// survivors' compositions, so [`FilteredMatrix::expand`] is exact by
+/// construction and the differential test checks the identity
+/// `XOR(expanded originals) = 0` for every dependency of the filtered
+/// matrix.
+///
+/// `merge_bound` of one is pruning alone; two is always profitable (one
+/// row and one column leave together, and no row gains weight beyond the
+/// pair's union); higher bounds trade density for dimension and belong to
+/// measurement.
+#[must_use]
+pub fn filter_merge(rows: &[Vec<u64>], columns: usize, merge_bound: usize) -> FilteredMatrix {
+    let words = words_for(columns);
+    let mut work: Vec<Vec<u64>> = rows.to_vec();
+    let mut compositions: Vec<Vec<usize>> = (0..rows.len()).map(|i| vec![i]).collect();
+    let mut live = vec![true; rows.len()];
+
+    // Column occupancy, maintained incrementally: count and XOR of the
+    // occupying row indices (the XOR trick names the survivor outright
+    // when the count is one, and pairs resolve by scan).
+    let mut occupants = vec![0usize; columns];
+    for (index, row) in work.iter().enumerate() {
+        for column in set_bits(row, words, columns) {
+            occupants[column] += 1;
+        }
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for column in 0..columns {
+            let weight = occupants[column];
+            if weight == 0 || weight > merge_bound.max(1) {
+                continue;
+            }
+            // Gather the live rows touching this column.
+            let members: Vec<usize> = (0..work.len())
+                .filter(|&r| live[r] && bit_is_set(&work[r], column))
+                .collect();
+            if members.len() != weight {
+                // Stale count from earlier removals; repair and move on.
+                occupants[column] = members.len();
+                changed = true;
+                continue;
+            }
+            if weight == 1 {
+                // A singleton: its row can join no dependency.
+                let victim = members[0];
+                live[victim] = false;
+                for touched in set_bits(&work[victim], words, columns) {
+                    occupants[touched] -= 1;
+                }
+                changed = true;
+                continue;
+            }
+            // Merge: XOR the lightest member into the others, retire it.
+            let pivot = *members
+                .iter()
+                .min_by_key(|&&r| set_bits(&work[r], words, columns).count())
+                .expect("weight >= 2");
+            let pivot_row = work[pivot].clone();
+            let pivot_composition = compositions[pivot].clone();
+            for &member in &members {
+                if member == pivot {
+                    continue;
+                }
+                // Occupancy: out with the old bits, in with the new.
+                for touched in set_bits(&work[member], words, columns) {
+                    occupants[touched] -= 1;
+                }
+                for (word, pivot_word) in work[member].iter_mut().zip(&pivot_row) {
+                    *word ^= pivot_word;
+                }
+                for touched in set_bits(&work[member], words, columns) {
+                    occupants[touched] += 1;
+                }
+                let merged = symmetric_difference(&compositions[member], &pivot_composition);
+                compositions[member] = merged;
+            }
+            live[pivot] = false;
+            for touched in set_bits(&pivot_row, words, columns) {
+                occupants[touched] -= 1;
+            }
+            changed = true;
+        }
+    }
+
+    let mut kept_rows = Vec::new();
+    let mut kept_compositions = Vec::new();
+    for (index, alive) in live.iter().enumerate() {
+        if *alive {
+            kept_rows.push(work[index].clone());
+            kept_compositions.push(compositions[index].clone());
+        }
+    }
+    FilteredMatrix {
+        rows: kept_rows,
+        columns,
+        compositions: kept_compositions,
+    }
+}
+
+/// Whether `column` is set in a packed row.
+fn bit_is_set(row: &[u64], column: usize) -> bool {
+    row[column / 64] & (1u64 << (column % 64)) != 0
+}
+
+/// The symmetric difference of two ascending index lists, ascending.
+fn symmetric_difference(a: &[usize], b: &[usize]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            core::cmp::Ordering::Less => {
+                out.push(a[i]);
+                i += 1;
+            }
+            core::cmp::Ordering::Greater => {
+                out.push(b[j]);
+                j += 1;
+            }
+            core::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out.extend_from_slice(&a[i..]);
+    out.extend_from_slice(&b[j..]);
+    out
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    fn random_matrix(seed: u64, rows: usize, columns: usize, density: u64) -> Vec<Vec<u64>> {
+        let words = words_for(columns);
+        let mut state = seed;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state
+        };
+        (0..rows)
+            .map(|_| {
+                let mut row = vec![0u64; words];
+                for column in 0..columns {
+                    if next() % density == 0 {
+                        row[column / 64] |= 1 << (column % 64);
+                    }
+                }
+                row
+            })
+            .collect()
+    }
+
+    fn xor_of(rows: &[Vec<u64>], picks: &[usize]) -> Vec<u64> {
+        let mut sum = vec![0u64; rows[0].len()];
+        for &pick in picks {
+            for (word, source) in sum.iter_mut().zip(&rows[pick]) {
+                *word ^= source;
+            }
+        }
+        sum
+    }
+
+    #[test]
+    fn every_filtered_dependency_expands_to_a_null_original_combination() {
+        // The identity the whole design carries: a dependency of the
+        // filtered matrix, expanded through the compositions, must XOR the
+        // original rows to zero. Checked across random matrices and every
+        // merge bound in the practical range.
+        for seed in 1..=20u64 {
+            let columns = 96;
+            let rows = random_matrix(seed, 128, columns, 12);
+            for merge_bound in [1usize, 2, 4, 8] {
+                let filtered = filter_merge(&rows, columns, merge_bound);
+                let dependencies = dense_null_space(filtered.rows(), columns);
+                for dependency in dependencies.iter().take(4) {
+                    let expanded = filtered.expand(dependency);
+                    assert!(!expanded.is_empty(), "an empty dependency proves nothing");
+                    let sum = xor_of(&rows, &expanded);
+                    assert!(
+                        sum.iter().all(|&w| w == 0),
+                        "seed {seed} bound {merge_bound}: expansion does not vanish"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn merging_never_loses_solvability() {
+        // If the original matrix is over-determined enough to hold a
+        // dependency, the filtered one must still hold one: merging is
+        // row-space-preserving on the quotient, and pruning removes only
+        // rows no dependency can use.
+        for seed in 40..=48u64 {
+            let columns = 64;
+            let rows = random_matrix(seed, 90, columns, 10);
+            let original = dense_null_space(&rows, columns);
+            if original.is_empty() {
+                continue;
+            }
+            let filtered = filter_merge(&rows, columns, 4);
+            assert!(
+                !dense_null_space(filtered.rows(), columns).is_empty(),
+                "seed {seed}: filtering lost every dependency"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bound_of_two_strictly_shrinks_a_mergeable_matrix() {
+        // Two rows sharing an otherwise-unused column must collapse.
+        let columns = 8;
+        let mut rows = vec![vec![0u64], vec![0u64], vec![0u64], vec![0u64]];
+        rows[0][0] = 0b0000_0011; // columns 0,1
+        rows[1][0] = 0b0000_0110; // columns 1,2  (column 1 weight 2)
+        rows[2][0] = 0b0000_1100; // columns 2,3
+        rows[3][0] = 0b0000_0101; // columns 0,2
+        let filtered = filter_merge(&rows, columns, 2);
+        assert!(filtered.rows().len() < rows.len());
+        for (index, row) in filtered.rows().iter().enumerate() {
+            let expanded = filtered.composition(index);
+            let sum = xor_of(&rows, expanded);
+            assert_eq!(&sum, row, "composition does not reproduce its row");
+        }
+    }
+}

@@ -88,6 +88,7 @@ primary values. Every other export has one module path:
 | modular (fixed width) | Montgomery64, Residue64, Montgomery128, Residue128 | done |
 | number_theory (fixed width) | is_prime_u64 | done |
 | number_theory (smoothness) | dickman_rho | done |
+| gf2 (filtering) | filter_merge, FilteredMatrix | done |
 | number_theory | gcd/lcm, symbols, primality, CRT, reconstruction, valuations, product trees, smoothness, SmoothnessBaseError | done |
 | polynomial | PolyZ, PolyMod, polynomial limits and errors | done |
 | finite_field | Gf2m | done |

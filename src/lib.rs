@@ -142,7 +142,8 @@ pub mod polynomial {
 /// Linear algebra over GF(2): null space, pruning, Block Lanczos.
 pub mod gf2 {
     pub use crate::gf2_impl::{
-        block_lanczos_dependencies, dense_null_space, prune_singletons, PrunedMatrix,
+        block_lanczos_dependencies, dense_null_space, filter_merge, prune_singletons,
+        FilteredMatrix, PrunedMatrix,
     };
 }
 
