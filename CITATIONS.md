@@ -50,6 +50,13 @@ Algorithm M.
 | Three-operand add/sub (buffer reuse) | `add_into`, `sub_into` | the shape of GMP's `mpz_add` (design analogue, not an algorithm source). |
 | f64 / ln estimates | `to_f64_lossy`, `ln_approx` | top-64-bit mantissa extraction; no external algorithm. |
 
+## Fixed-width Montgomery arithmetic (`src/modular_fixed.rs`)
+
+| What | Where | Source |
+|---|---|---|
+| Word-width Montgomery contexts | `Montgomery64`, `Montgomery128` | Montgomery, *Modular Multiplication Without Trial Division*, Math. Comp. 44 (1985), 519–521 — the same REDC as the `BigUint` context, specialised to one and two words. |
+| 2-adic Newton inverse for the word constant | `Montgomery64::new`, `Montgomery128::new` | Newton–Hensel doubling of a 2-adic inverse; folklore refinement of the word-level constant of Dussé & Kaliski, *A Cryptographic Library for the Motorola DSP56000*, EUROCRYPT '90. |
+
 ## Montgomery and Barrett modular reduction (`src/bigint.rs`)
 
 | Algorithm | Location | Reference |

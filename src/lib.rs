@@ -90,6 +90,7 @@ mod gf2_impl;
 mod gf2m;
 #[path = "lattice.rs"]
 mod lattice_impl;
+mod modular_fixed;
 #[path = "number_theory.rs"]
 mod number_theory_impl;
 mod poly;
@@ -111,6 +112,7 @@ pub mod modular {
         BarrettContext, ContextMismatch, ModulusError, MontgomeryContext, MontgomeryResidue,
         MontgomeryScratch,
     };
+    pub use crate::modular_fixed::{Montgomery128, Montgomery64, Residue128, Residue64};
     pub use crate::number_theory_impl::{
         mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow, mod_sqrt, mod_sqrt_prime_power,
     };
