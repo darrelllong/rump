@@ -1463,6 +1463,53 @@ impl FilteredMatrix {
     }
 }
 
+/// Prim's minimum spanning tree over the given rows, edges weighted by the
+/// popcount of each pair's XOR.
+///
+/// Returns the root, a parent map, and a leaves-first order (children before
+/// parents). The root is the highest-weight member — discarding the heaviest
+/// row is the natural elimination choice — and the tree's total edge weight
+/// is the fill the column costs (Cavallar; Bouillaguet & Zimmermann,
+/// *Parallel Structured Gaussian Elimination for the Number Field Sieve*,
+/// §3).
+type SpanningTree = (usize, std::collections::HashMap<usize, usize>, Vec<usize>);
+
+fn minimum_spanning_tree(members: &[usize], rows: &[Vec<u64>]) -> SpanningTree {
+    let xor_weight = |a: usize, b: usize| -> u32 {
+        rows[a]
+            .iter()
+            .zip(&rows[b])
+            .map(|(x, y)| (x ^ y).count_ones())
+            .sum()
+    };
+    let root = *members
+        .iter()
+        .max_by_key(|&&r| rows[r].iter().map(|w| w.count_ones()).sum::<u32>())
+        .expect("a column of weight >= 2 has members");
+    let mut in_tree = vec![root];
+    let mut parents: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut remaining: Vec<usize> = members.iter().copied().filter(|&m| m != root).collect();
+    let mut order = Vec::new();
+    while !remaining.is_empty() {
+        let mut best = (u32::MAX, 0usize, 0usize); // (weight, member, parent)
+        for &member in &remaining {
+            for &node in &in_tree {
+                let weight = xor_weight(member, node);
+                if weight < best.0 {
+                    best = (weight, member, node);
+                }
+            }
+        }
+        let (_, member, parent) = best;
+        parents.insert(member, parent);
+        in_tree.push(member);
+        order.push(member);
+        remaining.retain(|&m| m != member);
+    }
+    order.reverse();
+    (root, parents, order)
+}
+
 /// Filters a matrix by singleton pruning and low-weight column merges.
 ///
 /// Repeats to a fixed point: a column touched by exactly one live row
@@ -1593,7 +1640,7 @@ pub fn filter_merge(rows: &[Vec<u64>], columns: usize, merge_bound: usize) -> Fi
     }
 }
 
-/// Whether `column` is set in a packed row./// Whether `column` is set in a packed row.
+/// Whether `column` is set in a packed row.
 fn bit_is_set(row: &[u64], column: usize) -> bool {
     row[column / 64] & (1u64 << (column % 64)) != 0
 }
@@ -1744,6 +1791,47 @@ mod filter_tests {
         assert!(
             filtered.rows().len() < sparse.len(),
             "a sparse matrix full of light columns did not shrink"
+        );
+    }
+
+    #[test]
+    fn higher_k_merges_preserve_the_expansion_identity() {
+        // The MST elimination for weight k >= 3 must keep the same
+        // correctness identity as the weight-two path: every dependency of
+        // the filtered matrix, expanded through the compositions, XORs the
+        // original rows to zero. Bounds 3 and 4 exercise trees with real
+        // depth, not just a single edge.
+        for seed in 100..=120u64 {
+            let columns = 80;
+            let rows = random_matrix(seed, 110, columns, 24);
+            for merge_bound in [3usize, 4, 6] {
+                let filtered = filter_merge(&rows, columns, merge_bound);
+                for dependency in dense_null_space(filtered.rows(), columns).iter().take(3) {
+                    let expanded = filtered.expand(dependency);
+                    assert!(!expanded.is_empty());
+                    let sum = xor_of(&rows, &expanded);
+                    assert!(
+                        sum.iter().all(|&w| w == 0),
+                        "seed {seed} bound {merge_bound}: MST expansion does not vanish"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_higher_bound_reduces_at_least_as_far() {
+        // More merge freedom cannot leave a larger matrix: every column a
+        // lower bound eliminates a higher bound eliminates too. Checked on
+        // a sparse matrix where higher-weight columns actually exist to
+        // merge.
+        let columns = 1_000;
+        let rows = random_matrix(303, 1_200, columns, 300);
+        let bound2 = filter_merge(&rows, columns, 2).rows().len();
+        let bound4 = filter_merge(&rows, columns, 4).rows().len();
+        assert!(
+            bound4 <= bound2,
+            "bound 4 kept {bound4} rows, bound 2 kept {bound2}"
         );
     }
 
