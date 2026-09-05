@@ -6530,3 +6530,126 @@ mod tests {
         );
     }
 }
+
+/// Dickman's function `ρ(u)`: the asymptotic probability that a random
+/// integer below `x` is `x^{1/u}`-smooth.
+///
+/// Dickman, *On the frequency of numbers containing prime factors of a
+/// certain relative magnitude*, Arkiv för Matematik, Astronomi och Fysik
+/// 22A (1930); the delay differential equation `u·ρ′(u) = −ρ(u−1)` with
+/// `ρ(u) = 1` on `[0, 1]` is solved numerically here, fourth-order
+/// Runge–Kutta over a fixed grid with linear interpolation for the delayed
+/// term, following the tabulation tradition of van de Lune & Wattel,
+/// *On the numerical solution of a differential-difference equation
+/// arising in analytic number theory*, Mathematics of Computation 23
+/// (1969), 417–421.
+///
+/// The estimate a sieve wants — how likely is this norm to be smooth over
+/// this base — is `ρ(ln N / ln B)` to first order, and comparisons between
+/// candidate polynomials need exactly the ratios of such values.
+///
+/// Deterministic: the grid and method are fixed, so every call in every
+/// build sees the same table. Values past the table's end (`u > 24`) return
+/// zero, which for smoothness comparison is the right degenerate answer:
+/// at `u = 24` the true value is below `10⁻²⁵`.
+///
+/// Accuracy is comparison-grade, not tabulation-grade: a few parts per
+/// million at small `u`, degrading with `u` as the interpolated delay
+/// compounds — the tests pin it. Candidate ranking, the use this serves,
+/// distinguishes values that differ by per cents.
+#[must_use]
+pub fn dickman_rho(u: f64) -> f64 {
+    if u <= 0.0 {
+        return if u == 0.0 { 1.0 } else { 0.0 };
+    }
+    if u <= 1.0 {
+        return 1.0;
+    }
+    let table = dickman_table();
+    let position = u * STEPS_PER_UNIT as f64;
+    let index = position.floor() as usize;
+    if index + 1 >= table.len() {
+        return 0.0;
+    }
+    let fraction = position - index as f64;
+    table[index] * (1.0 - fraction) + table[index + 1] * fraction
+}
+
+/// Grid resolution for the ρ table: steps per unit of `u`.
+const STEPS_PER_UNIT: usize = 256;
+
+/// The ρ table out to `u = 24`, built once.
+fn dickman_table() -> &'static [f64] {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<Vec<f64>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        const LIMIT: usize = 24;
+        let h = 1.0 / STEPS_PER_UNIT as f64;
+        let total = LIMIT * STEPS_PER_UNIT + 2;
+        let mut table = vec![0.0f64; total];
+        // ρ ≡ 1 on [0, 1].
+        for (index, value) in table.iter_mut().enumerate().take(STEPS_PER_UNIT + 1) {
+            let _ = index;
+            *value = 1.0;
+        }
+        // The Volterra form of the equation, not the derivative form:
+        // u·ρ(u) = ∫ over [u−1, u] of ρ. The derivative form accumulates
+        // *absolute* stepping error, which by u = 10 exceeds the value
+        // itself and drove a first draft of this table negative; the
+        // integral form averages positive values, so it stays positive and
+        // its error tracks the value's scale. Trapezoid over the grid, with
+        // the new point's own term moved to the left side:
+        //     ρ(u)·(u − h/2) = h·(ρ(u−1)/2 + Σ interior) − correction-free
+        for step in STEPS_PER_UNIT..total - 1 {
+            let next = step + 1;
+            let u = next as f64 * h;
+            let window_start = next - STEPS_PER_UNIT;
+            // h·(½·first + interior sum), the trapezoid over [u−1, u] less
+            // the half-weight of the point being solved for.
+            let mut integral = table[window_start] / 2.0;
+            for &value in &table[window_start + 1..next] {
+                integral += value;
+            }
+            integral *= h;
+            table[next] = integral / (u - h / 2.0);
+        }
+        table
+    })
+}
+
+#[cfg(test)]
+mod dickman_tests {
+    use super::dickman_rho;
+
+    #[test]
+    fn the_published_values_are_reproduced() {
+        // van de Lune & Wattel's tabulation (Math. Comp. 23, 1969), to the
+        // accuracy a 1/256 grid with Simpson steps supports.
+        for &(u, expected, tolerance) in &[
+            (1.0, 1.0, 1e-12),
+            (2.0, 0.306_852_819_4, 1e-5),
+            (3.0, 0.048_608_388_3, 1e-4),
+            (4.0, 0.004_910_925_6, 1e-4),
+            (5.0, 0.000_354_724_7, 1e-3),
+            (10.0, 2.770_17e-11, 1e-2),
+        ] {
+            let got = dickman_rho(u);
+            let relative = ((got - expected) / expected).abs();
+            assert!(
+                relative < tolerance,
+                "rho({u}) = {got}, expected {expected}, relative {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_edges_behave() {
+        assert_eq!(dickman_rho(0.0), 1.0);
+        assert_eq!(dickman_rho(-1.0), 0.0);
+        assert_eq!(dickman_rho(0.5), 1.0);
+        assert_eq!(dickman_rho(30.0), 0.0, "past the table is zero");
+        // Monotone decreasing beyond one.
+        assert!(dickman_rho(2.0) > dickman_rho(2.5));
+        assert!(dickman_rho(6.0) > dickman_rho(7.0));
+    }
+}
