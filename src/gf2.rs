@@ -1473,73 +1473,93 @@ pub fn filter_merge(rows: &[Vec<u64>], columns: usize, merge_bound: usize) -> Fi
     let mut compositions: Vec<Vec<usize>> = (0..rows.len()).map(|i| vec![i]).collect();
     let mut live = vec![true; rows.len()];
 
-    // Column occupancy, maintained incrementally: count and XOR of the
-    // occupying row indices (the XOR trick names the survivor outright
-    // when the count is one, and pairs resolve by scan).
+    // Column incidence, maintained incrementally as row lists. A first
+    // draft re-scanned every row per candidate column, which is quadratic
+    // and froze at real sieve sizes; the lists make each merge touch only
+    // the rows and columns it changes. Retired row indices linger in the
+    // lists and are skipped on read — cheaper than eager removal, and the
+    // occupancy counts stay exact.
+    let mut incidence: Vec<Vec<usize>> = vec![Vec::new(); columns];
     let mut occupants = vec![0usize; columns];
     for (index, row) in work.iter().enumerate() {
         for column in set_bits(row, words, columns) {
+            incidence[column].push(index);
             occupants[column] += 1;
         }
     }
 
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for column in 0..columns {
-            let weight = occupants[column];
-            if weight == 0 || weight > merge_bound.max(1) {
+    let bound = merge_bound.max(1);
+    // A min-heap of (weight, column) with lazy invalidation: every
+    // occupancy change pushes a fresh entry, and a popped entry whose
+    // recorded weight no longer matches the column's is stale and dropped.
+    // Lightest first is Markowitz's rule — a singleton beats a pair beats a
+    // triple — and the heap makes the whole filter
+    // O((nonzeros + merges)·log n), where the first draft's per-column row
+    // rescans were quadratic and a stack worklist still let hot columns
+    // recompact long lists repeatedly. Ties break on the column index, so
+    // the order, and therefore the output, is deterministic.
+    use core::cmp::Reverse;
+    let mut heap: std::collections::BinaryHeap<Reverse<(usize, usize)>> =
+        std::collections::BinaryHeap::new();
+    for column in 0..columns {
+        if occupants[column] != 0 && occupants[column] <= bound {
+            heap.push(Reverse((occupants[column], column)));
+        }
+    }
+
+    while let Some(Reverse((recorded, column))) = heap.pop() {
+        let weight = occupants[column];
+        if weight != recorded || weight == 0 || weight > bound {
+            continue; // stale entry, superseded by a later push
+        }
+        // Compact the incidence list to live members that still hold the
+        // column (a merge may have cancelled it out of a row).
+        incidence[column].retain(|&r| live[r] && bit_is_set(&work[r], column));
+        let members = incidence[column].clone();
+        debug_assert_eq!(members.len(), weight, "occupancy drifted from incidence");
+        let requeue =
+            |touched: usize, occupants: &[usize], heap: &mut std::collections::BinaryHeap<_>| {
+                if occupants[touched] != 0 && occupants[touched] <= bound {
+                    heap.push(Reverse((occupants[touched], touched)));
+                }
+            };
+        if weight == 1 {
+            let victim = members[0];
+            live[victim] = false;
+            for touched in set_bits(&work[victim], words, columns) {
+                occupants[touched] -= 1;
+                requeue(touched, &occupants, &mut heap);
+            }
+            continue;
+        }
+        let pivot = *members
+            .iter()
+            .min_by_key(|&&r| set_bits(&work[r], words, columns).count())
+            .expect("weight >= 2");
+        let pivot_row = work[pivot].clone();
+        let pivot_composition = compositions[pivot].clone();
+        for &member in &members {
+            if member == pivot {
                 continue;
             }
-            // Gather the live rows touching this column.
-            let members: Vec<usize> = (0..work.len())
-                .filter(|&r| live[r] && bit_is_set(&work[r], column))
-                .collect();
-            if members.len() != weight {
-                // Stale count from earlier removals; repair and move on.
-                occupants[column] = members.len();
-                changed = true;
-                continue;
-            }
-            if weight == 1 {
-                // A singleton: its row can join no dependency.
-                let victim = members[0];
-                live[victim] = false;
-                for touched in set_bits(&work[victim], words, columns) {
-                    occupants[touched] -= 1;
-                }
-                changed = true;
-                continue;
-            }
-            // Merge: XOR the lightest member into the others, retire it.
-            let pivot = *members
-                .iter()
-                .min_by_key(|&&r| set_bits(&work[r], words, columns).count())
-                .expect("weight >= 2");
-            let pivot_row = work[pivot].clone();
-            let pivot_composition = compositions[pivot].clone();
-            for &member in &members {
-                if member == pivot {
-                    continue;
-                }
-                // Occupancy: out with the old bits, in with the new.
-                for touched in set_bits(&work[member], words, columns) {
-                    occupants[touched] -= 1;
-                }
-                for (word, pivot_word) in work[member].iter_mut().zip(&pivot_row) {
-                    *word ^= pivot_word;
-                }
-                for touched in set_bits(&work[member], words, columns) {
-                    occupants[touched] += 1;
-                }
-                let merged = symmetric_difference(&compositions[member], &pivot_composition);
-                compositions[member] = merged;
-            }
-            live[pivot] = false;
-            for touched in set_bits(&pivot_row, words, columns) {
+            for touched in set_bits(&work[member], words, columns) {
                 occupants[touched] -= 1;
             }
-            changed = true;
+            for (word, pivot_word) in work[member].iter_mut().zip(&pivot_row) {
+                *word ^= pivot_word;
+            }
+            for touched in set_bits(&work[member], words, columns) {
+                occupants[touched] += 1;
+                incidence[touched].push(member);
+                requeue(touched, &occupants, &mut heap);
+            }
+            let merged = symmetric_difference(&compositions[member], &pivot_composition);
+            compositions[member] = merged;
+        }
+        live[pivot] = false;
+        for touched in set_bits(&pivot_row, words, columns) {
+            occupants[touched] -= 1;
+            requeue(touched, &occupants, &mut heap);
         }
     }
 
@@ -1558,7 +1578,7 @@ pub fn filter_merge(rows: &[Vec<u64>], columns: usize, merge_bound: usize) -> Fi
     }
 }
 
-/// Whether `column` is set in a packed row.
+/// Whether `column` is set in a packed row./// Whether `column` is set in a packed row.
 fn bit_is_set(row: &[u64], column: usize) -> bool {
     row[column / 64] & (1u64 << (column % 64)) != 0
 }
@@ -1605,7 +1625,11 @@ mod filter_tests {
             .map(|_| {
                 let mut row = vec![0u64; words];
                 for column in 0..columns {
-                    if next() % density == 0 {
+                    // High bits: a power-of-two-modulus LCG's low bits have
+                    // short periods, and `% density` on them once selected
+                    // the same column set in every row — a bimodal
+                    // "random" matrix that no filter could shrink.
+                    if (next() >> 33) % density == 0 {
                         row[column / 64] |= 1 << (column % 64);
                     }
                 }
@@ -1668,6 +1692,34 @@ mod filter_tests {
                 "seed {seed}: filtering lost every dependency"
             );
         }
+    }
+
+    #[test]
+    fn sieve_sized_matrices_filter_in_sieve_sized_time() {
+        // The first draft was quadratic in ways 128-row tests cannot see:
+        // it froze on its first real sieve matrix. This case is big enough
+        // that any such regression turns a hundredth of a second into
+        // minutes and fails on the suite's patience rather than silently.
+        // The dense shape carries the nonzeros; at this density no column
+        // is light enough to merge, so the assertion is completion and the
+        // expansion identity, not shrinkage.
+        let columns = 4_000;
+        let rows = random_matrix(7, 4_600, columns, 160);
+        let filtered = filter_merge(&rows, columns, 2);
+        let dependencies = dense_null_space(filtered.rows(), columns);
+        if let Some(dependency) = dependencies.first() {
+            let expanded = filtered.expand(dependency);
+            let sum = xor_of(&rows, &expanded);
+            assert!(sum.iter().all(|&w| w == 0));
+        }
+        // The sparse shape is where light columns abound and the filter
+        // must actually shrink the matrix.
+        let sparse = random_matrix(11, 4_600, columns, 1_600);
+        let filtered = filter_merge(&sparse, columns, 2);
+        assert!(
+            filtered.rows().len() < sparse.len(),
+            "a sparse matrix full of light columns did not shrink"
+        );
     }
 
     #[test]
