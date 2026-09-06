@@ -1592,32 +1592,32 @@ pub fn filter_merge(rows: &[Vec<u64>], columns: usize, merge_bound: usize) -> Fi
             }
             continue;
         }
-        let pivot = *members
-            .iter()
-            .min_by_key(|&&r| set_bits(&work[r], words, columns).count())
-            .expect("weight >= 2");
-        let pivot_row = work[pivot].clone();
-        let pivot_composition = compositions[pivot].clone();
-        for &member in &members {
-            if member == pivot {
-                continue;
-            }
+        // Eliminate along the minimum spanning tree of the members rather
+        // than a star from one pivot: a star adds the pivot into every
+        // other member and carries its cancellations everywhere, while the
+        // tree spends the least total fill. At weight two the tree is the
+        // one edge a star also uses, so this subsumes that case exactly.
+        let (root, parents, order) = minimum_spanning_tree(&members, &work);
+        for &member in &order {
+            let parent = parents[&member];
+            let parent_row = work[parent].clone();
+            let parent_composition = compositions[parent].clone();
             for touched in set_bits(&work[member], words, columns) {
                 occupants[touched] -= 1;
             }
-            for (word, pivot_word) in work[member].iter_mut().zip(&pivot_row) {
-                *word ^= pivot_word;
+            for (word, parent_word) in work[member].iter_mut().zip(&parent_row) {
+                *word ^= parent_word;
             }
             for touched in set_bits(&work[member], words, columns) {
                 occupants[touched] += 1;
                 incidence[touched].push(member);
                 requeue(touched, &occupants, &mut heap);
             }
-            let merged = symmetric_difference(&compositions[member], &pivot_composition);
-            compositions[member] = merged;
+            compositions[member] = symmetric_difference(&compositions[member], &parent_composition);
         }
-        live[pivot] = false;
-        for touched in set_bits(&pivot_row, words, columns) {
+        let root_row = work[root].clone();
+        live[root] = false;
+        for touched in set_bits(&root_row, words, columns) {
             occupants[touched] -= 1;
             requeue(touched, &occupants, &mut heap);
         }
