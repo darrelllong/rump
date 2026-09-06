@@ -85,6 +85,25 @@
 // Implementation modules are private; every public path below is a facade, so
 // each exported item has exactly one public path, as NAMES.md requires.
 mod bigint;
+
+/// The machine's reported parallelism, asked once.
+///
+/// [`std::thread::available_parallelism`] is not a cheap query on Linux: it
+/// opens and reads `/proc/self/cgroup` and the cgroup's CPU limits on every
+/// call, several file syscalls each time. Asked per multiplication — which
+/// is where the NTT admission asked it — that turned every
+/// [`BigUint::mul`] into a trip through procfs, and a 128-thread number
+/// field sieve on a Linux host spent 99% of its CPU in the kernel
+/// serialising on it (measured 2026-09-06: 460 s user against 49 354 s
+/// system). macOS answers the same question with one `sysctl`, so the cost
+/// was invisible on the machine the crate is developed on. The answer
+/// cannot change within a process in any way this crate should react to,
+/// so it is taken once and kept.
+pub(crate) fn available_parallelism() -> usize {
+    static AVAILABLE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *AVAILABLE
+        .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
+}
 #[path = "gf2.rs"]
 mod gf2_impl;
 mod gf2m;

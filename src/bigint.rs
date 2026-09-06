@@ -5863,7 +5863,7 @@ mod tests {
         use std::time::Instant;
 
         let mut seed = 0x510e_527f_ade6_82d1;
-        let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let available = crate::available_parallelism();
         eprintln!("available contexts: {available}");
         eprintln!(
             "{:>7} {:>12} {:>12} {:>12} {:>12} {:>12}  best",
@@ -5933,7 +5933,7 @@ mod tests {
         use std::time::Instant;
 
         let mut seed = 0xbb67_ae85_84ca_a73b;
-        let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let available = crate::available_parallelism();
         let word_sizes = std::env::var("RUMP_NTT_SCALING_WORDS").map_or_else(
             |_| vec![8_192usize, 16_384, 32_768, 65_536, 131_072],
             |list| {

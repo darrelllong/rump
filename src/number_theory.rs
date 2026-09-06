@@ -3018,7 +3018,7 @@ pub fn crt_combine_balanced(congruences: &[(BigUint, BigUint)], threads: usize) 
             }
         })
         .collect::<Option<Vec<_>>>()?;
-    let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let available = crate::available_parallelism();
     while level.len() > 1 {
         let pairs = level.len().div_ceil(2);
         let workers = if threads == 0 {
@@ -3820,7 +3820,7 @@ mod tests {
             .checked_add(1)
             .expect("stress bound must fit usize");
         let expected = reference_prime_sieve(length);
-        let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let available = crate::available_parallelism();
         let workers = available.min(length).max(1);
         eprintln!("checking 0..={inclusive_bound} with {workers} workers");
 
