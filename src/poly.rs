@@ -1280,6 +1280,95 @@ impl PolyZ {
         Self::new(coeffs)
     }
 
+    /// Whether some prime below `bound` certifies that `self` is irreducible
+    /// over `ℤ`.
+    ///
+    /// If `f mod p` is irreducible and keeps its degree — the leading
+    /// coefficient must not vanish modulo `p` — then `f` is irreducible over
+    /// `ℤ`, since any factorization over `ℤ` would reduce to one modulo `p`.
+    /// A `false` here means *not certified*, not *reducible*: the test has no
+    /// converse. `x⁴ + 1` is irreducible over `ℤ` and reducible modulo every
+    /// prime, so it is never certified. Callers must treat `false` as a
+    /// refusal rather than a verdict.
+    ///
+    /// For a polynomial of prime degree the density of certifying primes is
+    /// high — by Chebotarev it is the proportion of the Galois group acting
+    /// as a `d`-cycle, at worst `1/d` when there is one — so a couple of
+    /// dozen primes make a non-certification overwhelmingly likely to mean
+    /// the polynomial really is reducible, or has a Galois group with no
+    /// `d`-cycle. A constant or the zero polynomial is never certified.
+    #[must_use]
+    pub fn certified_irreducible_below(&self, bound: u64) -> bool {
+        let Some(degree) = self.degree() else {
+            return false;
+        };
+        if degree == 0 {
+            return false;
+        }
+        for prime in crate::number_theory::primes_below(bound) {
+            let modulus = BigUint::from_u64(prime);
+            let reduced = PolyMod::from_poly_z(self, &modulus);
+            if reduced.degree() == Some(degree) && reduced.is_irreducible() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The monic polynomial whose root is `c·θ` for each root `θ` of `self`,
+    /// where `c` is the leading coefficient: `c^{d−1} · f(x/c)`.
+    ///
+    /// A non-monic `f` has roots that are not algebraic integers, so `ℤ[θ]`
+    /// is not a ring anyone can compute in. Scaling by the leading
+    /// coefficient repairs that: if `f(x) = Σ cᵢ xⁱ` then
+    /// `c_d^{d−1} f(x/c_d) = Σ cᵢ c_d^{d−1−i} xⁱ` is monic with integer
+    /// coefficients and vanishes at `c_d·θ`, so `c_d·θ` is an algebraic
+    /// integer generating the same field. This is the standard device for
+    /// running the number field sieve on a non-monic polynomial (Buhler,
+    /// Lenstra & Pomerance, *Factoring integers with the number field
+    /// sieve*, LNMS 1554, §12): every `a − bθ` becomes `c_d·a − b·(c_d θ)`,
+    /// an element of `ℤ[c_d θ]`.
+    ///
+    /// A monic `f` is returned unchanged; a constant or the zero polynomial
+    /// has no root to scale and is returned unchanged too. The sign of the
+    /// leading coefficient is kept: `c_d = −1` gives `−f`, not `f`, which is
+    /// what makes the result monic.
+    #[must_use]
+    pub fn monic_scaling(&self) -> Self {
+        let Some(degree) = self.degree() else {
+            return self.clone();
+        };
+        if degree == 0 {
+            return self.clone();
+        }
+        let leading = self.leading_coefficient();
+        if leading.is_one() {
+            return self.clone();
+        }
+        // Powers of the leading coefficient, c^0 .. c^{d−1}, built once.
+        let mut powers = Vec::with_capacity(degree);
+        let mut power = BigInt::one();
+        for _ in 0..degree {
+            powers.push(power.clone());
+            power = power.mul(&leading);
+        }
+        // Coefficient i is multiplied by c^{d−1−i}; the leading one by c^{−1},
+        // which is to say it becomes one.
+        let coeffs = self
+            .coeffs
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                if i == degree {
+                    BigInt::one()
+                } else {
+                    c.mul(&powers[degree - 1 - i])
+                }
+            })
+            .collect();
+        Self::new(coeffs)
+    }
+
     /// The real roots of `self`, ascending, each repeated according to its
     /// multiplicity.
     ///
@@ -5113,6 +5202,76 @@ mod tests {
             PolyZ::balanced_base_expansion(&BigInt::from_i64(-5), &BigUint::from_u64(10), 1),
             PolyZ::from_i64_slice(&[5, -1])
         );
+    }
+
+    #[test]
+    fn irreducibility_is_certified_by_reduction_and_never_asserted() {
+        // x³ + 3x − 7 is irreducible and some small prime says so.
+        assert!(PolyZ::from_i64_slice(&[-7, 3, 0, 1]).certified_irreducible_below(200));
+        // (x + 1)(x + 2) is reducible over ℤ, so it reduces modulo every
+        // prime and can never be certified.
+        assert!(!PolyZ::from_i64_slice(&[2, 3, 1]).certified_irreducible_below(200));
+        // x⁴ + 1 is irreducible over ℤ but reducible modulo every prime: the
+        // classic case where `false` is a refusal, not a verdict.
+        assert!(!PolyZ::from_i64_slice(&[1, 0, 0, 0, 1]).certified_irreducible_below(200));
+        // A non-monic quartic: 2340x⁴ + 79192896x³ + … is CADO-NFS's c70
+        // polynomial, irreducible, and its leading coefficient vanishes
+        // modulo 2, 3, 5 and 13 — those primes must not certify it, and
+        // another prime must.
+        let cado = PolyZ::new(vec![
+            "-6110384336500620375".parse().expect("digits"),
+            "-1985703617230840".parse().expect("digits"),
+            "2132719574305".parse().expect("digits"),
+            "79192896".parse().expect("digits"),
+            "2340".parse().expect("digits"),
+        ]);
+        assert!(cado.certified_irreducible_below(200));
+        assert!(
+            !cado.certified_irreducible_below(3),
+            "2 divides the leading coefficient"
+        );
+        // Degenerate inputs are refused, not certified.
+        assert!(!PolyZ::zero().certified_irreducible_below(200));
+        assert!(!PolyZ::from_i64_slice(&[5]).certified_irreducible_below(200));
+    }
+
+    #[test]
+    fn monic_scaling_moves_the_roots_by_the_leading_coefficient() {
+        // f(x) = 6x³ − 5x² + 2x − 7, c = 6: the result is monic of the same
+        // degree, and x ↦ x/6 carries its roots back onto f's: writing
+        // g(x) = c^{d−1} f(x/c), the identity g(c·x) = c^{d−1} f(x) must hold
+        // as polynomials.
+        let f = PolyZ::from_i64_slice(&[-7, 2, -5, 6]);
+        let g = f.monic_scaling();
+        assert_eq!(g.degree(), Some(3));
+        assert!(g.leading_coefficient().is_one());
+        assert_eq!(g, PolyZ::from_i64_slice(&[-7 * 36, 2 * 6, -5, 1]));
+        let c = BigInt::from_i64(6);
+        for x in [-3i64, -1, 0, 1, 2, 5, 11] {
+            let x = BigInt::from_i64(x);
+            let lhs = g.evaluate(&x.mul(&c));
+            let rhs = f.evaluate(&x).mul(&c).mul(&c);
+            assert_eq!(lhs, rhs, "g(c·x) ≠ c^{{d−1}} f(x)");
+        }
+    }
+
+    #[test]
+    fn monic_scaling_keeps_the_sign_and_leaves_monic_input_alone() {
+        let monic = PolyZ::from_i64_slice(&[-7, 3, 0, 1]);
+        assert_eq!(monic.monic_scaling(), monic);
+        // A negative leading coefficient still yields a monic result.
+        let negative = PolyZ::from_i64_slice(&[4, 3, -2]);
+        let g = negative.monic_scaling();
+        assert!(g.leading_coefficient().is_one());
+        // c = −2, d = 2: coefficients [4·(−2), 3, 1].
+        assert_eq!(g, PolyZ::from_i64_slice(&[-8, 3, 1]));
+        // Degenerate inputs are returned unchanged rather than mangled.
+        assert_eq!(PolyZ::zero().monic_scaling(), PolyZ::zero());
+        let constant = PolyZ::from_i64_slice(&[5]);
+        assert_eq!(constant.monic_scaling(), constant);
+        let linear = PolyZ::from_i64_slice(&[3, 7]);
+        // c = 7, d = 1: the constant is multiplied by c^0.
+        assert_eq!(linear.monic_scaling(), PolyZ::from_i64_slice(&[3, 1]));
     }
 
     #[test]
