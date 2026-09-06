@@ -3365,6 +3365,112 @@ impl PolyMod {
     pub fn change_modulus(&self, modulus: &BigUint) -> Self {
         Self::new(self.coeffs.clone(), modulus)
     }
+
+    /// A square root of `self` in the finite field `𝔽_q[x]/(modulus_poly)`, or
+    /// `None` when `self` is not a square there.
+    ///
+    /// Tonelli, *Bemerkung über die Auflösung quadratischer Congruenzen*,
+    /// Göttinger Nachrichten (1891); Shanks, *Five number-theoretic
+    /// algorithms*, Proc. 2nd Manitoba Conf. on Numerical Mathematics (1972).
+    /// The classical algorithm over `𝔽_p`, carried into `𝔽_{q^d}` unchanged:
+    /// nothing in it needs the field to be prime, only its multiplicative group
+    /// to be cyclic of known order `q^d − 1`.
+    ///
+    /// `modulus_poly` must be monic and irreducible over `𝔽_q`, and `self`
+    /// already reduced by it. Neither is checked here: the caller builds both.
+    ///
+    /// # Why not the exponent shortcut
+    ///
+    /// When `q^d ≡ 3 (mod 4)` the root is just `z^{(q^d+1)/4}`, which is one
+    /// exponentiation and no search. That holds only for odd `d` with
+    /// `q ≡ 3 (mod 4)`; at even `d` every `q^d` is `1 (mod 4)` and the shortcut
+    /// is unavailable, which is the case this exists for.
+    ///
+    /// Deterministic: the non-residue search walks a fixed sequence of field
+    /// elements, so the same input yields the same root in every run.
+    #[must_use]
+    pub fn sqrt_in_field(&self, modulus_poly: &Self, degree: usize) -> Option<Self> {
+        let prime = self.modulus().clone();
+        let one = Self::new(vec![BigUint::one()], &prime);
+        if self.is_zero() {
+            return Some(Self::zero(&prime));
+        }
+        // The field's order and the halved exponent that decides residuacity.
+        let order = prime.pow_u64(degree as u64);
+        let order_minus_one = order.sub(&BigUint::one());
+        let half = order_minus_one.div_rem(&BigUint::from_u64(2)).0;
+        // Euler's criterion in the field.
+        if self.mod_pow(&half, modulus_poly) != one {
+            return None;
+        }
+        // q^d − 1 = 2^s · t with t odd.
+        let mut s = 0u64;
+        let mut t = order_minus_one.clone();
+        let two = BigUint::from_u64(2);
+        while !t.is_odd() {
+            t = t.div_rem(&two).0;
+            s += 1;
+        }
+        if s == 1 {
+            // q^d ≡ 3 (mod 4): the shortcut, taken here so the general routine
+            // is never slower than the special case it subsumes.
+            let exponent = order.add(&BigUint::one()).div_rem(&BigUint::from_u64(4)).0;
+            let root = self.mod_pow(&exponent, modulus_poly);
+            return (root.mul(&root).rem(modulus_poly) == *self).then_some(root);
+        }
+        // A quadratic non-residue, by deterministic search: the constants
+        // 2, 3, 4, … then the linear elements x, x+1, …. Non-residues are half
+        // the field, so this stops almost at once; the bound keeps a
+        // pathological or mis-supplied field from looping forever.
+        const NON_RESIDUE_TRIES: u64 = 512;
+        let minus_one = Self::new(vec![prime.sub(&BigUint::one())], &prime);
+        let mut non_residue = None;
+        for candidate in 0..NON_RESIDUE_TRIES {
+            let element = if candidate < 256 {
+                Self::new(vec![BigUint::from_u64(candidate + 2)], &prime)
+            } else {
+                Self::new(
+                    vec![BigUint::from_u64(candidate - 256), BigUint::one()],
+                    &prime,
+                )
+            }
+            .rem(modulus_poly);
+            if element.is_zero() {
+                continue;
+            }
+            if element.mod_pow(&half, modulus_poly) == minus_one {
+                non_residue = Some(element);
+                break;
+            }
+        }
+        let non_residue = non_residue?;
+
+        let mut m = s;
+        let mut c = non_residue.mod_pow(&t, modulus_poly);
+        let mut remainder = self.mod_pow(&t, modulus_poly);
+        let mut root = self.mod_pow(&t.add(&BigUint::one()).div_rem(&two).0, modulus_poly);
+        while remainder != one {
+            // The least i < m with remainder^(2^i) = 1.
+            let mut i = 0u64;
+            let mut square = remainder.clone();
+            while square != one {
+                square = square.mul(&square).rem(modulus_poly);
+                i += 1;
+                if i == m {
+                    return None; // not a square after all: no such i exists
+                }
+            }
+            let mut b = c.clone();
+            for _ in 0..(m - i - 1) {
+                b = b.mul(&b).rem(modulus_poly);
+            }
+            m = i;
+            c = b.mul(&b).rem(modulus_poly);
+            remainder = remainder.mul(&c).rem(modulus_poly);
+            root = root.mul(&b).rem(modulus_poly);
+        }
+        (root.mul(&root).rem(modulus_poly) == *self).then_some(root)
+    }
 }
 
 #[cfg(test)]
@@ -5694,5 +5800,135 @@ mod real_root_tests {
 
         // A non-zero constant has no roots.
         assert_eq!(PolyZ::from_i64_slice(&[7]).real_roots(), Ok(Vec::new()));
+    }
+}
+
+#[cfg(test)]
+mod field_sqrt_tests {
+    use super::{PolyMod, PolyZ};
+    use crate::BigUint;
+
+    fn field(coefficients: &[i64], prime: u64) -> (PolyMod, BigUint) {
+        let modulus = BigUint::from_u64(prime);
+        let poly = PolyMod::from_poly_z(&PolyZ::from_i64_slice(coefficients), &modulus);
+        (poly, modulus)
+    }
+
+    #[test]
+    fn even_degree_fields_are_the_case_the_shortcut_cannot_serve() {
+        // x^4 + 1 is irreducible over 𝔽_q for q ≡ 3 (mod 4); the field has
+        // order q^4 ≡ 1 (mod 4), so the (q^d+1)/4 exponent is unavailable
+        // and Tonelli–Shanks is the only route. Every square must come back.
+        // Quartics verified irreducible over each prime by search, so the
+        // test pins real fields rather than assumed ones.
+        for &(prime, c0, c1, c2) in &[
+            (7u64, 1i64, 1i64, 0i64),
+            (11, 1, 1, 7),
+            (19, 1, 1, 3),
+            (23, 1, 1, 3),
+            (103, 1, 1, 5),
+        ] {
+            let (modulus_poly, q) = field(&[c0, c1, c2, 0, 1], prime);
+            assert!(
+                modulus_poly.is_irreducible(),
+                "the quartic for q={prime} must be irreducible"
+            );
+            let mut squares = 0;
+            for seed in 1..40u64 {
+                let element = PolyMod::from_poly_z(
+                    &PolyZ::from_i64_slice(&[
+                        (seed % prime) as i64,
+                        ((seed * 3) % prime) as i64,
+                        ((seed * 7) % prime) as i64,
+                        ((seed * 11) % prime) as i64,
+                    ]),
+                    &q,
+                )
+                .rem(&modulus_poly);
+                if element.is_zero() {
+                    continue;
+                }
+                let square = element.mul(&element).rem(&modulus_poly);
+                let root = square
+                    .sqrt_in_field(&modulus_poly, 4)
+                    .unwrap_or_else(|| panic!("a square has a root: q={prime} seed={seed}"));
+                assert_eq!(
+                    root.mul(&root).rem(&modulus_poly),
+                    square,
+                    "q={prime} seed={seed}: the root does not square back"
+                );
+                squares += 1;
+            }
+            assert!(squares > 20, "too few squares exercised at q={prime}");
+        }
+    }
+
+    #[test]
+    fn non_squares_are_refused_in_an_even_degree_field() {
+        // Half the field is a non-residue; the routine must say so rather
+        // than return a wrong root. Counting both verdicts keeps the test
+        // from passing on a routine that always refuses.
+        let (modulus_poly, q) = field(&[1, 1, 0, 0, 1], 7);
+        assert!(modulus_poly.is_irreducible());
+        let (mut squares, mut non_squares) = (0, 0);
+        for seed in 1..60u64 {
+            let element = PolyMod::from_poly_z(
+                &PolyZ::from_i64_slice(&[(seed % 7) as i64, ((seed / 7) % 7) as i64, 1, 0]),
+                &q,
+            )
+            .rem(&modulus_poly);
+            if element.is_zero() {
+                continue;
+            }
+            match element.sqrt_in_field(&modulus_poly, 4) {
+                Some(root) => {
+                    assert_eq!(root.mul(&root).rem(&modulus_poly), element);
+                    squares += 1;
+                }
+                None => non_squares += 1,
+            }
+        }
+        assert!(squares > 0 && non_squares > 0, "{squares} / {non_squares}");
+    }
+
+    #[test]
+    fn odd_degree_agrees_with_the_exponent_shortcut() {
+        // Where both routes exist they must agree up to sign, since the
+        // odd-degree path is what production has always used.
+        let prime = 23u64;
+        let (modulus_poly, q) = field(&[1, 3, 0, 1], prime); // cubic, verified
+        assert!(modulus_poly.is_irreducible());
+        let order = q.pow_u64(3);
+        let exponent = order.add(&BigUint::one()).div_rem(&BigUint::from_u64(4)).0;
+        for seed in 1..30u64 {
+            let element = PolyMod::from_poly_z(
+                &PolyZ::from_i64_slice(&[(seed % prime) as i64, ((seed * 5) % prime) as i64, 2]),
+                &q,
+            )
+            .rem(&modulus_poly);
+            if element.is_zero() {
+                continue;
+            }
+            let square = element.mul(&element).rem(&modulus_poly);
+            let shortcut = square.mod_pow(&exponent, &modulus_poly);
+            let general = square
+                .sqrt_in_field(&modulus_poly, 3)
+                .expect("a square has a root");
+            let negated = PolyMod::zero(&q).sub(&general).rem(&modulus_poly);
+            assert!(
+                shortcut == general || shortcut == negated,
+                "seed {seed}: the two routes disagree beyond sign"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_roots_to_zero() {
+        let (modulus_poly, q) = field(&[1, 1, 0, 0, 1], 7);
+        let zero = PolyMod::zero(&q);
+        assert!(zero
+            .sqrt_in_field(&modulus_poly, 4)
+            .expect("zero is a square")
+            .is_zero());
     }
 }

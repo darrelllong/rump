@@ -90,7 +90,7 @@ primary values. Every other export has one module path:
 | number_theory (smoothness) | dickman_rho | done |
 | gf2 (filtering) | filter_merge, FilteredMatrix | done |
 | number_theory | gcd/lcm, symbols, primality, CRT, reconstruction, valuations, product trees, smoothness, SmoothnessBaseError | done |
-| polynomial | PolyZ, PolyMod, polynomial limits and errors | done |
+| polynomial | PolyZ, PolyMod, polynomial limits and errors, PolyMod::sqrt_in_field | done |
 | finite_field | Gf2m | done |
 | gf2 | dense null space, singleton pruning, Block Lanczos, PrunedMatrix | done |
 | lattice | LLL, weighted Gauss reduction, ReductionError | done |
