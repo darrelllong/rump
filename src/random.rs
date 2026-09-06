@@ -300,9 +300,10 @@ pub fn random_coprime_below<R: RandomSource + ?Sized>(
 /// below `e⁻¹¹¹` unconditionally at every width in range — and catches
 /// every degenerate source, including one cycling among several
 /// composites. The unconditional bound splits by width: for `bits ≥ 6`,
-/// `π(2x) − π(x) > (3/5)·x/ln x` (Rosser and Schoenfeld 1962; on the
-/// citation-check list, the inequality itself verified numerically to
-/// `10⁷`) bounds the density below by `1.2/((bits−1)·ln 2)`, giving
+/// `π(2x) − π(x) > (3/5)·x/ln x` (Rosser & Schoenfeld, *Approximate
+/// formulas for some functions of prime numbers*, Illinois J. Math. 6
+/// (1962), 64–94, Theorem 3's bounds combined; the inequality itself
+/// verified numerically to `10⁷`) bounds the density below by `1.2/((bits−1)·ln 2)`, giving
 /// survival under `e⁻¹¹¹`; the four smaller widths check exhaustively —
 /// 2 and 3 contain no composite at all, and the worst case is `bits = 4`
 /// (density 1/2 over 256 rounds, survival `2⁻²⁵⁶ = e⁻¹⁷⁷`). The inner guard makes the common

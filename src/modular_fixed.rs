@@ -548,7 +548,7 @@ pub fn is_prime_u64(candidate: u64) -> bool {
         if candidate == small {
             return true;
         }
-        if candidate % small == 0 {
+        if candidate.is_multiple_of(small) {
             return false;
         }
     }

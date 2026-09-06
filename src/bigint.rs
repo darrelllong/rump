@@ -1154,7 +1154,10 @@ impl BigUint {
     /// exponent `k = a·b` implies a perfect `a`-th power, so primes
     /// suffice — with the 2-adic valuation as a fast filter: any `k` must
     /// divide the valuation when it is non-zero. Zero and one are perfect
-    /// powers by convention (`0^2`, `1^2`).
+    /// powers by convention (`0^2`, `1^2`). This is the straightforward
+    /// method; the essentially linear-time one is Bernstein, *Detecting
+    /// perfect powers in essentially linear time*, Math. Comp. 67 (1998),
+    /// 1253–1283.
     ///
     /// On odd operands the valuation filter is inert and every prime
     /// exponent below the bit width pays a full root: measured on M4,
@@ -2008,7 +2011,10 @@ impl BigUint {
         acc
     }
 
-    /// Toom-4 admission, on the same shape as [`Self::should_use_toom3`]:
+    /// Toom-4 admission (four-way Toom–Cook: Toom, Soviet Physics–Doklady 3
+    /// (1963), 714–716; Cook, *On the minimum computation time of
+    /// functions*, Harvard thesis, 1966; the interpolation after Bodrato,
+    /// WAIFI 2007), on the same shape as [`Self::should_use_toom3`]:
     /// both operands past `TOOM4_THRESHOLD_LIMBS` and within 1.5× in length.
     fn should_use_toom4(lhs: &Self, rhs: &Self) -> bool {
         let short = lhs.limbs.len().min(rhs.limbs.len());

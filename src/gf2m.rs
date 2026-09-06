@@ -139,8 +139,10 @@ impl Gf2m {
 
     /// Multiply two field elements modulo the field polynomial.
     ///
-    /// Left-to-right comb multiplication with 4-bit windows (Hankerson,
-    /// Menezes, Vanstone — *Guide to ECC*, Algorithm 2.36): precompute the
+    /// Left-to-right comb multiplication with 4-bit windows (López & Dahab,
+    /// *High-speed software multiplication in F_{2^m}*, INDOCRYPT 2000, LNCS
+    /// 1977, 203–212; as Hankerson, Menezes, Vanstone — *Guide to ECC*,
+    /// Algorithm 2.36, present it): precompute the
     /// sixteen products `u(x)·b(x)` for 4-bit `u`, then sweep `a` one window
     /// at a time, shifting the accumulator four bits between sweeps.
     ///

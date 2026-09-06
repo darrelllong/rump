@@ -370,13 +370,15 @@ fn combine_signed_into(
 // two-stripping: the state tracks their low bits symbolically, and a
 // remainder sequence beside an odd operand cannot end on an even value.
 //
-// The design and the table generator are Niels Möller's, as shipped in GMP
-// (`mpn_jacobi_n`, `gen-jacobitab.c`); the identities are Schönhage's. The
-// published subquadratic-Jacobi reference is Brent and Zimmermann, *An
-// O(M(n) log n) algorithm for the Jacobi symbol*, ANTS-IX, 2010 — their
-// algorithm takes the binary (2-adic) route; this implementation takes the
-// left-to-right route their §1 attributes to Möller, which composes with the
-// Half-GCD machinery below.
+// The idea of carrying the symbol as a small state advanced per quotient
+// is Niels Möller's (it is how GMP's `mpn_jacobi_n` works); the identities
+// are Schönhage's. The table below is built at compile time from those
+// identities by this crate's own generator, and nothing of GMP's is
+// reproduced here. The published subquadratic-Jacobi reference is Brent
+// and Zimmermann, *An O(M(n) log n) algorithm for the Jacobi symbol*,
+// ANTS-IX, LNCS 6197 (2010), 83–95 — their algorithm takes the binary
+// (2-adic) route; this implementation takes the left-to-right route their
+// §1 attributes to Möller, which composes with the Half-GCD machinery below.
 
 /// The thirteen reachable `(a mod 4, b mod 4)` classes. At least one side of
 /// the pair is always odd; the denominator flag `d` is ambiguous only for
@@ -1790,7 +1792,9 @@ pub fn rational_reconstruct(x: &BigUint, m: &BigUint) -> Option<(BigInt, BigUint
 const CIPOLLA_THRESHOLD_FACTOR: usize = 4;
 
 /// The Tonelli–Shanks descent for `p − 1 = q·2^s`, `a` a residue already
-/// reduced modulo the odd prime `p` (Cohen, *A Course in Computational
+/// reduced modulo the odd prime `p` (Tonelli, Göttinger Nachrichten 1891;
+/// Shanks, *Five number-theoretic algorithms*, Proc. 2nd Manitoba Conf.
+/// Numerical Math., 1972; in the form of Cohen, *A Course in Computational
 /// Algebraic Number Theory*, Algorithm 1.5.1). `q` and `s` are the caller's
 /// 2-adic split of `p − 1`, and `ctx` its Montgomery context.
 ///
@@ -3125,8 +3129,10 @@ const SMALL_TRIAL_PRIMES: [u16; 168] = [
 /// congruent to `0`, `1`, or `n − 1` cannot testify, and this function does
 /// not screen for that.
 ///
-/// The mechanism is the standard one (*Handbook of Applied Cryptography*,
-/// Algorithm 4.24) read in the contrapositive. Walk the chain
+/// The mechanism is the standard one (Miller, JCSS 13 (1976); Rabin,
+/// J. Number Theory 12 (1980) — the references are given in full at the
+/// word-width test in `modular_fixed`; here in the form of *Handbook of
+/// Applied Cryptography*, Algorithm 4.24) read in the contrapositive. Walk the chain
 /// `a^d, a^(2d), a^(4d), …, a^(n−1)`. If some squaring lands on `1` from a
 /// value that is neither `1` nor `n − 1`, that value is a non-trivial square
 /// root of unity, which a prime modulus cannot have — `x² ≡ 1 (mod p)` means
@@ -4160,30 +4166,6 @@ mod tests {
             let winner = if bin <= leh { "binary" } else { "lehmer" };
             eprintln!("{limbs:7} {bin:12.4} {leh:12.4}  {winner}");
         }
-    }
-
-    #[test]
-    fn jacobi_table_matches_gmp() {
-        // GMP's shipped jacobitab.h, as produced by Möller's gen-jacobitab.c —
-        // an independently generated cross-check of the compile-time
-        // derivation from Schönhage's rules.
-        #[rustfmt::skip]
-        const GMP_TABLE: [u8; 208] = [
-             0,  0,  0,  0,  0, 12,  8,  4,  1,  1,  1,  1,  1, 13,  9,  5,
-             2,  2,  2,  2,  2,  6, 10, 14,  3,  3,  3,  3,  3,  7, 11, 15,
-             4, 16,  6, 18,  4,  0, 12,  8,  5, 17,  7, 19,  5,  1, 13,  9,
-             6, 18,  4, 16,  6, 10, 14,  2,  7, 19,  5, 17,  7, 11, 15,  3,
-             8, 10,  9, 11,  8,  4,  0, 12,  9, 11,  8, 10,  9,  5,  1, 13,
-            10,  9, 11,  8, 10, 14,  2,  6, 11,  8, 10,  9, 11, 15,  3,  7,
-            12, 22, 24, 20, 12,  8,  4,  0, 13, 23, 25, 21, 13,  9,  5,  1,
-            25, 21, 13, 23, 14,  2,  6, 10, 24, 20, 12, 22, 15,  3,  7, 11,
-            16,  6, 18,  4, 16, 16, 16, 16, 17,  7, 19,  5, 17, 17, 17, 17,
-            18,  4, 16,  6, 18, 22, 19, 23, 19,  5, 17,  7, 19, 23, 18, 22,
-            20, 12, 22, 24, 20, 20, 20, 20, 21, 13, 23, 25, 21, 21, 21, 21,
-            22, 24, 20, 12, 22, 19, 23, 18, 23, 25, 21, 13, 23, 18, 22, 19,
-            24, 20, 12, 22, 15,  3,  7, 11, 25, 21, 13, 23, 14,  2,  6, 10,
-        ];
-        assert_eq!(super::JACOBI_TABLE, GMP_TABLE);
     }
 
     /// The GMP-vector-grounded binary implementation as an oracle, on the
@@ -6549,9 +6531,11 @@ mod tests {
 /// Dickman, *On the frequency of numbers containing prime factors of a
 /// certain relative magnitude*, Arkiv för Matematik, Astronomi och Fysik
 /// 22A (1930); the delay differential equation `u·ρ′(u) = −ρ(u−1)` with
-/// `ρ(u) = 1` on `[0, 1]` is solved numerically here, fourth-order
-/// Runge–Kutta over a fixed grid with linear interpolation for the delayed
-/// term, following the tabulation tradition of van de Lune & Wattel,
+/// `ρ(u) = 1` on `[0, 1]` is solved numerically here in its integral
+/// (Volterra) form `u·ρ(u) = ∫_{u−1}^{u} ρ(t) dt`, by the trapezoid rule
+/// over a fixed grid — the derivative form drove a first draft negative,
+/// as the table builder explains — following the tabulation tradition of
+/// van de Lune & Wattel,
 /// *On the numerical solution of a differential-difference equation
 /// arising in analytic number theory*, Mathematics of Computation 23
 /// (1969), 417–421.
@@ -6636,7 +6620,7 @@ mod dickman_tests {
     #[test]
     fn the_published_values_are_reproduced() {
         // van de Lune & Wattel's tabulation (Math. Comp. 23, 1969), to the
-        // accuracy a 1/256 grid with Simpson steps supports.
+        // accuracy a 1/256 grid with trapezoid steps supports.
         for &(u, expected, tolerance) in &[
             (1.0, 1.0, 1e-12),
             (2.0, 0.306_852_819_4, 1e-5),

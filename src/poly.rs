@@ -1231,7 +1231,10 @@ impl PolyZ {
 
     /// The balanced base-`m` expansion of `n`: the polynomial
     /// `c₀ + c₁x + ⋯ + c_d xᵈ` with `n = Σ cₖ mᵏ` and every digit below the
-    /// top one in the symmetric range `(−m/2, m/2]`.
+    /// top one in the symmetric range `(−m/2, m/2]` — the number field
+    /// sieve's base-`m` polynomial (Buhler, Lenstra & Pomerance, *Factoring
+    /// integers with the number field sieve*, LNM 1554, 1993, §3), with the
+    /// symmetric digits that halve its coefficients.
     ///
     /// The ordinary base-`m` expansion takes digits in `[0, m)`; the balanced
     /// one takes the representative of least absolute value instead, which
@@ -1371,6 +1374,14 @@ impl PolyZ {
 
     /// The real roots of `self`, ascending, each repeated according to its
     /// multiplicity.
+    ///
+    /// Isolation is by the derivative recursion — the roots of `f′` separate
+    /// the roots of `f` (Rolle), so bisection between consecutive critical
+    /// points finds every sign change — rather than a Sturm sequence
+    /// (Sturm, *Mémoire sur la résolution des équations numériques*, 1829)
+    /// or Descartes-rule bisection (Collins & Akritas, SYMSAC '76); the
+    /// survey is Collins & Loos, *Real zeros of polynomials*, in
+    /// *Computer Algebra* (Buchberger, Collins & Loos, eds.), Springer, 1983.
     ///
     /// # Multiplicity is decided exactly, not inferred
     ///
@@ -1548,7 +1559,9 @@ impl PolyZ {
     /// `[(k, sₖ)]` where `self = ∏ sₖᵏ` up to content and every `sₖ` is
     /// squarefree and coprime to the others.
     ///
-    /// The classical decomposition, exact over ℤ throughout. `g = gcd(f, f′)`
+    /// The classical decomposition (Yun, *On square-free decomposition
+    /// algorithms*, SYMSAC '76, 26–35, gives the refined form; this is the
+    /// plain gcd ladder it refines), exact over ℤ throughout. `g = gcd(f, f′)`
     /// carries every repeated factor one power down, and `w = f/g` is the
     /// radical — every distinct factor exactly once. Peeling
     /// `y = gcd(w, g)` off `w` then leaves precisely the factors of
@@ -1602,7 +1615,12 @@ impl PolyZ {
     }
 
     /// The primitive gcd of two polynomials over ℤ, by the Euclidean algorithm
-    /// on pseudo-remainders.
+    /// on pseudo-remainders: the primitive polynomial remainder sequence
+    /// (Collins, *Subresultants and reduced polynomial remainder sequences*,
+    /// J. ACM 14 (1967), 128–142; Brown, *On Euclid's algorithm and the
+    /// computation of polynomial greatest common divisors*, J. ACM 18
+    /// (1971), 478–504, which also gives the subresultant sequence this
+    /// does not use).
     ///
     /// Each remainder is reduced to its primitive part, which is what keeps
     /// the coefficient growth of a pseudo-remainder sequence in check.
@@ -3507,23 +3525,21 @@ impl PolyMod {
             let root = self.mod_pow(&exponent, modulus_poly);
             return (root.mul(&root).rem(modulus_poly) == *self).then_some(root);
         }
-        // A quadratic non-residue, by deterministic search: the constants
-        // 2, 3, 4, … then the linear elements x, x+1, …. Non-residues are half
-        // the field, so this stops almost at once; the bound keeps a
+        // A quadratic non-residue, by deterministic search over the linear
+        // elements x, x + 1, x + 2, …. Not the constants: for even `d` the
+        // field contains 𝔽_{q²}, in which every element of 𝔽_q is a square,
+        // so no constant can serve — and even `d` is the case this routine
+        // exists for. (A first draft tried 256 constants first and paid 256
+        // full exponentiations for nothing at every even-degree call.) A
+        // linear element is a non-residue about half the time in every
+        // degree, so this stops almost at once; the bound keeps a
         // pathological or mis-supplied field from looping forever.
         const NON_RESIDUE_TRIES: u64 = 512;
         let minus_one = Self::new(vec![prime.sub(&BigUint::one())], &prime);
         let mut non_residue = None;
         for candidate in 0..NON_RESIDUE_TRIES {
-            let element = if candidate < 256 {
-                Self::new(vec![BigUint::from_u64(candidate + 2)], &prime)
-            } else {
-                Self::new(
-                    vec![BigUint::from_u64(candidate - 256), BigUint::one()],
-                    &prime,
-                )
-            }
-            .rem(modulus_poly);
+            let element = Self::new(vec![BigUint::from_u64(candidate), BigUint::one()], &prime)
+                .rem(modulus_poly);
             if element.is_zero() {
                 continue;
             }

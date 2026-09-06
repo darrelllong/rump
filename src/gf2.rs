@@ -1463,15 +1463,19 @@ impl FilteredMatrix {
     }
 }
 
-/// Prim's minimum spanning tree over the given rows, edges weighted by the
-/// popcount of each pair's XOR.
+/// A minimum spanning tree over the given rows, edges weighted by the
+/// popcount of each pair's XOR, grown one nearest vertex at a time — the
+/// algorithm of Jarník (*O jistém problému minimálním*, Práce Moravské
+/// přírodovědecké společnosti 6 (1930), 57–63), rediscovered by Prim
+/// (Bell System Tech. J. 36 (1957), 1389–1401) and usually named for him.
 ///
 /// Returns the root, a parent map, and a leaves-first order (children before
 /// parents). The root is the highest-weight member — discarding the heaviest
 /// row is the natural elimination choice — and the tree's total edge weight
-/// is the fill the column costs (Cavallar; Bouillaguet & Zimmermann,
-/// *Parallel Structured Gaussian Elimination for the Number Field Sieve*,
-/// §3).
+/// is the fill the column costs (Cavallar, *Strategies in filtering in the
+/// number field sieve*, ANTS-IV, LNCS 1838 (2000), 209–231; Bouillaguet &
+/// Zimmermann, *Parallel Structured Gaussian Elimination for the Number
+/// Field Sieve*, 2019, §3).
 type SpanningTree = (usize, std::collections::HashMap<usize, usize>, Vec<usize>);
 
 fn minimum_spanning_tree(members: &[usize], rows: &[Vec<u64>]) -> SpanningTree {
@@ -1552,7 +1556,9 @@ pub fn filter_merge(rows: &[Vec<u64>], columns: usize, merge_bound: usize) -> Fi
     // A min-heap of (weight, column) with lazy invalidation: every
     // occupancy change pushes a fresh entry, and a popped entry whose
     // recorded weight no longer matches the column's is stale and dropped.
-    // Lightest first is Markowitz's rule — a singleton beats a pair beats a
+    // Lightest first is Markowitz's rule (*The elimination form of the
+    // inverse and its application to linear programming*, Management
+    // Science 3 (1957), 255–269) — a singleton beats a pair beats a
     // triple — and the heap makes the whole filter
     // O((nonzeros + merges)·log n), where the first draft's per-column row
     // rescans were quadratic and a stack worklist still let hot columns
@@ -1561,9 +1567,9 @@ pub fn filter_merge(rows: &[Vec<u64>], columns: usize, merge_bound: usize) -> Fi
     use core::cmp::Reverse;
     let mut heap: std::collections::BinaryHeap<Reverse<(usize, usize)>> =
         std::collections::BinaryHeap::new();
-    for column in 0..columns {
-        if occupants[column] != 0 && occupants[column] <= bound {
-            heap.push(Reverse((occupants[column], column)));
+    for (column, &occupancy) in occupants.iter().enumerate() {
+        if occupancy != 0 && occupancy <= bound {
+            heap.push(Reverse((occupancy, column)));
         }
     }
 
@@ -1613,6 +1619,16 @@ pub fn filter_merge(rows: &[Vec<u64>], columns: usize, merge_bound: usize) -> Fi
             }
             for (word, parent_word) in work[member].iter_mut().zip(&parent_row) {
                 *word ^= parent_word;
+            }
+            // A column the member cancelled out of has lost a holder and may
+            // have dropped to the bound, or to a singleton; it is requeued
+            // like any other occupancy change, or the fixed point the doc
+            // promises is not reached. (Found by review: the gains below were
+            // requeued and the losses were not.)
+            for touched in set_bits(&before, words, columns) {
+                if !bit_is_set(&work[member], touched) {
+                    requeue(touched, &occupants, &mut heap);
+                }
             }
             for touched in set_bits(&work[member], words, columns) {
                 occupants[touched] += 1;
@@ -1713,7 +1729,7 @@ mod filter_tests {
             .map(|_| {
                 let mut row = vec![0u64; words];
                 for column in 0..columns {
-                    if mix(next()) % density == 0 {
+                    if mix(next()).is_multiple_of(density) {
                         row[column / 64] |= 1 << (column % 64);
                     }
                 }
