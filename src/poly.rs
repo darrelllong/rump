@@ -12,7 +12,7 @@
 //! stay normalized: no trailing zero coefficient, so the zero polynomial is
 //! the empty coefficient list and the degree is the last index.
 
-use crate::bigint::{BigInt, BigUint, Sign};
+use crate::bigint::{BarrettContext, BigInt, BigUint, Sign, NEWTON_DIVISION_THRESHOLD_LIMBS};
 use crate::number_theory_impl as number_theory;
 
 /// Coefficient count at or above which [`PolyZ`](crate::polynomial::PolyZ) multiplication splits
@@ -2060,6 +2060,36 @@ fn add_into_at_z(acc: &mut [BigInt], addend: &[BigInt], offset: usize) {
     }
 }
 
+/// Coefficient reduction modulo `m`, with Barrett's reciprocal taken once
+/// when `m` is wide.
+///
+/// A convolution or a division reduces `2d − 1` or `d` coefficients by the
+/// same modulus; at the widths where [`BigUint::div_rem`] goes through
+/// Newton's reciprocal, each of those divisions would recompute the same
+/// `μ`. One [`BarrettContext`] per call amortises it: the reciprocal once,
+/// then two products per coefficient. Below the width the context costs
+/// more than it saves and the plain division is used.
+struct Reducer<'a> {
+    modulus: &'a BigUint,
+    barrett: Option<BarrettContext>,
+}
+
+impl<'a> Reducer<'a> {
+    fn new(modulus: &'a BigUint) -> Self {
+        let barrett = (modulus.limbs().len() >= NEWTON_DIVISION_THRESHOLD_LIMBS)
+            .then(|| BarrettContext::new(modulus).ok())
+            .flatten();
+        Self { modulus, barrett }
+    }
+
+    fn reduce(&self, x: &BigUint) -> BigUint {
+        match &self.barrett {
+            Some(context) => context.reduce(x),
+            None => x.rem(self.modulus),
+        }
+    }
+}
+
 /// The convolution `a ⋆ b` modulo `m`, returning `a.len() + b.len() - 1`
 /// coefficients — the coefficient-vector core behind [`PolyMod::mul`].
 /// Shape and split rule are [`convolve_z`]'s, at
@@ -2138,8 +2168,9 @@ fn convolve_schoolbook_modp(a: &[BigUint], b: &[BigUint], m: &BigUint) -> Vec<Bi
             acc[i + j].add_assign_ref(&term);
         }
     }
+    let reducer = Reducer::new(m);
     for slot in &mut acc {
-        *slot = slot.rem(m);
+        *slot = reducer.reduce(slot);
     }
     acc
 }
@@ -2222,8 +2253,9 @@ fn convolve_square_modp(a: &[BigUint], m: &BigUint) -> Vec<BigUint> {
             acc[i + j].add_assign_ref(&cross);
         }
     }
+    let reducer = Reducer::new(m);
     for slot in &mut acc {
-        *slot = slot.rem(m);
+        *slot = reducer.reduce(slot);
     }
     acc
 }
@@ -2396,7 +2428,8 @@ impl PolyMod {
             *modulus >= BigUint::from_u64(2),
             "polynomial modulus must be at least 2"
         );
-        let coeffs = coeffs.into_iter().map(|c| c.rem(modulus)).collect();
+        let reducer = Reducer::new(modulus);
+        let coeffs = coeffs.iter().map(|c| reducer.reduce(c)).collect();
         let mut poly = Self {
             coeffs,
             modulus: modulus.clone(),
@@ -2744,6 +2777,7 @@ impl PolyMod {
         // `deg divisor + 1` steps, so it accumulates that many offsets
         // below `m²`, staying under `2·bits(m) + lg(deg divisor)` bits.
         let modulus_squared = self.modulus.square();
+        let reducer = Reducer::new(&self.modulus);
         let mut rem = self.coeffs.clone();
         let mut quotient =
             want_quotient.then(|| vec![BigUint::zero(); self_degree - divisor_degree + 1]);
@@ -2753,7 +2787,7 @@ impl PolyMod {
             // (`div_rem` short-circuits below the divisor), and this is
             // simultaneously the cancellation test, since the step below
             // leaves a multiple of `m` behind rather than a literal zero.
-            rem[top] = rem[top].rem(&self.modulus);
+            rem[top] = reducer.reduce(&rem[top]);
             if rem[top].is_zero() {
                 if top == 0 {
                     break;
@@ -2798,7 +2832,7 @@ impl PolyMod {
         // closing pass.
         let quotient = quotient.map(|q| Self::from_reduced(q, &self.modulus));
         for slot in &mut rem {
-            *slot = slot.rem(&self.modulus);
+            *slot = reducer.reduce(slot);
         }
         (quotient, Self::from_reduced(rem, &self.modulus))
     }

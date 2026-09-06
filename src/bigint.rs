@@ -29,9 +29,11 @@ use montgomery::{copy_padded, mont_mul, mont_scratch_limbs, mont_sqr};
 pub use montgomery::{ContextMismatch, MontgomeryContext, MontgomeryResidue, MontgomeryScratch};
 
 mod barrett;
+mod newton;
 mod reciprocal;
 
 pub use barrett::BarrettContext;
+pub(crate) use newton::NEWTON_DIVISION_THRESHOLD_LIMBS;
 pub use reciprocal::WordReciprocal;
 // Only the test module reads the threshold from here now — the dispatch that
 // acts on it moved into `barrett` with the code it gates.
@@ -2518,10 +2520,13 @@ impl BigUint {
     ///
     /// Dispatches on the divisor's width: a single-limb divisor takes a
     /// base-2⁶⁴ Horner division (one pass, no quotient estimation needed),
-    /// while a multi-limb divisor uses Knuth's Algorithm D (*TAOCP* vol. 2,
+    /// a multi-limb divisor uses Knuth's Algorithm D (*TAOCP* vol. 2,
     /// §4.3.1) — operand normalization, the two-limb quotient estimate, and the
-    /// occasional add-back correction. A dividend smaller than the divisor
-    /// returns `(0, self)` without either path.
+    /// occasional add-back correction — and a divisor of hundreds of limbs
+    /// or more goes through Newton's reciprocal (`newton.rs`; Brent &
+    /// Zimmermann, *Modern Computer Arithmetic*, §4.2.2), which is
+    /// subquadratic. A dividend smaller than the divisor returns
+    /// `(0, self)` without any path.
     ///
     /// # Panics
     ///
@@ -2538,6 +2543,11 @@ impl BigUint {
         if divisor.limbs.len() == 1 {
             let (quotient, remainder) = Self::div_rem_limb(&self.limbs, divisor.limbs[0]);
             return (quotient, Self::from_u64(remainder));
+        }
+        // Wide divisors take Newton's reciprocal, which is O(M(k)) where
+        // Algorithm D is O(k²); see `newton.rs` for the crossover.
+        if divisor.limbs.len() >= newton::NEWTON_DIVISION_THRESHOLD_LIMBS {
+            return newton::div_rem(self, divisor);
         }
 
         Self::div_rem_knuth(&self.limbs, &divisor.limbs)

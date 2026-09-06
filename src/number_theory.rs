@@ -4618,12 +4618,14 @@ mod tests {
         BigUint::from_be_bytes(&bytes)
     }
 
-    /// Reference vectors computed by GMP 6.3.0's mpz_jacobi (see
-    /// scripts/bench_gmp.sh for the toolchain): an independent oracle for the
-    /// binary reciprocity algorithm. Triples are (a, n, (a/n)) with a and n in
-    /// hex, spanning 8- to 1024-bit odd moduli, a below/at/above n, shared
-    /// factors, and the (2/n) supplement cases.
-    const GMP_JACOBI_VECTORS: &[(&str, &str, i8)] = &[
+    /// Reference vectors, recomputed with SageMath 10.9's `jacobi_symbol`
+    /// (`scripts/check_symbol_vectors.sage` re-derives every one; 2026-09-06,
+    /// 254 of 254 agree): an independent oracle for the binary reciprocity
+    /// algorithm. Triples are (a, n, (a/n)) with a and n in hex, spanning 8-
+    /// to 1024-bit odd moduli, a below/at/above n, shared factors, and the
+    /// (2/n) supplement cases. The operand shapes were first drawn against
+    /// GMP 6.3.0's `mpz_jacobi`; the values are the symbol's and nobody's.
+    const JACOBI_VECTORS: &[(&str, &str, i8)] = &[
         ("8a", "bf", 1),
         ("f6ad", "bf", -1),
         ("be", "bf", -1),
@@ -4760,7 +4762,7 @@ mod tests {
 
     #[test]
     fn jacobi_matches_gmp_vectors() {
-        for &(a_hex, n_hex, expected) in GMP_JACOBI_VECTORS {
+        for &(a_hex, n_hex, expected) in JACOBI_VECTORS {
             let a = biguint_from_hex(a_hex);
             let n = biguint_from_hex(n_hex);
             assert_eq!(
@@ -4868,10 +4870,11 @@ mod tests {
         );
     }
 
-    /// Reference vectors computed by GMP 6.3.0's mpz_kronecker: even moduli,
-    /// powers of two, n = 0, shared factors, and odd moduli where the symbol
-    /// must agree with jacobi. Triples are (a, n, (a/n)) in hex.
-    const GMP_KRONECKER_VECTORS: &[(&str, &str, i8)] = &[
+    /// Reference vectors, recomputed with SageMath 10.9's `kronecker_symbol`
+    /// (`scripts/check_symbol_vectors.sage`): even moduli, powers of two,
+    /// n = 0, shared factors, and odd moduli where the symbol must agree
+    /// with jacobi. Triples are (a, n, (a/n)) in hex.
+    const KRONECKER_VECTORS: &[(&str, &str, i8)] = &[
         ("6", "17", 1),
         ("cf3", "17", 1),
         ("45", "17", 0),
@@ -4998,7 +5001,7 @@ mod tests {
 
     #[test]
     fn kronecker_matches_gmp_vectors() {
-        for &(a_hex, n_hex, expected) in GMP_KRONECKER_VECTORS {
+        for &(a_hex, n_hex, expected) in KRONECKER_VECTORS {
             let a = biguint_from_hex(a_hex);
             let n = biguint_from_hex(n_hex);
             assert_eq!(

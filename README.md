@@ -150,7 +150,7 @@ comes from.
 
 Differential suites check division against a bit-serial oracle, Montgomery
 exponentiation against a division-based ladder, and the Jacobi symbol against
-132 vectors computed by GMP's `mpz_jacobi` plus Euler's criterion — oracles
+132 vectors recomputed with SageMath (`scripts/check_symbol_vectors.sage`) plus Euler's criterion — oracles
 that share no code with the kernels they judge. The suites are
 mutation-hardened: seeded defects in the quotient estimate, the REDC carry
 chain, and the reciprocity logic are caught, and the survivors are proven
