@@ -1575,6 +1575,11 @@ pub fn filter_merge(rows: &[Vec<u64>], columns: usize, merge_bound: usize) -> Fi
         // Compact the incidence list to live members that still hold the
         // column (a merge may have cancelled it out of a row).
         incidence[column].retain(|&r| live[r] && bit_is_set(&work[r], column));
+        // Retirement is lazy, so a row that lost this column to one merge
+        // and regained it in another is listed twice; the compaction must
+        // collapse those or the members outnumber the occupancy.
+        incidence[column].sort_unstable();
+        incidence[column].dedup();
         let members = incidence[column].clone();
         debug_assert_eq!(members.len(), weight, "occupancy drifted from incidence");
         let requeue =
@@ -1602,7 +1607,8 @@ pub fn filter_merge(rows: &[Vec<u64>], columns: usize, merge_bound: usize) -> Fi
             let parent = parents[&member];
             let parent_row = work[parent].clone();
             let parent_composition = compositions[parent].clone();
-            for touched in set_bits(&work[member], words, columns) {
+            let before = work[member].clone();
+            for touched in set_bits(&before, words, columns) {
                 occupants[touched] -= 1;
             }
             for (word, parent_word) in work[member].iter_mut().zip(&parent_row) {
@@ -1610,7 +1616,13 @@ pub fn filter_merge(rows: &[Vec<u64>], columns: usize, merge_bound: usize) -> Fi
             }
             for touched in set_bits(&work[member], words, columns) {
                 occupants[touched] += 1;
-                incidence[touched].push(member);
+                // Only a column the member did not already hold gains a
+                // list entry: the member is still listed under the columns
+                // it kept, and listing it twice would let a later compaction
+                // count it twice against an occupancy that counts it once.
+                if !bit_is_set(&before, touched) {
+                    incidence[touched].push(member);
+                }
                 requeue(touched, &occupants, &mut heap);
             }
             compositions[member] = symmetric_difference(&compositions[member], &parent_composition);
