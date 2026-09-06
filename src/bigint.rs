@@ -3495,7 +3495,7 @@ impl BigInt {
     /// carrying the sign through (a negative base to an odd power stays
     /// negative). `self^0 = 1`.
     #[must_use]
-    pub(crate) fn pow_u64(&self, exponent: u64) -> Self {
+    pub fn pow_u64(&self, exponent: u64) -> Self {
         let magnitude = self.magnitude.pow_u64(exponent);
         // The sign is negative iff the base is negative and the exponent odd.
         let sign = if self.sign == Sign::Negative && exponent % 2 == 1 {
