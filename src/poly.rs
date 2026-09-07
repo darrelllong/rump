@@ -15,6 +15,9 @@
 use crate::bigint::{BarrettContext, BigInt, BigUint, Sign, NEWTON_DIVISION_THRESHOLD_LIMBS};
 use crate::number_theory_impl as number_theory;
 
+mod hensel_sqrt;
+pub use hensel_sqrt::HenselSquareRoot;
+
 /// Coefficient count at or above which [`PolyZ`](crate::polynomial::PolyZ) multiplication splits
 /// Karatsuba-style instead of running the schoolbook convolution.
 ///

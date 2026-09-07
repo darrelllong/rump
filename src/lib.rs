@@ -153,8 +153,8 @@ pub mod number_theory {
 /// Univariate polynomials over ℤ and over a residue ring.
 pub mod polynomial {
     pub use crate::poly::{
-        ApproximateRoot, FactorRealError, PolyMod, PolyZ, RealFactorization, RealRootError,
-        MAX_ENUMERATED_ROOTS,
+        ApproximateRoot, FactorRealError, HenselSquareRoot, PolyMod, PolyZ, RealFactorization,
+        RealRootError, MAX_ENUMERATED_ROOTS,
     };
 }
 
