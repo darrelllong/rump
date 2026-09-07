@@ -55,6 +55,25 @@ pub fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
     a
 }
 
+/// Greatest common divisor of two double words.
+///
+/// Euclid on `u128` until both operands fit a word, then [`gcd_u64`]: a
+/// `u128` remainder is a library call, and after the first step or two the
+/// operands are at the size the hardware divides directly. For sieve
+/// coordinates that outgrow a word without earning a heap allocation.
+#[must_use]
+pub fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        if let (Ok(a64), Ok(b64)) = (u64::try_from(a), u64::try_from(b)) {
+            return u128::from(gcd_u64(a64, b64));
+        }
+        let remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    a
+}
+
 /// The top ≤124 bits of `limbs` starting at bit `shift`, as a non-negative
 /// `i128`. Callers pick `shift` so `value >> shift < 2^124`, keeping the result
 /// positive and leaving headroom for the transform's corrections. Clone-free:
@@ -3200,12 +3219,15 @@ pub fn primes_below(bound: u64) -> Vec<u64> {
     let mut composite = vec![false; odd_count];
     let number = |i: usize| 2 * (i as u64) + 3;
     let mut i = 0usize;
-    while number(i) * number(i) < bound {
+    // Squares in two words: a bound near `u64::MAX` has primes to cross
+    // from whose square leaves one.
+    let wide_bound = u128::from(bound);
+    while u128::from(number(i)) * u128::from(number(i)) < wide_bound {
         if !composite[i] {
-            let p = number(i);
+            let p = u128::from(number(i));
             // Cross out p², p²+2p, … (odd multiples of p only).
             let mut multiple = p * p;
-            while multiple < bound {
+            while multiple < wide_bound {
                 let index = usize::try_from((multiple - 3) / 2).expect("index within sieve");
                 composite[index] = true;
                 multiple += 2 * p;
@@ -3999,6 +4021,21 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn gcd_u128_agrees_with_the_wide_one() {
+        for (a, b) in [
+            (0u128, 0u128),
+            (0, 7),
+            (u128::from(u64::MAX) + 1, 6),
+            ((1u128 << 100) * 3, (1u128 << 70) * 9),
+            (u128::MAX, u128::MAX - 1),
+            (u128::MAX, 1u128 << 127),
+        ] {
+            let wide = gcd(&BigUint::from_u128(a), &BigUint::from_u128(b));
+            assert_eq!(BigUint::from_u128(gcd_u128(a, b)), wide, "gcd({a}, {b})");
         }
     }
 

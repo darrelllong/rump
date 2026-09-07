@@ -189,6 +189,30 @@ impl WordReciprocal {
         }
     }
 
+    /// `value mod divisor` for a two-word `value`: one word through
+    /// [`Self::rem`], two through the limb loop.
+    #[inline]
+    #[must_use]
+    pub fn rem_u128(&self, value: u128) -> u64 {
+        match u64::try_from(value) {
+            Ok(word) => self.rem(word),
+            Err(_) => self.rem_limbs(&[value as u64, (value >> 64) as u64]),
+        }
+    }
+
+    /// [`Self::rem_euclid_i64`] for a two-word signed `value`: the
+    /// non-negative residue in `0..divisor`, `i128::MIN` included.
+    #[inline]
+    #[must_use]
+    pub fn rem_euclid_i128(&self, value: i128) -> u64 {
+        let magnitude = self.rem_u128(value.unsigned_abs());
+        if value < 0 && magnitude != 0 {
+            self.divisor - magnitude
+        } else {
+            magnitude
+        }
+    }
+
     /// `limbs mod divisor` over a little-endian limb slice.
     pub(super) fn rem_limbs(&self, limbs: &[u64]) -> u64 {
         if limbs.is_empty() {

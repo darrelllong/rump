@@ -818,6 +818,44 @@ impl BigUint {
         (mantissa, 64)
     }
 
+    /// The nearest integer to a finite, non-negative double, or `None` for
+    /// a negative or non-finite one.
+    ///
+    /// A double is an integer significand at a power of two, so the
+    /// conversion is exact once the value is rounded: the significand is
+    /// placed at its exponent, however large. The inverse of
+    /// [`Self::to_f64_lossy`] for the values that round-trip, and the way
+    /// a size computed in floating point — a skew, a translation — becomes
+    /// an integer without passing through a word.
+    #[must_use]
+    pub fn from_f64_lossy(value: f64) -> Option<Self> {
+        if !value.is_finite() || value < 0.0 {
+            return None;
+        }
+        let rounded = value.round();
+        if rounded == 0.0 {
+            return Some(Self::from_u64(0));
+        }
+        let bits = rounded.to_bits();
+        let exponent = ((bits >> 52) & 0x7ff) as i64;
+        let fraction = bits & ((1u64 << 52) - 1);
+        let significand = if exponent == 0 {
+            fraction
+        } else {
+            fraction | (1u64 << 52)
+        };
+        // rounded = significand · 2^(exponent − 1075).
+        let shift = exponent - 1075;
+        let mut integer = Self::from_u64(significand);
+        if shift >= 0 {
+            integer.shl_bits(shift as usize);
+        } else {
+            // An integer below 2⁵³: the bits shifted out are zero.
+            integer.shr_bits((-shift) as usize);
+        }
+        Some(integer)
+    }
+
     /// The value as an `f64` — the lossy narrowing the parameter heuristics
     /// of factoring and lattice work are written in terms of. The result is
     /// within one unit in the last place of the true value (the top 64 bits
@@ -3198,6 +3236,19 @@ impl BigInt {
         self.sign
     }
 
+    /// [`BigUint::from_f64_lossy`] with the sign: the nearest integer to a
+    /// finite double, or `None` for a non-finite one.
+    #[must_use]
+    pub fn from_f64_lossy(value: f64) -> Option<Self> {
+        let magnitude = BigUint::from_f64_lossy(value.abs())?;
+        let integer = Self::from_biguint(magnitude);
+        Some(if value < 0.0 {
+            integer.negated()
+        } else {
+            integer
+        })
+    }
+
     /// The nearest `f64`, sign included: [`BigUint::to_f64_lossy`] on the
     /// magnitude, negated for a negative value.
     #[must_use]
@@ -3589,6 +3640,49 @@ impl BigInt {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_double_becomes_the_integer_it_is() {
+        for value in [
+            0.0f64,
+            1.0,
+            2.5,
+            3.5,
+            1e15,
+            2f64.powi(53),
+            2f64.powi(90) * 1.5,
+            1e300,
+        ] {
+            let integer = BigUint::from_f64_lossy(value).expect("finite and non-negative");
+            let expected = value.round();
+            assert_eq!(
+                integer.to_f64_lossy(),
+                expected,
+                "{value} became {integer:?}"
+            );
+            if expected >= 2f64.powi(53) {
+                // Exact: a double this large is an integer, and its
+                // significand sits at its exponent.
+                let bits = expected.to_bits();
+                let significand = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+                let exponent = ((bits >> 52) & 0x7ff) as usize - 1075;
+                let mut exact = BigUint::from_u64(significand);
+                exact.shl_bits(exponent);
+                assert_eq!(integer, exact);
+            }
+        }
+        assert!(BigUint::from_f64_lossy(-1.0).is_none());
+        assert!(BigUint::from_f64_lossy(f64::NAN).is_none());
+        assert!(BigUint::from_f64_lossy(f64::INFINITY).is_none());
+        assert_eq!(
+            BigInt::from_f64_lossy(-2.5).expect("finite"),
+            BigInt::from_i64(-3)
+        );
+        assert_eq!(
+            BigInt::from_f64_lossy(-1e20).expect("finite"),
+            BigInt::from_i128(-100_000_000_000_000_000_000)
+        );
+        assert!(BigInt::from_f64_lossy(f64::NEG_INFINITY).is_none());
+    }
 
     #[test]
     fn symmetric_rem_is_congruent_and_smallest() {
@@ -3799,6 +3893,16 @@ mod tests {
             for value in values {
                 let got = r.rem_euclid_i64(value);
                 assert!(got < divisor, "residue {got} not below {divisor}");
+                // The two-word form agrees on every one-word value, and on
+                // the value widened by a word.
+                assert_eq!(r.rem_euclid_i128(i128::from(value)), got);
+                let wide = i128::from(value) << 64 | i128::from(value.unsigned_abs() >> 1);
+                let wide_expected = BigInt::from_i128(wide).rem_euclid(&BigUint::from_u64(divisor));
+                assert_eq!(
+                    BigUint::from_u64(r.rem_euclid_i128(wide)),
+                    wide_expected,
+                    "rem_euclid_i128({wide}) by {divisor}"
+                );
                 if let Ok(signed) = i64::try_from(divisor) {
                     assert_eq!(
                         got,

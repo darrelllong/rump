@@ -75,6 +75,11 @@ impl SparseMatrix {
     /// Panics if a row is not strictly ascending or reaches `columns`.
     #[must_use]
     pub fn new(columns: usize, rows: Vec<Vec<u32>>) -> Self {
+        assert!(
+            u32::try_from(rows.len()).is_ok() && u32::try_from(columns).is_ok(),
+            "{} rows by {columns} columns: the filter indexes both in thirty-two bits",
+            rows.len()
+        );
         for (index, row) in rows.iter().enumerate() {
             assert!(
                 row.windows(2).all(|pair| pair[0] < pair[1]),
@@ -94,6 +99,11 @@ impl SparseMatrix {
     /// `columns` are ignored.
     #[must_use]
     pub fn from_packed(rows: &[Vec<u64>], columns: usize) -> Self {
+        assert!(
+            u32::try_from(rows.len()).is_ok() && u32::try_from(columns).is_ok(),
+            "{} rows by {columns} columns: the filter indexes both in thirty-two bits",
+            rows.len()
+        );
         let words = words_for(columns);
         let rows = rows
             .iter()

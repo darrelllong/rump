@@ -370,6 +370,11 @@ impl Sparse {
 
     /// From each relation's ascending column list.
     fn from_lists(by_relation: Vec<Vec<u32>>, columns: usize, threads: usize) -> Self {
+        assert!(
+            u32::try_from(by_relation.len()).is_ok() && u32::try_from(columns).is_ok(),
+            "{} rows by {columns} columns: the solver indexes both in thirty-two bits",
+            by_relation.len()
+        );
         let mut by_column = vec![Vec::new(); columns];
         for (index, row) in by_relation.iter().enumerate() {
             for &column in row {
