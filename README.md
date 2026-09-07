@@ -59,7 +59,9 @@ the breaking API cut uses no compatibility shims or duplicate public paths.
 - **`PolyZ`, `PolyMod`** — dense univariate polynomials over ℤ and 𝔽ₚ:
   exact and pseudo-division, resultant and discriminant (Bareiss),
   squarefree/distinct-degree/Cantor–Zassenhaus factorization,
-  `is_irreducible`, and `roots`.
+  `is_irreducible`, `roots`, square roots in 𝔽_{q^d} (`sqrt_in_field`),
+  and `HenselSquareRoot`, the p-adic Newton lift of a square root in
+  ℤ[x]/(f) from q to q^k.
 - **`lll_reduce`, `lll_reduce_delta`** — integral LLL lattice basis
   reduction (Cohen's Algorithm 2.6.3), exact integer Gram data throughout.
 
