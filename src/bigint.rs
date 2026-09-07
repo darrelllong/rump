@@ -3198,6 +3198,17 @@ impl BigInt {
         self.sign
     }
 
+    /// The nearest `f64`, sign included: [`BigUint::to_f64_lossy`] on the
+    /// magnitude, negated for a negative value.
+    #[must_use]
+    pub fn to_f64_lossy(&self) -> f64 {
+        let magnitude = self.magnitude.to_f64_lossy();
+        match self.sign {
+            Sign::Negative => -magnitude,
+            _ => magnitude,
+        }
+    }
+
     /// Borrow the absolute value. Sign and magnitude are stored apart, so
     /// `|self|` is a borrow rather than a computation, and the unsigned
     /// kernels can be applied to it directly.
