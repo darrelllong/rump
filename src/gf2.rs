@@ -1,5 +1,5 @@
-//! Linear algebra over GF(2): dense null space, singleton pruning, and
-//! Block Lanczos.
+//! Linear algebra over GF(2): dense null space, singleton pruning,
+//! structured elimination on sparse rows ([`filter`]), and Block Lanczos.
 //!
 //! Solving `Mx = 0` over GF(2) for a large sparse `M` is not a factoring
 //! problem, though factoring is where it is most often met: it is the same
@@ -26,6 +26,10 @@
 use std::sync::{mpsc, Arc};
 
 use crate::random::RandomSource;
+
+#[path = "gf2/filter.rs"]
+mod filter;
+pub use filter::{filter_merge, FilteredMatrix, SparseMatrix};
 
 /// Bits per storage word.
 const WORD: usize = 64;
@@ -353,26 +357,26 @@ struct Sparse {
 impl Sparse {
     fn from_packed(rows: &[Vec<u64>], columns: usize, threads: usize) -> Self {
         let words = columns.div_ceil(WIDTH);
-        let mut by_relation = Vec::with_capacity(rows.len());
+        let by_relation = rows
+            .iter()
+            .map(|row| {
+                set_bits(row, words, columns)
+                    .map(|column| column as u32)
+                    .collect()
+            })
+            .collect();
+        Self::from_lists(by_relation, columns, threads)
+    }
+
+    /// From each relation's ascending column list.
+    fn from_lists(by_relation: Vec<Vec<u32>>, columns: usize, threads: usize) -> Self {
         let mut by_column = vec![Vec::new(); columns];
-        for (index, row) in rows.iter().enumerate() {
-            let mut set = Vec::new();
-            for word in 0..words {
-                let mut bits = row.get(word).copied().unwrap_or(0);
-                if word == words - 1 && !columns.is_multiple_of(WIDTH) {
-                    bits &= (1u64 << (columns % WIDTH)) - 1;
-                }
-                while bits != 0 {
-                    let bit = bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    let column = word * WIDTH + bit;
-                    set.push(column as u32);
-                    by_column[column].push(index as u32);
-                }
+        for (index, row) in by_relation.iter().enumerate() {
+            for &column in row {
+                by_column[column as usize].push(index as u32);
             }
-            by_relation.push(set);
         }
-        let useful = (rows.len().max(columns) / MINIMUM_FOLDS_PER_WORKER).max(1);
+        let useful = (by_relation.len().max(columns) / MINIMUM_FOLDS_PER_WORKER).max(1);
         Self {
             by_relation: Arc::new(by_relation),
             by_column: Arc::new(by_column),
@@ -787,6 +791,56 @@ pub fn block_lanczos_dependencies<R: RandomSource + ?Sized>(
         return None;
     }
     let matrix = Sparse::from_packed(rows, columns, threads);
+    lanczos(&matrix, rng, |indices| {
+        // Checked against the caller's own rows, not against anything this
+        // module computed.
+        let mut total = vec![0u64; columns.div_ceil(WIDTH)];
+        for &index in indices {
+            xor_into(&mut total, &rows[index]);
+        }
+        if !columns.is_multiple_of(WIDTH) {
+            let last = total.len() - 1;
+            total[last] &= (1u64 << (columns % WIDTH)) - 1;
+        }
+        !any(&total)
+    })
+}
+
+/// [`block_lanczos_dependencies`] over a [`SparseMatrix`]: the same
+/// iteration, the same checks, and the same result for the same rows and
+/// random source, without packing a sieve matrix one bit per column first.
+#[must_use]
+pub fn block_lanczos_dependencies_sparse<R: RandomSource + ?Sized>(
+    matrix: &SparseMatrix,
+    rng: &mut R,
+    threads: usize,
+) -> Option<Vec<Vec<usize>>> {
+    if matrix.rows().is_empty() || matrix.columns() == 0 {
+        return None;
+    }
+    let sparse = Sparse::from_lists(matrix.rows().to_vec(), matrix.columns(), threads);
+    lanczos(&sparse, rng, |indices| {
+        // The XOR of the chosen rows is zero exactly when every column they
+        // touch is touched an even number of times.
+        let mut touched: Vec<u32> = indices
+            .iter()
+            .flat_map(|&index| matrix.rows()[index].iter().copied())
+            .collect();
+        touched.sort_unstable();
+        touched
+            .chunk_by(|a, b| a == b)
+            .all(|run| run.len().is_multiple_of(2))
+    })
+}
+
+/// Montgomery's iteration over `A = MᵀM`, ending with the candidates
+/// filtered by `is_null`, the caller's own test that a set of row indices
+/// XORs to zero.
+fn lanczos<R: RandomSource + ?Sized>(
+    matrix: &Sparse,
+    rng: &mut R,
+    is_null: impl Fn(&[usize]) -> bool,
+) -> Option<Vec<Vec<usize>>> {
     let count = matrix.relations();
 
     // The starting block is random; rump chooses no entropy source, so the
@@ -902,17 +956,7 @@ pub fn block_lanczos_dependencies<R: RandomSource + ?Sized>(
         if indices.is_empty() {
             continue;
         }
-        // Checked against the caller's own rows, not against anything this
-        // module computed.
-        let mut total = vec![0u64; columns.div_ceil(WIDTH)];
-        for &index in &indices {
-            xor_into(&mut total, &rows[index]);
-        }
-        if !columns.is_multiple_of(WIDTH) {
-            let last = total.len() - 1;
-            total[last] &= (1u64 << (columns % WIDTH)) - 1;
-        }
-        if !any(&total) {
+        if is_null(&indices) {
             found.push(indices);
         }
     }
@@ -1389,520 +1433,5 @@ mod tests {
         assert_eq!(pruned.rows().len(), 3);
         assert_eq!(pruned.columns(), 2);
         assert_eq!(pruned.original(), &[0, 1, 2]);
-    }
-}
-
-/// A filtered `GF(2)` matrix: rows merged and pruned, each carrying the set
-/// of original rows it is the sum of.
-///
-/// The classical NFS filtering step (structured Gaussian elimination —
-/// Lenstra & Manasse's large-prime experience made it standard, and the
-/// modern treatment is Bouillaguet & Zimmermann, *Parallel Structured
-/// Gaussian Elimination for the Number Field Sieve*, 2019): columns of low
-/// weight are eliminated by combining the rows that share them, shrinking
-/// the matrix the solver sees. Correctness travels with the data rather
-/// than a separate history: every surviving row records which original
-/// rows it is the XOR of, so a dependency over the filtered matrix expands
-/// to the original by symmetric difference of those sets — an identity a
-/// test can check directly against the original rows.
-#[derive(Clone, Debug)]
-pub struct FilteredMatrix {
-    rows: Vec<Vec<u64>>,
-    columns: usize,
-    live_columns: usize,
-    /// Ascending original-row indices whose XOR is the corresponding row.
-    compositions: Vec<Vec<usize>>,
-}
-
-impl FilteredMatrix {
-    /// The surviving rows, packed as the input was.
-    #[must_use]
-    pub fn rows(&self) -> &[Vec<u64>] {
-        &self.rows
-    }
-
-    /// The column count, unchanged from the input; eliminated columns are
-    /// simply empty. This is the width the packed rows carry, and what the
-    /// solvers must be told.
-    #[must_use]
-    pub fn columns(&self) -> usize {
-        self.columns
-    }
-
-    /// Columns still touched by a surviving row. This — not [`Self::columns`]
-    /// — is the number an over-determination test must compare row counts
-    /// against: comparing against the full width once declared every
-    /// filtered matrix under-determined and sent a run widening forever,
-    /// since filtering removes a row per eliminated column but the width
-    /// never moves.
-    #[must_use]
-    pub fn live_columns(&self) -> usize {
-        self.live_columns
-    }
-
-    /// The original rows whose XOR forms filtered row `index`.
-    #[must_use]
-    pub fn composition(&self, index: usize) -> &[usize] {
-        &self.compositions[index]
-    }
-
-    /// Expands a dependency over the filtered rows to one over the
-    /// original rows, by symmetric difference of the compositions.
-    #[must_use]
-    pub fn expand(&self, dependency: &[usize]) -> Vec<usize> {
-        let mut counts: std::collections::BTreeMap<usize, u32> = std::collections::BTreeMap::new();
-        for &row in dependency {
-            for &original in &self.compositions[row] {
-                *counts.entry(original).or_insert(0) += 1;
-            }
-        }
-        counts
-            .into_iter()
-            .filter_map(|(original, count)| (count % 2 == 1).then_some(original))
-            .collect()
-    }
-}
-
-/// A minimum spanning tree over the given rows, edges weighted by the
-/// popcount of each pair's XOR, grown one nearest vertex at a time — the
-/// algorithm of Jarník (*O jistém problému minimálním*, Práce Moravské
-/// přírodovědecké společnosti 6 (1930), 57–63), rediscovered by Prim
-/// (Bell System Tech. J. 36 (1957), 1389–1401) and usually named for him.
-///
-/// Returns the root, a parent map, and a leaves-first order (children before
-/// parents). The root is the highest-weight member — discarding the heaviest
-/// row is the natural elimination choice — and the tree's total edge weight
-/// is the fill the column costs (Cavallar, *Strategies in filtering in the
-/// number field sieve*, ANTS-IV, LNCS 1838 (2000), 209–231; Bouillaguet &
-/// Zimmermann, *Parallel Structured Gaussian Elimination for the Number
-/// Field Sieve*, 2019, §3).
-type SpanningTree = (usize, std::collections::HashMap<usize, usize>, Vec<usize>);
-
-fn minimum_spanning_tree(members: &[usize], rows: &[Vec<u64>]) -> SpanningTree {
-    let xor_weight = |a: usize, b: usize| -> u32 {
-        rows[a]
-            .iter()
-            .zip(&rows[b])
-            .map(|(x, y)| (x ^ y).count_ones())
-            .sum()
-    };
-    let root = *members
-        .iter()
-        .max_by_key(|&&r| rows[r].iter().map(|w| w.count_ones()).sum::<u32>())
-        .expect("a column of weight >= 2 has members");
-    let mut in_tree = vec![root];
-    let mut parents: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-    let mut remaining: Vec<usize> = members.iter().copied().filter(|&m| m != root).collect();
-    let mut order = Vec::new();
-    while !remaining.is_empty() {
-        let mut best = (u32::MAX, 0usize, 0usize); // (weight, member, parent)
-        for &member in &remaining {
-            for &node in &in_tree {
-                let weight = xor_weight(member, node);
-                if weight < best.0 {
-                    best = (weight, member, node);
-                }
-            }
-        }
-        let (_, member, parent) = best;
-        parents.insert(member, parent);
-        in_tree.push(member);
-        order.push(member);
-        remaining.retain(|&m| m != member);
-    }
-    order.reverse();
-    (root, parents, order)
-}
-
-/// Filters a matrix by singleton pruning and low-weight column merges.
-///
-/// Repeats to a fixed point: a column touched by exactly one live row
-/// removes that row (nothing can cancel it); a column touched by exactly
-/// `2..=merge_bound` rows is eliminated by XOR-ing one of them — the
-/// lightest, the Markowitz-style choice at this weight — into the others,
-/// which removes the column and one row. Each merge records itself in the
-/// survivors' compositions, so [`FilteredMatrix::expand`] is exact by
-/// construction and the differential test checks the identity
-/// `XOR(expanded originals) = 0` for every dependency of the filtered
-/// matrix.
-///
-/// `merge_bound` of one is pruning alone; two is always profitable (one
-/// row and one column leave together, and no row gains weight beyond the
-/// pair's union); higher bounds trade density for dimension and belong to
-/// measurement.
-#[must_use]
-pub fn filter_merge(rows: &[Vec<u64>], columns: usize, merge_bound: usize) -> FilteredMatrix {
-    let words = words_for(columns);
-    let mut work: Vec<Vec<u64>> = rows.to_vec();
-    let mut compositions: Vec<Vec<usize>> = (0..rows.len()).map(|i| vec![i]).collect();
-    let mut live = vec![true; rows.len()];
-
-    // Column incidence, maintained incrementally as row lists. A first
-    // draft re-scanned every row per candidate column, which is quadratic
-    // and froze at real sieve sizes; the lists make each merge touch only
-    // the rows and columns it changes. Retired row indices linger in the
-    // lists and are skipped on read — cheaper than eager removal, and the
-    // occupancy counts stay exact.
-    let mut incidence: Vec<Vec<usize>> = vec![Vec::new(); columns];
-    let mut occupants = vec![0usize; columns];
-    for (index, row) in work.iter().enumerate() {
-        for column in set_bits(row, words, columns) {
-            incidence[column].push(index);
-            occupants[column] += 1;
-        }
-    }
-
-    let bound = merge_bound.max(1);
-    // A min-heap of (weight, column) with lazy invalidation: every
-    // occupancy change pushes a fresh entry, and a popped entry whose
-    // recorded weight no longer matches the column's is stale and dropped.
-    // Lightest first is Markowitz's rule (*The elimination form of the
-    // inverse and its application to linear programming*, Management
-    // Science 3 (1957), 255–269) — a singleton beats a pair beats a
-    // triple — and the heap makes the whole filter
-    // O((nonzeros + merges)·log n), where the first draft's per-column row
-    // rescans were quadratic and a stack worklist still let hot columns
-    // recompact long lists repeatedly. Ties break on the column index, so
-    // the order, and therefore the output, is deterministic.
-    use core::cmp::Reverse;
-    let mut heap: std::collections::BinaryHeap<Reverse<(usize, usize)>> =
-        std::collections::BinaryHeap::new();
-    for (column, &occupancy) in occupants.iter().enumerate() {
-        if occupancy != 0 && occupancy <= bound {
-            heap.push(Reverse((occupancy, column)));
-        }
-    }
-
-    while let Some(Reverse((recorded, column))) = heap.pop() {
-        let weight = occupants[column];
-        if weight != recorded || weight == 0 || weight > bound {
-            continue; // stale entry, superseded by a later push
-        }
-        // Compact the incidence list to live members that still hold the
-        // column (a merge may have cancelled it out of a row).
-        incidence[column].retain(|&r| live[r] && bit_is_set(&work[r], column));
-        // Retirement is lazy, so a row that lost this column to one merge
-        // and regained it in another is listed twice; the compaction must
-        // collapse those or the members outnumber the occupancy.
-        incidence[column].sort_unstable();
-        incidence[column].dedup();
-        let members = incidence[column].clone();
-        debug_assert_eq!(members.len(), weight, "occupancy drifted from incidence");
-        let requeue =
-            |touched: usize, occupants: &[usize], heap: &mut std::collections::BinaryHeap<_>| {
-                if occupants[touched] != 0 && occupants[touched] <= bound {
-                    heap.push(Reverse((occupants[touched], touched)));
-                }
-            };
-        if weight == 1 {
-            let victim = members[0];
-            live[victim] = false;
-            for touched in set_bits(&work[victim], words, columns) {
-                occupants[touched] -= 1;
-                requeue(touched, &occupants, &mut heap);
-            }
-            continue;
-        }
-        // Eliminate along the minimum spanning tree of the members rather
-        // than a star from one pivot: a star adds the pivot into every
-        // other member and carries its cancellations everywhere, while the
-        // tree spends the least total fill. At weight two the tree is the
-        // one edge a star also uses, so this subsumes that case exactly.
-        let (root, parents, order) = minimum_spanning_tree(&members, &work);
-        for &member in &order {
-            let parent = parents[&member];
-            let parent_row = work[parent].clone();
-            let parent_composition = compositions[parent].clone();
-            let before = work[member].clone();
-            for touched in set_bits(&before, words, columns) {
-                occupants[touched] -= 1;
-            }
-            for (word, parent_word) in work[member].iter_mut().zip(&parent_row) {
-                *word ^= parent_word;
-            }
-            // A column the member cancelled out of has lost a holder and may
-            // have dropped to the bound, or to a singleton; it is requeued
-            // like any other occupancy change, or the fixed point the doc
-            // promises is not reached. (Found by review: the gains below were
-            // requeued and the losses were not.)
-            for touched in set_bits(&before, words, columns) {
-                if !bit_is_set(&work[member], touched) {
-                    requeue(touched, &occupants, &mut heap);
-                }
-            }
-            for touched in set_bits(&work[member], words, columns) {
-                occupants[touched] += 1;
-                // Only a column the member did not already hold gains a
-                // list entry: the member is still listed under the columns
-                // it kept, and listing it twice would let a later compaction
-                // count it twice against an occupancy that counts it once.
-                if !bit_is_set(&before, touched) {
-                    incidence[touched].push(member);
-                }
-                requeue(touched, &occupants, &mut heap);
-            }
-            compositions[member] = symmetric_difference(&compositions[member], &parent_composition);
-        }
-        let root_row = work[root].clone();
-        live[root] = false;
-        for touched in set_bits(&root_row, words, columns) {
-            occupants[touched] -= 1;
-            requeue(touched, &occupants, &mut heap);
-        }
-    }
-
-    let mut kept_rows = Vec::new();
-    let mut kept_compositions = Vec::new();
-    for (index, alive) in live.iter().enumerate() {
-        if *alive {
-            kept_rows.push(work[index].clone());
-            kept_compositions.push(compositions[index].clone());
-        }
-    }
-    let live_columns = occupants.iter().filter(|&&count| count > 0).count();
-    FilteredMatrix {
-        rows: kept_rows,
-        columns,
-        live_columns,
-        compositions: kept_compositions,
-    }
-}
-
-/// Whether `column` is set in a packed row.
-fn bit_is_set(row: &[u64], column: usize) -> bool {
-    row[column / 64] & (1u64 << (column % 64)) != 0
-}
-
-/// The symmetric difference of two ascending index lists, ascending.
-fn symmetric_difference(a: &[usize], b: &[usize]) -> Vec<usize> {
-    let mut out = Vec::with_capacity(a.len() + b.len());
-    let (mut i, mut j) = (0, 0);
-    while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
-            core::cmp::Ordering::Less => {
-                out.push(a[i]);
-                i += 1;
-            }
-            core::cmp::Ordering::Greater => {
-                out.push(b[j]);
-                j += 1;
-            }
-            core::cmp::Ordering::Equal => {
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    out.extend_from_slice(&a[i..]);
-    out.extend_from_slice(&b[j..]);
-    out
-}
-
-#[cfg(test)]
-mod filter_tests {
-    use super::*;
-
-    /// The splitmix64 output finalizer (Stafford's Mix13, as fixed in
-    /// Vigna's splitmix64 reference implementation): a bijective mixer
-    /// whose output bits all depend on all input bits. A raw
-    /// power-of-two-modulus LCG must not be reduced by a small modulus —
-    /// its low bits have short periods, and `% density` on them once
-    /// selected the same column set in every row, a bimodal "random"
-    /// matrix no filter could shrink.
-    fn mix(value: u64) -> u64 {
-        let mut z = value;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    }
-
-    fn random_matrix(seed: u64, rows: usize, columns: usize, density: u64) -> Vec<Vec<u64>> {
-        let words = words_for(columns);
-        let mut state = seed;
-        let mut next = move || {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            state
-        };
-        (0..rows)
-            .map(|_| {
-                let mut row = vec![0u64; words];
-                for column in 0..columns {
-                    if mix(next()).is_multiple_of(density) {
-                        row[column / 64] |= 1 << (column % 64);
-                    }
-                }
-                row
-            })
-            .collect()
-    }
-
-    fn xor_of(rows: &[Vec<u64>], picks: &[usize]) -> Vec<u64> {
-        let mut sum = vec![0u64; rows[0].len()];
-        for &pick in picks {
-            for (word, source) in sum.iter_mut().zip(&rows[pick]) {
-                *word ^= source;
-            }
-        }
-        sum
-    }
-
-    #[test]
-    fn every_filtered_dependency_expands_to_a_null_original_combination() {
-        // The identity the whole design carries: a dependency of the
-        // filtered matrix, expanded through the compositions, must XOR the
-        // original rows to zero. Checked across random matrices and every
-        // merge bound in the practical range.
-        for seed in 1..=20u64 {
-            let columns = 96;
-            let rows = random_matrix(seed, 128, columns, 12);
-            for merge_bound in [1usize, 2, 4, 8] {
-                let filtered = filter_merge(&rows, columns, merge_bound);
-                let dependencies = dense_null_space(filtered.rows(), columns);
-                for dependency in dependencies.iter().take(4) {
-                    let expanded = filtered.expand(dependency);
-                    assert!(!expanded.is_empty(), "an empty dependency proves nothing");
-                    let sum = xor_of(&rows, &expanded);
-                    assert!(
-                        sum.iter().all(|&w| w == 0),
-                        "seed {seed} bound {merge_bound}: expansion does not vanish"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn merging_never_loses_solvability() {
-        // If the original matrix is over-determined enough to hold a
-        // dependency, the filtered one must still hold one: merging is
-        // row-space-preserving on the quotient, and pruning removes only
-        // rows no dependency can use.
-        for seed in 40..=48u64 {
-            let columns = 64;
-            let rows = random_matrix(seed, 90, columns, 10);
-            let original = dense_null_space(&rows, columns);
-            if original.is_empty() {
-                continue;
-            }
-            let filtered = filter_merge(&rows, columns, 4);
-            assert!(
-                !dense_null_space(filtered.rows(), columns).is_empty(),
-                "seed {seed}: filtering lost every dependency"
-            );
-        }
-    }
-
-    #[test]
-    fn sieve_sized_matrices_filter_in_sieve_sized_time() {
-        // The first draft was quadratic in ways 128-row tests cannot see:
-        // it froze on its first real sieve matrix. This case is big enough
-        // that any such regression turns a hundredth of a second into
-        // minutes and fails on the suite's patience rather than silently.
-        // The dense shape carries the nonzeros; at this density no column
-        // is light enough to merge, so the assertion is completion and the
-        // expansion identity, not shrinkage.
-        let columns = 4_000;
-        let rows = random_matrix(7, 4_600, columns, 160);
-        let filtered = filter_merge(&rows, columns, 2);
-        let dependencies = dense_null_space(filtered.rows(), columns);
-        if let Some(dependency) = dependencies.first() {
-            let expanded = filtered.expand(dependency);
-            let sum = xor_of(&rows, &expanded);
-            assert!(sum.iter().all(|&w| w == 0));
-        }
-        // The sparse shape is where light columns abound and the filter
-        // must actually shrink the matrix.
-        let sparse = random_matrix(11, 4_600, columns, 1_600);
-        let filtered = filter_merge(&sparse, columns, 2);
-        assert!(
-            filtered.rows().len() < sparse.len(),
-            "a sparse matrix full of light columns did not shrink"
-        );
-    }
-
-    #[test]
-    fn higher_k_merges_preserve_the_expansion_identity() {
-        // The MST elimination for weight k >= 3 must keep the same
-        // correctness identity as the weight-two path: every dependency of
-        // the filtered matrix, expanded through the compositions, XORs the
-        // original rows to zero. Bounds 3 and 4 exercise trees with real
-        // depth, not just a single edge.
-        for seed in 100..=120u64 {
-            let columns = 80;
-            let rows = random_matrix(seed, 110, columns, 24);
-            for merge_bound in [3usize, 4, 6] {
-                let filtered = filter_merge(&rows, columns, merge_bound);
-                for dependency in dense_null_space(filtered.rows(), columns).iter().take(3) {
-                    let expanded = filtered.expand(dependency);
-                    assert!(!expanded.is_empty());
-                    let sum = xor_of(&rows, &expanded);
-                    assert!(
-                        sum.iter().all(|&w| w == 0),
-                        "seed {seed} bound {merge_bound}: MST expansion does not vanish"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn a_higher_bound_reduces_at_least_as_far() {
-        // More merge freedom cannot leave a larger matrix: every column a
-        // lower bound eliminates a higher bound eliminates too. Checked on
-        // a sparse matrix where higher-weight columns actually exist to
-        // merge.
-        let columns = 1_000;
-        let rows = random_matrix(303, 1_200, columns, 300);
-        let bound2 = filter_merge(&rows, columns, 2).rows().len();
-        let bound4 = filter_merge(&rows, columns, 4).rows().len();
-        assert!(
-            bound4 <= bound2,
-            "bound 4 kept {bound4} rows, bound 2 kept {bound2}"
-        );
-    }
-
-    #[test]
-    fn live_columns_track_the_filtering() {
-        // The over-determination contract: an input with more rows than
-        // live columns must still show that relationship after filtering,
-        // because each elimination retires a row and a column together.
-        let columns = 4_000;
-        let sparse = random_matrix(13, 4_600, columns, 1_600);
-        let filtered = filter_merge(&sparse, columns, 2);
-        assert!(filtered.live_columns() <= filtered.columns());
-        // Count nonempty columns independently.
-        let mut seen = vec![false; columns];
-        for row in filtered.rows() {
-            for c in 0..columns {
-                if row[c / 64] & (1 << (c % 64)) != 0 {
-                    seen[c] = true;
-                }
-            }
-        }
-        assert_eq!(
-            seen.iter().filter(|&&s| s).count(),
-            filtered.live_columns(),
-            "live column count disagrees with the rows"
-        );
-    }
-
-    #[test]
-    fn a_bound_of_two_strictly_shrinks_a_mergeable_matrix() {
-        // Two rows sharing an otherwise-unused column must collapse.
-        let columns = 8;
-        let mut rows = vec![vec![0u64], vec![0u64], vec![0u64], vec![0u64]];
-        rows[0][0] = 0b0000_0011; // columns 0,1
-        rows[1][0] = 0b0000_0110; // columns 1,2  (column 1 weight 2)
-        rows[2][0] = 0b0000_1100; // columns 2,3
-        rows[3][0] = 0b0000_0101; // columns 0,2
-        let filtered = filter_merge(&rows, columns, 2);
-        assert!(filtered.rows().len() < rows.len());
-        for (index, row) in filtered.rows().iter().enumerate() {
-            let expanded = filtered.composition(index);
-            let sum = xor_of(&rows, expanded);
-            assert_eq!(&sum, row, "composition does not reproduce its row");
-        }
     }
 }

@@ -158,11 +158,11 @@ pub mod polynomial {
     };
 }
 
-/// Linear algebra over GF(2): null space, pruning, Block Lanczos.
+/// Linear algebra over GF(2): null space, pruning, structured elimination, Block Lanczos.
 pub mod gf2 {
     pub use crate::gf2_impl::{
-        block_lanczos_dependencies, dense_null_space, filter_merge, prune_singletons,
-        FilteredMatrix, PrunedMatrix,
+        block_lanczos_dependencies, block_lanczos_dependencies_sparse, dense_null_space,
+        filter_merge, prune_singletons, FilteredMatrix, PrunedMatrix, SparseMatrix,
     };
 }
 
