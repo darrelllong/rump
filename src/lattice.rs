@@ -69,6 +69,76 @@ pub fn lll_reduce(basis: &mut [Vec<BigInt>]) {
 ///
 /// An empty basis is reduced vacuously and returns without panicking.
 pub fn lll_reduce_delta(basis: &mut [Vec<BigInt>], delta_num: u64, delta_den: u64) {
+    lll_reduce_with(basis, delta_num, delta_den, &dot);
+}
+
+/// Reduce `basis` in place under the quadratic form `form`: the inner
+/// product is `⟨u, v⟩ = uᵀ·form·v` in place of the dot product, so the
+/// reduced basis is short in the norm the form induces rather than the
+/// Euclidean one.
+///
+/// The same Algorithm 2.6.3 of Cohen: LLL never looks at coordinates, only
+/// at inner products, and an integral form keeps every Gram–Schmidt
+/// quantity in `ℤ` exactly as the dot product does. What it is for: a
+/// lattice whose vectors are measured by something other than their
+/// coordinates — the coefficients of a polynomial measured by the `L²`
+/// integral of the polynomial over a region, say, whose Gram matrix over
+/// the monomials is a dense form (Herrmann, May & Ritzenhofen, *Polynomial
+/// selection using lattices*, Factoring 2009 workshop, for that use).
+///
+/// `form` must be square with the rows' length, symmetric, and positive
+/// definite; the first two are checked, and the third shows as a Gram
+/// determinant failing to be positive, which panics as a dependent basis
+/// would.
+///
+/// # Panics
+///
+/// As [`lll_reduce_delta`], and if `form` is not square of the rows'
+/// length or not symmetric.
+pub fn lll_reduce_form(
+    basis: &mut [Vec<BigInt>],
+    form: &[Vec<BigInt>],
+    delta_num: u64,
+    delta_den: u64,
+) {
+    if let Some(first) = basis.first() {
+        let m = first.len();
+        assert!(
+            form.len() == m && form.iter().all(|row| row.len() == m),
+            "the form must be square of the vectors' length"
+        );
+        for (i, row) in form.iter().enumerate() {
+            for (j, entry) in row.iter().enumerate() {
+                assert!(*entry == form[j][i], "the form must be symmetric");
+            }
+        }
+    }
+    let inner = |u: &[BigInt], v: &[BigInt]| -> BigInt {
+        let mut acc = BigInt::zero();
+        for (i, a) in u.iter().enumerate() {
+            if a.is_zero() {
+                continue;
+            }
+            let mut row = BigInt::zero();
+            for (j, b) in v.iter().enumerate() {
+                if !b.is_zero() && !form[i][j].is_zero() {
+                    row = row.add(&form[i][j].mul(b));
+                }
+            }
+            acc = acc.add(&a.mul(&row));
+        }
+        acc
+    };
+    lll_reduce_with(basis, delta_num, delta_den, &inner);
+}
+
+/// The reduction, with the inner product supplied.
+fn lll_reduce_with(
+    basis: &mut [Vec<BigInt>],
+    delta_num: u64,
+    delta_den: u64,
+    dot: &dyn Fn(&[BigInt], &[BigInt]) -> BigInt,
+) {
     assert!(delta_den > 0, "delta denominator must be positive");
     // 1/4 < δ < 1. Compare in u128 so a large numerator cannot overflow the
     // `4·delta_num` term and turn a valid δ into a false rejection.
@@ -97,7 +167,10 @@ pub fn lll_reduce_delta(basis: &mut [Vec<BigInt>], delta_num: u64, delta_den: u6
     let mut d = vec![BigInt::zero(); n + 1];
     d[0] = BigInt::one();
     d[1] = dot(&basis[0], &basis[0]);
-    assert!(!d[1].is_zero(), "linearly dependent basis (zero vector)");
+    assert!(
+        d[1].sign() == crate::bigint::Sign::Positive,
+        "linearly dependent basis (zero vector), or a form that is not positive definite"
+    );
     let mut lam = vec![vec![BigInt::zero(); n + 1]; n + 1];
 
     let mut k = 2usize;
@@ -123,7 +196,10 @@ pub fn lll_reduce_delta(basis: &mut [Vec<BigInt>], delta_num: u64, delta_den: u6
                     // u is now the Gram determinant of b_1..b_k, which
                     // vanishes exactly when those rows are dependent. The
                     // divisions above were by d_1..d_{k-1}, already checked.
-                    assert!(!u.is_zero(), "linearly dependent basis");
+                    assert!(
+                        u.sign() == crate::bigint::Sign::Positive,
+                        "linearly dependent basis, or a form that is not positive definite"
+                    );
                     d[k] = u;
                 }
             }
@@ -504,6 +580,8 @@ pub fn gauss_reduce_weighted(
 
 #[cfg(test)]
 mod tests {
+    use super::lll_reduce_form;
+
     use super::{gauss_reduce_weighted, lll_reduce, lll_reduce_delta, weighted_norm_sq};
     use crate::bigint::{BigInt, Sign};
     use core::num::NonZeroU64;
@@ -1089,5 +1167,88 @@ mod tests {
         // Second row is twice the first: rank 1, not a basis of ℤ².
         let mut basis = rows(&[&[1, 2], &[2, 4]]);
         lll_reduce(&mut basis);
+    }
+
+    /// The identity form is the dot product, and a diagonal form is the
+    /// reduction of the scaled basis: `lll_reduce_form` agrees with
+    /// `lll_reduce` on both.
+    #[test]
+    fn the_form_reduction_agrees_with_the_dot_product_on_diagonal_forms() {
+        let rows = |entries: &[[i64; 3]]| -> Vec<Vec<BigInt>> {
+            entries
+                .iter()
+                .map(|row| row.iter().map(|&x| BigInt::from_i64(x)).collect())
+                .collect()
+        };
+        let original = rows(&[[1, 1, 1], [-1, 0, 2], [3, 5, 6]]);
+        let identity = rows(&[[1, 0, 0], [0, 1, 0], [0, 0, 1]]);
+        let mut plain = original.clone();
+        lll_reduce(&mut plain);
+        let mut formed = original.clone();
+        lll_reduce_form(&mut formed, &identity, 3, 4);
+        assert_eq!(plain, formed);
+
+        // Diagonal weights (1, 4, 9) = the columns scaled by (1, 2, 3).
+        let diagonal = rows(&[[1, 0, 0], [0, 4, 0], [0, 0, 9]]);
+        let mut formed = original.clone();
+        lll_reduce_form(&mut formed, &diagonal, 3, 4);
+        let mut scaled: Vec<Vec<BigInt>> = original
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .map(|(i, x)| x.mul(&BigInt::from_i64(i as i64 + 1)))
+                    .collect()
+            })
+            .collect();
+        lll_reduce(&mut scaled);
+        let unscaled: Vec<Vec<BigInt>> = scaled
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .map(|(i, x)| x.div_rem(&BigInt::from_i64(i as i64 + 1)).0)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(formed, unscaled);
+    }
+
+    /// Under a dense form the shortest vector is not the Euclidean one:
+    /// the form `[[2, 1], [1, 2]]` (norm² = 2x² + 2xy + 2y²) makes
+    /// `(1, −1)` shorter (norm² 2) than `(1, 0)` (norm² 2) — equal — and
+    /// `(1, 1)` (norm² 6) longer than `(2, −1)` (norm² 6)... so take the
+    /// basis `{(3, 0), (1, 1)}`, whose Euclidean reduction is
+    /// `{(1, 1), (2, −1)}` and whose form reduction must lead with a vector
+    /// of form-norm² 6 or less, and verify every returned vector's
+    /// form-norm is what the form says, with the first the shortest.
+    #[test]
+    fn the_form_reduction_measures_by_the_form() {
+        let rows = |entries: &[[i64; 2]]| -> Vec<Vec<BigInt>> {
+            entries
+                .iter()
+                .map(|row| row.iter().map(|&x| BigInt::from_i64(x)).collect())
+                .collect()
+        };
+        let form = rows(&[[2, 1], [1, 2]]);
+        let norm = |v: &[BigInt]| -> BigInt {
+            let (x, y) = (&v[0], &v[1]);
+            let two = BigInt::from_i64(2);
+            two.mul(&x.mul(x))
+                .add(&two.mul(&x.mul(y)))
+                .add(&two.mul(&y.mul(y)))
+        };
+        let mut basis = rows(&[[3, 0], [1, 1]]);
+        lll_reduce_form(&mut basis, &form, 3, 4);
+        // The lattice is index-3 in ℤ²; its shortest form-norm² is 6,
+        // attained by (1, 1) and (2, −1) among others, and LLL at δ = 3/4
+        // in dimension two returns a shortest vector first.
+        assert_eq!(norm(&basis[0]), BigInt::from_i64(6));
+        assert!(norm(&basis[1]) >= norm(&basis[0]));
+        // Still a basis of the same lattice: determinant ±3.
+        let det = basis[0][0]
+            .mul(&basis[1][1])
+            .sub(&basis[0][1].mul(&basis[1][0]));
+        assert_eq!(det.magnitude(), &crate::BigUint::from_u64(3));
     }
 }

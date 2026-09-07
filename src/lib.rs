@@ -174,7 +174,7 @@ pub mod finite_field {
 /// Lattice basis reduction.
 pub mod lattice {
     pub use crate::lattice_impl::{
-        gauss_reduce_weighted, lll_reduce, lll_reduce_delta, ReductionError,
+        gauss_reduce_weighted, lll_reduce, lll_reduce_delta, lll_reduce_form, ReductionError,
     };
 }
 
