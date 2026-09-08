@@ -1218,6 +1218,35 @@ fn gcd_lehmer(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 #[must_use]
 pub fn mod_inverse_u64(value: u64, modulus: u64) -> Option<u64> {
     assert!(modulus != 0, "modulus must be non-zero");
+    // Extended Euclid at the narrowest width that holds the cofactors:
+    // every cofactor stays below the modulus in magnitude, so a modulus
+    // under 2³¹ runs in `i32`, under 2⁶³ in `i64`, and only the top bit
+    // needs `i128`. A lattice sieve asks this once per base prime per
+    // special q, and a two-word division per Euclid step — some forty
+    // steps for a twenty-bit prime — was most of what a lattice cost to
+    // set up.
+    if modulus < 1 << 31 {
+        let m = modulus as i32;
+        let (mut old_r, mut r) = ((value % modulus) as i32, m);
+        let (mut old_s, mut s) = (1i32, 0i32);
+        while r != 0 {
+            let quotient = old_r / r;
+            (old_r, r) = (r, old_r - quotient * r);
+            (old_s, s) = (s, old_s - quotient * s);
+        }
+        return (old_r == 1).then(|| old_s.rem_euclid(m) as u64);
+    }
+    if modulus < 1 << 63 {
+        let m = modulus as i64;
+        let (mut old_r, mut r) = ((value % modulus) as i64, m);
+        let (mut old_s, mut s) = (1i64, 0i64);
+        while r != 0 {
+            let quotient = old_r / r;
+            (old_r, r) = (r, old_r - quotient * r);
+            (old_s, s) = (s, old_s - quotient * s);
+        }
+        return (old_r == 1).then(|| old_s.rem_euclid(m) as u64);
+    }
     let modulus_signed = i128::from(modulus);
     let (mut old_r, mut r) = (i128::from(value).rem_euclid(modulus_signed), modulus_signed);
     let (mut old_s, mut s) = (1i128, 0i128);
@@ -4020,6 +4049,41 @@ mod tests {
                         "n={n}, r={r}, a={a}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn the_word_inverse_agrees_with_the_wide_one_at_every_width() {
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state
+        };
+        let moduli = [
+            3u64,
+            65_537,
+            (1 << 31) - 1,
+            (1 << 31) + 11,
+            (1 << 32) + 15,
+            (1 << 62) + 135,
+            (1 << 63) - 25,
+            (1 << 63) + 29,
+            u64::MAX - 58,
+            u64::MAX,
+        ];
+        for modulus in moduli {
+            for _ in 0..64 {
+                let value = next() % modulus;
+                let wide = mod_inverse(&BigUint::from_u64(value), &BigUint::from_u64(modulus))
+                    .and_then(|x| x.to_u64());
+                assert_eq!(
+                    mod_inverse_u64(value, modulus),
+                    wide,
+                    "{value} mod {modulus}"
+                );
             }
         }
     }

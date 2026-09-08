@@ -15,8 +15,8 @@
 //! Structured Gaussian elimination as NFS practice has it (Cavallar,
 //! *Strategies in filtering in the number field sieve*, ANTS-IV, LNCS
 //! 1838 (2000), 209–231; the modern treatment is Bouillaguet &
-//! Zimmermann, *Parallel Structured Gaussian Elimination for the Number
-//! Field Sieve*, J. Math. Cryptol. 15 (2021), 87–103): a column held by
+//! Zimmermann, *Parallel structured Gaussian elimination for the number
+//! field sieve*, Mathematical Cryptology 1 (2021), 22–39): a column held by
 //! one live row pins that row out of every dependency, so the row goes;
 //! a column held by `w ≥ 2` rows is eliminated by adding rows along the
 //! minimum spanning tree of its members, edges weighted by the size of the
@@ -28,7 +28,9 @@
 //! A merge bound — eliminate columns up to weight `k` — is the usual
 //! knob, and it is the wrong shape: whether a merge pays depends on the
 //! fill it causes, not on the weight of the column. The solver this feeds
-//! is Block Lanczos, whose cost is `rows/64` iterations of a pass over
+//! is Block Lanczos (Montgomery, *A block Lanczos algorithm for finding
+//! dependencies over GF(2)*, EUROCRYPT '95, LNCS 921, 106–120), whose cost
+//! is `rows/64` iterations of a pass over
 //! every nonzero: proportional to `rows · nonzeros`. Eliminating a column
 //! whose tree costs fill `Δ` (the change in the nonzero count, negative
 //! for a singleton or a pair) takes the cost from `rows · nonzeros` to
