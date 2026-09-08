@@ -1725,24 +1725,58 @@ impl PolyZ {
     /// # Panics
     ///
     /// Panics if `divisor` is the zero polynomial or is not monic.
+    ///
+    /// The pairs of a level are multiplied in parallel over the threads
+    /// the machine reports, as many as the level has pairs to give them;
+    /// the top levels, a few products of the largest operands, parallelise
+    /// inside the multiplication instead, through the NTT kernels.
     #[must_use]
     pub fn product_mod_monic(factors: &[Self], divisor: &Self) -> Self {
         let mut level: Vec<Self> = factors.iter().map(|f| f.rem_monic(divisor)).collect();
         if level.is_empty() {
             return Self::constant(BigInt::one()).rem_monic(divisor);
         }
+        let workers = crate::available_parallelism();
         while level.len() > 1 {
-            let mut above = Vec::with_capacity(level.len().div_ceil(2));
-            for pair in level.chunks(2) {
-                above.push(match pair {
-                    [left, right] => left.mul(right).rem_monic(divisor),
-                    [only] => only.clone(),
-                    _ => unreachable!("chunks(2) yields one or two"),
+            let pairs = level.len().div_ceil(2);
+            let lanes = workers.min(pairs).max(1);
+            let per_lane = pairs.div_ceil(lanes);
+            let mut above: Vec<Self> = Vec::with_capacity(pairs);
+            if lanes == 1 {
+                for pair in level.chunks(2) {
+                    above.push(Self::pair_product_mod_monic(pair, divisor));
+                }
+            } else {
+                let products: Vec<Vec<Self>> = std::thread::scope(|scope| {
+                    let handles: Vec<_> = level
+                        .chunks(2 * per_lane)
+                        .map(|lane| {
+                            scope.spawn(move || {
+                                lane.chunks(2)
+                                    .map(|pair| Self::pair_product_mod_monic(pair, divisor))
+                                    .collect::<Vec<Self>>()
+                            })
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .map(|handle| handle.join().expect("a product lane does not panic"))
+                        .collect()
                 });
+                above.extend(products.into_iter().flatten());
             }
             level = above;
         }
         level.pop().expect("a non-empty level has a root")
+    }
+
+    /// One or two factors of a product-tree level, reduced.
+    fn pair_product_mod_monic(pair: &[Self], divisor: &Self) -> Self {
+        match pair {
+            [left, right] => left.mul(right).rem_monic(divisor),
+            [only] => only.clone(),
+            _ => unreachable!("chunks(2) yields one or two"),
+        }
     }
 
     /// The homogeneous substitution `Σ cₖ·aᵏ·b^(d−k)`, where the `cₖ` are the
