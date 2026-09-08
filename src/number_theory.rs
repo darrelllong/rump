@@ -3226,6 +3226,76 @@ fn is_witness(
     value != one_mont
 }
 
+/// The probability that a number of natural logarithm `ln_n` is smooth
+/// over the primes below `e^ln_bound` up to at most `large_primes` prime
+/// factors each below `e^ln_cap`, in the heuristic where the largest
+/// prime factors of a random number are distributed as Dickman's `ρ`
+/// says.
+///
+/// With `x = ln n` and `b = ln bound`, a number with no prime factor above
+/// the bound has probability `ρ(x/b)`; one whose primes above the bound
+/// are exactly one, near `e^s`, has density `ρ((x − s)/b)·ds/s` in `s`
+/// (a prime near `e^s` in an interval of logarithmic width `ds` with
+/// probability `ds/s`, the prime number theorem); two, near `e^{s₁}` and
+/// `e^{s₂}` with `s₁ ≤ s₂`, `ρ((x − s₁ − s₂)/b)·ds₁ds₂/(s₁s₂)`. The
+/// sum over the admitted counts, with `s` over `(b, ln cap]`, is the
+/// semismoothness probability of Bach & Peralta (*Asymptotic
+/// semismoothness probabilities*, Math. Comp. 65 (1996), 1701–1715),
+/// whose `G(α, β)` is this function's `large_primes = 1` case in their
+/// normalisation; the two-prime term is the same integral one dimension
+/// up (Lambert, *Computational aspects of discrete logarithms*, PhD
+/// thesis, University of Waterloo, 1996, for the two- and three-prime
+/// cases). Integrated numerically with the midpoint rule on a grid of
+/// [`SEMISMOOTH_GRID`] points a dimension.
+///
+/// What it is for: a sieve accepts a relation whose values are smooth
+/// over the bases up to one or two large primes within a cap on each
+/// side, and a polynomial's expected yield over a region is the mean of
+/// this probability over it — Dickman's `ρ` alone, at either the bound
+/// or the cap, is the probability of a different event.
+#[must_use]
+pub fn semismooth_probability(ln_n: f64, ln_bound: f64, ln_cap: f64, large_primes: usize) -> f64 {
+    if !(ln_n.is_finite() && ln_bound.is_finite() && ln_cap.is_finite()) || ln_bound <= 0.0 {
+        return 0.0;
+    }
+    if ln_n <= 0.0 {
+        return 1.0;
+    }
+    let smooth = |ln_rest: f64| dickman_rho(ln_rest / ln_bound);
+    let mut total = smooth(ln_n);
+    let (low, high) = (ln_bound, ln_cap.min(ln_n));
+    if large_primes == 0 || high <= low {
+        return total;
+    }
+    let grid = SEMISMOOTH_GRID;
+    let width = (high - low) / grid as f64;
+    let node = |k: usize| low + (k as f64 + 0.5) * width;
+    // One large prime.
+    for k in 0..grid {
+        let s = node(k);
+        total += smooth(ln_n - s) * width / s;
+    }
+    if large_primes >= 2 {
+        // Two, ordered s₁ ≤ s₂: the unordered pair counted once.
+        for k1 in 0..grid {
+            let s1 = node(k1);
+            for k2 in k1..grid {
+                let s2 = node(k2);
+                let rest = ln_n - s1 - s2;
+                if rest < 0.0 {
+                    break;
+                }
+                let cell = if k1 == k2 { 0.5 } else { 1.0 };
+                total += smooth(rest) * cell * width * width / (s1 * s2);
+            }
+        }
+    }
+    total.min(1.0)
+}
+
+/// Points per dimension of the semismoothness integrals' grid.
+const SEMISMOOTH_GRID: usize = 96;
+
 /// Every prime below `bound` (exclusive), ascending, by the sieve of
 /// Eratosthenes. The bulk companion to [`is_probable_prime`]: where that
 /// tests one candidate, this enumerates a range, for callers assembling a
@@ -4086,6 +4156,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The semismooth probabilities against the truth on random
+    /// numbers: forty-eight-bit numbers trial-divided to the cap, so
+    /// their shape — smooth, one large prime, two — is exact. The model
+    /// is asymptotic and the numbers are small, so the agreement is to a
+    /// fifth; the order of the three probabilities and the monotone
+    /// growth with the count admitted are exact.
+    #[test]
+    fn the_semismooth_probabilities_track_the_shapes_of_random_numbers() {
+        let (bound, cap) = (1u64 << 12, 1u64 << 18);
+        let primes = primes_below(cap + 1);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let samples = 40_000usize;
+        let (mut smooth, mut one, mut two) = (0usize, 0usize, 0usize);
+        for _ in 0..samples {
+            let mut n = (next() >> 16) | (1u64 << 47);
+            let mut large = 0usize;
+            for &p in &primes {
+                if p * p > n {
+                    break;
+                }
+                while n % p == 0 {
+                    n /= p;
+                    if p >= bound {
+                        large += 1;
+                    }
+                }
+            }
+            // The cofactor is 1 or a prime; a prime below the bound is
+            // smooth, one up to the cap is a large prime, above it is out.
+            if n > 1 {
+                if n >= bound && n <= cap {
+                    large += 1;
+                } else if n > cap {
+                    continue;
+                }
+            }
+            match large {
+                0 => smooth += 1,
+                1 => one += 1,
+                2 => two += 1,
+                _ => {}
+            }
+        }
+        let ln_n = 47.5 * core::f64::consts::LN_2;
+        let (ln_b, ln_c) = ((bound as f64).ln(), (cap as f64).ln());
+        let p0 = semismooth_probability(ln_n, ln_b, ln_c, 0);
+        let p1 = semismooth_probability(ln_n, ln_b, ln_c, 1);
+        let p2 = semismooth_probability(ln_n, ln_b, ln_c, 2);
+        assert!(p0 < p1 && p1 < p2, "{p0} {p1} {p2}");
+        let observed = [
+            smooth as f64 / samples as f64,
+            (smooth + one) as f64 / samples as f64,
+            (smooth + one + two) as f64 / samples as f64,
+        ];
+        for (model, truth) in [p0, p1, p2].iter().zip(observed) {
+            assert!(
+                (model - truth).abs() <= 0.2 * truth.max(1e-3) + 1e-3,
+                "model {model} against observed {truth}"
+            );
+        }
+        assert_eq!(
+            semismooth_probability(ln_n, ln_b, ln_b, 2),
+            p0,
+            "an empty window admits nothing"
+        );
     }
 
     #[test]
