@@ -3226,6 +3226,41 @@ fn is_witness(
     value != one_mont
 }
 
+/// `ln Γ(x)` for `x > 0`, by Lanczos's approximation (Lanczos, *A
+/// precision approximation of the gamma function*, J. SIAM Numer. Anal.
+/// B 1 (1964), 86–96) with the coefficients for `g = 7` and nine terms,
+/// good to about fifteen digits over the positive reals; below one half
+/// the reflection formula `Γ(x)Γ(1 − x) = π / sin πx` is used.
+///
+/// For the densities the polynomial ranking integrates over — a
+/// chi-squared, a gamma — whose normalisation is a gamma function.
+#[must_use]
+pub fn ln_gamma(x: f64) -> f64 {
+    const G: f64 = 7.0;
+    const COEFFICIENTS: [f64; 9] = [
+        0.999_999_999_999_809_9,
+        676.520_368_121_885_1,
+        -1_259.139_216_722_402_8,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_905,
+        -0.138_571_095_265_720_12,
+        9.984_369_578_019_572e-6,
+        1.505_632_735_149_311_6e-7,
+    ];
+    if x < 0.5 {
+        return (core::f64::consts::PI / (core::f64::consts::PI * x).sin()).ln()
+            - ln_gamma(1.0 - x);
+    }
+    let x = x - 1.0;
+    let mut a = COEFFICIENTS[0];
+    let t = x + G + 0.5;
+    for (i, &c) in COEFFICIENTS.iter().enumerate().skip(1) {
+        a += c / (x + i as f64);
+    }
+    0.5 * (2.0 * core::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + a.ln()
+}
+
 /// The probability that a number of natural logarithm `ln_n` is smooth
 /// over the primes below `e^ln_bound` up to at most `large_primes` prime
 /// factors each below `e^ln_cap`, in the heuristic where the largest
@@ -4229,6 +4264,23 @@ mod tests {
             p0,
             "an empty window admits nothing"
         );
+    }
+
+    #[test]
+    fn the_log_gamma_matches_factorials_and_the_half_integers() {
+        for n in 1..=20u32 {
+            let factorial: f64 = (1..n).map(f64::from).product();
+            let expected = factorial.ln();
+            assert!(
+                (ln_gamma(f64::from(n)) - expected).abs() < 1e-12 * expected.abs().max(1.0),
+                "Γ({n})"
+            );
+        }
+        // Γ(1/2) = √π, Γ(3/2) = √π/2.
+        let root_pi = core::f64::consts::PI.sqrt();
+        assert!((ln_gamma(0.5) - root_pi.ln()).abs() < 1e-13);
+        assert!((ln_gamma(1.5) - (root_pi / 2.0).ln()).abs() < 1e-13);
+        assert!((ln_gamma(0.25) - 3.625_609_908_221_908_3f64.ln()).abs() < 1e-12);
     }
 
     #[test]
