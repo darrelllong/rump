@@ -4219,7 +4219,7 @@ mod tests {
                 if p * p > n {
                     break;
                 }
-                while n % p == 0 {
+                while n.is_multiple_of(p) {
                     n /= p;
                     if p >= bound {
                         large += 1;
@@ -4280,7 +4280,7 @@ mod tests {
         let root_pi = core::f64::consts::PI.sqrt();
         assert!((ln_gamma(0.5) - root_pi.ln()).abs() < 1e-13);
         assert!((ln_gamma(1.5) - (root_pi / 2.0).ln()).abs() < 1e-13);
-        assert!((ln_gamma(0.25) - 3.625_609_908_221_908_3f64.ln()).abs() < 1e-12);
+        assert!((ln_gamma(0.25) - 3.625_609_908_221_908f64.ln()).abs() < 1e-12);
     }
 
     #[test]

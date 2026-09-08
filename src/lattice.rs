@@ -820,8 +820,9 @@ mod short_vector_tests {
                     det *= m[i][i];
                     for k in (i + 1)..n {
                         let factor = m[k][i] / m[i][i];
-                        for j in i..n {
-                            m[k][j] -= factor * m[i][j];
+                        let (pivot, below) = m.split_at_mut(k);
+                        for (target, &source) in below[0][i..n].iter_mut().zip(&pivot[i][i..n]) {
+                            *target -= factor * source;
                         }
                     }
                 }
