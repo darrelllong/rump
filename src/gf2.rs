@@ -343,11 +343,43 @@ type Small = [u64; WIDTH];
 /// Both orientations are needed every iteration — `A = MᵀM` is two products —
 /// and each is a gather over the side it is indexed by, so storing both costs
 /// one extra copy of the indices and saves a scatter with random writes.
+/// Lists of indices stored flat: the indices of list `i` are
+/// `indices[offsets[i]..offsets[i + 1]]`. One allocation for a matrix of
+/// millions of lists, read in order, where a vector per list put every
+/// list behind its own pointer and the product behind a cache miss per
+/// list (perf, twilight, 2026-09-08: the product was ninety-five per cent
+/// of a Lanczos run).
+struct Lists {
+    offsets: Vec<usize>,
+    indices: Vec<u32>,
+}
+
+impl Lists {
+    fn from_lists(lists: &[Vec<u32>]) -> Self {
+        let mut offsets = Vec::with_capacity(lists.len() + 1);
+        let mut indices = Vec::with_capacity(lists.iter().map(Vec::len).sum());
+        offsets.push(0);
+        for list in lists {
+            indices.extend_from_slice(list);
+            offsets.push(indices.len());
+        }
+        Self { offsets, indices }
+    }
+
+    fn len(&self) -> usize {
+        self.offsets.len() - 1
+    }
+
+    fn list(&self, index: usize) -> &[u32] {
+        &self.indices[self.offsets[index]..self.offsets[index + 1]]
+    }
+}
+
 struct Sparse {
     /// For each relation, the columns it sets.
-    by_relation: Arc<Vec<Vec<u32>>>,
+    by_relation: Arc<Lists>,
     /// For each column, the relations that set it.
-    by_column: Arc<Vec<Vec<u32>>>,
+    by_column: Arc<Lists>,
     /// Workers retained for the whole Lanczos recurrence. Recreating them for
     /// both halves of every `A·x` paid thousands of spawn/join cycles on a
     /// large sieve matrix.
@@ -383,8 +415,8 @@ impl Sparse {
         }
         let useful = (by_relation.len().max(columns) / MINIMUM_FOLDS_PER_WORKER).max(1);
         Self {
-            by_relation: Arc::new(by_relation),
-            by_column: Arc::new(by_column),
+            by_relation: Arc::new(Lists::from_lists(&by_relation)),
+            by_column: Arc::new(Lists::from_lists(&by_column)),
             folds: FoldPool::new(threads.min(useful).max(1)),
         }
     }
@@ -440,7 +472,7 @@ type Block = Arc<Vec<u64>>;
 const MINIMUM_FOLDS_PER_WORKER: usize = 4_096;
 
 struct FoldJob {
-    lists: Arc<Vec<Vec<u32>>>,
+    lists: Arc<Lists>,
     input: Block,
     start: usize,
     end: usize,
@@ -487,7 +519,7 @@ impl FoldPool {
                         FoldMessage::Run(job) => {
                             let values =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    fold_range(&job.lists[job.start..job.end], &job.input)
+                                    fold_range(&job.lists, job.start, job.end, &job.input)
                                 }));
                             let _ = job.reply.send(FoldReply {
                                 start: job.start,
@@ -502,11 +534,11 @@ impl FoldPool {
         Self { senders, handles }
     }
 
-    fn mapped(&self, lists: Arc<Vec<Vec<u32>>>, input: Block) -> Vec<u64> {
+    fn mapped(&self, lists: Arc<Lists>, input: Block) -> Vec<u64> {
         let useful = (lists.len() / MINIMUM_FOLDS_PER_WORKER).max(1);
         let workers = self.senders.len().min(useful);
         if workers <= 1 {
-            return fold_range(&lists, &input);
+            return fold_range(&lists, 0, lists.len(), &input);
         }
 
         let per = lists.len().div_ceil(workers);
@@ -559,26 +591,58 @@ impl Drop for FoldPool {
     }
 }
 
-fn fold_range(lists: &[Vec<u32>], input: &[u64]) -> Vec<u64> {
-    lists
-        .iter()
-        .map(|indices| {
-            indices
-                .iter()
-                .fold(0u64, |total, &index| total ^ input[index as usize])
-        })
-        .collect()
+fn fold_range(lists: &Lists, start: usize, end: usize, input: &[u64]) -> Vec<u64> {
+    let mut out = Vec::with_capacity(end - start);
+    for index in start..end {
+        let indices = lists.list(index);
+        // Four independent accumulators: the gathers are what the product
+        // waits on, and one chain of XORs let the core issue them one at a
+        // time.
+        let mut chunks = indices.chunks_exact(4);
+        let (mut a, mut b, mut c, mut d) = (0u64, 0u64, 0u64, 0u64);
+        for chunk in &mut chunks {
+            a ^= input[chunk[0] as usize];
+            b ^= input[chunk[1] as usize];
+            c ^= input[chunk[2] as usize];
+            d ^= input[chunk[3] as usize];
+        }
+        let mut total = a ^ b ^ c ^ d;
+        for &index in chunks.remainder() {
+            total ^= input[index as usize];
+        }
+        out.push(total);
+    }
+    out
 }
 
 /// `leftᵀ · right` for two blocks: the `64 × 64` matrix of inner products.
 fn dot(left: &[u64], right: &[u64]) -> Small {
-    let mut out = [0u64; WIDTH];
+    // Eight tables, one per byte of the left word: entry `e` of table `b`
+    // accumulates the right words whose left word has byte `b` equal to
+    // `e`. Eight table updates per word, against a loop over the word's
+    // set bits — thirty-two on average — and the tables then combine into
+    // the sixty-four lanes in a fixed sixteen thousand operations. The
+    // dot products are three of a Lanczos iteration and were serial bit
+    // loops over the whole block, most of an iteration's time once the
+    // matrix product was parallel (perf, twilight, 2026-09-08).
+    let mut tables = [[0u64; 256]; 8];
     for (a, b) in left.iter().zip(right.iter()) {
-        let mut bits = *a;
-        while bits != 0 {
-            let lane = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            out[lane] ^= *b;
+        let mut word = *a;
+        for table in &mut tables {
+            table[(word & 0xff) as usize] ^= *b;
+            word >>= 8;
+        }
+    }
+    let mut out = [0u64; WIDTH];
+    for (byte, table) in tables.iter().enumerate() {
+        for bit in 0..8 {
+            let mut lane = 0u64;
+            for (entry, &value) in table.iter().enumerate() {
+                if (entry >> bit) & 1 == 1 {
+                    lane ^= value;
+                }
+            }
+            out[byte * 8 + bit] = lane;
         }
     }
     out
@@ -1103,7 +1167,8 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
         );
-        let expected = fold_range(&lists, &input);
+        let lists = Arc::new(super::Lists::from_lists(&lists));
+        let expected = fold_range(&lists, 0, lists.len(), &input);
         let pool = FoldPool::new(8);
         for _ in 0..16 {
             assert_eq!(
@@ -1114,6 +1179,47 @@ mod tests {
     }
 
     /// A deterministic `RandomSource` for the tests, so a failure reproduces.
+    /// Where the sparse solver's time goes at the size of a hundred-digit
+    /// matrix: a random matrix of the sieve's shape, timed, for a
+    /// profiler to look at.
+    #[test]
+    #[ignore = "timing probe for the sparse solver at a sieve matrix's size"]
+    fn lanczos_cost_probe() {
+        let size: usize = std::env::var("LANCZOS_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(200_000);
+        let weight: usize = 100;
+        let threads: usize = std::env::var("LANCZOS_THREADS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(128);
+        let mut rng = TestRng(0x5eed_1234_abcd_ef01);
+        let columns = size - 128;
+        let rows: Vec<Vec<u32>> = (0..size)
+            .map(|_| {
+                let mut row: Vec<u32> = (0..weight)
+                    .map(|_| {
+                        let mut bytes = [0u8; 8];
+                        crate::random::RandomSource::fill_bytes(&mut rng, &mut bytes);
+                        (u64::from_le_bytes(bytes) % columns as u64) as u32
+                    })
+                    .collect();
+                row.sort_unstable();
+                row.dedup();
+                row
+            })
+            .collect();
+        let matrix = super::filter::SparseMatrix::new(columns, rows);
+        let started = std::time::Instant::now();
+        let dependencies = super::block_lanczos_dependencies_sparse(&matrix, &mut rng, threads);
+        eprintln!(
+            "lanczos {size} x {columns}, {weight} per row, {threads} threads: {:?}, {} dependencies",
+            started.elapsed(),
+            dependencies.map_or(0, |d| d.len())
+        );
+    }
+
     struct TestRng(u64);
     impl crate::random::RandomSource for TestRng {
         fn fill_bytes(&mut self, dest: &mut [u8]) {
