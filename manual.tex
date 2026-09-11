@@ -146,11 +146,11 @@ use rump::modular::{
     BarrettContext, MontgomeryContext, MontgomeryScratch,
 };
 use rump::number_theory::{
-    crt_combine, gcd, gcd_extended, gcd_u64, is_probable_prime, is_probable_prime_bpsw,
-    is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre, miller_rabin_with_bases,
-    miller_rabin_witness, primes_below, product_tree, rational_reconstruct,
-    rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, valuation,
-    SmoothnessBase,
+    crt_combine, crt_combine_balanced, gcd, gcd_extended, gcd_u64, is_lucas_probable_prime,
+    is_prime_aks, is_probable_prime, is_probable_prime_bpsw, is_strong_lucas_probable_prime,
+    jacobi, kronecker, lcm, legendre, miller_rabin_with_bases, miller_rabin_witness,
+    primes_below, product_tree, rational_reconstruct, rational_reconstruct_bounded,
+    remainder_tree, remove_factor, smooth_parts, valuation, SmoothnessBase,
 };
 use rump::polynomial::{PolyMod, PolyZ, RealRootError};
 use rump::random::{
@@ -191,10 +191,17 @@ of $f$ and $\deg f$ its degree, with $\deg 0 = -\infty$.
 \subsection{Construction, bytes, and radix strings}
 
 \code{zero}, \code{one}, \code{from\_u64}, and \code{from\_u128} build small
-values. \code{from\_be\_bytes} / \code{to\_be\_bytes} are the one external
-binary format --- big-endian bytes, as DER, PEM, and the RFC wire formats
-use; \code{to\_be\_bytes\_padded(w)} zero-pads on the left to a fixed width
-and panics when the value does not fit. \code{low\_u128} and
+values. Bytes come in both orders: \code{from\_be\_bytes} /
+\code{to\_be\_bytes} are big-endian, as DER, PEM, and most RFC wire formats
+use, and \code{from\_le\_bytes} / \code{to\_le\_bytes} are their
+little-endian mirror, as the X25519 and Ed25519 encodings use. Decoding the
+empty slice gives zero, and zero bytes at the high end are ignored. The
+encoders emit the minimal $\lceil b/8 \rceil$ bytes for a $b$-bit value ---
+a single \code{0x00} for zero --- while \code{to\_be\_bytes\_padded(w)} and
+\code{to\_le\_bytes\_padded(w)} zero-fill the high end to $w$ bytes and
+panic when the value does not fit. Each encoder allocates its output once,
+at its final length, and writes the limbs straight into it, so it leaves no
+other heap copy of the value's bytes. \code{low\_u128} and
 \code{low\_bits(k)} ($= a \bmod 2^k$) read the low end directly.
 
 \code{from\_str\_radix} / \code{to\_str\_radix} convert against any radix
@@ -217,6 +224,9 @@ assert_eq!("3735928559".parse::<BigUint>(), Ok(n));
 let value = BigUint::from_be_bytes(&[0x01, 0x00]);
 assert_eq!(value, BigUint::from_u64(256));
 assert_eq!(value.to_be_bytes_padded(4), vec![0x00, 0x00, 0x01, 0x00]);
+assert_eq!(BigUint::from_le_bytes(&[0x00, 0x01]), value);
+assert_eq!(value.to_le_bytes(), vec![0x00, 0x01]);
+assert_eq!(value.to_le_bytes_padded(4), vec![0x00, 0x01, 0x00, 0x00]);
 \end{lstlisting}
 
 \subsection{Comparison and predicates}
@@ -362,8 +372,11 @@ running remainder against the top limb of the divisor,
 which after the standard two-limb refinement is off by at most one, and the
 multiply-subtract step's borrow corrects that final case. \code{rem}
 keeps only the remainder; \code{div\_rem\_u64} and \code{rem\_u64} divide by
-a machine word with no heap-allocated divisor; \code{mod\_mul} is one-shot
-modular multiplication. All panic on a zero divisor or modulus.
+a machine word with no heap-allocated divisor. \code{mod\_mul},
+\code{mod\_add}, \code{mod\_sub}, and \code{mod\_neg} are the one-shot
+modular operations: operands of any size, and a result in $[0, m)$.
+Negation returns $0$ for a multiple of $m$ and $m - (a \bmod m)$ otherwise.
+All panic on a zero divisor or modulus.
 
 \begin{lstlisting}
 let n = BigUint::from_u64(1_000);
@@ -372,6 +385,11 @@ let (q, r) = n.div_rem(&d);
 assert_eq!(q, BigUint::from_u64(142));
 assert_eq!(r, BigUint::from_u64(6));
 assert_eq!(n.rem_u64(7), 6);
+
+// Negation lands in [0, m): -123 = 71 (mod 97), and 2 * 97 negates to zero.
+let negated = BigUint::mod_neg(&BigUint::from_u64(123), &BigUint::from_u64(97));
+assert_eq!(negated, BigUint::from_u64(71));
+assert!(BigUint::mod_neg(&BigUint::from_u64(194), &BigUint::from_u64(97)).is_zero());
 \end{lstlisting}
 
 \subsection{Shifts and bit access}
@@ -1071,6 +1089,12 @@ x_{12} \;=\; a_1 + m_1\Bigl( (a_2 - a_1)\, m_1^{-1} \bmod m_2 \Bigr)
 \code{None} when the moduli are not pairwise coprime (detected by the
 failing inversion).
 
+\code{crt\_combine\_balanced} applies the same
+validation and returns the same canonical answer, but combines equal-width
+partial products up a balanced tree, running independent pairs on at most
+the requested number of workers --- never more than the machine reports,
+and serially when the request is zero.
+
 \begin{lstlisting}
 // Sunzi's classic: 2 mod 3, 3 mod 5, 2 mod 7.
 let x = crt_combine(&[
@@ -1080,6 +1104,17 @@ let x = crt_combine(&[
 ])
 .expect("moduli are pairwise coprime");
 assert_eq!(x, BigUint::from_u64(23));
+assert_eq!(
+    crt_combine_balanced(
+        &[
+            (BigUint::from_u64(2), BigUint::from_u64(3)),
+            (BigUint::from_u64(3), BigUint::from_u64(5)),
+            (BigUint::from_u64(2), BigUint::from_u64(7)),
+        ],
+        4,
+    ),
+    Some(x)
+);
 \end{lstlisting}
 
 \subsection{Valuation}
@@ -1308,6 +1343,76 @@ assert!(!is_probable_prime_bpsw(&BigUint::from_u64(2_047))); // Lucas rejects
 assert!(is_strong_lucas_probable_prime(&BigUint::from_u64(5_459)));
 assert!(!is_probable_prime_bpsw(&BigUint::from_u64(5_459))); // base 2 rejects
 \end{lstlisting}
+
+\paragraph{The general Lucas test of FIPS 186-4.} Appendix C.3.3 of FIPS
+186-4 specifies a Lucas test with a single acceptance condition, and
+\code{is\_lucas\_probable\_prime} follows it step for step. A perfect
+square is composite (step 1; \code{is\_square} answers Appendix C.4's
+question exactly). $D$ is the first of $5, -7, 9, -11, \ldots$ with
+$\jac{D}{n} = -1$, and a zero symbol means composite (step 2). Write
+$K = n + 1 = \sum_{i=0}^{r} K_i 2^i$ with $K_r = 1$. From $U = V = 1$, for
+$i = r - 1$ down to $0$, set
+\begin{equation}
+U' = U V,
+\qquad
+V' = \tfrac{V^2 + D U^2}{2},
+\end{equation}
+then $U \leftarrow \tfrac{U' + V'}{2}$ and $V \leftarrow \tfrac{V' + D U'}{2}$
+when $K_i = 1$, and $U \leftarrow U'$, $V \leftarrow V'$ otherwise --- all
+rem $n$, with an odd $A$ halved as $(A + n)/2$ (steps 3--6). The candidate
+is accepted when the final $U$ is zero (step 7), which is
+$U_{n+1} \equiv 0 \pmod{n}$ for the sequences above with $P = 1$,
+$Q = (1 - D)/4$. Since
+\begin{equation}
+U_{n+1} = U_d\, V_d\, V_{2d} \cdots V_{2^{s-1} d},
+\end{equation}
+every candidate the strong test accepts is accepted here, but not
+conversely: $323 = 17 \cdot 19$ is the first composite this test passes
+(OEIS A217120), and the strong test rejects it.
+
+C.3.3 is specified for odd candidates; the function also answers $0$, $1$,
+and even inputs correctly ($2$ is prime, the rest are not). Step 2 is read
+with one qualification, which can only matter for a candidate no larger
+than the $|D|$ its own search reaches. A zero symbol means
+$\gcd(D, n) > 1$, which proves $n$ composite when the gcd is a proper
+divisor --- always the case while $|D| < n$. When $n$ itself divides $D$
+the symbol proves nothing, and only a prime can reach such a $D$: a
+composite non-square $n$ has a least prime factor $p < n$, and the search
+meets $|D| = p$ (or $|D| = 9$, when $p = 3$) first and stops there. Read
+literally, the step would report the primes $5$ and $11$ composite, at
+$D = 5$ and $D = -11$, so the function passes over such a symbol. For
+every candidate larger than the $|D|$ its search reaches --- every
+candidate FIPS 186-4 tests --- the result is the text's exactly.
+
+\begin{lstlisting}
+assert!(is_lucas_probable_prime(&BigUint::from_u64(65_537)));
+assert!(is_lucas_probable_prime(&BigUint::from_u64(11))); // passes over D = -11
+assert!(!is_lucas_probable_prime(&BigUint::from_u64(10_201))); // 101^2
+
+// 323 = 17 * 19 is a Lucas pseudoprime but not a strong one.
+assert!(is_lucas_probable_prime(&BigUint::from_u64(323)));
+assert!(!is_strong_lucas_probable_prime(&BigUint::from_u64(323)));
+\end{lstlisting}
+
+\paragraph{AKS.} \code{is\_prime\_aks} is the exact deterministic test of
+Agrawal, Kayal, and Saxena (2004). It rejects perfect powers, finds a
+modulus $r$ with $\mathrm{ord}_r(n) > \lg^2 n$, checks small gcds, and then
+verifies
+\begin{equation}
+(X + a)^n \equiv X^n + a \pmod{X^r - 1,\; n}
+\end{equation}
+for enough consecutive values of $a$. A \code{true} result is an
+unconditional primality proof, not a probable-prime verdict, and
+\code{false} means composite. The constants are large: the probable-prime
+tests above are the practical ones, and AKS is for callers that need this
+algorithm specifically.
+
+\begin{lstlisting}
+// Unlike the probable-prime predicates, AKS is an unconditional proof.
+assert!(is_prime_aks(&BigUint::from_u64(101)));
+assert!(!is_prime_aks(&BigUint::from_u64(561))); // Carmichael
+\end{lstlisting}
+
 \section{Polynomials: \code{PolyZ} and \code{PolyMod}}
 
 Both types are dense univariate polynomials, coefficients stored low to
@@ -1910,7 +2015,7 @@ returns \code{Option} instead.
 \midrule
 \code{sub\_ref} / \code{sub\_assign\_ref} & the result would be negative \\
 \code{div\_rem} / \code{div\_rem\_u64} / \code{rem} / \code{rem\_u64} & the divisor or modulus is zero \\
-\code{mod\_mul} / \code{mod\_pow} / \code{mod\_add} / \code{mod\_sub} & the modulus is zero \\
+\code{mod\_mul} / \code{mod\_pow} / \code{mod\_add} / \code{mod\_sub} / \code{mod\_neg} & the modulus is zero \\
 \code{ln\_approx} & the value is zero \\
 \code{digit\_count} & the radix is below 2 \\
 \code{mod\_inverse\_u64} & the modulus is zero \\
@@ -1919,7 +2024,7 @@ returns \code{Option} instead.
 \code{valuation} / \code{remove\_factor} & $n = 0$ or $p < 2$ \\
 \code{remainder\_tree} & a leaf is zero \\
 \code{rational\_reconstruct\_bounded} & $2ND \ge m$ (the uniqueness contract) \\
-\code{to\_be\_bytes\_padded} & the value exceeds the requested width \\
+\code{to\_be\_bytes\_padded} / \code{to\_le\_bytes\_padded} & the value exceeds the requested width \\
 \code{from\_str\_radix} / \code{to\_str\_radix} & the radix is outside $[2, 36]$ \\
 \code{mul\_mont} / \code{square\_mont} / their \code{\_with\_workspace} forms / \code{pow\_encoded} & an operand \emph{wider} than the modulus, in every build; an unreduced operand of the modulus's width trips a debug assert only (\S\ref{sec:montgomery}) \\
 \code{Gf2m::half\_trace} & the field degree is even \\
@@ -1957,6 +2062,8 @@ samplers (\S\ref{sec:random}) & the generator trips a stall guard (see \S\ref{se
   --- Algorithms 1.7.1, 2.6.3; \S3.3--3.4.
 \item R. Baillie and S.~S. Wagstaff, \emph{Lucas pseudoprimes},
   Math.\ Comp.\ 35 (1980).
+\item National Institute of Standards and Technology, \emph{Digital
+  Signature Standard (DSS)}, FIPS PUB 186-4 (2013) --- Appendix C.3.3.
 \item M.~O. Rabin, \emph{Probabilistic algorithms in finite fields},
   SIAM J.\ Comput.\ 9 (1980).
 \item D. Hankerson, A. Menezes, S. Vanstone, \emph{Guide to Elliptic Curve

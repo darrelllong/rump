@@ -27,11 +27,11 @@ use rump::modular::{
     BarrettContext, ModulusError, MontgomeryContext, MontgomeryScratch,
 };
 use rump::number_theory::{
-    crt_combine, crt_combine_balanced, gcd, gcd_extended, gcd_u64, is_prime_aks, is_probable_prime,
-    is_probable_prime_bpsw, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
-    miller_rabin_with_bases, miller_rabin_witness, primes_below, product_tree,
-    rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
-    smooth_parts, valuation, SmoothnessBase,
+    crt_combine, crt_combine_balanced, gcd, gcd_extended, gcd_u64, is_lucas_probable_prime,
+    is_prime_aks, is_probable_prime, is_probable_prime_bpsw, is_strong_lucas_probable_prime,
+    jacobi, kronecker, lcm, legendre, miller_rabin_with_bases, miller_rabin_witness, primes_below,
+    product_tree, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
+    remove_factor, smooth_parts, valuation, SmoothnessBase,
 };
 use rump::polynomial::{PolyMod, PolyZ, RealRootError};
 use rump::random::{
@@ -59,10 +59,15 @@ Unsigned multiprecision integers on little-endian `u64` limbs.
 
 ### Construction and bytes
 
-`zero`, `one`, `from_u64`, and `from_u128` build small values;
-`from_be_bytes` / `to_be_bytes` are the one external format — big-endian
-bytes, as DER, PEM, and the RFC wire formats use. `to_be_bytes` strips
-leading zero bytes (zero encodes as a single `0x00`).
+`zero`, `one`, `from_u64`, and `from_u128` build small values.
+`from_be_bytes` / `to_be_bytes` are big-endian bytes, as DER, PEM, and most
+RFC wire formats use; `from_le_bytes` / `to_le_bytes` are their
+little-endian mirror, as the X25519 and Ed25519 encodings use. The encoders
+drop zero bytes from the high end (zero encodes as a single `0x00`); the
+`_padded` forms zero-fill the high end to a fixed width instead, and panic
+when the value does not fit. Each encoder allocates its output once, at its
+final length, and writes the limbs straight into it, so it leaves no other
+heap copy of the value's bytes behind.
 
 ```rust
 assert!(BigUint::zero().is_zero());
@@ -79,6 +84,12 @@ assert_eq!(value.to_be_bytes(), vec![0x01, 0x00]);
 // Fixed-width output pads on the left — the shape share and wire
 // serializations want; a value that does not fit panics.
 assert_eq!(value.to_be_bytes_padded(4), vec![0x00, 0x00, 0x01, 0x00]);
+
+// The little-endian mirror: least significant byte first, padded on the
+// right.
+assert_eq!(BigUint::from_le_bytes(&[0x00, 0x01]), value);
+assert_eq!(value.to_le_bytes(), vec![0x00, 0x01]);
+assert_eq!(value.to_le_bytes_padded(4), vec![0x00, 0x01, 0x00, 0x00]);
 
 // Range-pinned callers can read the low bits directly.
 let wide = BigUint::from_u128((7u128 << 64) | 9);
@@ -231,8 +242,9 @@ assert_eq!(x, BigUint::from_u64(0b0110));
 
 `div_rem` returns quotient and remainder (Knuth Algorithm D under the hood);
 `rem` keeps only the remainder; `rem_u64` reduces by a machine word;
-`mod_mul` is one-shot modular multiplication. All panic on a zero divisor
-or modulus.
+`mod_mul`, `mod_add`, `mod_sub`, and `mod_neg` are the one-shot modular
+operations, taking operands of any size and returning a result in
+`[0, modulus)`. All panic on a zero divisor or modulus.
 
 ```rust
 let n = BigUint::from_u64(1_000);
@@ -250,6 +262,12 @@ let product = BigUint::mod_mul(
     &BigUint::from_u64(97),
 );
 assert_eq!(product, BigUint::from_u64(22)); // 123 · 456 = 56 088 ≡ 22 (mod 97)
+
+// Negation lands in [0, modulus): −123 ≡ 71 (mod 97).
+let negated = BigUint::mod_neg(&BigUint::from_u64(123), &BigUint::from_u64(97));
+assert_eq!(negated, BigUint::from_u64(71));
+// A multiple of the modulus negates to zero: 194 = 2 · 97.
+assert!(BigUint::mod_neg(&BigUint::from_u64(194), &BigUint::from_u64(97)).is_zero());
 ```
 
 ## Signed integers: BigInt and Sign
@@ -935,6 +953,27 @@ assert!(is_strong_lucas_probable_prime(&BigUint::from_u64(5_459)));
 assert!(!is_probable_prime_bpsw(&BigUint::from_u64(5_459)));
 ```
 
+`is_lucas_probable_prime` is the general (not the strong) Lucas test of
+FIPS 186-4, Appendix C.3.3, step for step, for callers bound to that
+standard: a perfect square is composite; `D` is the first of 5, −7, 9, −11,
+… with `(D/n) = −1`, and a zero symbol means composite unless `n` divides
+that `D` itself (as 5 and 11 do, and only a prime can reach one); `n` is
+accepted exactly when `U_{n+1} ≡ 0 (mod n)` for `P = 1`, `Q = (1 − D)/4`.
+Whatever the strong test accepts, this test accepts, but not conversely:
+323 = 17 · 19 is the first composite it passes. `2` passes; `0`, `1`, and
+the other even values do not.
+
+```rust
+// FIPS 186-4 C.3.3: every prime passes, and no perfect square does.
+assert!(is_lucas_probable_prime(&BigUint::from_u64(65_537)));
+assert!(is_lucas_probable_prime(&BigUint::from_u64(11))); // passes over D = −11
+assert!(!is_lucas_probable_prime(&BigUint::from_u64(10_201))); // 101²
+
+// 323 = 17 · 19 is a Lucas pseudoprime, but not a strong one.
+assert!(is_lucas_probable_prime(&BigUint::from_u64(323)));
+assert!(!is_strong_lucas_probable_prime(&BigUint::from_u64(323)));
+```
+
 `is_prime_aks` is the exact deterministic Agrawal–Kayal–Saxena test. It
 proves its answer unconditionally by checking polynomial congruences in
 `(ℤ/nℤ)[X]/(X^r − 1)` after the perfect-power, multiplicative-order, and
@@ -1315,7 +1354,7 @@ recoverable conditions:
 |---|---|
 | `sub` / `-=` | the result would be negative |
 | `div_rem` / `div_rem_u64` / `rem` / `rem_u64` | the divisor or modulus is zero |
-| `BigUint::mod_mul` / `mod_pow` / `mod_add` / `mod_sub` | the modulus is zero |
+| `BigUint::mod_mul` / `mod_pow` / `mod_add` / `mod_sub` / `mod_neg` | the modulus is zero |
 | `ln_approx` | the value is zero |
 | `digit_count` | the radix is below 2 |
 | `mod_inverse_u64` | the modulus is zero |
@@ -1337,7 +1376,7 @@ recoverable conditions:
 | `PolyZ::balanced_base_expansion` | the base is below 2 |
 | `PolyZ::roots_mod_prime_power` | the exponent is zero, the base is below 2, the polynomial is zero or has every coefficient divisible by `pᵉ` (every residue is then a root), or the lift would exceed `MAX_ENUMERATED_ROOTS` candidates at some level or in its answer |
 | `lll_reduce` / `lll_reduce_delta` | dependent, ragged, or zero-length rows; the `_delta` form also on `δ ∉ (1/4, 1)` or a zero denominator |
-| `to_be_bytes_padded` | the value needs more than the requested byte length |
+| `to_be_bytes_padded` / `to_le_bytes_padded` | the value needs more than the requested byte length |
 | `MontgomeryContext::mul_mont` / `square_mont` / their `_with_workspace` forms / `pow_encoded` | given an operand not reduced below the modulus — the shared in-domain contract, asserted in debug builds; in release a grossly over-width operand trips the internal bounds check. `encode` and `decode` instead reduce any representative and never panic on width |
 | `random_below` / `random_nonzero_below` / `random_coprime_below` / `random_probable_prime` | the generator trips a stall guard — see Random sampling above for what each guard can and cannot detect |
 

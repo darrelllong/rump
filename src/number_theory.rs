@@ -3886,6 +3886,164 @@ pub fn is_strong_lucas_probable_prime(n: &BigUint) -> bool {
     strong_lucas_core(n, &ctx, discriminant)
 }
 
+/// The (general) Lucas probabilistic primality test of FIPS 186-4,
+/// Appendix C.3.3, step for step.
+///
+/// Every prime passes. A composite passes only when it is a Lucas
+/// pseudoprime for the parameters the steps imply — `P = 1` and
+/// `Q = (1 − D)/4`, with `D` chosen by Selfridge's Method A — the first being
+/// `323 = 17·19`. The acceptance condition, `U_{C+1} ≡ 0 (mod C)`, is weaker
+/// than [`is_strong_lucas_probable_prime`]'s: for `C + 1 = 2^s·d` with `d`
+/// odd, `U_{C+1} = U_d·V_d·V_{2d}⋯V_{2^{s−1}d}`, so every composite the
+/// strong test accepts is accepted here, while some accepted here (323 among
+/// them) are rejected there. This is the test to call where a standard names
+/// C.3.3; elsewhere the strong test is the better one.
+///
+/// For an odd candidate `C` the steps are:
+///
+/// 1. If `C` is a perfect square, return composite. Appendix C.4 offers a
+///    Newton iteration that "may be used"; [`BigUint::is_square`] answers
+///    the same question exactly.
+/// 2. Find the first `D` in `5, −7, 9, −11, 13, −15, …` with Jacobi symbol
+///    `(D/C) = −1`; if a symbol is `0`, return composite.
+/// 3. `K = C + 1`,
+/// 4. with binary expansion `K_r K_{r−1} … K_0` and `K_r = 1`.
+/// 5. `U_r = V_r = 1`.
+/// 6. For `i` from `r − 1` down to `0`: `U_temp = U_{i+1}·V_{i+1}` and
+///    `V_temp = (V_{i+1}² + D·U_{i+1}²)/2`; then, if `K_i = 1`,
+///    `U_i = (U_temp + V_temp)/2` and `V_i = (V_temp + D·U_temp)/2`, and
+///    otherwise `U_i = U_temp` and `V_i = V_temp` — all modulo `C`.
+/// 7. If `U_0 = 0`, return probably prime; otherwise composite.
+///
+/// Each halving of an odd `A` is taken as `(A + C)/2`, as the note after
+/// step 7 permits. The arithmetic runs on Montgomery residues under one
+/// context for `C`; halving commutes with that encoding, being
+/// multiplication by `2⁻¹ mod C`.
+///
+/// C.3.3's input is an odd candidate. Outside that domain this function is
+/// still total and still correct: `2` returns `true`, `0` and every other
+/// even value return `false`, and `1` is rejected by step 1 (`1 = 1²`).
+///
+/// Step 2 is read with one qualification, and it can only matter for a
+/// candidate no larger than the `|D|` its own search reaches. A zero symbol
+/// means `gcd(D, C) > 1`, which proves `C` composite when the gcd is a proper
+/// divisor — always the case while `|D| < C`. When `C` itself divides `D`
+/// the symbol proves nothing, and the search can arrive at such a `D` only
+/// for prime `C`: a composite non-square `C` has a least prime factor
+/// `p < C`, and the search meets `|D| = p` (or `|D| = 9`, when `p = 3`)
+/// first and returns composite there. Taken literally, the step would report
+/// the primes 5 and 11 composite, at `D = 5` and `D = −11`, so such a zero
+/// symbol is passed over and the search continues. For every candidate
+/// larger than the `|D|` it reaches — every candidate FIPS 186-4 tests — the
+/// result is the text's exactly.
+///
+/// Reference: National Institute of Standards and Technology, *Digital
+/// Signature Standard (DSS)*, FIPS PUB 186-4 (July 2013), Appendix C.3.3,
+/// *(General) Lucas Probabilistic Primality Test*.
+#[must_use]
+pub fn is_lucas_probable_prime(n: &BigUint) -> bool {
+    // Outside C.3.3's odd candidates: two is the one even prime, and zero
+    // and every other even value are composite.
+    if !n.is_odd() {
+        return *n == BigUint::from_u64(2);
+    }
+    // Step 1. This also retires one, and it is what lets step 2 end: against
+    // a square every Jacobi symbol is 0 or 1.
+    if n.is_square() {
+        return false;
+    }
+    // Step 2.
+    let Some(discriminant) = lucas_discriminant_c33(n) else {
+        return false;
+    };
+    // Steps 3 to 7, under the Montgomery context every odd modulus has.
+    let ctx = MontgomeryContext::new(n).expect("candidate is odd");
+    lucas_ladder_c33(n, &ctx, discriminant)
+}
+
+/// FIPS 186-4 C.3.3 step 2 for an odd, non-square candidate `C > 1`: the
+/// first `D` of `5, −7, 9, −11, 13, …` with `(D/C) = −1`, or `None` when a
+/// zero symbol proves `C` composite. A zero symbol from a `D` that `C`
+/// divides proves nothing and is passed over; [`is_lucas_probable_prime`]
+/// explains why only a prime candidate reaches one.
+///
+/// Termination is the argument [`selfridge_discriminant`] gives: the
+/// sequence meets every residue class modulo an odd `C`, and once squares
+/// are excluded some class has symbol `−1`. The same empirical remark
+/// applies to the `i64` conversion: it is unreachable in practice, and a
+/// panic rather than a misclassification if it were not.
+fn lucas_discriminant_c33(candidate: &BigUint) -> Option<i64> {
+    debug_assert!(candidate.is_odd() && !candidate.is_one());
+    let mut magnitude: u64 = 5;
+    let mut positive = true;
+    loop {
+        let signed =
+            i64::try_from(magnitude).expect("discriminant search stays far below i64::MAX");
+        let discriminant = if positive { signed } else { -signed };
+        let residue = BigInt::from_i64(discriminant).rem_euclid(candidate);
+        match jacobi(&residue, candidate).expect("the candidate is odd") {
+            -1 => return Some(discriminant),
+            0 if candidate
+                .to_u64()
+                .is_none_or(|word| !magnitude.is_multiple_of(word)) =>
+            {
+                return None;
+            }
+            _ => {}
+        }
+        magnitude += 2;
+        positive = !positive;
+    }
+}
+
+/// FIPS 186-4 C.3.3 steps 3 to 7 for an odd candidate `C > 1` and its step-2
+/// discriminant: the left-to-right ladder over the bits of `K = C + 1` on
+/// Montgomery residues, accepting exactly when `U_0 = 0`.
+fn lucas_ladder_c33(candidate: &BigUint, ctx: &MontgomeryContext, discriminant: i64) -> bool {
+    // A/2 mod C for a reduced A, by the note after step 7: (A + C)/2 when A
+    // is odd. The sum stays below 2C, so the halved value is reduced again.
+    let halve = |value: BigUint| -> BigUint {
+        let mut halved = value;
+        if halved.is_odd() {
+            halved += candidate;
+        }
+        halved.shr1();
+        halved
+    };
+    let d = ctx.encode(&BigInt::from_i64(discriminant).rem_euclid(candidate));
+
+    // Steps 3 and 4: K = C + 1, whose top bit K_r is bit r = bits(K) − 1.
+    let k = candidate.add(&BigUint::one());
+    let r = k.bits() - 1;
+
+    // Step 5.
+    let mut u = ctx.encode(&BigUint::one());
+    let mut v = u.clone();
+
+    // Step 6.
+    for i in (0..r).rev() {
+        // Steps 6.1 and 6.2.
+        let u_temp = ctx.mul_mont(&u, &v);
+        let v_temp = halve(ctx.add_mont(
+            &ctx.square_mont(&v),
+            &ctx.mul_mont(&d, &ctx.square_mont(&u)),
+        ));
+        // Step 6.3.
+        if k.bit(i) {
+            // Steps 6.3.1 and 6.3.2.
+            u = halve(ctx.add_mont(&u_temp, &v_temp));
+            v = halve(ctx.add_mont(&v_temp, &ctx.mul_mont(&d, &u_temp)));
+        } else {
+            // Steps 6.3.3 and 6.3.4.
+            u = u_temp;
+            v = v_temp;
+        }
+    }
+
+    // Step 7. A zero Montgomery residue is a zero value: gcd(R, C) = 1.
+    u.is_zero()
+}
+
 /// Baillie–PSW probable-prime test: trial division, one strong base-2
 /// Miller–Rabin round, then the strong Lucas test with Selfridge's
 /// parameters.
@@ -5960,6 +6118,175 @@ mod tests {
         // Wrapper edges the composed test never routes here.
         for n in [0u64, 1, 4, 6] {
             assert!(!is_strong_lucas_probable_prime(&BigUint::from_u64(n)));
+        }
+    }
+
+    /// OEIS A217120, *Lucas pseudoprimes* — "Lucas pseudoprimes with
+    /// parameters (P, Q) defined by Selfridge's Method A" — every term below
+    /// 10⁵: terms 1 through 57 of the sequence's b-file, b217120.txt,
+    /// downloaded from oeis.org on 2026-09-11 (term 58 is
+    /// 100127).
+    const A217120_BELOW_BOUND: [u64; 57] = [
+        323, 377, 1159, 1829, 3827, 5459, 5777, 9071, 9179, 10877, 11419, 11663, 13919, 14839,
+        16109, 16211, 18407, 18971, 19043, 22499, 23407, 24569, 25199, 25877, 26069, 27323, 32759,
+        34943, 35207, 39059, 39203, 39689, 40309, 44099, 46979, 47879, 50183, 51983, 53663, 56279,
+        58519, 60377, 63881, 69509, 72389, 73919, 75077, 77219, 79547, 79799, 82983, 84419, 86063,
+        90287, 94667, 97019, 97439,
+    ];
+
+    /// The bound [`A217120_BELOW_BOUND`] is complete below.
+    const A217120_BOUND: u64 = 100_000;
+
+    #[test]
+    fn lucas_c33_accepts_exactly_the_primes_and_a217120_below_its_bound() {
+        let bound = usize::try_from(A217120_BOUND).expect("the bound fits usize");
+        let prime = reference_prime_sieve(bound);
+        // The table is what its comment says: ascending odd composites.
+        assert!(A217120_BELOW_BOUND.windows(2).all(|pair| pair[0] < pair[1]));
+        for &n in &A217120_BELOW_BOUND {
+            let index = usize::try_from(n).expect("a tabulated term fits usize");
+            assert!(n < A217120_BOUND && !n.is_multiple_of(2) && !prime[index]);
+        }
+        // Every integer below the bound: each prime is accepted, and of the
+        // composites exactly the tabulated Lucas pseudoprimes are.
+        for (index, &is_prime) in prime.iter().enumerate() {
+            let n = u64::try_from(index).expect("the bound fits u64");
+            let expected = is_prime || A217120_BELOW_BOUND.binary_search(&n).is_ok();
+            assert_eq!(
+                is_lucas_probable_prime(&BigUint::from_u64(n)),
+                expected,
+                "C.3.3 misclassified {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn lucas_c33_rejects_perfect_squares() {
+        // Step 1 carries weight: against a square every Jacobi symbol is 0
+        // or 1, so the step-2 search alone would never end.
+        for root in 0u64..3_000 {
+            assert!(
+                !is_lucas_probable_prime(&BigUint::from_u64(root * root)),
+                "{root}² is a perfect square"
+            );
+        }
+        // Squares of primes at width, where no small factor gives them away.
+        let mut rng = SplitMix64 {
+            state: 0x5a0a_12e5_c333_0001,
+        };
+        let mut prime = draw_below(&mut rng, &pow2(192));
+        prime.set_bit(191);
+        prime.set_bit(0);
+        while !is_probable_prime(&prime) {
+            prime = prime.add(&BigUint::from_u64(2));
+        }
+        for root in [mersenne(61), mersenne(89), mersenne(127), prime] {
+            assert!(is_lucas_probable_prime(&root));
+            assert!(!is_lucas_probable_prime(&root.square()));
+        }
+    }
+
+    #[test]
+    fn strong_lucas_acceptance_implies_lucas_c33_acceptance() {
+        // With n + 1 = 2^s·d, U_(n+1) = U_d·V_d·V_2d⋯V_(2^(s−1)·d) under the
+        // same D, so whatever the strong test accepts, C.3.3 accepts.
+        for n in 0..A217120_BOUND {
+            let value = BigUint::from_u64(n);
+            if is_strong_lucas_probable_prime(&value) {
+                assert!(
+                    is_lucas_probable_prime(&value),
+                    "{n} passes the strong test but not C.3.3"
+                );
+            }
+        }
+        // Not conversely. A217120's first five terms precede 5459, the first
+        // strong Lucas pseudoprime (A217255): C.3.3 accepts them, and the
+        // strong test does not.
+        for n in [323u64, 377, 1159, 1829, 3827] {
+            let value = BigUint::from_u64(n);
+            assert!(is_lucas_probable_prime(&value), "{n} is in A217120");
+            assert!(
+                !is_strong_lucas_probable_prime(&value),
+                "{n} is not a strong Lucas pseudoprime"
+            );
+        }
+    }
+
+    #[test]
+    fn lucas_c33_edges_and_wide_candidates() {
+        // C.3.3 takes odd candidates; the rest of the domain is defined, and
+        // right.
+        for (n, expected) in [
+            (0u64, false),
+            (1, false),
+            (2, true),
+            (3, true),
+            (4, false),
+            (6, false),
+            (1 << 40, false),
+        ] {
+            assert_eq!(
+                is_lucas_probable_prime(&BigUint::from_u64(n)),
+                expected,
+                "{n}"
+            );
+        }
+        // A zero symbol from a D the candidate divides proves nothing: 5
+        // divides D = 5 and 11 divides D = −11, and both are prime. A
+        // composite meets its proper factor first.
+        for n in [5u64, 11] {
+            assert!(
+                is_lucas_probable_prime(&BigUint::from_u64(n)),
+                "{n} is prime"
+            );
+        }
+        for n in [15u64, 33, 35, 55, 77, 99] {
+            assert!(
+                !is_lucas_probable_prime(&BigUint::from_u64(n)),
+                "{n} is composite"
+            );
+        }
+
+        for exponent in [61usize, 89, 107, 127, 521] {
+            assert!(
+                is_lucas_probable_prime(&mersenne(exponent)),
+                "M{exponent} is prime"
+            );
+        }
+        assert!(
+            !is_lucas_probable_prime(&mersenne(67)),
+            "M67 = 193707721 · 761838257287"
+        );
+
+        // Multi-limb candidates: a prime at each width passes, a product of
+        // two half-width primes fails, and random odd values agree with the
+        // twelve-base Miller–Rabin test.
+        let mut rng = SplitMix64 {
+            state: 0x1ca5_c333_0000_0001,
+        };
+        let prime_at = |bits: usize, rng: &mut SplitMix64| {
+            let mut p = draw_below(rng, &pow2(bits));
+            p.set_bit(bits - 1);
+            p.set_bit(0);
+            while !is_probable_prime(&p) {
+                p = p.add(&BigUint::from_u64(2));
+            }
+            p
+        };
+        for bits in [64usize, 65, 128, 192, 256, 512] {
+            assert!(is_lucas_probable_prime(&prime_at(bits, &mut rng)));
+            let semiprime = prime_at(bits / 2, &mut rng).mul(&prime_at(bits / 2, &mut rng));
+            assert!(!is_lucas_probable_prime(&semiprime));
+            for _ in 0..40 {
+                let mut candidate = draw_below(&mut rng, &pow2(bits));
+                candidate.set_bit(bits - 1);
+                candidate.set_bit(0);
+                assert_eq!(
+                    is_lucas_probable_prime(&candidate),
+                    is_probable_prime(&candidate),
+                    "C.3.3 and Miller–Rabin disagree at {bits} bits"
+                );
+            }
         }
     }
 

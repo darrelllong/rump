@@ -384,30 +384,15 @@ impl BigUint {
 
     /// Encode as big-endian bytes without leading zero bytes.
     ///
-    /// Internally, limb 0 stores the least-significant 64 bits, so encoding
-    /// walks the limbs in reverse order and strips only the leading zero bytes
-    /// introduced by the fixed-width `u64` representation.
-    ///
-    /// # Panics
-    ///
-    /// Does not panic in normal use; the internal `expect` would trip only on a
-    /// corrupt representation (a non-zero value with no non-zero bytes).
+    /// The output is exactly `⌈bits/8⌉` bytes (zero encodes as a single
+    /// `0x00`), allocated once at that length and filled from its last byte
+    /// backwards with the limbs' bytes, least significant first. Nothing is
+    /// encoded wider and trimmed, so no byte of the value is left behind in
+    /// a discarded buffer or in the result's spare capacity.
     #[must_use]
     pub fn to_be_bytes(&self) -> Vec<u8> {
-        if self.is_zero() {
-            return vec![0];
-        }
-
-        let mut out = Vec::with_capacity(self.limbs.len() * 8);
-        for &limb in self.limbs.iter().rev() {
-            out.extend_from_slice(&limb.to_be_bytes());
-        }
-
-        let first_nonzero = out
-            .iter()
-            .position(|&byte| byte != 0)
-            .expect("non-zero bigint must encode to at least one non-zero byte");
-        out.drain(0..first_nonzero);
+        let mut out = vec![0u8; self.bits().div_ceil(8).max(1)];
+        self.write_bytes_least_significant_first(out.iter_mut().rev());
         out
     }
 
@@ -439,24 +424,94 @@ impl BigUint {
     /// Encode as big-endian bytes at a fixed width, zero-padded on the
     /// left — the shape wire formats and share serializations want.
     ///
+    /// The limbs are written straight into the one `byte_width` buffer that
+    /// is returned; no unpadded encoding is built and copied, so no second
+    /// copy of the value's bytes is left in a freed allocation.
+    ///
     /// # Panics
     ///
     /// Panics if the value does not fit in `byte_width` bytes.
     /// `byte_width = 0` is legal only for zero (and yields an empty vector).
     #[must_use]
     pub fn to_be_bytes_padded(&self, byte_width: usize) -> Vec<u8> {
-        if self.is_zero() {
-            return vec![0u8; byte_width];
-        }
-        let minimal = self.bits().div_ceil(8);
         assert!(
-            minimal <= byte_width,
+            self.bits().div_ceil(8) <= byte_width,
             "value does not fit in {byte_width} bytes"
         );
         let mut out = vec![0u8; byte_width];
-        let bytes = self.to_be_bytes();
-        out[byte_width - bytes.len()..].copy_from_slice(&bytes);
+        self.write_bytes_least_significant_first(out.iter_mut().rev());
         out
+    }
+
+    /// Decode little-endian bytes: the first byte is the least significant,
+    /// the mirror of [`Self::from_be_bytes`]. The empty slice decodes to zero,
+    /// and zero bytes at the end (the high end) are accepted and ignored.
+    #[must_use]
+    pub fn from_le_bytes(bytes: &[u8]) -> Self {
+        let mut limbs = Vec::with_capacity(bytes.len().div_ceil(8));
+        // Eight bytes to a limb, the first byte of each chunk lowest; a short
+        // final chunk is the top limb's low bytes.
+        for chunk in bytes.chunks(8) {
+            let mut limb = 0u64;
+            for (&byte, shift) in chunk.iter().zip((0..u64::BITS).step_by(8)) {
+                limb |= u64::from(byte) << shift;
+            }
+            limbs.push(limb);
+        }
+
+        let mut out = Self { limbs };
+        out.normalize();
+        out
+    }
+
+    /// Encode as little-endian bytes without trailing zero bytes — the mirror
+    /// of [`Self::to_be_bytes`]: exactly `⌈bits/8⌉` bytes, least significant
+    /// first, and zero encodes as a single `0x00`. The buffer is allocated
+    /// once at that length and written directly, with no reversed copy.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> Vec<u8> {
+        let mut out = vec![0u8; self.bits().div_ceil(8).max(1)];
+        self.write_bytes_least_significant_first(out.iter_mut());
+        out
+    }
+
+    /// Encode as little-endian bytes at a fixed width, zero-padded on the
+    /// right (the high end) — the mirror of [`Self::to_be_bytes_padded`],
+    /// written straight into the returned buffer in the same way.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value does not fit in `byte_width` bytes.
+    /// `byte_width = 0` is legal only for zero (and yields an empty vector).
+    #[must_use]
+    pub fn to_le_bytes_padded(&self, byte_width: usize) -> Vec<u8> {
+        assert!(
+            self.bits().div_ceil(8) <= byte_width,
+            "value does not fit in {byte_width} bytes"
+        );
+        let mut out = vec![0u8; byte_width];
+        self.write_bytes_least_significant_first(out.iter_mut());
+        out
+    }
+
+    /// The one byte writer behind the four encoders: the value's bytes, least
+    /// significant first, into `slots` in the order the iterator yields them.
+    ///
+    /// Writing stops at whichever runs out first — the slots or the limbs'
+    /// `8·len` bytes. Slots past the limbs keep what the caller put there
+    /// (zero, in every caller), and limb bytes past the slots are the top
+    /// limb's high zero bytes, because each caller sized its buffer to at
+    /// least `⌈bits/8⌉`.
+    fn write_bytes_least_significant_first<'a>(&self, slots: impl Iterator<Item = &'a mut u8>) {
+        let bytes = self.limbs.iter().flat_map(|&limb| {
+            // The cast keeps the low eight bits of each shifted limb.
+            (0..u64::BITS)
+                .step_by(8)
+                .map(move |shift| (limb >> shift) as u8)
+        });
+        for (slot, byte) in slots.zip(bytes) {
+            *slot = byte;
+        }
     }
 
     /// Parse from a digit string in the given radix (2 through 36, digits
@@ -2553,6 +2608,36 @@ impl BigUint {
         }
     }
 
+    /// One-shot modular negation, on the same contract as
+    /// [`Self::mod_add`]: any operand, non-zero modulus (panic otherwise).
+    ///
+    /// The result is the canonical representative of `−value` modulo
+    /// `modulus`, always in `[0, modulus)`: a `value` that is a multiple of
+    /// the modulus (zero included) negates to zero, and any other to
+    /// `modulus − (value mod modulus)`, which is in `[1, modulus)`. A reduced
+    /// operand takes one subtraction; an unreduced one is reduced first.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `modulus == 0`.
+    #[must_use]
+    pub fn mod_neg(value: &Self, modulus: &Self) -> Self {
+        assert!(!modulus.is_zero(), "modulus must be non-zero");
+        if value < modulus {
+            return if value.is_zero() {
+                Self::zero()
+            } else {
+                modulus.sub(value)
+            };
+        }
+        let reduced = value.rem(modulus);
+        if reduced.is_zero() {
+            Self::zero()
+        } else {
+            modulus.sub(&reduced)
+        }
+    }
+
     /// Return `(quotient, remainder)` for Euclidean division, with the
     /// remainder in `[0, divisor)`.
     ///
@@ -4087,6 +4172,46 @@ mod tests {
     #[should_panic(expected = "division by zero")]
     fn div_rem_u64_rejects_zero() {
         let _ = BigUint::from_u64(5).div_rem_u64(0);
+    }
+
+    #[test]
+    fn mod_neg_matches_machine_arithmetic() {
+        let mut seed = 0x6e6e_9a7e_0000_0001;
+        for _ in 0..2000 {
+            let m = (lcg_next(&mut seed) >> (lcg_next(&mut seed) % 64)).max(1);
+            let a = lcg_next(&mut seed) >> (lcg_next(&mut seed) % 64);
+            let (bm, ba) = (BigUint::from_u64(m), BigUint::from_u64(a));
+            let negated = BigUint::mod_neg(&ba, &bm);
+            // Unreduced operands are within the contract; the result is not.
+            let expected = (u128::from(m) - u128::from(a % m)) % u128::from(m);
+            assert_eq!(negated, BigUint::from_u128(expected));
+            assert!(negated < bm);
+            assert!(BigUint::mod_add(&ba, &negated, &bm).is_zero());
+            assert_eq!(BigUint::mod_sub(&BigUint::zero(), &ba, &bm), negated);
+        }
+
+        // Multi-limb, at each edge of the range and past it.
+        let mut modulus = BigUint::zero();
+        modulus.set_bit(130);
+        let modulus = modulus.add(&BigUint::from_u64(27));
+        let one = BigUint::one();
+        let three = BigUint::from_u64(3);
+        assert!(BigUint::mod_neg(&BigUint::zero(), &modulus).is_zero());
+        assert!(BigUint::mod_neg(&modulus, &modulus).is_zero());
+        assert_eq!(BigUint::mod_neg(&one, &modulus), modulus.sub(&one));
+        assert_eq!(BigUint::mod_neg(&modulus.sub(&one), &modulus), one);
+        let unreduced = modulus.mul(&BigUint::from_u64(5)).add(&three);
+        assert_eq!(BigUint::mod_neg(&unreduced, &modulus), modulus.sub(&three));
+        let multiple = modulus.mul(&BigUint::from_u64(7));
+        assert!(BigUint::mod_neg(&multiple, &modulus).is_zero());
+        // Modulus one: the ring has one element.
+        assert!(BigUint::mod_neg(&unreduced, &one).is_zero());
+    }
+
+    #[test]
+    #[should_panic(expected = "modulus must be non-zero")]
+    fn mod_neg_rejects_zero_modulus() {
+        let _ = BigUint::mod_neg(&BigUint::one(), &BigUint::zero());
     }
 
     #[test]
@@ -6241,6 +6366,76 @@ mod tests {
     #[should_panic(expected = "does not fit")]
     fn padded_bytes_reject_overflow() {
         let _ = BigUint::from_u64(0x0102).to_be_bytes_padded(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not fit")]
+    fn padded_little_endian_bytes_reject_overflow() {
+        let _ = BigUint::from_u64(0x0102).to_le_bytes_padded(1);
+    }
+
+    #[test]
+    fn little_endian_bytes_mirror_big_endian() {
+        // The fixed conventions, spelled out.
+        let value = BigUint::from_u64(0x0102);
+        assert_eq!(value.to_le_bytes(), vec![0x02, 0x01]);
+        assert_eq!(value.to_le_bytes_padded(2), vec![0x02, 0x01]); // exact fit
+        assert_eq!(value.to_le_bytes_padded(5), vec![0x02, 0x01, 0, 0, 0]);
+        assert_eq!(BigUint::from_le_bytes(&[0x02, 0x01, 0, 0]), value);
+        assert!(BigUint::from_le_bytes(&[]).is_zero());
+        assert!(BigUint::from_le_bytes(&[0, 0, 0]).is_zero());
+        assert_eq!(BigUint::zero().to_le_bytes(), vec![0]);
+        assert_eq!(BigUint::zero().to_le_bytes_padded(3), vec![0, 0, 0]);
+        assert!(BigUint::zero().to_le_bytes_padded(0).is_empty());
+
+        // Random byte strings across limb boundaries, some with leading
+        // (high) zero bytes. The oracle is the input bytes themselves, decoded
+        // by the unchanged big-endian parser: every encoder must reproduce
+        // them, stripped or padded, and in either byte order.
+        let mut seed = 0x1eb1_7e50_0000_0001;
+        for byte_len in 0usize..=41 {
+            for _ in 0..8 {
+                let mut bytes: Vec<u8> = (0..byte_len)
+                    .map(|_| (lcg_next(&mut seed) >> 56) as u8)
+                    .collect();
+                if byte_len > 1 && lcg_next(&mut seed).is_multiple_of(3) {
+                    bytes[0] = 0;
+                }
+                let value = BigUint::from_be_bytes(&bytes);
+                let minimal = value.bits().div_ceil(8);
+                let significant = &bytes[bytes.len() - minimal..];
+
+                let expected_be = if minimal == 0 {
+                    vec![0]
+                } else {
+                    significant.to_vec()
+                };
+                let mut expected_le = expected_be.clone();
+                expected_le.reverse();
+                let be = value.to_be_bytes();
+                let le = value.to_le_bytes();
+                assert_eq!(be, expected_be);
+                assert_eq!(le, expected_le);
+                // Allocated at the final length: nothing sits in spare
+                // capacity past the bytes a caller can see.
+                assert_eq!(be.capacity(), be.len());
+                assert_eq!(le.capacity(), le.len());
+
+                let mut reversed = bytes.clone();
+                reversed.reverse();
+                assert_eq!(BigUint::from_le_bytes(&reversed), value);
+                assert_eq!(BigUint::from_le_bytes(&le), value);
+
+                for width in minimal..minimal + 10 {
+                    let mut padded_be = vec![0u8; width - minimal];
+                    padded_be.extend_from_slice(significant);
+                    let mut padded_le = padded_be.clone();
+                    padded_le.reverse();
+                    assert_eq!(value.to_be_bytes_padded(width), padded_be);
+                    assert_eq!(value.to_le_bytes_padded(width), padded_le);
+                }
+            }
+        }
     }
 
     #[test]

@@ -116,6 +116,7 @@ path is the contract; physical splitting follows after names settle.
 | Reciprocal | integer::WordReciprocal | done | fixed divisor is exactly one word |
 | Reciprocal::new(NonZeroU64) | WordReciprocal::new(NonZeroU64) | done | total constructor |
 | Reciprocal::rem / div_rem | WordReciprocal::rem / div_rem | done | leaf names are canonical |
+| — | BigUint::from_le_bytes / to_le_bytes / to_le_bytes_padded | done | little-endian mirror of the big-endian trio, on the same zero, minimal-length, and overflow-panic conventions |
 
 Constructors, conversions, predicates, roots, shifts, and div_rem methods not
 listed above retain their current leaf names under the canonical path.
@@ -132,6 +133,7 @@ listed above retain their current leaf names under the canonical path.
 | sqrt_mod | modular::mod_sqrt | done | |
 | sqrt_mod_prime_power | modular::mod_sqrt_prime_power | done | |
 | BigUint mod_add/mod_sub/mod_mul | same leaf names | done | inherent operations stay on the value |
+| — | BigUint::mod_neg | done | one-shot negation on the mod_add contract; `neg` as in `core::ops::Neg`, the way add/sub/mul follow `Add`/`Sub`/`Mul` |
 | BarrettContext::new returning Option | return Result<Self, ModulusError> | done | zero and one are rejected |
 | MontgomeryContext::new returning Option | return Result<Self, ModulusError> | done | zero and even moduli are rejected |
 | no public modular construction error | modular::ModulusError { Zero, One, Even } | done | shared factual variants; no context-dependent “below two” variant |
@@ -157,6 +159,7 @@ public.
 | is_probable_prime_with_bases | number_theory::miller_rabin_with_bases | done | algorithm is visible |
 | miller_rabin_witness | same under number_theory | done | |
 | is_strong_lucas_probable_prime | same under number_theory | done | |
+| — | number_theory::is_lucas_probable_prime | done | FIPS 186-4 C.3.3 general Lucas test; a distinct, weaker acceptance condition than the strong test, not an alias |
 | ProductTree | number_theory::ProductTree | done | typed invariant is canonical |
 | product_tree / remainder_tree | same under number_theory | done | algorithmic one-shot pair |
 | — | number_theory::crt_combine_balanced | done | balanced product tree, bounded parallel workers; distinct cost contract from the ordered one-shot fold |

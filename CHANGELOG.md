@@ -46,7 +46,44 @@ what a consumer must change, not everything that moved.
   scalar-equation oracles and a fixture that crosses the parallel threshold
   check bit-identical results at one and eight workers.
 
+- **`BigUint::to_be_bytes` and `to_be_bytes_padded` allocate once and leave
+  no second copy.** `to_be_bytes_padded` encoded unpadded and copied that
+  vector into the padded one, dropping it unwiped; `to_be_bytes` encoded
+  eight bytes per limb and drained the leading zeros, leaving up to seven
+  low-order bytes of the value in the result's spare capacity. Both now
+  write the limbs straight into one buffer of the final length, whose
+  capacity equals its length. The output is unchanged; a consumer that wipes
+  the returned bytes now reaches every heap copy these functions made.
+
 ### Added
+
+- **Little-endian bytes: `BigUint::from_le_bytes`, `to_le_bytes`, and
+  `to_le_bytes_padded`.** The exact mirror of the big-endian trio: the empty
+  slice decodes to zero, zero encodes as one `0x00`, the minimal encoding
+  drops high zero bytes, and the padded form zero-fills the high end and
+  panics when the value does not fit. Each writes its output directly, with
+  no reversed intermediate. A consumer that reversed a big-endian encoding,
+  and wiped the reversed copy, calls these instead.
+
+- **`BigUint::mod_neg`.** One-shot modular negation on `mod_add`'s
+  contract: any operand, non-zero modulus (panic otherwise), result in
+  `[0, modulus)`. It replaces `BigUint::mod_sub(&BigUint::zero(), x, m)`.
+
+- **`number_theory::is_lucas_probable_prime`.** The general Lucas
+  probable-prime test of FIPS 186-4, Appendix C.3.3, step for step: a
+  perfect square is composite, `D` is the first of 5, −7, 9, −11, … with
+  Jacobi symbol −1 and a zero symbol means composite, and the candidate is
+  accepted exactly when `U_0 = 0` at the end of the left-to-right ladder over
+  the bits of `n + 1`. It is not an alias of
+  `is_strong_lucas_probable_prime`, whose acceptance condition is stronger:
+  323 passes this test and fails that one. One reading is documented rather
+  than silent. A zero symbol from a `D` the candidate itself divides proves
+  nothing, and only a prime reaches one, so it is passed over instead of
+  reporting the primes 5 and 11 composite; for every candidate larger than
+  the `|D|` its search reaches, the result is the standard's exactly. `0`,
+  `1`, and even values, outside C.3.3's odd domain, get the true answer.
+  Every integer below 10⁵ is checked against an independent sieve and
+  OEIS A217120.
 
 - **`number_theory::is_prime_aks`.** An exact, unconditional deterministic
   implementation of the Agrawal–Kayal–Saxena primality test. The polynomial

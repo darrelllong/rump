@@ -13,11 +13,11 @@ use rump::modular::{
     BarrettContext, ModulusError, MontgomeryContext, MontgomeryScratch,
 };
 use rump::number_theory::{
-    crt_combine, crt_combine_balanced, gcd, gcd_extended, gcd_u64, is_prime_aks, is_probable_prime,
-    is_probable_prime_bpsw, is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre,
-    miller_rabin_with_bases, miller_rabin_witness, primes_below, product_tree,
-    rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
-    smooth_parts, valuation, SmoothnessBase,
+    crt_combine, crt_combine_balanced, gcd, gcd_extended, gcd_u64, is_lucas_probable_prime,
+    is_prime_aks, is_probable_prime, is_probable_prime_bpsw, is_strong_lucas_probable_prime,
+    jacobi, kronecker, lcm, legendre, miller_rabin_with_bases, miller_rabin_witness, primes_below,
+    product_tree, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
+    remove_factor, smooth_parts, valuation, SmoothnessBase,
 };
 use rump::polynomial::{PolyMod, PolyZ, RealRootError};
 use rump::random::{
@@ -121,6 +121,12 @@ fn manual_biguint_construction_and_bytes() {
     // serializations want; a value that does not fit panics.
     assert_eq!(value.to_be_bytes_padded(4), vec![0x00, 0x00, 0x01, 0x00]);
 
+    // The little-endian mirror: least significant byte first, padded on the
+    // right.
+    assert_eq!(BigUint::from_le_bytes(&[0x00, 0x01]), value);
+    assert_eq!(value.to_le_bytes(), vec![0x00, 0x01]);
+    assert_eq!(value.to_le_bytes_padded(4), vec![0x00, 0x01, 0x00, 0x00]);
+
     // Range-pinned callers can read the low bits directly.
     let wide = BigUint::from_u128((7u128 << 64) | 9);
     assert_eq!(wide.low_u128(), (7u128 << 64) | 9);
@@ -200,6 +206,12 @@ fn manual_biguint_division_and_reduction() {
         &BigUint::from_u64(97),
     );
     assert_eq!(product, BigUint::from_u64(22)); // 123 · 456 = 56 088 ≡ 22 (mod 97)
+
+    // Negation lands in [0, modulus): −123 ≡ 71 (mod 97).
+    let negated = BigUint::mod_neg(&BigUint::from_u64(123), &BigUint::from_u64(97));
+    assert_eq!(negated, BigUint::from_u64(71));
+    // A multiple of the modulus negates to zero: 194 = 2 · 97.
+    assert!(BigUint::mod_neg(&BigUint::from_u64(194), &BigUint::from_u64(97)).is_zero());
 }
 
 #[test]
@@ -644,6 +656,18 @@ fn manual_number_theory_baillie_psw() {
     // 5459 is a strong Lucas pseudoprime; the base-2 stage rejects it.
     assert!(is_strong_lucas_probable_prime(&BigUint::from_u64(5_459)));
     assert!(!is_probable_prime_bpsw(&BigUint::from_u64(5_459)));
+}
+
+#[test]
+fn manual_number_theory_fips_lucas() {
+    // FIPS 186-4 C.3.3: every prime passes, and no perfect square does.
+    assert!(is_lucas_probable_prime(&BigUint::from_u64(65_537)));
+    assert!(is_lucas_probable_prime(&BigUint::from_u64(11))); // passes over D = −11
+    assert!(!is_lucas_probable_prime(&BigUint::from_u64(10_201))); // 101²
+
+    // 323 = 17 · 19 is a Lucas pseudoprime, but not a strong one.
+    assert!(is_lucas_probable_prime(&BigUint::from_u64(323)));
+    assert!(!is_strong_lucas_probable_prime(&BigUint::from_u64(323)));
 }
 
 #[test]
