@@ -144,10 +144,10 @@ pub mod number_theory {
         crt_combine, crt_combine_balanced, dickman_rho, gcd, gcd_extended, gcd_u128, gcd_u64,
         is_lucas_probable_prime, is_prime_aks, is_probable_prime, is_probable_prime_bpsw,
         is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker, lcm, legendre, ln_gamma,
-        miller_rabin_with_bases, miller_rabin_witness, primes_below, product_tree,
-        rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
-        semismooth_probability, smooth_parts, valuation, ProductTree, SmoothnessBase,
-        SmoothnessBaseError,
+        miller_rabin_with_bases, miller_rabin_witness, primes_below, primes_past, product_tree,
+        rational_reconstruct, rational_reconstruct_bounded, regularized_incomplete_beta,
+        remainder_tree, remove_factor, semismooth_probability, smooth_parts, student_t_quantile,
+        valuation, ProductTree, SmoothnessBase, SmoothnessBaseError,
     };
 }
 
@@ -175,9 +175,10 @@ pub mod finite_field {
 /// Lattice basis reduction.
 pub mod lattice {
     pub use crate::lattice_impl::{
-        gauss_reduce_weighted, lll_reduce, lll_reduce_delta, lll_reduce_form, short_vectors_form,
-        ReductionError,
+        closest_vectors_form, gauss_reduce_weighted, lll_reduce, lll_reduce_delta, lll_reduce_form,
+        short_vectors_form, ReductionError,
     };
+    pub use crate::poly::bareiss_determinant;
 }
 
 /// Sampling, driven entirely by a caller-supplied byte source.

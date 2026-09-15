@@ -328,3 +328,8 @@ target-specific public API may be used to implement this ledger.
 | Current | Canonical | State | Notes |
 |---|---|---|---|
 | — | cargo feature `wipe` | done | opt-in drop-time zeroization; restores the pre-0.3.0 scrub the 0.3.0 cut removed, behind a feature so the default build keeps forbid(unsafe_code). Owner: consumer crates handling key material (cryptography-rs enables it). |
+| — | lattice::closest_vectors_form | done | closest-vector enumeration under an integral form, the affine counterpart of `short_vectors_form`: Schnorr–Euchner about a target with exact recheck, a bounded search and not a certificate. Owner: factoring's polynomial search, which searches the nonzero slices of its kernel lattice with it (2026-09-15). |
+| — | lattice::bareiss_determinant | done | the exact integer determinant by fraction-free elimination, previously private to the polynomial resultant; public for Gram determinants, whose ratios are exact squared distances from a span (factoring's slice count). |
+| — | number_theory::primes_past | done | the segmented companion of `primes_below`: the primes past a cursor by windows of 2¹⁵ odd integers, the survivors above 2⁴⁰ settled by `is_probable_prime`. Owner: factoring's special-`q` supply above its base. |
+| — | number_theory::student_t_quantile | done | Student's `t` inverted exactly through the incomplete beta function; for a simultaneous bound on a race's rates, where an expansion was five per cent short. |
+| — | number_theory::regularized_incomplete_beta | done | `I_x(a, b)` by the Numerical Recipes continued fraction with `ln_gamma`; the distribution function behind Student's `t`, `F` and the binomial. |

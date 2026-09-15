@@ -760,6 +760,480 @@ pub fn short_vectors_form(
     found.into_iter().map(|(_, v)| v).collect()
 }
 
+/// The lattice vectors within squared distance `bound` of `target` under
+/// the positive-definite integral form `form`, nearest first, at most
+/// `limit` of them, each as a lattice vector in the basis's coordinates
+/// (not as coefficients).
+///
+/// The closest-vector counterpart of [`short_vectors_form`], and the same
+/// enumeration: the basis extended by `−target`, whose Gram matrix under
+/// the form is taken exactly and brought to doubles by a common shift, is
+/// Gram–Schmidt-decomposed; the extended coordinate is held at one, so
+/// the partial norm at the top is the squared distance of the target from
+/// the lattice's real span, and the search below it runs over integer
+/// coefficients from the last coordinate down, each about its centre in
+/// the zig-zag order, pruned by the partial norm; and every vector the
+/// floating-point search admits has its distance recomputed exactly
+/// before it is kept, so rounding can only ever offer an extra candidate,
+/// never lose one within the slack. Once `limit` are held the radius
+/// falls to the farthest of them. The basis should be LLL-reduced first.
+/// A visit cap ends a search that a wide bound has made large; what was
+/// found by then is returned, nearest first, so the result is a bounded
+/// search and not a certificate that nothing else lies within the bound.
+///
+/// What it is for: a target that is not a lattice vector but whose
+/// neighbours are wanted — a polynomial to be moved by lattice vectors to
+/// the least norm, a coset of a sublattice to be searched for its
+/// shortest member (the coset `t + L` is the closest vectors of `L` to
+/// `−t`).
+///
+/// # Panics
+///
+/// As [`lll_reduce_form`] on a malformed basis or form, if `target` is
+/// not the vectors' length, and if `bound` is negative.
+#[must_use]
+pub fn closest_vectors_form(
+    basis: &[Vec<BigInt>],
+    form: &[Vec<BigInt>],
+    target: &[BigInt],
+    bound: &BigInt,
+    limit: usize,
+) -> Vec<Vec<BigInt>> {
+    let n = basis.len();
+    assert!(bound.sign() != Sign::Negative, "the bound is negative");
+    if n == 0 || limit == 0 {
+        return Vec::new();
+    }
+    let m = basis[0].len();
+    assert!(
+        form.len() == m && form.iter().all(|row| row.len() == m),
+        "the form must be square of the vectors' length"
+    );
+    assert!(
+        target.len() == m,
+        "the target must be of the vectors' length"
+    );
+    let form_dot = |u: &[BigInt], v: &[BigInt]| -> BigInt {
+        let mut total = BigInt::zero();
+        for (i, a) in u.iter().enumerate() {
+            if a.is_zero() {
+                continue;
+            }
+            for (j, b) in v.iter().enumerate() {
+                if !form[i][j].is_zero() && !b.is_zero() {
+                    total = total.add(&a.mul(b).mul(&form[i][j]));
+                }
+            }
+        }
+        total
+    };
+    // The basis extended by −target: a vector of the search is
+    // Σ xᵢ bᵢ − target with the last coefficient one.
+    let negated: Vec<BigInt> = target.iter().map(BigInt::negated).collect();
+    let extended: Vec<&[BigInt]> = basis
+        .iter()
+        .map(Vec::as_slice)
+        .chain(core::iter::once(negated.as_slice()))
+        .collect();
+    let gram: Vec<Vec<BigInt>> = (0..=n)
+        .map(|i| {
+            (0..=n)
+                .map(|j| form_dot(extended[i], extended[j]))
+                .collect()
+        })
+        .collect();
+    let widest = gram
+        .iter()
+        .flatten()
+        .map(|g| g.magnitude().bits())
+        .max()
+        .unwrap_or(0)
+        .max(bound.magnitude().bits());
+    let shift = widest.saturating_sub(900);
+    let to_double = |x: &BigInt| -> f64 {
+        let mut magnitude = x.magnitude().clone();
+        magnitude.shr_bits(shift);
+        let value = magnitude.to_f64_lossy();
+        if x.sign() == Sign::Negative {
+            -value
+        } else {
+            value
+        }
+    };
+    let g: Vec<Vec<f64>> = gram
+        .iter()
+        .map(|row| row.iter().map(to_double).collect())
+        .collect();
+    let slack = |value: f64| value * (1.0 + 1e-9) + f64::MIN_POSITIVE;
+    let mut radius = slack(to_double(bound));
+    // Gram–Schmidt from the Gram matrix: mu[i][j] for j < i and the
+    // squared norms r[i] of the orthogonalised vectors. The last is the
+    // target's distance from the span, which may be zero.
+    let mut mu = vec![vec![0.0f64; n + 1]; n + 1];
+    let mut r = vec![0.0f64; n + 1];
+    for i in 0..=n {
+        for j in 0..=i {
+            let mut value = g[i][j];
+            for k in 0..j {
+                value -= mu[i][k] * mu[j][k] * r[k];
+            }
+            if j < i {
+                mu[i][j] = if r[j] > 0.0 { value / r[j] } else { 0.0 };
+            } else {
+                r[i] = value;
+            }
+        }
+        if i < n {
+            assert!(r[i] > 0.0, "the form is not positive definite on the basis");
+        }
+    }
+    r[n] = r[n].max(0.0);
+    if r[n] > radius {
+        return Vec::new();
+    }
+    let mut found: Vec<(BigInt, Vec<BigInt>)> = Vec::new();
+    let mut x = vec![0i64; n + 1];
+    x[n] = 1;
+    let mut centre = vec![0.0f64; n];
+    let mut partial = vec![0.0f64; n + 1];
+    partial[n] = r[n];
+    let mut step = vec![0i64; n];
+    let centre_of = |level: usize, x: &[i64]| -> f64 {
+        let mut c = 0.0;
+        for k in (level + 1)..=n {
+            c -= mu[k][level] * x[k] as f64;
+        }
+        c
+    };
+    let mut level = n - 1;
+    centre[level] = centre_of(level, &x);
+    x[level] = centre[level].round() as i64;
+    step[level] = if centre[level] >= x[level] as f64 {
+        1
+    } else {
+        -1
+    };
+    let mut visited = 0u64;
+    loop {
+        let deviation = x[level] as f64 - centre[level];
+        let here = partial[level + 1] + deviation * deviation * r[level];
+        if here <= radius {
+            if level == 0 {
+                let mut vector = vec![BigInt::zero(); m];
+                for (&c, b) in x[..n].iter().zip(basis) {
+                    if c == 0 {
+                        continue;
+                    }
+                    let c = BigInt::from_i64(c);
+                    for (slot, entry) in vector.iter_mut().zip(b) {
+                        *slot = slot.add(&c.mul(entry));
+                    }
+                }
+                let difference: Vec<BigInt> =
+                    vector.iter().zip(target).map(|(v, t)| v.sub(t)).collect();
+                let distance = form_dot(&difference, &difference);
+                if distance <= *bound {
+                    let at = found.partition_point(|(other, _)| *other <= distance);
+                    found.insert(at, (distance, vector));
+                    if found.len() > limit {
+                        found.pop();
+                    }
+                    if found.len() == limit {
+                        let (farthest, _) = found.last().expect("held");
+                        radius = radius.min(slack(to_double(farthest)));
+                    }
+                }
+                x[0] += step[0];
+                step[0] = -step[0] - step[0].signum();
+                if step[0] == 0 {
+                    step[0] = 1;
+                }
+                visited += 1;
+            } else {
+                partial[level] = here;
+                level -= 1;
+                centre[level] = centre_of(level, &x);
+                x[level] = centre[level].round() as i64;
+                step[level] = if centre[level] >= x[level] as f64 {
+                    1
+                } else {
+                    -1
+                };
+            }
+        } else {
+            // The zig-zag visits a coordinate's integers in order of their
+            // distance from the centre, so the first past the radius ends
+            // the level.
+            if level == n - 1 {
+                break;
+            }
+            level += 1;
+            x[level] += step[level];
+            step[level] = -step[level] - step[level].signum();
+            if step[level] == 0 {
+                step[level] = 1;
+            }
+            visited += 1;
+        }
+        if visited > 50_000_000 {
+            break;
+        }
+    }
+    found.into_iter().map(|(_, v)| v).collect()
+}
+
+#[cfg(test)]
+mod closest_vector_tests {
+    use super::*;
+
+    fn big(x: i64) -> BigInt {
+        BigInt::from_i64(x)
+    }
+
+    /// Every vector the enumeration returns is a lattice vector within
+    /// the bound of the target, and it returns every such vector, nearest
+    /// first: against an exhaustive search over a box of coefficients on
+    /// random small bases under a diagonal form, with targets both in the
+    /// lattice, off it, and — in dimension three of a rank-two lattice —
+    /// off its span.
+    #[test]
+    fn the_enumeration_agrees_with_an_exhaustive_search() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as i64
+        };
+        for trial in 0..60 {
+            let n = 2 + (trial % 3);
+            let m = if trial % 5 == 0 { n + 1 } else { n };
+            let basis: Vec<Vec<BigInt>> = (0..n)
+                .map(|_| (0..m).map(|_| big(next() % 9 - 4)).collect())
+                .collect();
+            let form: Vec<Vec<BigInt>> = (0..m)
+                .map(|i| {
+                    (0..m)
+                        .map(|j| {
+                            if i == j {
+                                big(1 + (trial as i64 * (i as i64 + 1)) % 5)
+                            } else {
+                                big(0)
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            let norm = |v: &[BigInt]| -> BigInt {
+                let mut total = BigInt::zero();
+                for (i, a) in v.iter().enumerate() {
+                    total = total.add(&a.mul(a).mul(&form[i][i]));
+                }
+                total
+            };
+            // Independent rows only: the Gram determinant is nonzero.
+            let gram: Vec<Vec<f64>> = (0..n)
+                .map(|i| {
+                    (0..n)
+                        .map(|j| {
+                            let mut total = 0.0;
+                            for k in 0..m {
+                                total += basis[i][k].to_f64_lossy()
+                                    * basis[j][k].to_f64_lossy()
+                                    * form[k][k].to_f64_lossy();
+                            }
+                            total
+                        })
+                        .collect()
+                })
+                .collect();
+            let mut det = 1.0;
+            let mut mat = gram;
+            let mut singular = false;
+            for i in 0..n {
+                let pivot = (i..n)
+                    .max_by(|&a, &b| mat[a][i].abs().partial_cmp(&mat[b][i].abs()).unwrap())
+                    .unwrap();
+                mat.swap(i, pivot);
+                if mat[i][i].abs() < 1e-9 {
+                    singular = true;
+                    break;
+                }
+                det *= mat[i][i];
+                for k in (i + 1)..n {
+                    let factor = mat[k][i] / mat[i][i];
+                    let (pivot, below) = mat.split_at_mut(k);
+                    for (target, &source) in below[0][i..n].iter_mut().zip(&pivot[i][i..n]) {
+                        *target -= factor * source;
+                    }
+                }
+            }
+            if singular || det.abs() < 0.5 {
+                continue;
+            }
+            let mut reduced = basis.clone();
+            lll_reduce_form(&mut reduced, &form, 3, 4);
+            let target: Vec<BigInt> = match trial % 3 {
+                // A lattice vector.
+                0 => {
+                    let coefficients: Vec<BigInt> = (0..n).map(|_| big(next() % 5 - 2)).collect();
+                    (0..m)
+                        .map(|k| {
+                            let mut total = BigInt::zero();
+                            for (coefficient, row) in coefficients.iter().zip(&reduced) {
+                                total = total.add(&coefficient.mul(&row[k]));
+                            }
+                            total
+                        })
+                        .collect()
+                }
+                _ => (0..m).map(|_| big(next() % 21 - 10)).collect(),
+            };
+            let bound = norm(&reduced[0]).mul(&big(3)).add(&big(4));
+            let found = closest_vectors_form(&reduced, &form, &target, &bound, usize::MAX);
+            let radius = 8i64;
+            let mut expected: Vec<Vec<BigInt>> = Vec::new();
+            let count = (2 * radius + 1).pow(n as u32);
+            let nearest_integer_coefficients: Vec<i64> = {
+                // Centre the box on the target's nearest lattice point by
+                // a floating least-squares fit, so a box of radius eight
+                // in coefficients holds every vector within the bound of
+                // it in these dimensions.
+                let mut a: Vec<Vec<f64>> = (0..n)
+                    .map(|i| {
+                        (0..n)
+                            .map(|j| {
+                                let mut total = 0.0;
+                                for k in 0..m {
+                                    total += reduced[i][k].to_f64_lossy()
+                                        * reduced[j][k].to_f64_lossy()
+                                        * form[k][k].to_f64_lossy();
+                                }
+                                total
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let mut b: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let mut total = 0.0;
+                        for k in 0..m {
+                            total += reduced[i][k].to_f64_lossy()
+                                * target[k].to_f64_lossy()
+                                * form[k][k].to_f64_lossy();
+                        }
+                        total
+                    })
+                    .collect();
+                for i in 0..n {
+                    let pivot = (i..n)
+                        .max_by(|&p, &q| a[p][i].abs().partial_cmp(&a[q][i].abs()).unwrap())
+                        .unwrap();
+                    a.swap(i, pivot);
+                    b.swap(i, pivot);
+                    for k in (i + 1)..n {
+                        let factor = a[k][i] / a[i][i];
+                        let (pivot, below) = a.split_at_mut(k);
+                        for (target, &source) in below[0][i..n].iter_mut().zip(&pivot[i][i..n]) {
+                            *target -= factor * source;
+                        }
+                        b[k] -= factor * b[i];
+                    }
+                }
+                let mut y = vec![0.0; n];
+                for i in (0..n).rev() {
+                    let mut total = b[i];
+                    for k in (i + 1)..n {
+                        total -= a[i][k] * y[k];
+                    }
+                    y[i] = total / a[i][i];
+                }
+                y.iter().map(|v| v.round() as i64).collect()
+            };
+            for code in 0..count {
+                let mut c = code;
+                let coefficients: Vec<i64> = (0..n)
+                    .map(|k| {
+                        let value = c % (2 * radius + 1) - radius;
+                        c /= 2 * radius + 1;
+                        value + nearest_integer_coefficients[k]
+                    })
+                    .collect();
+                let mut v = vec![BigInt::zero(); m];
+                for (k, &coefficient) in coefficients.iter().enumerate() {
+                    for (slot, entry) in v.iter_mut().zip(&reduced[k]) {
+                        *slot = slot.add(&big(coefficient).mul(entry));
+                    }
+                }
+                let difference: Vec<BigInt> =
+                    v.iter().zip(&target).map(|(a, t)| a.sub(t)).collect();
+                if norm(&difference) <= bound {
+                    expected.push(v);
+                }
+            }
+            let key = |v: &Vec<BigInt>| {
+                v.iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let mut found_keys: Vec<String> = found.iter().map(key).collect();
+            let mut expected_keys: Vec<String> = expected.iter().map(key).collect();
+            found_keys.sort();
+            expected_keys.sort();
+            assert_eq!(
+                found_keys, expected_keys,
+                "trial {trial}: dimension {n} in {m}"
+            );
+            let distance = |v: &Vec<BigInt>| {
+                let difference: Vec<BigInt> =
+                    v.iter().zip(&target).map(|(a, t)| a.sub(t)).collect();
+                norm(&difference)
+            };
+            for pair in found.windows(2) {
+                assert!(distance(&pair[0]) <= distance(&pair[1]));
+            }
+            if trial % 3 == 0 {
+                assert_eq!(found.first().map(distance), Some(BigInt::zero()));
+            }
+        }
+    }
+
+    /// The limit keeps the nearest, and a target beyond the bound of the
+    /// lattice's span finds nothing.
+    #[test]
+    fn the_limit_keeps_the_nearest_and_a_far_target_finds_nothing() {
+        let basis = vec![vec![big(7), big(0)], vec![big(3), big(1)]];
+        let form = vec![vec![big(1), big(0)], vec![big(0), big(1)]];
+        let mut reduced = basis.clone();
+        lll_reduce_form(&mut reduced, &form, 3, 4);
+        let target = vec![big(10), big(10)];
+        let found = closest_vectors_form(&reduced, &form, &target, &big(100), 1);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0],
+            vec![big(9), big(10)],
+            "the lattice {{(7a + 3b, b)}} has (9, 10) = −3·(7, 0) + 10·(3, 1) one from the target"
+        );
+        let plane = vec![vec![big(1), big(0), big(0)], vec![big(0), big(1), big(0)]];
+        let form = vec![
+            vec![big(1), big(0), big(0)],
+            vec![big(0), big(1), big(0)],
+            vec![big(0), big(0), big(1)],
+        ];
+        let far = vec![big(0), big(0), big(11)];
+        assert!(closest_vectors_form(&plane, &form, &far, &big(100), 4).is_empty());
+        // Within 122: the origin at 121 and its four neighbours at 122.
+        let near = closest_vectors_form(&plane, &form, &far, &big(122), usize::MAX);
+        assert_eq!(near.len(), 5, "{near:?}");
+        assert_eq!(near[0], vec![big(0), big(0), big(0)]);
+        assert_eq!(
+            closest_vectors_form(&plane, &form, &far, &big(122), 3).len(),
+            3
+        );
+    }
+}
+
 #[cfg(test)]
 mod short_vector_tests {
     use super::*;

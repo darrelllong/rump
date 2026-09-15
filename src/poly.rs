@@ -2364,7 +2364,22 @@ fn sylvester_matrix(a: &PolyZ, b: &PolyZ) -> Vec<Vec<BigInt>> {
 /// `previous` is never zero: it starts at 1 and is thereafter the pivot of
 /// the preceding step, which the exchange-or-return above guaranteed
 /// non-zero.
-fn bareiss_determinant(mut matrix: Vec<Vec<BigInt>>) -> BigInt {
+///
+/// Public beside the lattice routines as the exact determinant of a Gram
+/// matrix under an integral form — the squared covolume of a lattice's
+/// basis, whose ratio between a basis and the basis extended by one
+/// vector is that vector's squared distance from the span, exactly.
+/// The empty matrix has determinant one.
+///
+/// # Panics
+///
+/// If the matrix is not square.
+#[must_use]
+pub fn bareiss_determinant(mut matrix: Vec<Vec<BigInt>>) -> BigInt {
+    assert!(
+        matrix.iter().all(|row| row.len() == matrix.len()),
+        "the matrix must be square"
+    );
     let n = matrix.len();
     if n == 0 {
         return BigInt::one();

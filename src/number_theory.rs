@@ -3381,6 +3381,174 @@ pub fn primes_below(bound: u64) -> Vec<u64> {
     primes
 }
 
+/// Odd integers a window of [`primes_past`] covers.
+const PRIME_WINDOW: u64 = 1 << 15;
+
+/// The crossing primes a window of [`primes_past`] is sieved by reach this
+/// far and no further; past it, above `2⁴⁰`, what the sieve leaves is
+/// settled by [`is_probable_prime`], a proof over the word. A window at
+/// the top of the word would otherwise want every prime to `2³²` crossed
+/// out first.
+const CROSSING_PRIMES_BELOW: u64 = 1 << 20;
+
+/// The primes above `lower`, ascending, to the end of the word: the sieve
+/// of Eratosthenes over one window of `2¹⁵` odd integers at a time, each
+/// crossed out by the primes up to its square root from
+/// [`primes_below`], sieved when it is reached. The segmented companion
+/// of [`primes_below`]: where that materialises every prime from two, this
+/// supplies the primes just past a cursor at a cost that does not depend
+/// on the cursor — a window at ten million holds some four thousand primes
+/// and is crossed out in well under a millisecond — for a caller walking
+/// primes upward in batches (a number field sieve's special `q` above its
+/// factor base) that would otherwise sieve and discard a growing prefix
+/// for every batch. Above `2⁴⁰` the crossing primes stop at `2²⁰` and
+/// the survivors are settled by the primality proof instead.
+///
+/// Every integer above `lower` is classified, two included, and the
+/// supply ends with the word: a cursor at `u64::MAX` yields nothing.
+pub fn primes_past(lower: u64) -> impl Iterator<Item = u64> {
+    // Two is the one even prime, and the only prime a window of odd
+    // integers cannot hold.
+    let two = (lower < 2).then_some(2);
+    // The first odd integer above `lower`.
+    let mut start = lower.saturating_add(1) | 1;
+    let mut small: Vec<u64> = Vec::new();
+    let mut window: std::vec::IntoIter<u64> = Vec::new().into_iter();
+    let mut exhausted = start == u64::MAX;
+    two.into_iter().chain(core::iter::from_fn(move || loop {
+        if let Some(prime) = window.next() {
+            return Some(prime);
+        }
+        if exhausted {
+            return None;
+        }
+        // The window: the odd integers `start, start + 2, …` below `end`.
+        let end = start.saturating_add(2 * PRIME_WINDOW);
+        let count = usize::try_from((end - start).div_ceil(2)).expect("a window fits");
+        // The crossing primes: every prime whose square is below the
+        // window's end, extended as the windows climb, to the cap.
+        let root = end.isqrt().saturating_add(1);
+        let capped = root > CROSSING_PRIMES_BELOW;
+        let root = root.min(CROSSING_PRIMES_BELOW);
+        if small.last().is_none_or(|&last| last < root) {
+            small = primes_below(root.saturating_add(1));
+        }
+        let mut composite = vec![false; count];
+        for &p in small.iter().skip_while(|&&p| p == 2) {
+            if p.saturating_mul(p) >= end {
+                break;
+            }
+            // The first odd multiple of p at or above the window's start
+            // and at or above p²: below p² a multiple of p has a smaller
+            // prime factor that crosses it out, and p itself, if it lies
+            // in the window, is prime.
+            let mut multiple = p * p;
+            if multiple < start {
+                // At or above `start`, and odd; a window at the top of the
+                // word may have no such multiple, and then none to cross.
+                let Some(first) = start.div_ceil(p).checked_mul(p) else {
+                    continue;
+                };
+                multiple = first;
+                if multiple.is_multiple_of(2) {
+                    let Some(odd) = multiple.checked_add(p) else {
+                        continue;
+                    };
+                    multiple = odd;
+                }
+            }
+            while multiple < end {
+                composite[usize::try_from((multiple - start) / 2).expect("within the window")] =
+                    true;
+                let Some(next) = multiple.checked_add(2 * p) else {
+                    break;
+                };
+                multiple = next;
+            }
+        }
+        let primes: Vec<u64> = composite
+            .iter()
+            .enumerate()
+            .filter(|(_, &crossed)| !crossed)
+            .map(|(i, _)| start + 2 * i as u64)
+            .filter(|&n| n > 1)
+            .filter(|&n| !capped || is_probable_prime(&BigUint::from_u64(n)))
+            .collect();
+        window = primes.into_iter();
+        // The next window starts where this one ended; `end` is odd, as
+        // `start` was and the window's width is even. The last window a
+        // word can hold ends the supply.
+        start = end;
+        exhausted = end == u64::MAX;
+    }))
+}
+
+#[cfg(test)]
+mod prime_window_tests {
+    use super::*;
+
+    /// The primes past a cursor are the sieve's past it, every prime and
+    /// no other, across window boundaries, from cursors on both sides of
+    /// two and at the edges of a window.
+    #[test]
+    fn the_primes_past_a_cursor_are_the_sieves_past_it() {
+        let bound = 4 * 2 * PRIME_WINDOW + 11;
+        let all = primes_below(bound);
+        for lower in [
+            0,
+            1,
+            2,
+            3,
+            4,
+            97,
+            2 * PRIME_WINDOW - 2,
+            2 * PRIME_WINDOW - 1,
+            2 * PRIME_WINDOW,
+            2 * PRIME_WINDOW + 1,
+            100_003,
+        ] {
+            let expected: Vec<u64> = all.iter().copied().filter(|&p| p > lower).collect();
+            let past: Vec<u64> = primes_past(lower).take_while(|&p| p < bound).collect();
+            assert_eq!(past, expected, "cursor {lower}");
+        }
+    }
+
+    /// Past a cursor the first window's table does not reach, the crossing
+    /// primes are extended as the windows climb, and past the cap the proof
+    /// settles the survivors: every integer of a window below the cap's
+    /// square, at `2³⁶`, and above it, at `2⁴⁴`, is classified as the
+    /// proof classifies it, and the primes come in order.
+    #[test]
+    fn the_windows_climb_past_any_table() {
+        for lower in [1u64 << 36, 1 << 44] {
+            let primes: Vec<u64> = primes_past(lower).take(40).collect();
+            assert!(primes.windows(2).all(|pair| pair[0] < pair[1]));
+            let last = *primes.last().expect("forty primes");
+            for n in lower + 1..=last {
+                assert_eq!(
+                    primes.contains(&n),
+                    is_probable_prime(&BigUint::from_u64(n)),
+                    "{n}"
+                );
+            }
+        }
+    }
+
+    /// The supply ends with the word: a cursor at the top yields nothing
+    /// and does not spin, and the last window holds the primes below the
+    /// top and no more.
+    #[test]
+    fn the_supply_ends_with_the_word() {
+        assert_eq!(primes_past(u64::MAX).next(), None);
+        assert_eq!(primes_past(u64::MAX - 2).next(), None);
+        let near_top: Vec<u64> = primes_past(u64::MAX - 400).collect();
+        assert!(near_top
+            .iter()
+            .all(|&p| is_probable_prime(&BigUint::from_u64(p))));
+        assert_eq!(near_top.last(), Some(&(u64::MAX - 58)), "2⁶⁴ − 59 is prime");
+    }
+}
+
 /// Trial division against every prime below 1000, then Miller-Rabin over the
 /// first twelve prime bases, `2` through `37`.
 ///
@@ -7237,6 +7405,157 @@ fn dickman_table() -> &'static [f64] {
         }
         table
     })
+}
+
+/// Student's `t` at `probability`, one-sided, on `freedom` degrees of
+/// freedom: the point `t` with `P(T ≤ t) = probability`, for a bound on a
+/// difference of means from few observations, as a race between
+/// polynomials reads its rates.
+///
+/// The distribution function is `P(|T| > t) = I_x(ν/2, 1/2)` with
+/// `x = ν/(ν + t²)` and `I` the regularised incomplete beta function
+/// (Abramowitz & Stegun, *Handbook of Mathematical Functions*, 26.7.1),
+/// inverted by bisection on `t`, stopped when the bracket is within a
+/// part in a billion. A Cornish–Fisher expansion about the normal
+/// quantile is within one per cent of the tables at the
+/// ninety-seven-and-a-half per cent point and five per cent short at the
+/// far points a simultaneous bound asks for on few degrees of freedom,
+/// where its terms have not begun to shrink; the inversion is exact to
+/// the bisection.
+///
+/// # Panics
+///
+/// If `freedom` is zero or `probability` is not strictly between one half
+/// and one.
+#[must_use]
+pub fn student_t_quantile(freedom: usize, probability: f64) -> f64 {
+    assert!(freedom > 0, "no degrees of freedom");
+    assert!(
+        probability > 0.5 && probability < 1.0,
+        "the quantile is one-sided, above one half and below one"
+    );
+    let nu = freedom as f64;
+    let tail = 2.0 * (1.0 - probability);
+    let two_sided_tail = |t: f64| regularized_incomplete_beta(nu / (nu + t * t), nu / 2.0, 0.5);
+    let (mut low, mut high) = (0.0f64, 1.0f64);
+    while two_sided_tail(high) > tail {
+        high *= 2.0;
+    }
+    while high - low > 1e-9 * high {
+        let middle = 0.5 * (low + high);
+        if two_sided_tail(middle) > tail {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    0.5 * (low + high)
+}
+
+/// The regularised incomplete beta function `I_x(a, b)`, for `a, b > 0`
+/// and `x` in `[0, 1]`: the distribution function of the beta
+/// distribution, and through it of Student's `t` and the `F` and
+/// binomial distributions.
+///
+/// By the continued fraction of Press et al., *Numerical Recipes*, 3rd
+/// ed., §6.4, evaluated by the modified Lentz method, taken on the side
+/// of the symmetry `I_x(a, b) = 1 − I_{1−x}(b, a)` where it converges
+/// fastest, with [`ln_gamma`] for the normalisation.
+#[must_use]
+pub fn regularized_incomplete_beta(x: f64, a: f64, b: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    let front =
+        (ln_gamma(a + b) - ln_gamma(a) - ln_gamma(b) + a * x.ln() + b * (1.0 - x).ln()).exp();
+    if x < (a + 1.0) / (a + b + 2.0) {
+        front * beta_continued_fraction(x, a, b) / a
+    } else {
+        1.0 - front * beta_continued_fraction(1.0 - x, b, a) / b
+    }
+}
+
+/// The continued fraction of the incomplete beta function, by the
+/// modified Lentz method (*Numerical Recipes*, 3rd ed., §6.4, `betacf`):
+/// `I_x(a, b) = x^a (1−x)^b / (a·B(a, b)) · 1/(1 + d₁/(1 + d₂/(1 + …)))`.
+fn beta_continued_fraction(x: f64, a: f64, b: f64) -> f64 {
+    const TINY: f64 = 1e-300;
+    let floored = |value: f64| if value.abs() < TINY { TINY } else { value };
+    let (qab, qap, qam) = (a + b, a + 1.0, a - 1.0);
+    let mut c = 1.0;
+    let mut d = 1.0 / floored(1.0 - qab * x / qap);
+    let mut h = d;
+    for m in 1..=300 {
+        let m = m as f64;
+        let m2 = 2.0 * m;
+        let even = m * (b - m) * x / ((qam + m2) * (a + m2));
+        d = 1.0 / floored(1.0 + even * d);
+        c = floored(1.0 + even / c);
+        h *= d * c;
+        let odd = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+        d = 1.0 / floored(1.0 + odd * d);
+        c = floored(1.0 + odd / c);
+        let step = d * c;
+        h *= step;
+        if (step - 1.0).abs() < 3e-16 {
+            break;
+        }
+    }
+    h
+}
+
+#[cfg(test)]
+mod statistics_tests {
+    use super::*;
+
+    /// The quantile is the table's, at the two-sided five, one and a tenth
+    /// of a per cent points, from one degree of freedom up.
+    #[test]
+    fn student_t_is_the_table() {
+        let table = [
+            (1, [12.706, 63.657, 636.619]),
+            (2, [4.303, 9.925, 31.599]),
+            (3, [3.182, 5.841, 12.924]),
+            (5, [2.571, 4.032, 6.869]),
+            (7, [2.365, 3.499, 5.408]),
+            (10, [2.228, 3.169, 4.587]),
+            (20, [2.086, 2.845, 3.850]),
+            (30, [2.042, 2.750, 3.646]),
+            (120, [1.980, 2.617, 3.373]),
+        ];
+        for (freedom, points) in table {
+            for (probability, expected) in [0.975, 0.995, 0.9995].into_iter().zip(points) {
+                let t = student_t_quantile(freedom, probability);
+                assert!(
+                    (t / expected - 1.0).abs() < 5e-4,
+                    "{freedom} at {probability}: {t} against {expected}"
+                );
+            }
+        }
+    }
+
+    /// The incomplete beta function at its closed forms: `I_x(1, 1) = x`,
+    /// `I_x(1, b) = 1 − (1 − x)^b`, `I_x(a, 1) = x^a`, the symmetry
+    /// `I_{1/2}(a, a) = 1/2`, and the ends.
+    #[test]
+    fn the_incomplete_beta_function_matches_its_closed_forms() {
+        for x in [0.05, 0.3, 0.5, 0.77, 0.99] {
+            assert!((regularized_incomplete_beta(x, 1.0, 1.0) - x).abs() < 1e-14);
+            for b in [0.5, 2.0, 7.5] {
+                let expected = 1.0 - (1.0 - x).powf(b);
+                assert!((regularized_incomplete_beta(x, 1.0, b) - expected).abs() < 1e-13);
+                assert!((regularized_incomplete_beta(x, b, 1.0) - x.powf(b)).abs() < 1e-13);
+            }
+        }
+        for a in [0.5, 1.0, 3.0, 12.0] {
+            assert!((regularized_incomplete_beta(0.5, a, a) - 0.5).abs() < 1e-13);
+        }
+        assert_eq!(regularized_incomplete_beta(0.0, 2.0, 3.0), 0.0);
+        assert_eq!(regularized_incomplete_beta(1.0, 2.0, 3.0), 1.0);
+    }
 }
 
 #[cfg(test)]
