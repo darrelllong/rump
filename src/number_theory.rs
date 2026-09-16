@@ -3234,9 +3234,24 @@ fn is_witness(
 
 /// `ln Γ(x)` for `x > 0`, by Lanczos's approximation (Lanczos, *A
 /// precision approximation of the gamma function*, J. SIAM Numer. Anal.
-/// B 1 (1964), 86–96) with the coefficients for `g = 7` and nine terms,
-/// good to about fifteen digits over the positive reals; below one half
-/// the reflection formula `Γ(x)Γ(1 − x) = π / sin πx` is used.
+/// B 1 (1964), 86–96) with `g = 7` and nine terms.
+///
+/// The coefficients make the approximation exact at `Γ(1), …, Γ(9)`, each
+/// rounded to the nearest double; `scripts/lanczos_coefficients.py`
+/// derives them, confirms the table bit for bit, and separates the error
+/// of the approximation from that of the rounded coefficients. Below
+/// `x = 1/2` the recurrence `ln Γ(x) = ln Γ(1 + x) − ln x` (DLMF 5.5.1)
+/// carries the argument into the approximation's range; it has no
+/// intermediate that overflows, so the result is finite down to the least
+/// subnormal.
+///
+/// Measured over 45 000 arguments against 40-digit values (the ignored
+/// test `the_log_gamma_sweep_matches_high_precision`): absolute error below
+/// `5·10⁻¹⁵` for `1/2 ≤ x ≤ 3`, the interval holding both zeros of `ln Γ`,
+/// and relative error below `2·10⁻¹⁵` elsewhere. The approximation itself,
+/// with the rounded coefficients, is good to `10⁻¹⁵`; the rest is
+/// cancellation in floating evaluation. `NaN` for `x ≤ 0` or `NaN`; `+∞`
+/// for `+∞`.
 ///
 /// The normalisation of the gamma, chi-squared, beta and Student's `t`
 /// densities; [`regularized_incomplete_beta`] is built on it.
@@ -3254,17 +3269,22 @@ pub fn ln_gamma(x: f64) -> f64 {
         9.984_369_578_019_572e-6,
         1.505_632_735_149_311_6e-7,
     ];
+    if x.is_nan() || x <= 0.0 {
+        return f64::NAN;
+    }
+    if x.is_infinite() {
+        return f64::INFINITY;
+    }
     if x < 0.5 {
-        return (core::f64::consts::PI / (core::f64::consts::PI * x).sin()).ln()
-            - ln_gamma(1.0 - x);
+        return ln_gamma(1.0 + x) - x.ln();
     }
-    let x = x - 1.0;
-    let mut a = COEFFICIENTS[0];
-    let t = x + G + 0.5;
-    for (i, &c) in COEFFICIENTS.iter().enumerate().skip(1) {
-        a += c / (x + i as f64);
+    let z = x - 1.0;
+    let t = z + G + 0.5;
+    let mut series = COEFFICIENTS[0];
+    for (k, &c) in COEFFICIENTS.iter().enumerate().skip(1) {
+        series += c / (z + k as f64);
     }
-    0.5 * (2.0 * core::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + a.ln()
+    0.5 * (2.0 * core::f64::consts::PI).ln() + (z + 0.5) * t.ln() - t + series.ln()
 }
 
 /// Every prime below `bound` (exclusive), ascending, by the sieve of
@@ -4419,6 +4439,108 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Against 50-digit values from `scripts/lanczos_coefficients.py
+    /// --reference`: subnormal and tiny arguments through the recurrence,
+    /// both sides of the switch at 1/2, the zeros at 1 and 2 and their
+    /// neighbours, the minimum near 1.4616, and large arguments up to
+    /// where the value approaches `f64::MAX`.
+    #[test]
+    fn the_log_gamma_is_accurate_from_the_least_subnormal_up() {
+        let reference: [(f64, f64); 40] = [
+            (5e-324, 744.44007192138126231),
+            (1e-310, 713.8013788281541651),
+            (2.2250738585072014e-308, 708.39641853226410622),
+            (1e-300, 690.77552789821370518),
+            (1e-100, 230.25850929940456838),
+            (1e-20, 46.051701859880913735),
+            (1e-10, 23.025850929882735237),
+            (1e-05, 11.512919692895825626),
+            (0.001, 6.9071788853838536617),
+            (0.1, 2.252712651734205902),
+            (0.25, 1.2880225246980774574),
+            (0.4999999999999999, 0.57236494292470030507),
+            (0.5, 0.57236494292470008707),
+            (0.5000000000000001, 0.57236494292469986908),
+            (0.75, 0.20328095143129537148),
+            (0.9999999999999998, 1.2816762426960016513e-16),
+            (1.0, 0.0),
+            (1.0000000000000002, -1.2816762426960008403e-16),
+            (1.00000001, -5.77215653168851219e-9),
+            (1.4616321449683622, -0.1214862905358496081),
+            (1.5, -0.12078223763524522235),
+            (1.999999, -4.2278401259658537019e-7),
+            (1.9999999999999996, -1.8775396131086230342e-16),
+            (2.0, 0.0),
+            (2.0000000000000004, 1.8775396131086243061e-16),
+            (2.000001, 4.227846576245292362e-7),
+            (2.5, 0.28468287047291915963),
+            (3.0, 0.69314718055994530942),
+            (7.5, 7.5343642367587329552),
+            (10.0, 12.801827480081469611),
+            (33.3, 82.603723581654943008),
+            (100.0, 359.13420536957539878),
+            (171.5, 709.14316303092824227),
+            (1000.0, 5905.2204232091812118),
+            (100000.0, 1051287.7089736568949),
+            (10000000000.0, 220258509288.81058147),
+            (1000000000000000.0, 33538776394910668.91),
+            (1e+100, 2.2925850929940457206e+102),
+            (1e+300, 6.8977552789821374147e+302),
+            (2.5e+305, 1.755511860237645252e+308),
+        ];
+        for (x, expected) in reference {
+            let got = ln_gamma(x);
+            let error = (got - expected).abs();
+            if (0.5..=3.0).contains(&x) {
+                assert!(
+                    error < 5e-15,
+                    "ln Γ({x:e}) = {got:e}, expected {expected:e}, absolute error {error:e}"
+                );
+            } else {
+                let relative = error / expected.abs();
+                assert!(
+                    relative < 2e-15,
+                    "ln Γ({x:e}) = {got:e}, expected {expected:e}, relative error {relative:e}"
+                );
+            }
+        }
+        assert!(ln_gamma(0.0).is_nan());
+        assert!(ln_gamma(-1.5).is_nan());
+        assert!(ln_gamma(f64::NAN).is_nan());
+        assert_eq!(ln_gamma(f64::INFINITY), f64::INFINITY);
+    }
+
+    /// The dense sweep: `scripts/lanczos_coefficients.py --sweep FILE`
+    /// writes 45 000 pairs `x ln Γ(x)` (seed 20260916, 40 digits) covering
+    /// subnormal to `1e305`, with dense bands around 1 and 2; run with
+    /// `RUMP_LN_GAMMA_SWEEP=FILE cargo test --release -- --ignored
+    /// the_log_gamma_sweep`.
+    #[test]
+    #[ignore = "needs the reference file from scripts/lanczos_coefficients.py --sweep"]
+    fn the_log_gamma_sweep_matches_high_precision() {
+        let path = std::env::var("RUMP_LN_GAMMA_SWEEP")
+            .expect("RUMP_LN_GAMMA_SWEEP names the reference file");
+        let text = std::fs::read_to_string(path).expect("the reference file is readable");
+        let mut checked = 0usize;
+        for line in text.lines() {
+            let (x, expected) = line.split_once(' ').expect("each line is `x value`");
+            let (x, expected): (f64, f64) =
+                (x.parse().expect("x"), expected.parse().expect("value"));
+            let error = (ln_gamma(x) - expected).abs();
+            if (0.5..=3.0).contains(&x) {
+                assert!(error < 5e-15, "ln Γ({x:e}): absolute error {error:e}");
+            } else {
+                assert!(
+                    error < 2e-15 * expected.abs(),
+                    "ln Γ({x:e}): relative error {:e}",
+                    error / expected.abs()
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked > 40_000, "only {checked} reference pairs");
     }
 
     #[test]
