@@ -599,10 +599,10 @@ pub fn gauss_reduce_weighted(
 ///
 /// What it is for: LLL returns a reduced basis, and a reduced basis's
 /// rows are not the lattice's shortest vectors, only vectors within a
-/// factor of them; where the shortest vectors matter — the kernel
-/// lattice of a number field sieve polynomial search, whose vectors are
-/// the polynomials with a given root — the rows are a sample of what the
-/// lattice holds, and this is the rest of it.
+/// factor of them; where the shortest vectors themselves matter — a
+/// kernel lattice whose vectors are the integer polynomials with a given
+/// root, for one — the rows are a sample of what the lattice holds, and
+/// this is the rest of it.
 ///
 /// # Panics
 ///

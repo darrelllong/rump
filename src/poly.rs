@@ -1329,11 +1329,12 @@ impl PolyZ {
     /// coefficient repairs that: if `f(x) = Σ cᵢ xⁱ` then
     /// `c_d^{d−1} f(x/c_d) = Σ cᵢ c_d^{d−1−i} xⁱ` is monic with integer
     /// coefficients and vanishes at `c_d·θ`, so `c_d·θ` is an algebraic
-    /// integer generating the same field. This is the standard device for
-    /// running the number field sieve on a non-monic polynomial (Buhler,
-    /// Lenstra & Pomerance, *Factoring integers with the number field
-    /// sieve*, LNMS 1554, §12): every `a − bθ` becomes `c_d·a − b·(c_d θ)`,
-    /// an element of `ℤ[c_d θ]`.
+    /// integer generating the same field. It is the standard device for
+    /// computing in the order of a non-monic polynomial — the number field
+    /// sieve's use is the textbook one (Buhler, Lenstra & Pomerance,
+    /// *Factoring integers with the number field sieve*, LNMS 1554, §12) —
+    /// and it maps every `a − bθ` to `c_d·a − b·(c_d θ)`, an element of
+    /// `ℤ[c_d θ]`.
     ///
     /// A monic `f` is returned unchanged; a constant or the zero polynomial
     /// has no root to scale and is returned unchanged too. The sign of the

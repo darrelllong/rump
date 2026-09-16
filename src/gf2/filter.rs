@@ -1,5 +1,6 @@
-//! Structured Gaussian elimination over GF(2) on sparse rows: the filtering
-//! step between a sieve and its linear solver.
+//! Structured Gaussian elimination over GF(2) on sparse rows: shrinking a
+//! very sparse matrix before an iterative solver looks for its dependencies,
+//! as between a sieve and its linear algebra.
 //!
 //! A sieve matrix has a few dozen nonzeros in a row and hundreds of
 //! thousands of columns, most of them touched by one or two rows. Holding
