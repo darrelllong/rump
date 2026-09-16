@@ -5,6 +5,20 @@ what a consumer must change, not everything that moved.
 
 ## Unreleased
 
+### Breaking
+
+- **`lattice::short_vectors_form` and `closest_vectors_form` return
+  `lattice::Enumeration` and take `visit_limit: u64`.** Both panicked on
+  valid forms whose scales differ widely — under `diag(1, 2¹⁰⁰⁰)` the
+  common shift into doubles rounded the entry 1 to zero — and returned a
+  truncated search indistinguishable from a complete one. The Gram–Schmidt
+  data are now exact, pruning uses outward-rounded enclosures, and
+  `Enumeration::outcome()` says whether the search was `Exhausted`, stopped
+  at its `VisitLimit`, or met a `NumericalLimit`; only `Exhausted` certifies
+  that nothing within the bound was missed. A negative bound is an empty,
+  exhausted search for both functions. Callers add the visit limit (the old
+  implicit cap was 50 000 000) and read `.into_vectors()`.
+
 ### Fixed
 
 - **`number_theory::ln_gamma` is finite for small positive arguments.** Below

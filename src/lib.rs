@@ -164,7 +164,7 @@ pub mod finite_field {
 pub mod lattice {
     pub use crate::lattice_impl::{
         closest_vectors_form, gauss_reduce_weighted, lll_reduce, lll_reduce_delta, lll_reduce_form,
-        short_vectors_form, ReductionError,
+        short_vectors_form, Enumeration, EnumerationOutcome, ReductionError,
     };
     pub use crate::poly::bareiss_determinant;
 }
