@@ -5,6 +5,14 @@ what a consumer must change, not everything that moved.
 
 ## Unreleased
 
+### Removed
+
+- **`number_theory::dickman_rho` and `number_theory::semismooth_probability`.**
+  Both existed only to rank a sieve's expected relation yield, and their one
+  consumer was the factoring crate, which now owns them. Callers that want
+  Dickman's function or the Bach–Peralta semismoothness estimate take them
+  from factoring or carry their own.
+
 ### Changed
 
 - **Large `BigUint` multiplication now dispatches to an exact NTT.** Four
