@@ -1221,10 +1221,10 @@ pub fn mod_inverse_u64(value: u64, modulus: u64) -> Option<u64> {
     // Extended Euclid at the narrowest width that holds the cofactors:
     // every cofactor stays below the modulus in magnitude, so a modulus
     // under 2³¹ runs in `i32`, under 2⁶³ in `i64`, and only the top bit
-    // needs `i128`. A lattice sieve asks this once per base prime per
-    // special q, and a two-word division per Euclid step — some forty
-    // steps for a twenty-bit prime — was most of what a lattice cost to
-    // set up.
+    // needs `i128`. A caller inverting modulo every prime of a large base
+    // asks this thousands of times per setup, and a two-word division per
+    // Euclid step — some forty steps for a twenty-bit prime — was most of
+    // what that setup cost.
     if modulus < 1 << 31 {
         let m = modulus as i32;
         let (mut old_r, mut r) = ((value % modulus) as i32, m);
@@ -1579,15 +1579,15 @@ impl core::fmt::Display for SmoothnessBaseError {
 
 impl std::error::Error for SmoothnessBaseError {}
 
-/// A factor base with its prime product `z` precomputed, so that batches can
+/// A set of primes with their product `z` precomputed, so that batches can
 /// be sized by the caller rather than by what the setup costs.
 ///
 /// [`smooth_parts`] rebuilds `z` on every call. For a base to 20 000 that is
 /// a 13 500-bit product over about 1 100 primes — nothing once per run, but
 /// paid per batch it decides how the caller may batch, and a caller whose
 /// natural batch is a few values is pushed into one enormous batch at the end
-/// of a run. That is the wrong shape for relation collection, which stops as
-/// soon as it has enough.
+/// of a run. That is the wrong shape for a caller that streams values and
+/// stops as soon as it has found enough smooth ones.
 ///
 /// The obligation on `primes` is checked here, once, instead of per batch.
 ///
@@ -3232,8 +3232,8 @@ fn is_witness(
 /// good to about fifteen digits over the positive reals; below one half
 /// the reflection formula `Γ(x)Γ(1 − x) = π / sin πx` is used.
 ///
-/// For the densities the polynomial ranking integrates over — a
-/// chi-squared, a gamma — whose normalisation is a gamma function.
+/// The normalisation of the gamma, chi-squared, beta and Student's `t`
+/// densities; [`regularized_incomplete_beta`] is built on it.
 #[must_use]
 pub fn ln_gamma(x: f64) -> f64 {
     const G: f64 = 7.0;
@@ -3401,9 +3401,8 @@ const CROSSING_PRIMES_BELOW: u64 = 1 << 20;
 /// supplies the primes just past a cursor at a cost that does not depend
 /// on the cursor — a window at ten million holds some four thousand primes
 /// and is crossed out in well under a millisecond — for a caller walking
-/// primes upward in batches (a number field sieve's special `q` above its
-/// factor base) that would otherwise sieve and discard a growing prefix
-/// for every batch. Above `2⁴⁰` the crossing primes stop at `2²⁰` and
+/// primes upward in batches from an arbitrary starting point, which would
+/// otherwise sieve and discard a growing prefix for every batch. Above `2⁴⁰` the crossing primes stop at `2²⁰` and
 /// the survivors are settled by the primality proof instead.
 ///
 /// Every integer above `lower` is classified, two included, and the
@@ -7336,19 +7335,19 @@ mod tests {
 /// arising in analytic number theory*, Mathematics of Computation 23
 /// (1969), 417–421.
 ///
-/// The estimate a sieve wants — how likely is this norm to be smooth over
-/// this base — is `ρ(ln N / ln B)` to first order, and comparisons between
-/// candidate polynomials need exactly the ratios of such values.
+/// The probability that a value near `N` is smooth over the primes below
+/// `B` is `ρ(ln N / ln B)` to first order, and comparing two such chances
+/// needs exactly the ratio of the two values.
 ///
 /// Deterministic: the grid and method are fixed, so every call in every
 /// build sees the same table. Values past the table's end (`u > 24`) return
-/// zero, which for smoothness comparison is the right degenerate answer:
+/// zero, which for comparing smoothness chances is the right degenerate answer:
 /// at `u = 24` the true value is below `10⁻²⁵`.
 ///
 /// Accuracy is comparison-grade, not tabulation-grade: a few parts per
 /// million at small `u`, degrading with `u` as the interpolated delay
-/// compounds — the tests pin it. Candidate ranking, the use this serves,
-/// distinguishes values that differ by per cents.
+/// compounds — the tests pin it. That suits comparing estimates that
+/// differ by per cents; it is not a substitute for a published table.
 #[must_use]
 pub fn dickman_rho(u: f64) -> f64 {
     if u <= 0.0 {
@@ -7411,8 +7410,7 @@ fn dickman_table() -> &'static [f64] {
 
 /// Student's `t` at `probability`, one-sided, on `freedom` degrees of
 /// freedom: the point `t` with `P(T ≤ t) = probability`, for a bound on a
-/// difference of means from few observations, as a race between
-/// polynomials reads its rates.
+/// difference of means from few observations.
 ///
 /// The distribution function is `P(|T| > t) = I_x(ν/2, 1/2)` with
 /// `x = ν/(ν + t²)` and `I` the regularised incomplete beta function

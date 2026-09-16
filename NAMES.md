@@ -3,7 +3,8 @@
 The naming authority for Rump. If this file disagrees with a doc comment,
 manual, changelog, commit message, request, or review, this file wins.
 
-Companion: [factoring NAMES](../factoring/NAMES.md) is the consumer half. A
+Companion: the factoring crate, a separate repository and rump's largest
+consumer, keeps the consumer half of this ledger in its own NAMES.md. A
 cross-repository name is not agreed until it has the same canonical spelling
 and owner in both ledgers.
 
@@ -273,7 +274,7 @@ special-q policy, matrix meaning, and factor extraction.
 A helper moves only if it has a factoring-free contract, an independent test
 oracle, and a second credible use. Once it moves, a downstream copy is a bug.
 Transfer state is maintained in both this file and the ownership rows in the
-[factoring ledger](../factoring/NAMES.md).
+factoring crate's NAMES.md.
 
 | Canonical Rump API | Factoring site | Transfer state |
 |---|---|---|
