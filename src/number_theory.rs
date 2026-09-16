@@ -1260,6 +1260,54 @@ pub fn mod_inverse_u64(value: u64, modulus: u64) -> Option<u64> {
     })
 }
 
+/// Modular inverse of a double word, or `None` when there is none.
+///
+/// The `u128` sibling of [`mod_inverse_u64`], by the same extended Euclidean
+/// algorithm (*Handbook of Applied Cryptography*, Algorithm 2.142), and total
+/// over every modulus the type holds. Signed cofactors would need a bit the
+/// type does not have once the modulus passes `2¹²⁷`, so the cofactors are
+/// carried unsigned instead (Knuth, *TAOCP* vol. 2, §4.5.2, exercise 3): the
+/// signs of the coefficient sequence strictly alternate, so each step adds
+/// magnitudes, `|sₖ₊₁| = |sₖ₋₁| + qₖ·|sₖ|`, and the sign of the last one is
+/// the parity of the step count. Every magnitude is at most `modulus / g`,
+/// so nothing overflows. A modulus that fits a word is handed to
+/// [`mod_inverse_u64`], where the hardware divides directly.
+///
+/// `None` means the value shares a factor with the modulus. Modulo one
+/// every value is congruent to zero, whose inverse there is zero.
+///
+/// # Panics
+///
+/// Panics when the modulus is zero, which is not a modulus.
+#[must_use]
+pub fn mod_inverse_u128(value: u128, modulus: u128) -> Option<u128> {
+    assert!(modulus != 0, "modulus must be non-zero");
+    if let (Ok(value), Ok(modulus)) = (u64::try_from(value % modulus), u64::try_from(modulus)) {
+        return mod_inverse_u64(value, modulus).map(u128::from);
+    }
+    // (older, old) remainders with the value's coefficient magnitudes beside
+    // them; `negative` is the sign of the coefficient paired with `older`.
+    let (mut older, mut old) = (modulus, value % modulus);
+    let (mut older_coefficient, mut old_coefficient) = (0u128, 1u128);
+    let mut negative = true;
+    while old != 0 {
+        let quotient = older / old;
+        (older, old) = (old, older - quotient * old);
+        (older_coefficient, old_coefficient) = (
+            old_coefficient,
+            older_coefficient + quotient * old_coefficient,
+        );
+        negative = !negative;
+    }
+    (older == 1).then(|| {
+        if negative && older_coefficient != 0 {
+            modulus - older_coefficient
+        } else {
+            older_coefficient
+        }
+    })
+}
+
 /// Greatest common divisor.
 ///
 /// Lehmer's algorithm (Knuth, *TAOCP* vol. 2, §4.5.2, Algorithm L) below the
@@ -3040,6 +3088,40 @@ pub fn crt_combine(congruences: &[(BigUint, BigUint)]) -> Option<BigUint> {
     Some(solution)
 }
 
+/// Two congruences with word-sized moduli combined into one: the `x` in
+/// `[0, m₁·m₂)` with `x ≡ r₁ (mod m₁)` and `x ≡ r₂ (mod m₂)`.
+///
+/// [`crt_combine`]'s contract at machine width, for two congruences: the
+/// same Garner step (*Handbook of Applied Cryptography*, Algorithm 14.71),
+/// `x = r₁ + m₁·((r₂ − r₁)·m₁⁻¹ mod m₂)`, with the inversion by
+/// [`mod_inverse_u64`] and the one product reduced in `u128`. The product of
+/// two words always fits a double word, so the answer is never out of range
+/// and no heap is touched. Residues may be unreduced. `None` when either
+/// modulus is zero or the moduli share a factor — the inversion is the
+/// coprimality test, as it is in [`crt_combine`].
+///
+/// ```
+/// use rump::number_theory::crt_combine_u64;
+///
+/// assert_eq!(crt_combine_u64((2, 3), (3, 5)), Some(8));
+/// assert_eq!(crt_combine_u64((1, 4), (3, 6)), None); // gcd(4, 6) = 2
+/// ```
+#[must_use]
+pub fn crt_combine_u64(first: (u64, u64), second: (u64, u64)) -> Option<u128> {
+    let ((first_residue, first_modulus), (second_residue, second_modulus)) = (first, second);
+    if first_modulus == 0 || second_modulus == 0 {
+        return None;
+    }
+    let first_residue = first_residue % first_modulus;
+    let inverse = mod_inverse_u64(first_modulus % second_modulus, second_modulus)?;
+    // (r₂ − r₁) mod m₂, biased by m₂ so the subtraction stays in range.
+    let difference = (u128::from(second_residue % second_modulus) + u128::from(second_modulus)
+        - u128::from(first_residue % second_modulus))
+        % u128::from(second_modulus);
+    let k = difference * u128::from(inverse) % u128::from(second_modulus);
+    Some(u128::from(first_residue) + u128::from(first_modulus) * k)
+}
+
 /// Chinese remaindering through a balanced product tree.
 ///
 /// The mathematical contract is [`crt_combine`]'s: return the unique residue
@@ -4523,6 +4605,147 @@ mod tests {
     #[should_panic(expected = "modulus must be non-zero")]
     fn mod_inverse_u64_refuses_a_zero_modulus() {
         let _ = mod_inverse_u64(3, 0);
+    }
+
+    /// The double-word inverse against the heap one, above all where a
+    /// signed cofactor would need a 129th bit: moduli past `2¹²⁷`, up to
+    /// `u128::MAX`, with values that do and do not share a factor.
+    #[test]
+    fn the_double_word_inverse_agrees_with_the_wide_one_past_the_sign_bit() {
+        let mut state = 0x0fed_cba9_8765_4321u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state
+        };
+        let moduli = [
+            1u128,
+            2,
+            97,
+            u128::from(u64::MAX),
+            u128::from(u64::MAX) + 1,
+            (1 << 89) - 1,
+            (1 << 126) + 3,
+            (1 << 127) - 1,
+            1 << 127,
+            (1 << 127) + 45,
+            3 << 126,
+            u128::MAX - 158,
+            u128::MAX,
+        ];
+        for modulus in moduli {
+            let wide_modulus = BigUint::from_u128(modulus);
+            let mut values = vec![
+                0u128,
+                1,
+                2,
+                3,
+                6,
+                modulus - 1,
+                modulus / 2,
+                modulus.wrapping_add(1),
+            ];
+            for _ in 0..48 {
+                values.push((u128::from(next()) << 64 | u128::from(next())) % modulus);
+            }
+            for value in values {
+                let wide =
+                    mod_inverse(&BigUint::from_u128(value).rem(&wide_modulus), &wide_modulus);
+                let narrow = mod_inverse_u128(value, modulus);
+                assert_eq!(
+                    narrow.map(BigUint::from_u128),
+                    wide,
+                    "{value}⁻¹ mod {modulus}"
+                );
+                if let Some(inverse) = narrow {
+                    let product = BigUint::mod_mul(
+                        &BigUint::from_u128(value % modulus),
+                        &BigUint::from_u128(inverse),
+                        &wide_modulus,
+                    );
+                    assert_eq!(
+                        product,
+                        BigUint::one().rem(&wide_modulus),
+                        "{value}·{inverse} mod {modulus}"
+                    );
+                }
+            }
+        }
+        assert_eq!(mod_inverse_u128(0, 1), Some(0));
+        assert_eq!(mod_inverse_u128(1 << 64, 1 << 127), None);
+        assert_eq!(
+            mod_inverse_u128(u128::MAX - 1, u128::MAX),
+            Some(u128::MAX - 1)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "modulus must be non-zero")]
+    fn mod_inverse_u128_refuses_a_zero_modulus() {
+        let _ = mod_inverse_u128(3, 0);
+    }
+
+    /// Word-width CRT against `crt_combine` on the heap: coprime and
+    /// non-coprime moduli, unreduced residues, moduli of one, and products
+    /// near `u128::MAX`.
+    #[test]
+    fn the_word_crt_agrees_with_the_wide_one() {
+        let mut state = 0x5555_aaaa_3333_cccc_u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state
+        };
+        let moduli = [
+            1u64,
+            2,
+            3,
+            4,
+            6,
+            35,
+            65_537,
+            (1 << 32) + 15,
+            (1 << 63) + 29,
+            u64::MAX - 58,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        for &first_modulus in &moduli {
+            for &second_modulus in &moduli {
+                for _ in 0..8 {
+                    let (first_residue, second_residue) = (next(), next());
+                    let wide = crt_combine(&[
+                        (
+                            BigUint::from_u64(first_residue),
+                            BigUint::from_u64(first_modulus),
+                        ),
+                        (
+                            BigUint::from_u64(second_residue),
+                            BigUint::from_u64(second_modulus),
+                        ),
+                    ]);
+                    assert_eq!(
+                        crt_combine_u64((first_residue, first_modulus), (second_residue, second_modulus))
+                            .map(BigUint::from_u128),
+                        wide,
+                        "({first_residue} mod {first_modulus}, {second_residue} mod {second_modulus})"
+                    );
+                }
+            }
+        }
+        assert_eq!(crt_combine_u64((2, 3), (3, 5)), Some(8));
+        assert_eq!(crt_combine_u64((0, 0), (1, 5)), None);
+        assert_eq!(crt_combine_u64((1, 5), (0, 0)), None);
+        assert_eq!(crt_combine_u64((4, 1), (9, 1)), Some(0));
+        let top = crt_combine_u64((u64::MAX - 2, u64::MAX), (u64::MAX - 2, u64::MAX - 1))
+            .expect("consecutive integers are coprime");
+        assert_eq!(top, u128::from(u64::MAX - 2));
+        assert_eq!(
+            crt_combine_u64((u64::MAX - 1, u64::MAX), (u64::MAX - 2, u64::MAX - 1)),
+            Some(u128::from(u64::MAX) * u128::from(u64::MAX - 1) - 1)
+        );
     }
     use super::{
         gcd, is_probable_prime, jacobi, lcm, miller_rabin_with_bases, miller_rabin_witness,

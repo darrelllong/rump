@@ -81,7 +81,7 @@ Algorithm M.
 | Quotient-batch buffer bound | `QuotientLog` | Lamé's theorem (classical): F₁₈₁ > 2¹²⁴ > F₁₈₀ caps a 124-bit window at 178 Euclidean steps, which sizes the fixed buffer. |
 | Half-GCD (subquadratic) | `hgcd`, `gcd_via_hgcd`, `gcd_extended_via_hgcd` | Möller, *On Schönhage's algorithm and subquadratic integer gcd computation*, Math. Comp. 77 (2008), 589–607, Figure 4 (the algorithm behind GMP's `mpn_hgcd`); Equation 4, Lemmas 5–7, and §6.3 are cited at the specific steps they justify, and `HGCD_BASE_LIMBS` / `hgcd_base` are the analogues of GMP's `HGCD_THRESHOLD` / `hgcd2` loop. |
 | Extended Euclid (Bézout cofactors) | `gcd_extended` | *Handbook of Applied Cryptography*, Algorithm 2.107; Knuth, *TAOCP* vol. 2, §4.5.2, Algorithm X. |
-| Modular inverse | `mod_inverse`, `mod_inverse_u64` (the word-sized form, Bézout coefficients carried in `i128`) | *Handbook of Applied Cryptography*, Algorithm 2.142, reduced into `[0, n)`. |
+| Modular inverse | `mod_inverse`, `mod_inverse_u64` (the word-sized form, Bézout coefficients carried in `i128`), `mod_inverse_u128` (the double-word form, unsigned coefficient magnitudes with the sign from the step parity) | *Handbook of Applied Cryptography*, Algorithm 2.142, reduced into `[0, n)`; unsigned cofactors: Knuth, *TAOCP* vol. 2, §4.5.2, exercise 3. |
 
 ## Symbols and residuosity (`src/number_theory.rs`)
 
@@ -117,7 +117,7 @@ Algorithm M.
 
 | Algorithm | Location | Reference |
 |---|---|---|
-| CRT (Garner) | `crt_combine` | Incremental Garner recombination, *Handbook of Applied Cryptography*, Algorithm 14.71. |
+| CRT (Garner) | `crt_combine`, `crt_combine_u64` (one step at machine width) | Incremental Garner recombination, *Handbook of Applied Cryptography*, Algorithm 14.71. |
 | Rational reconstruction | `rational_reconstruct`, `_bounded` | von zur Gathen and Gerhard, *Modern Computer Algebra*, 3rd ed. (2013), §5.10; technique of Wang, *A p-adic algorithm for univariate partial fractions*, SYMSAC '81, 212–217 (rational-number statement: Wang, Guy and Davenport, SIGSAM Bulletin 16(2) (1982), 2–3); accelerated variants Collins and Encarnación, *Efficient rational number reconstruction*, J. Symbolic Comput. 20(3) (1995), 287–297. |
 | Batch modular inversion | `mod_inverse_batch` | Montgomery, *Speeding the Pollard and elliptic curve methods of factorization*, Math. Comp. 48 (1987), 243–264 (simultaneous-inversion trick). |
 | p-adic valuation / remove factor | `valuation`, `remove_factor` | squared-power ladder (shape of GMP's `mpz_remove`); `valuation` accepts any `p ≥ 2`, PARI's `valuation` convention. |

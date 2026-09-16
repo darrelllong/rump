@@ -65,6 +65,13 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **`modular::mod_inverse_u128` and `number_theory::crt_combine_u64`.** The
+  double-word inverse is total over every `u128` modulus, including those past
+  `2¹²⁷` where signed cofactors run out of bits; the word CRT combines two
+  congruences into the residue below their product as a `u128`, with
+  `crt_combine`'s `None` for zero or non-coprime moduli. Both replace
+  factoring-local copies that were narrower than their types.
+
 - **Little-endian bytes: `BigUint::from_le_bytes`, `to_le_bytes`, and
   `to_le_bytes_padded`.** The exact mirror of the big-endian trio: the empty
   slice decodes to zero, zero encodes as one `0x00`, the minimal encoding

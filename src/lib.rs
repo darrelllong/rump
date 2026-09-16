@@ -133,7 +133,8 @@ pub mod modular {
     };
     pub use crate::modular_fixed::{Montgomery128, Montgomery64, Residue128, Residue64};
     pub use crate::number_theory_impl::{
-        mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow, mod_sqrt, mod_sqrt_prime_power,
+        mod_inverse, mod_inverse_batch, mod_inverse_u128, mod_inverse_u64, mod_pow, mod_sqrt,
+        mod_sqrt_prime_power,
     };
 }
 
@@ -141,7 +142,7 @@ pub mod modular {
 pub mod number_theory {
     pub use crate::modular_fixed::is_prime_u64;
     pub use crate::number_theory_impl::{
-        crt_combine, crt_combine_balanced, gcd, gcd_extended, gcd_u128, gcd_u64,
+        crt_combine, crt_combine_balanced, crt_combine_u64, gcd, gcd_extended, gcd_u128, gcd_u64,
         is_lucas_probable_prime, is_prime_aks, is_probable_prime, is_probable_prime_bpsw,
         is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker, lcm, legendre, ln_gamma,
         miller_rabin_with_bases, miller_rabin_witness, primes_below, primes_past, product_tree,

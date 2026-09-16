@@ -23,15 +23,16 @@ use rump::finite_field::Gf2m;
 use rump::integer::WordReciprocal;
 use rump::lattice::{gauss_reduce_weighted, lll_reduce, ReductionError};
 use rump::modular::{
-    mod_inverse, mod_inverse_batch, mod_inverse_u64, mod_pow, mod_sqrt, mod_sqrt_prime_power,
-    BarrettContext, ModulusError, MontgomeryContext, MontgomeryScratch,
+    mod_inverse, mod_inverse_batch, mod_inverse_u128, mod_inverse_u64, mod_pow, mod_sqrt,
+    mod_sqrt_prime_power, BarrettContext, ModulusError, MontgomeryContext, MontgomeryScratch,
 };
 use rump::number_theory::{
-    crt_combine, crt_combine_balanced, gcd, gcd_extended, gcd_u64, is_lucas_probable_prime,
-    is_prime_aks, is_probable_prime, is_probable_prime_bpsw, is_strong_lucas_probable_prime,
-    jacobi, kronecker, lcm, legendre, miller_rabin_with_bases, miller_rabin_witness, primes_below,
-    product_tree, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
-    remove_factor, smooth_parts, valuation, SmoothnessBase,
+    crt_combine, crt_combine_balanced, crt_combine_u64, gcd, gcd_extended, gcd_u64,
+    is_lucas_probable_prime, is_prime_aks, is_probable_prime, is_probable_prime_bpsw,
+    is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre, miller_rabin_with_bases,
+    miller_rabin_witness, primes_below, product_tree, rational_reconstruct,
+    rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, valuation,
+    SmoothnessBase,
 };
 use rump::polynomial::{PolyMod, PolyZ, RealRootError};
 use rump::random::{
@@ -625,14 +626,16 @@ assert_eq!(kronecker(&BigUint::one(), &BigUint::zero()), 1); // (1/0) = 1
 ### Modular arithmetic
 
 `mod_pow` for any non-zero modulus (Montgomery when odd), `mod_inverse`
-(`None` when the gcd exceeds one; `mod_inverse_u64` is its word-sized
-companion), `mod_sqrt` by Tonelli–Shanks with a
+(`None` when the gcd exceeds one; `mod_inverse_u64` and `mod_inverse_u128`
+are its word- and double-word companions, each total over its type), `mod_sqrt` by Tonelli–Shanks with a
 dispatch to Cipolla's algorithm where the prime's 2-adic depth makes the
 descent quadratic (`None` for non-residues; the result is verified by
 squaring, so a composite modulus also yields `None`). `crt_combine` performs
 ordered Chinese remaindering; `crt_combine_balanced` gives the same canonical
-answer through balanced partial products and bounded parallel workers. Both
-return `None` when the moduli are empty, zero, or not pairwise coprime. The
+answer through balanced partial products and bounded parallel workers;
+`crt_combine_u64` combines two congruences with word moduli into a `u128`
+without the heap. All three return `None` when the moduli are empty, zero, or
+not pairwise coprime. The
 balanced form takes a maximum worker count, caps it at reported machine
 parallelism, and treats zero as an explicit serial request.
 
@@ -654,6 +657,10 @@ assert_eq!(mod_inverse(&BigUint::from_u64(2), &BigUint::from_u64(4)), None);
 // total over u64; panics only on a zero modulus.
 assert_eq!(mod_inverse_u64(3, 7), Some(5));
 assert_eq!(mod_inverse_u64(2, 4), None); // shares a factor
+
+// The double-word companion covers every u128 modulus, past 2^127 too.
+let m = (1u128 << 127) + 45; // m ≡ 2 (mod 3), so 3 · (m + 1)/3 ≡ 1
+assert_eq!(mod_inverse_u128(3, m), Some((m + 1) / 3));
 
 let root = mod_sqrt(&BigUint::from_u64(2), &p).expect("2 is a residue mod 41");
 assert_eq!(BigUint::mod_mul(&root, &root, &p), BigUint::from_u64(2));
@@ -678,6 +685,10 @@ assert_eq!(
     ),
     Some(x)
 );
+
+// Two word-sized congruences, no heap: 8 ≡ 2 (mod 3) and 8 ≡ 3 (mod 5).
+assert_eq!(crt_combine_u64((2, 3), (3, 5)), Some(8));
+assert_eq!(crt_combine_u64((1, 4), (3, 6)), None); // gcd(4, 6) = 2
 ```
 
 ### Batch inversion
@@ -1357,7 +1368,7 @@ recoverable conditions:
 | `BigUint::mod_mul` / `mod_pow` / `mod_add` / `mod_sub` / `mod_neg` | the modulus is zero |
 | `ln_approx` | the value is zero |
 | `digit_count` | the radix is below 2 |
-| `mod_inverse_u64` | the modulus is zero |
+| `mod_inverse_u64` / `mod_inverse_u128` | the modulus is zero |
 | `nth_root_floor` | `k == 0` |
 | `mod_sqrt_prime_power` | `e == 0` or `p < 2` |
 | `valuation` / `remove_factor` | `n == 0` or `p < 2` |
