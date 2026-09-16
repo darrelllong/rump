@@ -17,9 +17,8 @@
 #                              is not doing its job.
 #   both ~ 1                   the rig is clean for that workload.
 #
-# Measured here, the products cluster on 1.0, so it is the binary: for
-# `int_add` at 256 bits one image runs 5.5% faster than a byte-identical
-# twin. The effect tracks operation cost, as code placement should -- large
+# The products cluster on 1.0, so it is the binary: for `int_add` at 256 bits
+# one image runs 5.5% faster than a byte-identical twin. The effect tracks operation cost, as code placement should -- large
 # where per-call overhead dominates, under 1% for `mod_pow`, `int_div_rem`
 # and `nt_gcd`, where the arithmetic swamps it.
 #
@@ -28,10 +27,9 @@
 # confidence interval. A tight interval around a layout artifact is still an
 # artifact.
 #
-# Run on an IDLE machine. An earlier attempt ran alongside the paired matrix,
-# where 32 cells were continuously executing one of the two binaries and never
-# the other; that privileges one image's page cache and shared text pages, and
-# it produced a one-sided bias in all ten cells that had nothing to say about
+# Run on an IDLE machine. Alongside the paired matrix, other cells execute one
+# of the two binaries and never the other; that privileges one image's page
+# cache and shared text pages and biases every cell one way, independent of
 # the code.
 set -uo pipefail
 

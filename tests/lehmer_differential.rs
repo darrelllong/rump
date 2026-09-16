@@ -1,8 +1,9 @@
 //! Differential test of the Lehmer-based `gcd`, `gcd_extended`, and
-//! `mod_inverse` against the classical Euclid implementations they replaced.
+//! `mod_inverse`, and the division-free `jacobi`, against classical
+//! division-per-step implementations.
 //!
-//! The naive versions are reproduced verbatim here as oracles: they share no
-//! code with the Lehmer engine, so agreement across a wide operand sweep plus
+//! The naive versions here are oracles: they share no code with the Lehmer
+//! engine, so agreement across a wide operand sweep plus
 //! structured corner cases certifies the fast path computes the exact same
 //! quotient sequence (hence the exact same gcd and Bézout cofactors).
 
@@ -10,7 +11,7 @@ use rump::modular::mod_inverse;
 use rump::number_theory::{gcd, gcd_extended, jacobi};
 use rump::{BigInt, BigUint};
 
-// ── the oracles: classical Euclid, exactly as rump shipped before Lehmer ──
+// ── the oracles: classical Euclid, one division per step ──
 
 fn gcd_naive(lhs: &BigUint, rhs: &BigUint) -> BigUint {
     let mut current = lhs.clone();
@@ -44,8 +45,7 @@ fn gcd_extended_naive(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
     (old_r, old_s, old_t)
 }
 
-/// The division-per-step Jacobi symbol, exactly as rump shipped before the
-/// division-free rewrite — the oracle for `jacobi`.
+/// The division-per-step Jacobi symbol, the oracle for `jacobi`.
 fn jacobi_naive(a: &BigUint, n: &BigUint) -> Option<i8> {
     if n.is_zero() || !n.is_odd() {
         return None;

@@ -1,23 +1,20 @@
 //! Linear algebra over GF(2): dense null space, singleton pruning,
 //! structured elimination on sparse rows ([`filter`]), and Block Lanczos.
 //!
-//! Solving `Mx = 0` over GF(2) for a large sparse `M` is not a factoring
-//! problem, though factoring is where it is most often met: it is the same
-//! computation in index-calculus discrete logarithms, in coding theory, and
-//! anywhere a parity system gets large. Only the *matrix* belongs to the
-//! caller's problem; the solver does not.
+//! Solving `Mx = 0` over GF(2) for a large sparse `M` arises in integer
+//! factoring, index-calculus discrete logarithms, coding theory, and anywhere
+//! a parity system gets large. The matrix belongs to the caller's problem;
+//! the solver does not.
 //!
-//! Addition is XOR, so a whole row combines in one pass of 64-bit words and
-//! there is no pivoting for numerical stability to worry about — any non-zero
-//! entry will do.
+//! Addition is XOR, so a whole row combines in one pass of 64-bit words, and
+//! there is no pivoting for numerical stability: any non-zero entry will do.
 //!
 //! # The packing contract
 //!
 //! A row is a `&[u64]` holding one bit per column: column `c` lives at bit
 //! `c % 64` of word `c / 64`, least significant bit first. Bits at or beyond
-//! the declared `columns` are ignored rather than trusted, so a stray high bit
-//! cannot masquerade as a column. Nothing in the type system enforces this,
-//! which is why it is stated here and in `NAMES.md`.
+//! the declared `columns` are ignored, so a stray high bit cannot masquerade
+//! as a column. The type system does not enforce this.
 //!
 //! This module is distinct from [`finite_field`](crate::finite_field), which
 //! is arithmetic *in* the field GF(2^m); here GF(2) is the field the linear
@@ -282,34 +279,29 @@ pub fn prune_singletons(rows: &[Vec<u64>], columns: usize) -> PrunedMatrix {
 // Block Lanczos over GF(2): the null space without the cube.
 //
 // [`dense_null_space`] is Gauss–Jordan, which costs
-// `O(columns · rows · (rows + columns)/64)` and is blind to sparsity. A
-// number field sieve matrix is very sparse — measured at 0.30 % full at 39
-// digits, about thirty set bits across ten thousand columns — and past about
-// fifty digits the elimination is the larger half of the bill: at 44 digits
-// with a 128 000-prime base the sieve takes 82 s and the matrix 429 s.
+// `O(columns · rows · (rows + columns)/64)` and is blind to sparsity. Relation
+// matrices, such as a sieve's, carry a few dozen set bits per row across many
+// thousands of columns, and at that size elimination dominates.
 //
 // Block Lanczos costs `O(iterations · nonzeros)` with `iterations ≈ rows/64`,
 // because sixty-four vectors ride in the bits of one machine word and every
-// iteration advances all of them. That is about 160 iterations where a scalar
-// method needs `2·rows ≈ 20 000`, and the blocking is the whole difference.
+// iteration advances all of them. For ten thousand rows that is about 160
+// iterations where a scalar method needs `2·rows ≈ 20 000`.
 //
 // # Provenance
 //
 // The recurrence is Montgomery's: equations (18)–(20) and the subspace
 // selection of figure 1 from *A Block Lanczos Algorithm for Finding
-// Dependencies over GF(2)*, EUROCRYPT '95, pages 106–120. The equations are
-// copied from the paper rather than recalled, because the coefficients are
-// easy to misremember and a wrong one yields *no* dependencies rather than
-// wrong ones, which is a silent failure. Equations from a published paper are
-// mathematics; the code below is this repository's own expression of them,
-// and no line of it comes from anywhere else.
+// Dependencies over GF(2)*, EUROCRYPT '95, pages 106–120. The coefficients
+// follow the paper exactly: a wrong one yields *no* dependencies rather than
+// wrong ones, a silent failure. The code is this repository's own expression
+// of the equations.
 //
-// While checking that the paper had been read correctly, Sebastian Wouters'
-// BSD-licensed C++ implementation (`github.com/SebWouters/blanczos`) was
-// consulted, because it annotates its variables with Montgomery's names and
-// so makes a misreading of the indices obvious. Reading it, not taking from
-// it: the data structures here (a sparse matrix held by rows and by columns
-// at once, a `[u64; 64]` block) share nothing with its.
+// Sebastian Wouters' BSD-licensed C++ implementation
+// (`github.com/SebWouters/blanczos`) annotates its variables with
+// Montgomery's names and serves as a check on the reading of the indices. No
+// code is taken from it; the data structures here (a sparse matrix held by
+// rows and by columns at once, a `[u64; 64]` block) share nothing with its.
 //
 // # The two things that make it delicate
 //
@@ -338,17 +330,10 @@ const WIDTH: usize = 64;
 /// A dense `64 × 64` matrix over `GF(2)`, one word per row.
 type Small = [u64; WIDTH];
 
-/// The relation matrix `M`, held once by rows and once by columns.
-///
-/// Both orientations are needed every iteration — `A = MᵀM` is two products —
-/// and each is a gather over the side it is indexed by, so storing both costs
-/// one extra copy of the indices and saves a scatter with random writes.
 /// Lists of indices stored flat: the indices of list `i` are
-/// `indices[offsets[i]..offsets[i + 1]]`. One allocation for a matrix of
-/// millions of lists, read in order, where a vector per list put every
-/// list behind its own pointer and the product behind a cache miss per
-/// list (perf, twilight, 2026-09-08: the product was ninety-five per cent
-/// of a Lanczos run).
+/// `indices[offsets[i]..offsets[i + 1]]`. One allocation read in order, so
+/// the matrix product, which dominates a Lanczos run, takes no cache miss per
+/// list.
 struct Lists {
     offsets: Vec<usize>,
     indices: Vec<u32>,
@@ -375,14 +360,18 @@ impl Lists {
     }
 }
 
+/// The relation matrix `M`, held once by rows and once by columns.
+///
+/// Both orientations are needed every iteration — `A = MᵀM` is two products —
+/// and each is a gather over the side it is indexed by, so storing both costs
+/// one extra copy of the indices and saves a scatter with random writes.
 struct Sparse {
     /// For each relation, the columns it sets.
     by_relation: Arc<Lists>,
     /// For each column, the relations that set it.
     by_column: Arc<Lists>,
-    /// Workers retained for the whole Lanczos recurrence. Recreating them for
-    /// both halves of every `A·x` paid thousands of spawn/join cycles on a
-    /// large sieve matrix.
+    /// Workers retained for the whole Lanczos recurrence, so no `A·x` spawns
+    /// threads.
     folds: FoldPool,
 }
 
@@ -445,15 +434,6 @@ impl Sparse {
         )
     }
 
-    /// One output word per index list: the XOR-fold of `x` at those indices,
-    /// fanned over `threads` when there is enough work to pay for them.
-    ///
-    /// Each output word is an independent fold, so the split is by output
-    /// ranges and the concatenation is in range order: the result is
-    /// identical to the serial map whatever the thread count, which
-    /// `dependencies_do_not_depend_on_the_thread_count` asserts rather than
-    /// assumes. One thread, or too little work per thread to hide a spawn,
-    /// runs inline.
     /// `A·x` with `A = MᵀM`, the symmetric operator the iteration runs on.
     fn apply(&self, x: &Block) -> Block {
         self.backward(&self.forward(x))
@@ -467,8 +447,6 @@ type Block = Arc<Vec<u64>>;
 ///
 /// A fold is a short XOR gather. Below this boundary the retained worker still
 /// costs a channel round-trip and loses to the caller doing the range inline.
-/// This is the same 4,096-fold crossover the former spawn-per-apply path used;
-/// retaining workers removes spawn cost but not communication or cache cost.
 const MINIMUM_FOLDS_PER_WORKER: usize = 4_096;
 
 struct FoldJob {
@@ -534,6 +512,12 @@ impl FoldPool {
         Self { senders, handles }
     }
 
+    /// One output word per index list: the XOR-fold of `input` at those
+    /// indices, split across workers when each gets enough folds to pay.
+    ///
+    /// Each output word is an independent fold, so the split is by output
+    /// ranges and the gather is in range order: the result is identical to
+    /// the inline fold whatever the worker count.
     fn mapped(&self, lists: Arc<Lists>, input: Block) -> Vec<u64> {
         let useful = (lists.len() / MINIMUM_FOLDS_PER_WORKER).max(1);
         let workers = self.senders.len().min(useful);
@@ -596,8 +580,7 @@ fn fold_range(lists: &Lists, start: usize, end: usize, input: &[u64]) -> Vec<u64
     for index in start..end {
         let indices = lists.list(index);
         // Four independent accumulators: the gathers are what the product
-        // waits on, and one chain of XORs let the core issue them one at a
-        // time.
+        // waits on, and a single XOR chain would serialize them.
         let mut chunks = indices.chunks_exact(4);
         let (mut a, mut b, mut c, mut d) = (0u64, 0u64, 0u64, 0u64);
         for chunk in &mut chunks {
@@ -621,10 +604,8 @@ fn dot(left: &[u64], right: &[u64]) -> Small {
     // accumulates the right words whose left word has byte `b` equal to
     // `e`. Eight table updates per word, against a loop over the word's
     // set bits — thirty-two on average — and the tables then combine into
-    // the sixty-four lanes in a fixed sixteen thousand operations. The
-    // dot products are three of a Lanczos iteration and were serial bit
-    // loops over the whole block, most of an iteration's time once the
-    // matrix product was parallel (perf, twilight, 2026-09-08).
+    // the sixty-four lanes in a fixed sixteen thousand operations. Each
+    // Lanczos iteration takes three dot products over the whole block.
     let mut tables = [[0u64; 256]; 8];
     for (a, b) in left.iter().zip(right.iter()) {
         let mut word = *a;
@@ -671,9 +652,8 @@ fn mul(p: &Small, q: &Small) -> Small {
 /// about 32 dependent iterations for the dense words Block Lanczos produces.
 /// Split the selector into eight bytes instead: each byte indexes the XOR of
 /// its eight possible rows, so applying the matrix is exactly eight lookups
-/// and XORs. Building the 16 KiB table costs 2,040 XORs and is amortized over
-/// one word per surviving relation -- tens of thousands in the sieve matrices
-/// this solver is for.
+/// and XORs. Building the 16 KiB table costs 2,040 XORs, amortized over one
+/// word per relation.
 struct SmallProduct {
     by_byte: [[u64; 256]; 8],
 }
@@ -713,10 +693,9 @@ fn xor_mul_block_into(acc: &mut [u64], v: &[u64], p: &Small) {
 
 /// Equation (18), fused into one pass over the four blocks.
 ///
-/// The former expression allocated three full temporary blocks and walked
-/// the relation vector four times. The matrices are tiny and fixed for the
-/// whole pass, so build their byte tables once and combine each output word
-/// where it will live.
+/// The matrices are tiny and fixed for the whole pass, so their byte tables
+/// are built once and each output word is combined in place, with no
+/// temporary blocks.
 fn recurrence(av: &[u64], mask: u64, terms: [(&[u64], &Small); 3]) -> Vec<u64> {
     let [(v0, d), (v1, e), (v2, f)] = terms;
     debug_assert_eq!(av.len(), v0.len());
@@ -877,7 +856,7 @@ pub fn block_lanczos_dependencies<R: RandomSource + ?Sized>(
 
 /// [`block_lanczos_dependencies`] over a [`SparseMatrix`]: the same
 /// iteration, the same checks, and the same result for the same rows and
-/// random source, without packing a sieve matrix one bit per column first.
+/// random source, without packing the rows one bit per column first.
 #[must_use]
 pub fn block_lanczos_dependencies_sparse<R: RandomSource + ?Sized>(
     matrix: &SparseMatrix,
@@ -913,8 +892,7 @@ fn lanczos<R: RandomSource + ?Sized>(
     let count = matrix.relations();
 
     // The starting block is random; rump chooses no entropy source, so the
-    // words come from the caller's generator rather than an internal xorshift
-    // over a seed argument.
+    // words come from the caller's generator.
     let mut draw = move || {
         let mut bytes = [0u8; 8];
         rng.fill_bytes(&mut bytes);
@@ -1178,7 +1156,6 @@ mod tests {
         }
     }
 
-    /// A deterministic `RandomSource` for the tests, so a failure reproduces.
     /// Where the sparse solver's time goes at the size of a hundred-digit
     /// matrix: a random matrix of the sieve's shape, timed, for a
     /// profiler to look at.
@@ -1220,6 +1197,7 @@ mod tests {
         );
     }
 
+    /// A deterministic `RandomSource` for the tests, so a failure reproduces.
     struct TestRng(u64);
     impl crate::random::RandomSource for TestRng {
         fn fill_bytes(&mut self, dest: &mut [u8]) {
@@ -1247,14 +1225,6 @@ mod tests {
             .collect()
     }
 
-    /// Every dependency Block Lanczos returns is a genuine one.
-    ///
-    /// The weaker public contract, over inputs the method is not promised to
-    /// solve: it is randomized, so `None` is a legitimate outcome here and is
-    /// accepted. What is never acceptable is a returned set that is not
-    /// dependent. Convergence itself is pinned separately, on fixed input, by
-    /// `block_lanczos_recovers_a_known_subspace_on_fixed_input` — this test
-    /// deliberately cannot detect a solver that always gives up.
     #[test]
     fn dependencies_do_not_depend_on_the_thread_count() {
         // The applies split by output ranges and concatenate in order, so the
@@ -1268,6 +1238,12 @@ mod tests {
         assert_eq!(one, eight);
     }
 
+    /// Every dependency Block Lanczos returns is a genuine one.
+    ///
+    /// The method is randomized, so `None` is accepted here; a returned set
+    /// that is not dependent never is. Convergence is pinned separately by
+    /// `block_lanczos_recovers_a_known_subspace_on_fixed_input`; this test
+    /// cannot detect a solver that always gives up.
     #[test]
     fn block_lanczos_returns_only_genuine_dependencies() {
         for &(relations, columns, weight) in

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent LLL oracle for rung D.
+"""Independent LLL oracle for the cases pinned in src/lattice.rs.
 
 This is the textbook *rational* Gram-Schmidt LLL (Cohen 2.6.1 in spirit):
 mu and the squared norms B_i are exact Fractions, computed from a fresh
@@ -67,7 +67,7 @@ def gram_det(b):
     # det of the Gram matrix b b^T (lattice invariant, = (covolume)^2)
     n = len(b)
     G = [[dot(b[i], b[j]) for j in range(n)] for i in range(n)]
-    # fraction-free would do; Bareiss-lite via Fraction elimination
+    # Gaussian elimination over Fractions
     G = [[F(x) for x in row] for row in G]
     det = F(1)
     for i in range(n):

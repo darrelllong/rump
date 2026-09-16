@@ -35,107 +35,77 @@ mod reciprocal;
 pub use barrett::BarrettContext;
 pub(crate) use newton::NEWTON_DIVISION_THRESHOLD_LIMBS;
 pub use reciprocal::WordReciprocal;
-// Only the test module reads the threshold from here now — the dispatch that
-// acts on it moved into `barrett` with the code it gates.
+// Only the test module reads this threshold; the dispatch lives in `barrett`.
 #[cfg(test)]
 use barrett::BARRETT_HALF_PRODUCT_MAX_LIMBS;
 
-// Heuristic crossover where the recursive split starts beating schoolbook in
-// this pure-Rust implementation on our benchmark hardware.
+// Measured crossover where the recursive split starts beating schoolbook.
 const KARATSUBA_THRESHOLD_LIMBS: usize = 32;
-// Limit highly lopsided splits; beyond this ratio the extra recursion/temporary
-// cost usually outweighs Karatsuba's multiplication count reduction.
+// Largest long/short length ratio Karatsuba accepts; beyond it the extra
+// recursion and temporaries outweigh the saved multiplications.
 const KARATSUBA_MAX_IMBALANCE: usize = 2;
-// Toom-3 (three-way Toom–Cook) crossover: above this many limbs in the shorter
-// operand, the five sub-multiplications of size n/3 overtake Karatsuba's three
-// of size n/2, despite the heavier evaluate/interpolate pass. Measured crossover
-// on this pure-Rust implementation is ~120 limbs (Karatsuba still wins at and
-// below 4096-bit crypto sizes); see PERFORMANCE.md.
+// Toom-3 crossover: from this many limbs in the shorter operand, the five
+// sub-multiplications of size n/3 overtake Karatsuba's three of size n/2,
+// despite the heavier evaluate/interpolate pass. The measured crossover is
+// ~120 limbs, so Karatsuba still covers 4096-bit sizes; see PERFORMANCE.md.
 const TOOM3_THRESHOLD_LIMBS: usize = 128;
-// Toom-4 (four-way Toom–Cook) crossover. Its exponent (log 7 / log 4 ≈ 1.404)
-// beats Toom-3's (1.465), but the seven-point interpolation carries a much
-// larger constant here, so it only overtakes Toom-3 for very large operands —
-// measured near ~3000 limbs (~190 kbit). Set there as headroom; the practical
-// range stays on Toom-3. See PERFORMANCE.md.
+// Toom-4 crossover. Its exponent (log 7 / log 4 ≈ 1.404) beats Toom-3's
+// (1.465), but the seven-point interpolation carries a much larger constant,
+// so it overtakes Toom-3 only near 3000 limbs (~190 kbit). See PERFORMANCE.md.
 const TOOM4_THRESHOLD_LIMBS: usize = 3072;
 // Exact NTT multiplication crossover. The transform works in base 2^16 under
 // two 31-bit primes and reconstructs every convolution coefficient by CRT;
 // this threshold is measured against Toom-4 by `ntt_crossover_timing`.
 // Correctness is independent of it.
 const NTT_SERIAL_THRESHOLD_LIMBS: usize = 65_536;
-// The exact same kernel crosses earlier when its in-place transform stages can
-// use independent execution contexts. These are measured whole-product
-// crossovers, not CPU-count guesses: two contexts at 32,768 limbs, four or
-// more at 8,192. `ntt::automatic_worker_count` never exceeds reported machine
-// parallelism and returns one if detection fails.
+// The same kernel crosses earlier when its transform stages run on
+// independent execution contexts: measured at 32,768 limbs with two contexts,
+// 8,192 with four or more. `ntt::automatic_worker_count` never exceeds the
+// reported machine parallelism and returns one if detection fails.
 const NTT_TWO_WORKER_THRESHOLD_LIMBS: usize = 32_768;
 const NTT_PARALLEL_THRESHOLD_LIMBS: usize = 8_192;
 // A radix-2 transform rounds the convolution length up to a power of two, so
-// crossing that boundary can double its work for one extra input limb. On M4,
-// equal 98,304-limb operands (10.67 transform coefficients per short limb)
-// still favour Toom-4, while 114,688 (9.14) favour NTT decisively. Ten is the
-// measured separator; this gate prevents a nominal size threshold from
-// selecting NTT on the expensive side of its padding staircase.
+// one extra input limb can double its work. Equal 98,304-limb operands (10.67
+// transform coefficients per short limb) favour Toom-4; 114,688 (9.14) favour
+// NTT decisively. This gate keeps the size threshold from selecting NTT on the
+// expensive side of that padding staircase.
 const NTT_SERIAL_MAX_PADDED_COEFFICIENTS_PER_SHORT_LIMB: usize = 10;
-// Parallel transforms can admit a ratio of 11 (two workers at 49,152 limbs;
-// four from the measured 11,916-limb padding boundary onward).
+// Parallel transforms admit a ratio of 11 (two workers at 49,152 limbs; four
+// from the 11,916-limb padding boundary onward).
 const NTT_PARALLEL_MAX_PADDED_COEFFICIENTS_PER_SHORT_LIMB: usize = 11;
 // Block-decomposition crossover for lopsided products (long ≥ 2·short): the
-// shorter length above which cutting the longer operand into short-sized
+// shorter length from which cutting the longer operand into short-sized
 // digits and multiplying each pair through the balanced kernels beats one
-// flat schoolbook pass. This is deliberately far above the Karatsuba
-// crossover: at 32-limb digits each block is only marginally sub-quadratic
-// while the per-block dispatch and allocation overhead is paid in
-// full. Measured on M4 (`unbalanced_crossover_timing`): the decomposition
-// loses 2x at 32-limb digits, breaks even near 128, still trails slightly
-// at 192, and wins 25-35% at 256 rising toward 2x at 512. Set at the first
-// size that wins across every measured ratio.
+// flat schoolbook pass. It sits far above the Karatsuba crossover because
+// per-block dispatch and allocation are paid in full while small blocks are
+// barely sub-quadratic. `unbalanced_crossover_timing`: the decomposition
+// loses 2x at 32-limb digits, breaks even near 128, trails slightly at 192,
+// and wins 25-35% at 256, rising toward 2x at 512.
 const UNBALANCED_THRESHOLD_LIMBS: usize = 256;
 // Width at or above which squaring runs its own kernel rather than the
-// general multiplication. The kernel forms each cross term once, so its
-// ceiling is a saving of (n−1)/2n — half the limb products,
-// asymptotically — but it reaches that ceiling only once the products
-// dominate its three passes and their carry walks.
+// general multiplication. Forming each cross term once saves up to
+// (n−1)/2n of the limb products, but only once the products dominate the
+// kernel's three passes and their carry walks.
 //
-// Measured on M4 (`squaring_crossover_timing`, run with `--ignored`) at the
-// widths this constant actually gates, which is 8 up to the Karatsuba
-// threshold: +12% at 8 limbs, +29% at 12, +36% at 16, +29% at 24. Below 8
-// the measurement is inconclusive — the five passes at 1–6 limbs straddle
-// zero and one width reads a loss — so the floor sits where the win is
-// legible rather than where the arithmetic first favours it.
+// `squaring_crossover_timing` (run with `--ignored`), from 8 limbs up to the
+// Karatsuba threshold: +12% at 8 limbs, +29% at 12, +36% at 16, +29% at 24.
+// Below 8 the measurement straddles zero, so the floor sits where the win is
+// clear.
 const SQR_SCHOOLBOOK_MIN_LIMBS: usize = 8;
 // Width at or above which squaring stops splitting Karatsuba-style and
-// hands over to the multiplication ladder's Toom kernels. Asymptotics say
-// only that Toom eventually wins (its 1.465 against Karatsuba's 1.585);
-// they do not say where, and the ordinary multiplication crossover is the
-// wrong place to guess, because a Karatsuba *square* carries a constant
-// factor an ordinary Karatsuba product does not.
+// hands over to the multiplication ladder's Toom kernels. The ordinary
+// multiplication crossover does not carry over, because a Karatsuba square's
+// constant factor differs from a Karatsuba product's.
 //
-// Measured against `mul_toom3_ref` on the same operands
-// (`squaring_crossover_timing`, run with `--ignored`), quoting only widths
-// at which `mul` would actually reach Toom-3 — below its own 128-limb
-// threshold that comparison measures a kernel production never calls:
-// as the range observed rather than a single figure, because the spread
-// between runs is wider than the precision a single figure implies. Across
-// thirteen runs on M4: +6.2 to +10.1% at 128 limbs, +12.6 to +20.3% at
-// 160, +36 to +40% at 192, +3 to +6% at 256, +19 to +25% at 384, and −12
-// to −15% at 512.
-//
-// These are sample extremes, not bounds, and two revisions of this comment
-// have now been written as though they were — the fourteenth run will
-// probably widen them again. Only the sign and its persistence across runs
-// carry the threshold; the magnitudes are here to show how far from zero
-// each row sits, which is why the 512 row matters and the 256 row does
-// not. What carries the threshold
-// is the sign and its persistence across runs, not any one magnitude. The series is not monotone either, because
-// Toom-3's three-way split lands differently on each width (192 = 3·64
-// divides exactly, 256 does not), so the threshold is the last width the
-// squaring is consistently ahead at rather than a crossing point read off
-// a curve. Raising it from an earlier, wrongly-signed reading of 256 was
-// confirmed end to end against a build of the previous revision, six
-// passes alternating order: public `square` is 6.5% faster at 288
-// limbs, 23% at 384, 25% at 447, and at parity at 512 where the handoff
-// takes effect.
+// Karatsuba squaring against `mul_toom3_ref` on the same operands
+// (`squaring_crossover_timing`, run with `--ignored`), as the range over
+// repeated runs: +6.2 to +10.1% at 128 limbs, +12.6 to +20.3% at 160, +36
+// to +40% at 192, +3 to +6% at 256, +19 to +25% at 384, and −12 to −15% at
+// 512. The ranges are sample extremes, not bounds; the threshold rests on
+// the sign and its persistence across runs. The series is not monotone
+// because Toom-3's split lands differently on each width (192 = 3·64
+// divides exactly, 256 does not), so the threshold is the last width at
+// which squaring is consistently ahead.
 const SQR_KARATSUBA_MAX_LIMBS: usize = 448;
 
 /// Bitset of the 44 quadratic residues modulo 256, one bit per residue
@@ -153,22 +123,20 @@ const RADIX_DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 /// Digit count at or above which parsing dispatches to divide and conquer
 /// (`RADIX_FROM_DC_THRESHOLD_DIGITS`), and the recursion floor below which
 /// sub-problems convert classically (`RADIX_FROM_DC_BASE_DIGITS`).
-/// Measured on M4 with the ignored `radix_dc_crossover_timing` probe over
-/// repeated runs: with the 512-digit floor the ladder engine ties
-/// classical parsing at ~600 decimal digits, leads from ~1,200 (1.4×),
-/// and reaches 3× at ~40,000 digits. Correctness does not depend on
-/// either value: the recursion's hard base case is the ladder's first
-/// entry, and the suite drives both engines over the same vectors.
+/// Per the ignored `radix_dc_crossover_timing` probe, with the 512-digit
+/// floor the ladder engine ties classical parsing at ~600 decimal digits,
+/// leads from ~1,200 (1.4×), and reaches 3× at ~40,000 digits. Correctness
+/// does not depend on either value: the recursion's hard base case is the
+/// ladder's first entry.
 const RADIX_FROM_DC_THRESHOLD_DIGITS: usize = 1024;
 const RADIX_FROM_DC_BASE_DIGITS: usize = 512;
 
 /// Bit width at or above which rendering dispatches to divide and conquer
 /// (`RADIX_TO_DC_THRESHOLD_BITS`), and the recursion floor below which
-/// sub-values render classically (`RADIX_TO_DC_BASE_BITS`). Measured with
-/// the same probe: with the 512-bit floor the ladder render is 1.8× ahead
-/// of repeated division at 2,048 bits (~600 decimal digits), 6× at
-/// 16 kbit, 11× at 128 kbit — the quadratic curve falling away exactly as
-/// its complexity requires. Structurally safe at any values, as above.
+/// sub-values render classically (`RADIX_TO_DC_BASE_BITS`). Per the same
+/// probe, with the 512-bit floor the ladder render is 1.8× ahead of
+/// repeated division at 2,048 bits (~600 decimal digits), 6× at 16 kbit,
+/// and 11× at 128 kbit. Correct at any values, as above.
 const RADIX_TO_DC_THRESHOLD_BITS: usize = 2048;
 const RADIX_TO_DC_BASE_BITS: usize = 512;
 
@@ -347,8 +315,6 @@ impl BigUint {
     }
 
     /// Decode big-endian bytes.
-    ///
-    /// Internally, limb 0 always stores the least-significant 64 bits.
     #[must_use]
     pub fn from_be_bytes(bytes: &[u8]) -> Self {
         if bytes.is_empty() {
@@ -359,10 +325,8 @@ impl BigUint {
         let mut acc = 0u64;
         let mut shift = 0u32;
 
-        // Walk bytes from least-significant (last byte of the big-endian input)
-        // to most-significant, packing eight bytes at a time into a 64-bit limb.
-        // When `shift` reaches 64, the current limb is full — push it and start
-        // the next one.  Any remaining bytes at the end form a partial limb.
+        // Pack bytes from the least significant (the last) into limbs, eight
+        // to a limb; leftover bytes form a partial top limb.
         for &byte in bytes.iter().rev() {
             acc |= u64::from(byte) << shift;
             shift += 8;
@@ -385,10 +349,9 @@ impl BigUint {
     /// Encode as big-endian bytes without leading zero bytes.
     ///
     /// The output is exactly `⌈bits/8⌉` bytes (zero encodes as a single
-    /// `0x00`), allocated once at that length and filled from its last byte
-    /// backwards with the limbs' bytes, least significant first. Nothing is
-    /// encoded wider and trimmed, so no byte of the value is left behind in
-    /// a discarded buffer or in the result's spare capacity.
+    /// `0x00`), written directly into one allocation of that length, so no
+    /// byte of the value is left behind in a discarded buffer or in spare
+    /// capacity.
     #[must_use]
     pub fn to_be_bytes(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.bits().div_ceil(8).max(1)];
@@ -424,8 +387,7 @@ impl BigUint {
     /// Encode as big-endian bytes at a fixed width, zero-padded on the
     /// left — the shape wire formats and share serializations want.
     ///
-    /// The limbs are written straight into the one `byte_width` buffer that
-    /// is returned; no unpadded encoding is built and copied, so no second
+    /// The limbs are written straight into the returned buffer, so no second
     /// copy of the value's bytes is left in a freed allocation.
     ///
     /// # Panics
@@ -466,8 +428,8 @@ impl BigUint {
 
     /// Encode as little-endian bytes without trailing zero bytes — the mirror
     /// of [`Self::to_be_bytes`]: exactly `⌈bits/8⌉` bytes, least significant
-    /// first, and zero encodes as a single `0x00`. The buffer is allocated
-    /// once at that length and written directly, with no reversed copy.
+    /// first, and zero encodes as a single `0x00`, written directly into one
+    /// allocation.
     #[must_use]
     pub fn to_le_bytes(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.bits().div_ceil(8).max(1)];
@@ -494,14 +456,13 @@ impl BigUint {
         out
     }
 
-    /// The one byte writer behind the four encoders: the value's bytes, least
-    /// significant first, into `slots` in the order the iterator yields them.
+    /// The byte writer behind the four encoders: the value's bytes, least
+    /// significant first, into `slots` in iteration order.
     ///
-    /// Writing stops at whichever runs out first — the slots or the limbs'
-    /// `8·len` bytes. Slots past the limbs keep what the caller put there
-    /// (zero, in every caller), and limb bytes past the slots are the top
-    /// limb's high zero bytes, because each caller sized its buffer to at
-    /// least `⌈bits/8⌉`.
+    /// Writing stops when the slots or the limbs' `8·len` bytes run out.
+    /// Slots past the limbs keep their contents (zero, in every caller);
+    /// limb bytes past the slots are zero because every caller sizes its
+    /// buffer to at least `⌈bits/8⌉`.
     fn write_bytes_least_significant_first<'a>(&self, slots: impl Iterator<Item = &'a mut u8>) {
         let bytes = self.limbs.iter().flat_map(|&limb| {
             // The cast keeps the low eight bits of each shifted limb.
@@ -519,10 +480,10 @@ impl BigUint {
     /// invalid digit. Leading zeros are accepted; no sign, no whitespace,
     /// no `0x` prefix — this is the value, not a literal.
     ///
-    /// Below a measured digit-count crossover the conversion is the
-    /// classical method with a word-sized base: digits are consumed in
-    /// groups of the largest power of the radix that fits a limb, each
-    /// group folded in by one limb multiply-add — O(n²/64) limb work.
+    /// Below a measured digit-count crossover the conversion is classical
+    /// with a word-sized base: digits are consumed in groups of the largest
+    /// power of the radix that fits a limb, each group folded in by one limb
+    /// multiply-add, O(n²) in total.
     /// Above it, divide and conquer: the string splits against a ladder of
     /// squared radix powers built once per conversion,
     /// `high · radix^k + low`, for O(M(n)·log n) total (Knuth, TAOCP
@@ -576,12 +537,10 @@ impl BigUint {
         .collect()
     }
 
-    /// The largest power of `radix` that fits a `u64`, with its digit count —
-    /// the "big base" both classical conversions work in, so that a whole
-    /// group of digits costs one limb-sized multiply-add instead of one per
-    /// digit. Found by repeated `checked_mul`, which stops at the last power
-    /// below `2^64` (`10^19` for decimal, `3^40` for radix 3, `2^63` for
-    /// radix 2). The count is the number of digits that power spans.
+    /// The largest power of `radix` that fits a `u64`, with its exponent —
+    /// the "big base" both classical conversions work in, so a group of
+    /// digits costs one limb-sized multiply-add instead of one per digit
+    /// (`10^19` for decimal, `3^40` for radix 3, `2^63` for radix 2).
     fn limb_radix_power(radix: u32) -> (u64, usize) {
         let unit = u64::from(radix);
         let mut power = unit;
@@ -595,12 +554,10 @@ impl BigUint {
 
     /// Bit-pack digits of a power-of-two radix, least significant first.
     ///
-    /// When the radix is `2^b` a digit *is* a `b`-bit field of the value, so
-    /// the conversion is a re-slicing of the bit string and needs no
-    /// arithmetic at all — no multiply-add per group, no division, and no
-    /// crossover to a subquadratic method. A digit straddles a limb boundary
-    /// whenever `b` does not divide 64 (radices 8 and 32), which is what the
-    /// spill into `limbs[limb + 1]` handles.
+    /// When the radix is `2^b` a digit is a `b`-bit field of the value, so
+    /// the conversion re-slices the bit string with no arithmetic. A digit
+    /// straddles a limb boundary when `b` does not divide 64 (radices 8 and
+    /// 32); the spill into `limbs[limb + 1]` handles that.
     fn from_digits_pow2(digits: &[u8], radix: u32) -> Self {
         let bits_per = radix.trailing_zeros() as usize;
         let total_bits = digits.len() * bits_per;
@@ -645,13 +602,10 @@ impl BigUint {
 
     /// Classical parse: fold digit groups in against the word-sized base.
     ///
-    /// Horner's rule with the big base `radix^chunk` in place of the radix
-    /// itself, so one limb-sized multiply-add absorbs `chunk` digits rather
-    /// than one. The leading group takes the remainder `len mod chunk`, which
-    /// leaves every later group full and able to scale by the precomputed
-    /// `big_base` instead of a freshly exponentiated `radix.pow(take)`. Each
-    /// step multiplies a value that grows with the input by a single limb, so
-    /// the whole conversion is quadratic in the digit count.
+    /// Horner's rule with the big base `radix^chunk` in place of the radix,
+    /// so one limb-sized multiply-add absorbs `chunk` digits. The leading
+    /// group takes `len mod chunk` digits, leaving every later group full and
+    /// scaled by the precomputed `big_base`. Quadratic in the digit count.
     fn from_digits_classical(digits: &[u8], radix: u32) -> Self {
         let (big_base, chunk) = Self::limb_radix_power(radix);
         let mut value = Self::zero();
@@ -684,10 +638,9 @@ impl BigUint {
     }
 
     /// The squared-power ladder `radix^(chunk·2^i)`, built once per
-    /// conversion and shared down the recursion (Brent and Zimmermann
-    /// build it exactly once; rebuilding it per level is what turns the
-    /// subquadratic method back into a quadratic one). `chunk` is the
-    /// digit count of the first entry; entry `i` spans `chunk·2^i` digits.
+    /// conversion and shared down the recursion; rebuilding it per level
+    /// would make the method quadratic again. Entry `i` spans `chunk·2^i`
+    /// digits.
     fn radix_power_ladder(radix: u32, digit_count: usize) -> (Vec<Self>, usize) {
         let (big_base, chunk) = Self::limb_radix_power(radix);
         let mut ladder = vec![Self::from_u64(big_base)];
@@ -700,9 +653,9 @@ impl BigUint {
         (ladder, chunk)
     }
 
-    /// The render-side ladder, capped by the value's bit width — sizing it
-    /// by a digit proxy overshoots by up to two entries, and the extra
-    /// entries are the most expensive squarings in the whole conversion.
+    /// The render-side ladder, sized by the value's bit width. A digit-count
+    /// estimate would overshoot by up to two entries, the most expensive
+    /// squarings in the conversion.
     fn radix_power_ladder_bits(radix: u32, bit_width: usize) -> (Vec<Self>, usize) {
         let (big_base, chunk) = Self::limb_radix_power(radix);
         let mut ladder = vec![Self::from_u64(big_base)];
@@ -726,12 +679,8 @@ impl BigUint {
     /// below the digit count, convert the leading `len − span` digits and the
     /// trailing `span` digits separately, and recombine as
     /// `high · radix^span + low`. Choosing the largest such entry keeps the
-    /// two halves within a factor of two of each other, which is what makes
-    /// the recursion depth logarithmic and the multiply at each level a
-    /// balanced one.
-    ///
-    /// `span` is tracked alongside `index` rather than recomputed: entry `i`
-    /// spans `chunk·2^i` digits by construction of the ladder.
+    /// two halves within a factor of two of each other, so the recursion
+    /// depth is logarithmic and each multiply is balanced.
     fn from_digits_ladder(
         digits: &[u8],
         radix: u32,
@@ -776,10 +725,8 @@ impl BigUint {
         }
         let mut digits = Vec::with_capacity(groups.len() * chunk);
         for (index, &group) in groups.iter().rev().enumerate() {
-            // Among the radices that reach this path — the dispatch sends
-            // powers of two to bit extraction — radix 3 packs the most
-            // digits per limb: 3^40 < 2^64. The assert above records the
-            // precondition the buffer size relies on.
+            // Radix 3 packs the most digits per limb (3^40 < 2^64) among
+            // the radices that reach this path.
             let mut buffer = [0u8; 40];
             let mut value = group;
             for slot in buffer[..chunk].iter_mut().rev() {
@@ -814,10 +761,8 @@ impl BigUint {
     /// The mirror of [`Self::from_digits_ladder`]: one division by the
     /// largest ladder entry `radix^span` below the value splits it into a
     /// quotient and a remainder that render independently, and the remainder
-    /// occupies exactly `span` positional digits — hence the zero padding
-    /// before the low half is appended. Without that padding a remainder with
-    /// fewer significant digits than its span would silently shift the whole
-    /// low half left.
+    /// occupies exactly `span` positional digits, so the low half is
+    /// zero-padded to that span before it is appended.
     fn to_digits_ladder(
         &self,
         radix: u32,
@@ -852,9 +797,7 @@ impl BigUint {
 
     /// The top (up to) 64 significant bits packed into a `u64`, with the
     /// count of those bits — the shared mantissa of [`Self::to_f64_lossy`]
-    /// and [`Self::ln_approx`]. Below `2^64` this is the value and its bit
-    /// length; above it, the top limb's significant bits filled from the
-    /// limb below.
+    /// and [`Self::ln_approx`].
     fn top_64_bits(&self) -> (u64, usize) {
         let bits = self.bits();
         if bits <= 64 {
@@ -876,12 +819,9 @@ impl BigUint {
     /// The nearest integer to a finite, non-negative double, or `None` for
     /// a negative or non-finite one.
     ///
-    /// A double is an integer significand at a power of two, so the
-    /// conversion is exact once the value is rounded: the significand is
-    /// placed at its exponent, however large. The inverse of
-    /// [`Self::to_f64_lossy`] for the values that round-trip, and the way
-    /// a size computed in floating point — a skew, a translation — becomes
-    /// an integer without passing through a word.
+    /// A double is an integer significand at a power of two, so once the
+    /// value is rounded the conversion is exact, however large. The inverse
+    /// of [`Self::to_f64_lossy`] for values that round-trip.
     #[must_use]
     pub fn from_f64_lossy(value: f64) -> Option<Self> {
         if !value.is_finite() || value < 0.0 {
@@ -911,9 +851,8 @@ impl BigUint {
         Some(integer)
     }
 
-    /// The value as an `f64` — the lossy narrowing the parameter heuristics
-    /// of factoring and lattice work are written in terms of. The result is
-    /// within one unit in the last place of the true value (the top 64 bits
+    /// The value as an `f64`, for size-driven parameter heuristics. The
+    /// result is within one unit in the last place of the true value (the top 64 bits
     /// are taken as the mantissa, then rounded to `f64`'s 53; the direction
     /// is unspecified), and saturates to `f64::INFINITY` above the
     /// double-precision range (~2^1024).
@@ -928,9 +867,9 @@ impl BigUint {
         mantissa as f64 * 2f64.powi(i32::try_from(exponent).unwrap_or(i32::MAX))
     }
 
-    /// A natural logarithm of the value as an `f64`, for the size-driven
-    /// tuning heuristics stated in terms of `ln n` (the smoothness bound
-    /// `exp(½√(ln n · ln ln n))`, for one). Computed as
+    /// The natural logarithm of the value as an `f64`, for size-driven
+    /// heuristics stated in terms of `ln n` (such as the smoothness bound
+    /// `exp(½√(ln n · ln ln n))`). Computed as
     /// `ln(mantissa) + (bits − mantissa_bits)·ln 2` so it stays finite far
     /// past the point where the value itself overflows `f64`.
     ///
@@ -947,16 +886,9 @@ impl BigUint {
 
     /// How many digits the value has in `radix`, without writing them out.
     ///
-    /// [`Self::to_str_radix`] answers this too, by producing the whole
-    /// expansion — repeated division, quadratic in the limbs — when the caller
-    /// wanted a single number. Size-driven tuning asks for the length and
-    /// throws the digits away, and at that point the expansion is the cost.
-    ///
-    /// The logarithm decides every value but one class: `log_radix(n)` is an
-    /// integer exactly at the powers of `radix`, and there the floor can land
-    /// either side of it. So the estimate is corrected by comparison, which
-    /// runs at most once in each direction and costs about one exponentiation
-    /// by squaring rather than one division per digit.
+    /// A logarithm gives the estimate; near powers of `radix`, where the
+    /// floating-point floor can land on either side, comparisons against
+    /// powers of `radix` correct it.
     ///
     /// Zero has one digit, by the convention that writes it `0`.
     ///
@@ -1059,10 +991,9 @@ impl BigUint {
         bit_span(self.limbs.len() - 1, 64) + top_bits
     }
 
-    /// Integer square root: the largest `r` with `r² ≤ self` — the root
-    /// half of [`Self::sqrt_rem`], which documents the Newton iteration
-    /// both share. Callers that do not need the remainder use this and skip
-    /// the full-width squaring and subtraction that produce it.
+    /// Integer square root: the largest `r` with `r² ≤ self`. The root half
+    /// of [`Self::sqrt_rem`], which documents the Newton iteration; it skips
+    /// the squaring and subtraction that produce the remainder.
     #[must_use]
     pub fn sqrt_floor(&self) -> Self {
         if self.is_zero() || self.is_one() {
@@ -1081,13 +1012,8 @@ impl BigUint {
     /// sequence decreases strictly until it reaches it, so the first
     /// non-decrease certifies the answer (Cohen, *A Course in Computational
     /// Algebraic Number Theory*, Algorithm 1.7.1). Each step costs one
-    /// division at the operand's width, and convergence is quadratic — the
-    /// error's bit count roughly halves per step — so the step count is
-    /// about log₂ of the bit width: a dozen iterations at 8,192 bits,
-    /// measured. This replaced a bisection whose every probe was a
-    /// full-width square: 13.4 ms fell to 89 µs at 8,192 bits on M4, 150×
-    /// (the ignored `sqrt_newton_vs_bisection_timing` probe reproduces
-    /// both numbers against the bisection retained in the test module).
+    /// division at the operand's width, and convergence is quadratic, so the
+    /// step count is about log₂ of the bit width: a dozen at 8,192 bits.
     #[must_use]
     pub fn sqrt_rem(&self) -> (Self, Self) {
         if self.is_zero() || self.is_one() {
@@ -1099,10 +1025,7 @@ impl BigUint {
     }
 
     /// The Newton core shared by [`Self::sqrt_floor`] and
-    /// [`Self::sqrt_rem`] (the latter documents the iteration and its
-    /// certificate). Requires `self ≥ 2`, which both callers establish; the
-    /// returned root is certified by the first non-decrease, so no squaring
-    /// happens here — the remainder is the caller's business.
+    /// [`Self::sqrt_rem`]. Requires `self ≥ 2`.
     fn sqrt_newton(&self) -> Self {
         debug_assert!(!self.is_zero() && !self.is_one(), "callers handle 0 and 1");
         // Seed: 2^⌈bits/2⌉ ≥ ⌈√self⌉, one bit above the root's width.
@@ -1124,10 +1047,7 @@ impl BigUint {
         }
     }
 
-    /// Population count: the number of set bits, summed limb by limb through
-    /// `u64::count_ones`. The Hamming weight of the binary expansion, which
-    /// is exactly the number of multiplications a binary exponentiation
-    /// ladder performs for this exponent.
+    /// Population count: the number of set bits.
     #[must_use]
     pub fn popcount(&self) -> usize {
         self.limbs
@@ -1147,7 +1067,7 @@ impl BigUint {
     }
 
     /// `self^exponent` for a machine-word exponent, by binary
-    /// exponentiation — the small-power helper the root routines need.
+    /// exponentiation.
     #[must_use]
     pub fn pow_u64(&self, exponent: u64) -> Self {
         let mut result = Self::one();
@@ -1255,10 +1175,8 @@ impl BigUint {
     /// 1253–1283.
     ///
     /// On odd operands the valuation filter is inert and every prime
-    /// exponent below the bit width pays a full root: measured on M4,
-    /// 0.9 ms at 1,024 bits and 21.9 ms at 4,096, growing roughly
-    /// cubically. Residue-based exponent filters would trim this and are
-    /// a candidate refinement.
+    /// exponent below the bit width pays a full root: 0.9 ms at 1,024 bits
+    /// and 21.9 ms at 4,096, growing roughly cubically.
     #[must_use]
     pub fn is_perfect_power(&self) -> bool {
         if self.is_zero() || self.is_one() {
@@ -1313,11 +1231,10 @@ impl BigUint {
     }
 
     /// Set bit `index`, growing the limb vector with zero limbs when the
-    /// index lies above the current width. Setting a bit can only raise the
-    /// top limb above zero, so the canonical form survives without a
-    /// `normalize` pass. This is how the crate materializes a power of two —
-    /// `R² = 2^(128w)` in [`MontgomeryContext::new`], the Newton seeds in
-    /// [`Self::sqrt_rem`] — without building and shifting a value.
+    /// index lies above the current width. Setting a bit cannot zero the
+    /// top limb, so the result stays canonical without `normalize`. It is
+    /// the cheap way to build a power of two, such as `R² = 2^(128w)` in
+    /// [`MontgomeryContext::new`].
     pub fn set_bit(&mut self, index: usize) {
         let limb = index / 64;
         let shift = index % 64;
@@ -1327,12 +1244,9 @@ impl BigUint {
         self.limbs[limb] |= 1u64 << shift;
     }
 
-    /// Add another bigint in place: `self` grows to `other`'s width, then one
-    /// carry pass runs across the overlap and the carry ripples through the
-    /// remaining limbs, pushing a new top limb only if it escapes. The
-    /// accumulator is a `u128` so the sum of two limbs and a carry cannot
-    /// overflow. The result stays canonical without a `normalize` pass —
-    /// adding to a non-zero top limb cannot zero it.
+    /// Add another bigint in place: one `u128` carry pass over `other`'s
+    /// width, the carry rippling on and pushing a new top limb if it escapes.
+    /// Adding cannot zero a non-zero top limb, so no `normalize` is needed.
     ///
     /// # Panics
     ///
@@ -1369,10 +1283,9 @@ impl BigUint {
         }
     }
 
-    /// Return `self + other`, leaving both operands intact: a clone of `self`
-    /// followed by `+=`. The clone is the price of the
-    /// functional form; [`Self::add_into`] avoids it when the caller
-    /// already owns a destination buffer.
+    /// Return `self + other`: a clone of `self` plus an in-place add.
+    /// [`Self::add_into`] avoids the clone when the caller owns a
+    /// destination buffer.
     #[must_use]
     pub fn add(&self, other: &Self) -> Self {
         let mut out = self.clone();
@@ -1380,12 +1293,9 @@ impl BigUint {
         out
     }
 
-    /// Write `lhs + rhs` into `self`, reusing its limb buffer — the
-    /// three-operand form (the shape of GMP's `mpz_add`) for callers that
-    /// hold the result's storage across calls. One carry pass over the
-    /// operands; no allocation once the buffer's capacity covers the result.
-    /// Contrast `+=`, which *accumulates* into `self`;
-    /// this form replaces it.
+    /// Write `lhs + rhs` into `self`, replacing its value and reusing its
+    /// limb buffer — the three-operand form of GMP's `mpz_add`. No
+    /// allocation once the buffer's capacity covers the result.
     ///
     /// # Panics
     ///
@@ -1430,11 +1340,9 @@ impl BigUint {
         }
     }
 
-    /// Write `lhs - rhs` into `self`, reusing its limb buffer — the
-    /// three-operand counterpart of [`Self::add_into`]. One borrow pass;
-    /// no allocation once the buffer's capacity covers the result.
-    /// Contrast `-=`, which subtracts *from* `self`;
-    /// this form replaces it.
+    /// Write `lhs - rhs` into `self`, replacing its value and reusing its
+    /// limb buffer — the counterpart of [`Self::add_into`]. No allocation
+    /// once the buffer's capacity covers the result.
     ///
     /// # Panics
     ///
@@ -1467,9 +1375,9 @@ impl BigUint {
         self.normalize();
     }
 
-    /// `self ← minuend - self`, in place — the reversed subtraction the
-    /// signed in-place operations need when the result's magnitude is the
-    /// *other* operand's minus this one's. Panics if `minuend < self`.
+    /// `self ← minuend - self`, in place, for signed operations whose
+    /// result magnitude is the other operand's minus this one's. Panics if
+    /// `minuend < self`.
     fn rsub_assign_ref(&mut self, minuend: &Self) {
         assert!(minuend.cmp(self) != Ordering::Less, "BigUint underflow");
         debug_assert!(
@@ -1492,16 +1400,13 @@ impl BigUint {
         self.normalize();
     }
 
-    /// Subtract another bigint in place: one borrow pass, each limb difference
-    /// taken in `u128` and biased by `2^64` when it would go negative so the
-    /// borrow is carried explicitly rather than inferred from a wrap. A
-    /// cancellation can empty the top limbs, so the pass ends in `normalize`.
+    /// Subtract another bigint in place: one `u128` borrow pass, then
+    /// `normalize`, since cancellation can empty the top limbs.
     ///
     /// # Panics
     ///
-    /// Panics if `self < other`. ℕ is closed under addition but not under
-    /// subtraction, and this type has no sign in which to record a negative
-    /// difference; `BigInt`'s `-=` is the total operation.
+    /// Panics if `self < other`; this type cannot represent a negative
+    /// difference. `BigInt`'s `-=` is the total operation.
     pub(crate) fn sub_assign_ref(&mut self, other: &Self) {
         assert!((*self).cmp(other) != Ordering::Less, "BigUint underflow");
         if other.is_zero() {
@@ -1530,13 +1435,11 @@ impl BigUint {
         self.normalize();
     }
 
-    /// Return `self - other`: a clone of `self` followed by
-    /// `-=`.
+    /// Return `self - other`.
     ///
     /// # Panics
     ///
-    /// Panics if `self < other`, for the reason given on
-    /// `-=`.
+    /// Panics if `self < other`.
     #[must_use]
     pub fn sub(&self, other: &Self) -> Self {
         let mut out = self.clone();
@@ -1544,23 +1447,18 @@ impl BigUint {
         out
     }
 
-    /// Multiply two big integers, choosing the multiplication kernel by
-    /// operand size: schoolbook (Knuth's Algorithm M) by default, Karatsuba
-    /// above 32 limbs, three-way Toom–Cook above 128, four-way Toom–Cook above
-    /// 3072, and an exact number-theoretic transform above its measured,
-    /// hardware-aware crossover. The NTT starts at 65,536 limbs serially,
-    /// 32,768 with two useful contexts, and 8,192 with four or more; its
-    /// in-place stage partition never uses more execution contexts than
-    /// [`std::thread::available_parallelism`] reports. Each successive kernel
-    /// is asymptotically cheaper but splits the operands more, so its overhead
-    /// only pays off past the crossover — small products stay schoolbook. A
-    /// lopsided pair (`long ≥ 2·short`) whose shorter operand
-    /// is past `UNBALANCED_THRESHOLD_LIMBS` — 256, this fourth kernel's own
-    /// measured crossover, well above Karatsuba's — takes
+    /// Multiply two big integers, choosing the kernel by the shorter
+    /// operand's length: schoolbook (Knuth's Algorithm M) by default,
+    /// Karatsuba from 32 limbs, three-way Toom–Cook from 128, four-way
+    /// Toom–Cook from 3072, and an exact number-theoretic transform from
+    /// 65,536 limbs serially, 32,768 with two execution contexts, and 8,192
+    /// with four or more. The NTT never uses more contexts than
+    /// [`std::thread::available_parallelism`] reports. Toom and NTT require
+    /// `long ≤ 1.5·short`, Karatsuba `long < 2·short`. A lopsided pair
+    /// (`long ≥ 2·short`) whose shorter operand has at least 256 limbs takes
     /// `mul_unbalanced_ref`, block decomposition into balanced products;
-    /// lopsided pairs below that threshold stay schoolbook, which
-    /// measurement favors there. The module header cites each algorithm. A
-    /// zero operand short-circuits to zero.
+    /// smaller lopsided pairs stay schoolbook. The module header cites each
+    /// algorithm.
     ///
     /// # Panics
     ///
@@ -1676,39 +1574,26 @@ impl BigUint {
     /// Square a value, exploiting the symmetry that lets a squaring form
     /// each distinct cross term once instead of twice.
     ///
-    /// Three regimes, each measured against the kernel it displaces rather
-    /// than against a proxy. Below `SQR_SCHOOLBOOK_MIN_LIMBS` (8) the
-    /// specialized passes do not repay themselves and this is
-    /// [`Self::mul`]. From there to the Karatsuba crossover it is
-    /// `sqr_schoolbook_ref`, forming each cross term once. From there to
-    /// `SQR_KARATSUBA_MAX_LIMBS` (448) it is `sqr_karatsuba_ref`, the same
-    /// split with all three sub-products squarings, measured ahead of the
-    /// Toom-3 multiplication it would otherwise defer to. Above that range,
-    /// Toom wins until exact NTT admission; NTT squaring uses one transform
-    /// array and one forward transform per prime rather than routing through
-    /// a general product's two arrays and duplicate transform.
+    /// Below `SQR_SCHOOLBOOK_MIN_LIMBS` (8) this is [`Self::mul`]. From
+    /// there to the Karatsuba threshold it is `sqr_schoolbook_ref`; from
+    /// there to `SQR_KARATSUBA_MAX_LIMBS` (448) it is `sqr_karatsuba_ref`.
+    /// Wider operands take [`Self::mul`]'s Toom kernels, or, once NTT
+    /// admits them, an NTT square that needs one transform array and one
+    /// forward transform per prime instead of a general product's two.
     ///
-    /// End to end, against the multiplication a caller would otherwise
-    /// write: +12% at 8 limbs, +36% at 16, +32% at 32, +27% at 64, +26% at
-    /// 127. Toom occupies the middle large range. Once NTT admits the input,
-    /// the one-buffer square is about 1.47x faster than the general NTT product
-    /// on the crossover host and uses half its transform-array storage.
+    /// Against `self.mul(self)`: +12% at 8 limbs, +36% at 16, +32% at 32,
+    /// +27% at 64, +26% at 127. The NTT square is about 1.47x faster than
+    /// the NTT product and uses half its transform-array storage.
     ///
-    /// The Montgomery domain keeps its own in-domain squaring
-    /// ([`MontgomeryContext::square_residue`](crate::modular::MontgomeryContext::square_residue)), which fuses the reduction and is
-    /// not reached from here.
+    /// Montgomery residues have their own squaring
+    /// ([`MontgomeryContext::square_residue`](crate::modular::MontgomeryContext::square_residue)),
+    /// which fuses the reduction.
     #[must_use]
     pub fn square(&self) -> Self {
-        // Zero needs no special case: its width is below every threshold,
-        // so it takes the multiplication, which short-circuits it.
-        // Ordered so the narrowest operands — the commonest, and the ones
-        // whose absolute cost leaves least room for dispatch — decide on a
-        // single comparison.
+        // Narrowest first: the commonest operands decide on one comparison.
         let width = self.limbs.len();
         if width < SQR_SCHOOLBOOK_MIN_LIMBS {
-            // Too narrow for the specialized kernel's three passes to repay
-            // themselves. (Zero lands here too, and the multiplication
-            // short-circuits it.)
+            // Too narrow for the specialized kernel to pay; zero lands here.
             return self.mul(self);
         }
         if width < KARATSUBA_THRESHOLD_LIMBS {
@@ -1718,9 +1603,7 @@ impl BigUint {
             if Self::should_use_ntt(self, self) {
                 return self.sqr_ntt_ref();
             }
-            // Wide enough that the multiplication ladder's Toom kernels
-            // beat a Karatsuba square outright; the NTT case above retains a
-            // true square and avoids a duplicate transform buffer/pass.
+            // Wide enough that the Toom kernels beat a Karatsuba square.
             return self.mul(self);
         }
         self.sqr_karatsuba_ref()
@@ -1730,17 +1613,13 @@ impl BigUint {
     /// multiplication's `n²`, by forming each distinct cross term once
     /// (*Handbook of Applied Cryptography*, Algorithm 14.16).
     ///
-    /// Three passes rather than the obvious one. The strict upper triangle
-    /// `Σ_{i<j} aᵢaⱼB^{i+j}` accumulates first; doubling it then accounts
-    /// for the lower triangle, which is its mirror image; and the diagonal
-    /// `Σ aᵢ²B^{2i}` is added last. Doubling the accumulated sum once, as a
-    /// single shift over the buffer, is what avoids the `2·aᵢ·aⱼ` term that
-    /// would otherwise overflow a `u128` accumulator and force a wider
-    /// carry discipline.
+    /// Three passes: accumulate the strict upper triangle
+    /// `Σ_{i<j} aᵢaⱼB^{i+j}`, double it with one shift over the buffer, then
+    /// add the diagonal `Σ aᵢ²B^{2i}`. Doubling once, rather than per term,
+    /// avoids a `2·aᵢ·aⱼ` term that would overflow the `u128` accumulator.
     ///
     /// The doubling cannot overflow the buffer: twice the strict upper
-    /// triangle is at most the whole square, and `a < B^n` gives
-    /// `a² < B^{2n}`, the buffer's width. The debug assertion records that.
+    /// triangle is at most the whole square, and `a² < B^{2n}`.
     fn sqr_schoolbook_ref(value: &Self) -> Self {
         let n = value.limbs.len();
         let mut out = vec![0u64; 2 * n];
@@ -1779,10 +1658,8 @@ impl BigUint {
             "twice the cross terms is at most the square, which the buffer holds"
         );
 
-        // Pass three: the diagonal. A term at `2i` occupies two limbs, and
-        // its carry lands on `2i + 2` — which is the next iteration's own
-        // position, so the ripple is carried in the loop variable rather
-        // than re-walked.
+        // Pass three: the diagonal. A term at `2i` occupies two limbs and
+        // its carry lands on `2i + 2`, the next iteration's position.
         let mut carry = 0u128;
         for i in 0..n {
             let a_i = u128::from(value.limbs[i]);
@@ -1811,21 +1688,16 @@ impl BigUint {
     /// The subtractions cannot underflow: `(a₀+a₁)²` dominates both squares
     /// removed from it, their cross term being non-negative.
     fn sqr_karatsuba_ref(&self) -> Self {
-        // Unreachable from `square`, which only routes widths of at
-        // least `KARATSUBA_THRESHOLD_LIMBS` here, so `split >= 16`; kept
-        // because the function is meaningful on its own terms and a zero
-        // split would recurse forever.
+        // Unreachable from `square`, which routes only widths of at least
+        // `KARATSUBA_THRESHOLD_LIMBS` here; a zero split would recurse
+        // forever.
         let split = self.limbs.len() / 2;
         if split == 0 {
             return Self::sqr_schoolbook_ref(self);
         }
         let (low, high) = self.split_at_limb(split);
-        // Unlike the multiplication's split, which halves the *longer* of
-        // two operands and so can leave the shorter one's high half empty,
-        // this halves the operand's own width: `split = len/2 <= len − 1`
-        // for every `len >= 2`, so the high half retains `limbs[len − 1]`,
-        // which normalization guarantees is non-zero. No bail-out is
-        // reachable here.
+        // `split = len/2 <= len − 1` for `len >= 2`, so the high half keeps
+        // the non-zero top limb.
         debug_assert!(
             !high.is_zero(),
             "a normalized operand split at half its own width has a non-zero high half"
@@ -1868,26 +1740,20 @@ impl BigUint {
         (low, high)
     }
 
-    /// Both operands past the crossover, and within `KARATSUBA_MAX_IMBALANCE`
-    /// of each other in length. The ratio bound is strict because it is also
-    /// the kernel's structural floor: the split below is taken at half the
-    /// *longer* operand, so at `long = 2·short` exactly the shorter operand
-    /// fits entirely below the split, its high half is empty, and the kernel
-    /// would reject the pair back to schoolbook. That shape goes to
-    /// `mul_unbalanced_ref` above its threshold and to schoolbook below it.
+    /// Karatsuba admission: the shorter operand at least
+    /// `KARATSUBA_THRESHOLD_LIMBS`, and `long < KARATSUBA_MAX_IMBALANCE ·
+    /// short`. The bound is strict because the split is taken at half the
+    /// longer operand: at `long = 2·short` the shorter operand's high half is
+    /// empty and the kernel would fall back to schoolbook.
     fn should_use_karatsuba(lhs: &Self, rhs: &Self) -> bool {
         let short = lhs.limbs.len().min(rhs.limbs.len());
         let long = lhs.limbs.len().max(rhs.limbs.len());
         short >= KARATSUBA_THRESHOLD_LIMBS && long < short * KARATSUBA_MAX_IMBALANCE
     }
 
-    /// Unbalanced admission: the shorter operand alone is past
-    /// `UNBALANCED_THRESHOLD_LIMBS`, but the pair is too lopsided for any
-    /// balanced kernel (`long ≥ 2·short`). The threshold is this kernel's
-    /// own measured crossover, not Karatsuba's: below it the block
-    /// decomposition's per-block overhead loses to one flat schoolbook
-    /// pass, even though each block is nominally past the Karatsuba
-    /// crossover.
+    /// Unbalanced admission: the shorter operand at least
+    /// `UNBALANCED_THRESHOLD_LIMBS`, and the pair too lopsided for any
+    /// balanced kernel (`long ≥ 2·short`).
     fn should_use_unbalanced(lhs: &Self, rhs: &Self) -> bool {
         let short = lhs.limbs.len().min(rhs.limbs.len());
         let long = lhs.limbs.len().max(rhs.limbs.len());
@@ -1899,17 +1765,12 @@ impl BigUint {
     /// `k`, so that `long · short = Σᵢ digitᵢ·short·Bⁱ` — a sum of balanced
     /// `k × k` products, each accumulated into the output at its limb
     /// offset. Each digit product re-enters [`Self::mul`] and lands on
-    /// a balanced sub-quadratic kernel; a long × short product previously
-    /// failed every balanced ratio test and ran schoolbook at full width.
+    /// a balanced sub-quadratic kernel.
     ///
-    /// The accumulation is in place — `add_into_at` adds each product into
-    /// the preallocated output window `[i·k, i·k + len)` with carries
-    /// rippling upward — because the obvious recomposition (shift each
-    /// product by `i·k` limbs, then add full-width) copies
-    /// `Σᵢ i·k ≈ long²/(2k)` limbs and is quadratic in the *long* length,
-    /// which measurement showed losing to flat schoolbook at every shape.
-    /// An all-zero digit (a run of zero limbs in the longer operand)
-    /// contributes nothing and is skipped.
+    /// `add_into_at` accumulates each product in place at its window
+    /// `[i·k, i·k + len)`. Shifting each product and adding full-width would
+    /// copy `Σᵢ i·k ≈ long²/(2k)` limbs, quadratic in the long length. An
+    /// all-zero digit is skipped.
     fn mul_unbalanced_ref(&self, other: &Self) -> Self {
         let (long, short) = if self.limbs.len() >= other.limbs.len() {
             (self, other)
@@ -1938,9 +1799,8 @@ impl BigUint {
     /// `acc += addend · β^offset`, in place over a raw limb buffer: the
     /// recomposition primitive of [`Self::mul_unbalanced_ref`]. The addend
     /// is added limb-wise into `acc[offset..]` and the final carry ripples
-    /// upward; the caller guarantees the true sum fits in `acc`, which is
-    /// what bounds the ripple (the running total never reaches
-    /// `β^acc.len()`, so the carry dies before the buffer ends).
+    /// upward. The caller guarantees the true sum fits in `acc`, so the
+    /// carry dies before the buffer ends.
     fn add_into_at(acc: &mut [u64], addend: &[u64], offset: usize) {
         let mut carry = 0u64;
         for (j, &limb) in addend.iter().enumerate() {
@@ -2143,10 +2003,8 @@ impl BigUint {
     /// Toom–Cook four-way multiplication: split into four base-`B = 2^{64k}`
     /// digits (degree-3 polynomials), evaluate at `{0, 1, -1, 2, -2, 3, ∞}`,
     /// multiply the seven pairs recursively, then interpolate the seven product
-    /// digits. Sub-quadratic exponent `log 7 / log 4 ≈ 1.404`, below Toom-3's
-    /// `1.465`, so it overtakes Toom-3 once the seven-point interpolation
-    /// (divisions by 2, 3, 4, 5, 8, 12, all exact) is amortized. Same
-    /// interpolation shape as Toom-3, one order up.
+    /// digits (divisions by 2, 3, 4, 5, 8, 12, all exact). Exponent
+    /// `log 7 / log 4 ≈ 1.404`, below Toom-3's `1.465`.
     fn mul_toom4_ref(&self, other: &Self) -> Self {
         let n = self.limbs.len().max(other.limbs.len());
         let k = n.div_ceil(4);
@@ -2248,11 +2106,9 @@ impl BigUint {
     /// The low `limit` limbs of `lhs · rhs` — the product modulo
     /// `2^{64·limit}`, computed without forming the rest of it.
     ///
-    /// Every partial product lands at a fixed position, so one whose
-    /// position is at or above `limit` cannot influence any limb below it
-    /// and is simply never computed; the same is true of a carry walking
-    /// off the top of the window. That makes the result *exact* rather than
-    /// approximate, and costs about half the limb products of the full
+    /// A partial product or carry at or above position `limit` cannot
+    /// affect any limb below it, so it is never computed. The result is
+    /// exact, and costs about half the limb products of the full
     /// multiplication when `limit` is half the product's width.
     ///
     /// This is the half-product of *Handbook of Applied Cryptography*, Note
@@ -2315,18 +2171,13 @@ impl BigUint {
         }
 
         let mut result = Self { limbs: out };
-        // A normalized non-zero multiplicand and multiplier cannot produce a
-        // spuriously zero high limb except through the carry chain itself, so
-        // one post-pass normalization is enough.
+        // The top limb of the buffer can be zero.
         result.normalize();
         result
     }
 
-    /// Double the value: one bit carried from limb to limb, low to high, with
-    /// a new top limb pushed when it escapes. The single-bit case of
-    /// [`Self::shl_bits`] earns its own loop because it needs neither a
-    /// whole-limb move nor a `normalize` — a doubling cannot zero the top
-    /// limb.
+    /// Double the value: the single-bit case of [`Self::shl_bits`], with no
+    /// whole-limb move and no `normalize`.
     pub fn shl1(&mut self) {
         if self.is_zero() {
             return;
@@ -2342,15 +2193,10 @@ impl BigUint {
         if carry != 0 {
             self.limbs.push(carry);
         }
-        // A left shift on an already-normalized value cannot introduce a
-        // leading zero limb, so no normalize() pass is required here.
+        // A left shift cannot introduce a leading zero limb.
     }
 
-    /// Halve the value, discarding the low bit — `⌊self/2⌋`: one bit carried
-    /// from limb to limb, high to low, then a `normalize`, because unlike
-    /// doubling a halving can empty the top limb. This is the averaging step
-    /// of [`Self::sqrt_rem`]'s Newton iteration, where a division by two
-    /// would otherwise cost a full Algorithm D pass.
+    /// Halve the value, discarding the low bit: `⌊self/2⌋`.
     pub fn shr1(&mut self) {
         if self.is_zero() {
             return;
@@ -2368,9 +2214,7 @@ impl BigUint {
 
     /// XOR another bigint into `self` in place (GF(2^m) field addition).
     ///
-    /// Extends `self.limbs` with zeros if shorter than `other.limbs`, then
-    /// XORs each corresponding limb pair.  The result is normalized to strip
-    /// any leading zero limbs produced by XOR cancellation.
+    /// The result is normalized, since cancellation can zero the top limbs.
     pub fn bitxor_assign(&mut self, other: &BigUint) {
         if self.limbs.len() < other.limbs.len() {
             self.limbs.resize(other.limbs.len(), 0);
@@ -2383,12 +2227,9 @@ impl BigUint {
 
     /// Left-shift by `n` bits — multiplication by `2^n`.
     ///
-    /// Split into a whole-limb move of `n / 64` positions (zero limbs
-    /// prepended at the low end) and one pass shifting each limb by the
-    /// remaining `n % 64` bits with the displaced high bits carried into the
-    /// next limb. The split is what keeps every shift amount below 64:
-    /// shifting a `u64` by 64 or more is undefined, and `64 - bit_shifts`
-    /// appears in the carry expression.
+    /// A whole-limb move of `n / 64` positions, then one pass shifting by
+    /// the remaining `n % 64` bits, which keeps every `u64` shift amount
+    /// below 64.
     pub fn shl_bits(&mut self, n: usize) {
         if self.is_zero() || n == 0 {
             return;
@@ -2413,15 +2254,12 @@ impl BigUint {
                 self.limbs.push(carry);
             }
         }
-        // A left-shift on a normalized value cannot introduce a leading zero
-        // limb, so no normalize() pass is needed here.
+        // A left shift cannot introduce a leading zero limb.
     }
 
     /// Right-shift by `n` bits, discarding the shifted-out low bits.
     ///
-    /// The mirror of [`Self::shl_bits`]: `n / 64` whole-limb drops plus up to
-    /// 63 bit positions within limbs, avoiding undefined behaviour from
-    /// shifting a `u64` by 64 or more. Equivalent to dividing by `2^n`.
+    /// The mirror of [`Self::shl_bits`]: `⌊self / 2^n⌋`.
     pub fn shr_bits(&mut self, n: usize) {
         if self.is_zero() || n == 0 {
             return;
@@ -2447,8 +2285,7 @@ impl BigUint {
             self.limbs.truncate(kept);
         }
 
-        // Remaining bit-level shift (0 < bit_shifts < 64, so 64 - bit_shifts
-        // is a defined shift amount).
+        // Remaining bit-level shift (0 < bit_shifts < 64).
         if bit_shifts > 0 {
             let mut carry = 0u64;
             for limb in self.limbs.iter_mut().rev() {
@@ -2462,9 +2299,8 @@ impl BigUint {
     }
 
     /// The remainder `self mod modulus`, in `[0, modulus)`: [`Self::div_rem`]
-    /// with the quotient discarded. Algorithm D produces both halves in one
-    /// pass, so a caller that needs the quotient as well should take it from
-    /// `div_rem` rather than calling this and dividing a second time.
+    /// with the quotient discarded. A caller that also needs the quotient
+    /// should call `div_rem` once instead.
     ///
     /// # Panics
     ///
@@ -2476,10 +2312,8 @@ impl BigUint {
     }
 
     /// Divide by a machine word, returning `(quotient, remainder)` in one
-    /// pass — the word-sized companion to [`Self::div_rem`], without the
-    /// heap-allocated divisor a `BigUint` division would need. This is the
-    /// shape a trial-division inner loop wants: recover the quotient and
-    /// the remainder together, per word-sized prime, per candidate.
+    /// pass — the word-sized companion to [`Self::div_rem`], with no
+    /// heap-allocated divisor.
     ///
     /// # Panics
     ///
@@ -2490,10 +2324,7 @@ impl BigUint {
         Self::div_rem_limb(&self.limbs, divisor)
     }
 
-    /// The value as a `u64` when it fits, `None` otherwise — the checked
-    /// narrowing that [`Self::low_u128`] leaves to the caller. Use this
-    /// where a value is *expected* to fit a word and the expectation
-    /// should be verified rather than assumed.
+    /// The value as a `u64` when it fits, `None` otherwise.
     #[must_use]
     pub fn to_u64(&self) -> Option<u64> {
         match self.limbs.as_slice() {
@@ -2516,9 +2347,7 @@ impl BigUint {
         }
 
         let mut remainder = 0u128;
-        // Horner's method in base `2^64`: carry the remainder of the already
-        // processed high limbs, then append the next limb as the next base
-        // digit before reducing again.
+        // Horner's method in base `2^64`, from the top limb down.
         for &limb in self.limbs.iter().rev() {
             let acc = (remainder << 64) | u128::from(limb);
             remainder = acc % u128::from(modulus);
@@ -2529,17 +2358,11 @@ impl BigUint {
 
     /// Compute `(lhs * rhs) mod modulus`.
     ///
-    /// Multiply, then reduce once. This used to build a throwaway
-    /// [`MontgomeryContext`] for odd moduli and fall back to a double-and-add
-    /// reducer for even ones, both to dodge a division. With Algorithm D doing
-    /// the reduction that trade no longer pays: a Montgomery context costs a
-    /// division to construct (`R² mod n`) and then three Montgomery multiplies
-    /// plus a reduction to encode both operands, multiply, and decode, where
-    /// this costs one multiply and one division — and it needs no odd-modulus
-    /// special case.
-    ///
-    /// Callers that perform many multiplications under one modulus should still
-    /// build a [`MontgomeryContext`] once and reuse it; this is the one-shot path.
+    /// One multiply and one division, for any non-zero modulus. For a
+    /// single product this beats a throwaway [`MontgomeryContext`], which
+    /// costs a division to build plus encode, multiply and decode steps.
+    /// Callers doing many multiplications under one modulus should build a
+    /// [`MontgomeryContext`] once and reuse it.
     ///
     /// # Panics
     ///
@@ -2553,10 +2376,9 @@ impl BigUint {
         lhs.mul(rhs).rem(modulus)
     }
 
-    /// One-shot modular addition, on [`Self::mod_mul`]'s contract: any
-    /// operands, non-zero modulus (panic otherwise). Reduced operands take
-    /// one compare-and-correct; the domain contexts' `add` operations are
-    /// the reduced-only fast paths of this.
+    /// One-shot modular addition on [`Self::mod_mul`]'s contract: any
+    /// operands, non-zero modulus. Reduced operands take one
+    /// compare-and-correct.
     ///
     /// # Panics
     ///
@@ -2611,11 +2433,8 @@ impl BigUint {
     /// One-shot modular negation, on the same contract as
     /// [`Self::mod_add`]: any operand, non-zero modulus (panic otherwise).
     ///
-    /// The result is the canonical representative of `−value` modulo
-    /// `modulus`, always in `[0, modulus)`: a `value` that is a multiple of
-    /// the modulus (zero included) negates to zero, and any other to
-    /// `modulus − (value mod modulus)`, which is in `[1, modulus)`. A reduced
-    /// operand takes one subtraction; an unreduced one is reduced first.
+    /// The result is in `[0, modulus)`: a multiple of the modulus negates to
+    /// zero, any other `value` to `modulus − (value mod modulus)`.
     ///
     /// # Panics
     ///
@@ -2642,14 +2461,12 @@ impl BigUint {
     /// remainder in `[0, divisor)`.
     ///
     /// Dispatches on the divisor's width: a single-limb divisor takes a
-    /// base-2⁶⁴ Horner division (one pass, no quotient estimation needed),
-    /// a multi-limb divisor uses Knuth's Algorithm D (*TAOCP* vol. 2,
-    /// §4.3.1) — operand normalization, the two-limb quotient estimate, and the
-    /// occasional add-back correction — and a divisor of hundreds of limbs
-    /// or more goes through Newton's reciprocal (`newton.rs`; Brent &
-    /// Zimmermann, *Modern Computer Arithmetic*, §4.2.2), which is
-    /// subquadratic. A dividend smaller than the divisor returns
-    /// `(0, self)` without any path.
+    /// base-2⁶⁴ Horner division, a multi-limb divisor Knuth's Algorithm D
+    /// (*TAOCP* vol. 2, §4.3.1), and a divisor of at least
+    /// `NEWTON_DIVISION_THRESHOLD_LIMBS` (3072) limbs the subquadratic
+    /// Newton reciprocal (`newton.rs`; Brent & Zimmermann, *Modern Computer
+    /// Arithmetic*, §4.2.2). A dividend smaller than the divisor returns
+    /// `(0, self)`.
     ///
     /// # Panics
     ///
@@ -2661,8 +2478,6 @@ impl BigUint {
             return (Self::zero(), self.clone());
         }
 
-        // One limb of quotient at a time, not one bit: both paths below produce
-        // 64 quotient bits per pass over the divisor.
         if divisor.limbs.len() == 1 {
             let (quotient, remainder) = Self::div_rem_limb(&self.limbs, divisor.limbs[0]);
             return (quotient, Self::from_u64(remainder));
@@ -2701,12 +2516,9 @@ impl BigUint {
     ///
     /// Requires `dividend >= divisor` and at least two divisor limbs; both
     /// slices are normalized (non-zero top limb). Costs
-    /// `O(quotient_limbs * divisor_limbs)` limb operations, against
-    /// `O(bits * limbs)` for the bit-serial long division it replaced: one
-    /// pass over the divisor now yields 64 quotient bits instead of one.
+    /// `O(quotient_limbs * divisor_limbs)` limb operations.
     ///
-    /// Like the rest of the crate this is variable-time: the quotient-digit
-    /// corrections below are data-dependent.
+    /// Variable-time: the quotient-digit corrections are data-dependent.
     fn div_rem_knuth(dividend: &[u64], divisor: &[u64]) -> (Self, Self) {
         /// Knuth's `b`, the digit base.
         const BASE: u128 = 1u128 << 64;
@@ -2735,28 +2547,21 @@ impl BigUint {
         // each true digit fits in one limb.
         for j in (0..=m).rev() {
             // D3. Estimate the digit from the window's top two limbs:
-            // `q_hat = numerator / divisor_hi`, remainder `r_hat` (Knuth's
-            // q-hat and r-hat). Normalization guarantees `q_hat <= q + 2`.
+            // `q_hat = numerator / divisor_hi`, remainder `r_hat`.
+            // Normalization guarantees `q_hat <= q + 2`.
             //
-            // The loop's second test rules the estimate against the divisor's
-            // *third*-from-top limb; each firing lowers `q_hat` by one, and
-            // when it stops `q_hat <= q + 1` (TAOCP §4.3.1, exercise 20),
-            // leaving at most the one overshoot D6 can repair. Skipping this
-            // correction is not an option: for divisors like
-            // `[v0, d, d, ...]` with `d >= b/2` the raw estimate reaches
-            // `b + 1` — two over the true digit `b - 1` — which no single
-            // add-back can fix.
+            // The loop's second test checks the estimate against the
+            // divisor's second limb from the top; when it stops,
+            // `q_hat <= q + 1` (TAOCP §4.3.1, exercise 20), the one overshoot
+            // D6 repairs. Without it, divisors like `[v0, d, d, ...]` with
+            // `d >= b/2` give an estimate two over the true digit.
             //
             // The `q_hat >= BASE` arm is Knuth's `min(q_hat, b - 1)` clamp.
-            // Because `q_hat` stays in `u128` all the way into D4, the clamp
-            // is provably redundant here — an estimate of `b` or `b + 1` is
-            // always caught by the second test or repaired by D6 — but it is
-            // kept both to match the algorithm as published and to skip a
-            // predictably doomed full-width subtraction.
+            // With `q_hat` in `u128` it is redundant for correctness, but it
+            // matches the published algorithm and skips a doomed subtraction.
             //
             // Termination: each round adds `divisor_hi >= b/2` to `r_hat`, so
-            // the `r_hat >= BASE` break bounds the loop at two corrections
-            // beyond the clamp.
+            // the `r_hat >= BASE` break bounds the loop at two corrections.
             let numerator = (u128::from(rem[j + n]) << 64) | u128::from(rem[j + n - 1]);
             let mut q_hat = numerator / divisor_hi;
             let mut r_hat = numerator % divisor_hi;
@@ -2799,10 +2604,8 @@ impl BigUint {
                 rem[j + n] = rem[j + n].wrapping_add(low_u64(carry));
             }
 
-            // After a correct step the remaining value fits below `b^n`, so
-            // the window's top limb must be clean. Release builds never read
-            // `rem[j + n]` again (the next window sits one limb lower), but
-            // the store above keeps this invariant true and checkable.
+            // After a correct step the window's value is below `b^n`, so
+            // its top limb is zero.
             debug_assert!(rem[j + n] == 0, "quotient digit left residue");
 
             quotient[j] = low_u64(q_hat);
@@ -2831,12 +2634,9 @@ impl BigUint {
     /// - zero has `limbs.is_empty()`
     /// - every non-zero value has a non-zero top limb
     ///
-    /// Every path that can strand a zero above the significant limbs — a
-    /// subtraction that cancels, a right shift, a slice copied out of a
-    /// wider value, a product whose top limb did not carry — must end here,
-    /// because `Eq`, `Ord`, [`Self::bits`] and the kernel dispatch all read
-    /// the limb count as the value's width. `pop` only shortens the vector,
-    /// so the capacity survives for reuse.
+    /// Every path that can leave a zero top limb must end here, because
+    /// `Eq`, `Ord`, [`Self::bits`] and the kernel dispatch read the limb
+    /// count as the value's width. The capacity is kept for reuse.
     fn normalize(&mut self) {
         while self.limbs.last().copied() == Some(0) {
             self.limbs.pop();
@@ -2846,9 +2646,8 @@ impl BigUint {
     /// The `BigUint`-facing wrapper around [`mont_mul`]: the kernels work on
     /// fixed-width limb slices, while a canonical `BigUint` is only as wide as
     /// its value, so this pads both operands to the modulus width and carves
-    /// scratch, operand, and output windows out of one reusable workspace.
-    /// The workspace is threaded through by the caller so a sequence of
-    /// domain operations allocates once rather than per multiply.
+    /// scratch, operand, and output windows out of one caller-owned
+    /// workspace, so a sequence of operations allocates once.
     ///
     /// Operands must be reduced residues; an operand *wider* than the modulus
     /// panics in [`copy_padded`] rather than silently producing a wrong
@@ -2964,14 +2763,9 @@ impl PartialOrd for BigInt {
 
 /// Why a modulus was refused when building a fixed-modulus context.
 ///
-/// The variants describe the *value*, not the context that rejected it, so
-/// one error serves both: [`BarrettContext::new`] returns `Zero` or `One`,
-/// and [`MontgomeryContext::new`] returns `Zero` or `Even`. There is
-/// deliberately no "below two" variant, which would assert something true of
-/// only one of the two.
-///
-/// An unusable modulus is invalid input rather than a mathematical absence,
-/// which is why construction returns `Result` and not `Option`.
+/// The variants describe the value, not the context that rejected it:
+/// [`BarrettContext::new`] returns `Zero` or `One`, and
+/// [`MontgomeryContext::new`] returns `Zero` or `Even`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ModulusError {
@@ -3026,9 +2820,7 @@ impl core::str::FromStr for BigUint {
 
     /// Decimal parsing, through [`BigUint::from_str_radix`]: leading zeros
     /// are accepted, a sign or surrounding whitespace is not. Any rejected
-    /// input yields [`ParseBigIntError`], which carries no position — the
-    /// error exists to distinguish failure from a valid parse, not to
-    /// diagnose the input.
+    /// input yields [`ParseBigIntError`], which carries no position.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         Self::from_str_radix(text, 10).ok_or(ParseBigIntError)
     }
@@ -3061,11 +2853,9 @@ impl core::str::FromStr for BigInt {
 
 // ─── In-place operators ────────────────────────────────────────────────────
 //
-// Receiver mutation is spelled with the operator traits rather than an
-// inherent `add_assign_ref`: `x += &y` is the idiom a Rust caller reaches for
-// first, and one spelling is the rule. The right-hand side is borrowed, so a
-// long-lived accumulator reuses its limb buffer across a whole loop exactly as
-// the inherent form did — these forward to it, and it is now crate-private.
+// The public spelling of in-place arithmetic is `x += &y`. The right-hand side
+// is borrowed, so an accumulator reuses its limb buffer across a loop. These
+// forward to the crate-private `add_assign_ref` and `sub_assign_ref`.
 
 impl core::ops::AddAssign<&BigUint> for BigUint {
     /// `self += other`, reusing `self`'s limb buffer.
@@ -3104,12 +2894,10 @@ impl core::ops::SubAssign<&BigInt> for BigInt {
 
 /// `limbs · per_limb` as a bit index, refusing rather than wrapping.
 ///
-/// Every place that turns a limb count into a bit position goes through here.
-/// On a 64-bit `usize` the product is unreachable in practice — `Vec` aborts
-/// on capacity overflow long before it could form — but the crate is portable,
-/// and on a 32-bit target `len · 64` wraps at operands of about 537 MB and
-/// `len · 128` at about 268 MB, which are reachable. A wrapped index is a
-/// silently wrong answer; this is a refusal.
+/// Every conversion of a limb count into a bit position goes through here.
+/// On a 64-bit target overflow is unreachable, but on a 32-bit target
+/// `len · 64` wraps at operands of about 537 MB and `len · 128` at about
+/// 268 MB, and a wrapped index is a silently wrong answer.
 ///
 /// # Panics
 ///
@@ -3132,10 +2920,8 @@ impl Drop for BigUint {
     }
 }
 
-/// The low 64 bits of a `u128` accumulator as a limb. Every kernel here
-/// accumulates in `u128` and splits the result into a stored limb and a
-/// carry; this is the stored half, written as a masked `try_from` so the
-/// truncation is a checked operation rather than an `as` cast.
+/// The low 64 bits of a `u128` accumulator as a limb, by a masked
+/// `try_from` rather than an `as` cast.
 #[inline]
 fn low_u64(value: u128) -> u64 {
     u64::try_from(value & u128::from(u64::MAX)).expect("masked low 64 bits always fit into u64")
@@ -3169,11 +2955,9 @@ fn shl_into(value: &[u64], shift: u32, len: usize) -> Vec<u64> {
     out
 }
 
-/// Return `value` shifted right by `shift` bits (below 64) in a fresh buffer —
-/// the inverse of [`shl_into`], undoing Algorithm D's D1 normalization on the
-/// remainder in step D8. The width is unchanged: the shift is by less than one
-/// limb, so only the top limb can lose significance, and the caller
-/// normalizes.
+/// Return `value` shifted right by `shift` bits (below 64) in a fresh buffer
+/// of the same width — the inverse of [`shl_into`], undoing Algorithm D's
+/// normalization on the remainder in step D8. The caller normalizes.
 fn shr_limbs(value: &[u64], shift: u32) -> Vec<u64> {
     debug_assert!(shift < 64, "normalization shift stays within one limb");
     if shift == 0 {
@@ -3188,10 +2972,7 @@ fn shr_limbs(value: &[u64], shift: u32) -> Vec<u64> {
     out
 }
 
-/// Signed product `a · b`, named at the point of use so the Toom
-/// evaluate/interpolate sequences read as ordinary arithmetic: evaluating at
-/// the points `−1` and `−2` makes those pointwise multiplications signed,
-/// even though the multiplicands and the final product are not.
+/// Signed product `a · b`, for the Toom pointwise products at `−1` and `−2`.
 fn bigint_mul(a: &BigInt, b: &BigInt) -> BigInt {
     a.mul(b)
 }
@@ -3199,20 +2980,13 @@ fn bigint_mul(a: &BigInt, b: &BigInt) -> BigInt {
 /// `x / divisor` where `divisor` is known to divide `x` — the interpolation
 /// steps of Toom-3 and Toom-4 (dividing by 2, 3, 4, 5, 8, 12).
 ///
-/// Exactness is a property of the interpolation, not of the inputs: each
-/// quotient in the Vandermonde solve is an integer because the product
-/// polynomial's coefficients are integers, so the remainder is discarded and
-/// only checked in debug builds. The sign rides along unchanged, the divisor
-/// being positive, so a single-limb Horner division of the magnitude suffices.
+/// Each quotient in the interpolation is an integer because the product
+/// polynomial's coefficients are integers, so the remainder is checked only
+/// in debug builds. The divisor is positive, so the sign is unchanged.
 fn bigint_div_exact(x: &BigInt, divisor: u64) -> BigInt {
     debug_assert!(divisor > 0, "Toom interpolation never divides by zero");
-    // Most of the interpolation's divisors are 2, 4 or 8. An exact division by
-    // a power of two is a right shift, so take it: the Horner path below runs a
-    // `u128` division for every limb, and at Toom widths (Toom-3 dispatches at
-    // 128 limbs, Toom-4 at 3072) that is thousands of multi-cycle divisions
-    // standing in for a single-cycle shift per word. The evaluation side of
-    // this same algorithm already scales by shifting; this is the interpolation
-    // side catching up.
+    // Most divisors are 2, 4 or 8: a right shift, rather than a `u128`
+    // division per limb.
     if divisor.is_power_of_two() {
         let shift = divisor.trailing_zeros() as usize;
         debug_assert!(
@@ -3233,9 +3007,7 @@ fn bigint_div_exact(x: &BigInt, divisor: u64) -> BigInt {
 
 /// Multiply by `2^shift`, for the interpolation's power-of-two weights.
 ///
-/// The general path, `mul_biguint(&BigUint::from_u64(1 << shift))`,
-/// allocates a constant and enters the full multiplication dispatch to apply a
-/// weight that is one shift of the limb buffer.
+/// A shift, rather than `mul_biguint` through the multiplication dispatch.
 fn bigint_shl_exact(x: &BigInt, shift: usize) -> BigInt {
     let mut magnitude = x.magnitude().clone();
     magnitude.shl_bits(shift);
@@ -3258,10 +3030,8 @@ impl BigInt {
     /// The representation admits exactly one zero, so an inconsistent argument
     /// is normalized rather than stored: any sign with a zero magnitude becomes
     /// canonical zero (`Sign::Zero`), and `Sign::Zero` with a non-zero
-    /// magnitude becomes `Positive`. This keeps `Eq`/`Ord` total and
-    /// well-defined, at the cost of silently accepting a contradictory `(sign,
-    /// magnitude)` pair — callers constructing from untrusted parts should not
-    /// rely on the sign surviving unchanged.
+    /// magnitude becomes `Positive`. Callers constructing from untrusted
+    /// parts should not rely on the sign surviving unchanged.
     #[must_use]
     pub fn from_parts(sign: Sign, magnitude: BigUint) -> Self {
         if magnitude.is_zero() {
@@ -3279,10 +3049,8 @@ impl BigInt {
         }
     }
 
-    /// Construct a non-negative signed integer from an unsigned magnitude.
-    /// Routed through [`Self::from_parts`], so a zero magnitude yields
-    /// canonical zero rather than a positive zero. This is the lift the Toom
-    /// evaluation uses to put an unsigned operand into signed arithmetic.
+    /// Construct a non-negative signed integer from an unsigned magnitude;
+    /// a zero magnitude yields canonical zero.
     #[must_use]
     pub fn from_biguint(magnitude: BigUint) -> Self {
         Self::from_parts(Sign::Positive, magnitude)
@@ -3360,9 +3128,7 @@ impl BigInt {
     }
 
     /// Return `-self`: the sign flips and the magnitude is copied. Zero
-    /// negates to zero, which is exactly what the separate `Sign::Zero`
-    /// variant buys — a sign convention over the magnitude would produce a
-    /// second, unequal zero here.
+    /// negates to zero.
     #[must_use]
     pub fn negated(&self) -> Self {
         let sign = match self.sign {
@@ -3376,8 +3142,7 @@ impl BigInt {
         }
     }
 
-    /// Return `self + other`: a clone of `self` followed by
-    /// `+=`.
+    /// Return `self + other`.
     #[must_use]
     pub fn add(&self, other: &Self) -> Self {
         let mut out = self.clone();
@@ -3386,14 +3151,12 @@ impl BigInt {
     }
 
     /// Add another integer in place, reusing the magnitude's limb buffer in
-    /// every sign combination. The sign case analysis is `combine_assign`,
-    /// which this enters with `other`'s own sign.
+    /// every sign combination.
     pub(crate) fn add_assign_ref(&mut self, other: &Self) {
         self.combine_assign(other.sign, &other.magnitude);
     }
 
-    /// Return `self - other`: a clone of `self` followed by
-    /// `-=`. Total on ℤ, unlike [`BigUint::sub`].
+    /// Return `self - other`. Total on ℤ, unlike [`BigUint::sub`].
     #[must_use]
     pub fn sub(&self, other: &Self) -> Self {
         let mut out = self.clone();
@@ -3402,9 +3165,7 @@ impl BigInt {
     }
 
     /// Subtract another integer in place, reusing the magnitude's limb
-    /// buffer in every sign combination. Full signed semantics — the sign
-    /// follows the result, and nothing panics — unlike
-    /// `BigUint`'s `-=`, whose domain has no negative values.
+    /// buffer in every sign combination. Never panics.
     pub(crate) fn sub_assign_ref(&mut self, other: &Self) {
         let negated = match other.sign {
             Sign::Positive => Sign::Negative,
@@ -3416,12 +3177,10 @@ impl BigInt {
 
     /// The shared core of the signed in-place operations:
     /// `self ← self + s·m`, where `(s, m)` is `other`'s decomposition for
-    /// addition and its negation for subtraction. Like signs grow this
-    /// magnitude in place; unlike signs cancel — the smaller magnitude
-    /// leaves the larger (reversed in place when the larger is `m`), and the
-    /// sign follows the survivor. Zero results clear the buffer without
-    /// releasing it, preserving the type's canonical form (`Sign::Zero`
-    /// with an empty magnitude).
+    /// addition and its negation for subtraction. Like signs add
+    /// magnitudes; unlike signs subtract the smaller from the larger, and
+    /// the sign follows the larger. A zero result clears the buffer without
+    /// releasing it.
     fn combine_assign(&mut self, sign: Sign, magnitude: &BigUint) {
         debug_assert!(
             (sign == Sign::Zero) == magnitude.is_zero(),
@@ -3455,11 +3214,8 @@ impl BigInt {
         }
     }
 
-    /// Return `self * factor` for a non-negative factor: the magnitudes
-    /// multiply and the sign is unchanged, a positive factor being unable to
-    /// flip it. The form the Toom interpolation wants when it scales a signed
-    /// coefficient by a small positive constant, since the constant then
-    /// needs no sign of its own.
+    /// Return `self * factor` for an unsigned factor: the magnitudes
+    /// multiply and the sign is unchanged (zero when `factor` is zero).
     #[must_use]
     pub fn mul_biguint(&self, factor: &BigUint) -> Self {
         if factor.is_zero() || self.sign == Sign::Zero {
@@ -3506,13 +3262,8 @@ impl BigInt {
         }
     }
 
-    /// Signed product `self · other`: the magnitudes multiply through the
-    /// full [`BigUint::mul`] kernel ladder and the sign follows the
-    /// usual rule (like signs positive, unlike negative, zero absorbing).
-    /// Inside the crate this is the Half-GCD matrix arithmetic and the
-    /// `PolyZ` coefficient ring; outside it, one third of the signed ring
-    /// the number field sieve's balanced base-`m` expansion works in,
-    /// together with [`Self::div_rem`] and [`Self::abs`].
+    /// Signed product `self · other`: the magnitudes multiply through
+    /// [`BigUint::mul`] and the sign follows the usual rule.
     #[must_use]
     pub fn mul(&self, other: &Self) -> Self {
         let sign = match (self.sign, other.sign) {
@@ -3533,9 +3284,8 @@ impl BigInt {
     /// ```
     ///
     /// Concretely, `(-7).div_rem(2) = (-3, -1)` where the floored
-    /// convention would give `(-4, 1)`. A caller who wants the least
-    /// non-negative residue instead uses [`Self::rem_euclid`], which
-    /// is the floored remainder against an unsigned modulus.
+    /// convention would give `(-4, 1)`. For the least non-negative residue
+    /// use [`Self::rem_euclid`].
     ///
     /// # Panics
     ///
@@ -3543,20 +3293,15 @@ impl BigInt {
     #[must_use]
     pub fn div_rem(&self, divisor: &Self) -> (Self, Self) {
         let (quotient, remainder) = self.magnitude.div_rem(&divisor.magnitude);
-        // Truncation is what magnitude division already does; only the
-        // signs need assigning. `from_parts` canonicalizes a zero quotient
-        // or remainder to `Sign::Zero`.
+        // Magnitude division truncates; only the signs need assigning.
         (
             Self::from_parts(Self::quotient_sign(self.sign, divisor.sign), quotient),
             Self::from_parts(self.sign, remainder),
         )
     }
 
-    /// The absolute value as an owned [`BigUint`] — a clone of what
-    /// [`Self::magnitude`] lends. Reach for `magnitude()` whenever a borrow
-    /// suffices (comparisons against a bound, feeding an unsigned kernel);
-    /// this owned form exists for the callers that go on to consume or
-    /// store `|self|` independently of `self`.
+    /// The absolute value as an owned [`BigUint`]; [`Self::magnitude`]
+    /// borrows it instead.
     #[must_use]
     pub fn abs(&self) -> BigUint {
         self.magnitude.clone()
@@ -3568,8 +3313,7 @@ impl BigInt {
         Self::from_parts(Sign::Positive, BigUint::one())
     }
 
-    /// Whether the value is zero — a sign test, since the canonical form
-    /// pairs `Sign::Zero` with an empty magnitude and admits no other zero.
+    /// Whether the value is zero.
     #[must_use]
     pub fn is_zero(&self) -> bool {
         self.sign == Sign::Zero
@@ -3582,9 +3326,8 @@ impl BigInt {
     }
 
     /// Exact signed quotient `self / divisor` where the division is known
-    /// to leave no remainder — the interpolation and primitive-part steps
-    /// of polynomial arithmetic. The sign follows the usual rule; the
-    /// magnitudes divide evenly.
+    /// to leave no remainder, as in polynomial interpolation and
+    /// primitive-part steps.
     ///
     /// # Panics
     ///
@@ -3598,14 +3341,9 @@ impl BigInt {
     }
 
     /// Exact division when it divides, `None` when it does not — the checked
-    /// companion to [`Self::div_exact`], costing a single division.
-    ///
-    /// Callers that must *decide* divisibility (polynomial division over `ℤ`,
-    /// where a step with an indivisible leading coefficient means no integer
-    /// quotient exists) would otherwise divide twice: once to inspect the
-    /// remainder and again to take the quotient. Knuth's Algorithm D already
-    /// produces both, so this returns them together and the second division
-    /// disappears.
+    /// companion to [`Self::div_exact`], costing a single division. For
+    /// callers that must decide divisibility, such as polynomial division
+    /// over `ℤ`.
     #[must_use]
     pub(crate) fn div_exact_checked(&self, divisor: &Self) -> Option<Self> {
         let (quotient, remainder) = self.div_rem(divisor);
@@ -3624,11 +3362,9 @@ impl BigInt {
 
     /// Greatest common divisor of two signed integers, returned non-negative.
     ///
-    /// A gcd over ℤ is only defined up to sign — `d` and `−d` are associates
-    /// and divide the same set — so the convention is to name the
-    /// non-negative representative. The computation is therefore a function
-    /// of the magnitudes alone, and defers to [`crate::gcd`]; `gcd(0, 0)` is
-    /// zero.
+    /// A gcd over ℤ is defined up to sign, so this names the non-negative
+    /// one, computed from the magnitudes by
+    /// [`crate::number_theory::gcd`]; `gcd(0, 0)` is zero.
     #[must_use]
     pub(crate) fn gcd(&self, other: &Self) -> Self {
         Self::from_biguint(crate::number_theory_impl::gcd(
@@ -3637,10 +3373,8 @@ impl BigInt {
         ))
     }
 
-    /// `self^exponent` for a machine-word exponent, by binary
-    /// exponentiation — the signed counterpart of [`BigUint::pow_u64`],
-    /// carrying the sign through (a negative base to an odd power stays
-    /// negative). `self^0 = 1`.
+    /// `self^exponent` for a machine-word exponent — the signed counterpart
+    /// of [`BigUint::pow_u64`]. `self^0 = 1`.
     #[must_use]
     pub fn pow_u64(&self, exponent: u64) -> Self {
         let magnitude = self.magnitude.pow_u64(exponent);
@@ -3656,12 +3390,9 @@ impl BigInt {
     /// Reduce modulo a positive modulus and return the least non-negative
     /// residue, in `[0, modulus)`.
     ///
-    /// Rust's `%` on the primitive integers truncates toward zero and gives
-    /// the remainder the dividend's sign, which is not a residue: residue
-    /// arithmetic needs the canonical representative of the class. A negative
-    /// value is therefore folded as `modulus − (|self| mod modulus)`, with
-    /// the exactly-divisible case held at zero so the result is never
-    /// `modulus` itself.
+    /// Unlike Rust's `%`, whose remainder takes the dividend's sign, a
+    /// negative value maps to `modulus − (|self| mod modulus)`, or zero when
+    /// the modulus divides it.
     ///
     /// # Panics
     ///
@@ -3686,14 +3417,9 @@ impl BigInt {
     /// The representative of `self` modulo `modulus` in the *symmetric* range
     /// `(−modulus/2, modulus/2]`.
     ///
-    /// [`Self::rem_euclid`]'s companion, and the other canonical choice
-    /// of representative. Where that one is what residue arithmetic wants,
-    /// this is what *size* wants: it is the smallest representative in
-    /// absolute value, which halves the magnitude of a reduced coefficient and
-    /// so of everything built from one.
-    ///
-    /// The range is half-open at the upper end, so an exact half — possible
-    /// only for even `modulus` — stays positive: `5 mod 10` is `5`, not `−5`.
+    /// The representative smallest in absolute value, where
+    /// [`Self::rem_euclid`] gives the least non-negative one. An exact half
+    /// (even `modulus` only) stays positive: `5 mod 10` is `5`, not `−5`.
     ///
     /// # Panics
     ///
@@ -3712,9 +3438,8 @@ impl BigInt {
     pub fn symmetric_rem(&self, modulus: &BigUint) -> BigInt {
         assert!(!modulus.is_zero(), "modulus must be non-zero");
         let reduced = self.rem_euclid(modulus);
-        // reduced ∈ [0, modulus). Anything strictly above the midpoint belongs
-        // on the negative side: subtracting the modulus lands it in
-        // (−modulus/2, 0).
+        // reduced ∈ [0, modulus); above the midpoint, subtracting the modulus
+        // lands it in (−modulus/2, 0).
         if reduced.mul(&BigUint::from_u64(2)) > *modulus {
             BigInt::from_biguint(reduced).sub(&BigInt::from_biguint(modulus.clone()))
         } else {
@@ -3771,10 +3496,8 @@ mod tests {
 
     #[test]
     fn symmetric_rem_is_congruent_and_smallest() {
-        // The two properties that define it, checked against the other
-        // representative rather than against a table: the result is congruent
-        // to `rem_euclid`, and no other representative of the class is
-        // smaller in absolute value.
+        // The defining properties: congruent to `rem_euclid`, and no other
+        // representative of the class is smaller in absolute value.
         for m in [1u64, 2, 7, 8, 97, 1_000, 1_001] {
             let modulus = BigUint::from_u64(m);
             for value in -60i64..=60 {
@@ -3801,7 +3524,7 @@ mod tests {
 
     #[test]
     fn digit_count_matches_writing_the_digits_out() {
-        // The oracle is the expansion it exists to avoid producing.
+        // The oracle is the full expansion.
         let check = |value: &BigUint, radix: u32| {
             assert_eq!(
                 value.digit_count(radix),
@@ -3816,8 +3539,8 @@ mod tests {
             for value in [1u64, 2, 7, 63, 64, 65, u64::MAX] {
                 check(&BigUint::from_u64(value), radix);
             }
-            // The powers are the whole reason for the correction: the
-            // logarithm is an integer there and its floor can fall either way.
+            // At powers of the radix the logarithm is an integer and its
+            // floating-point floor can fall either way.
             for exponent in 0..40u64 {
                 let power = base.pow_u64(exponent);
                 check(&power, radix);
@@ -3874,8 +3597,8 @@ mod tests {
     }
 
     /// Divisors that exercise every branch of the normalization: already
-    /// normalized, one below a power of two, one above, the extremes, and the
-    /// small primes a factor base is actually made of.
+    /// normalized, one below a power of two, one above, the extremes, small
+    /// primes, and random odd words.
     fn reciprocal_divisor_corners() -> Vec<u64> {
         let mut divisors = vec![
             1,
@@ -3905,8 +3628,7 @@ mod tests {
 
     /// The reciprocal path must agree with the hardware-division path on
     /// every input, for both the quotient and the remainder. `div_rem_u64`
-    /// and `rem_u64` are the oracle: they are the existing implementation and
-    /// are independently tested, so a disagreement is this kernel's fault.
+    /// is the independently tested oracle.
     #[test]
     fn reciprocal_agrees_with_hardware_division_on_words() {
         let mut state = 0xabcd_ef01_u64;
@@ -3960,8 +3682,8 @@ mod tests {
         }
     }
 
-    /// `rem_euclid_i64` must land in `0..divisor` for negative inputs too,
-    /// which is the whole reason it exists. `i64::rem_euclid` is the oracle
+    /// `rem_euclid_i64` must land in `0..divisor` for negative inputs too.
+    /// `i64::rem_euclid` is the oracle
     /// wherever the divisor fits a positive `i64`; `i64::MIN` is included
     /// because its magnitude is not representable as a positive `i64`.
     #[test]
@@ -4056,9 +3778,8 @@ mod tests {
         );
     }
 
-    /// The specification for the signed in-place operations: the flattened
-    /// composition of the previous `add`/`sub` case analysis over
-    /// the unsigned primitives, retained as a structural oracle.
+    /// Oracle for the signed in-place operations: signed addition as a case
+    /// analysis over the unsigned primitives.
     fn signed_add_oracle(a: &BigInt, b: &BigInt) -> BigInt {
         use core::cmp::Ordering;
         match (a.sign(), b.sign()) {
@@ -4073,8 +3794,8 @@ mod tests {
         }
     }
 
-    /// The bisection sqrt_floor this crate shipped before Newton — kept as
-    /// the independent oracle for the replacement.
+    /// Integer square root by bisection: an independent oracle for the
+    /// Newton iteration.
     fn sqrt_floor_bisection(n: &BigUint) -> BigUint {
         if n.is_zero() || n.is_one() {
             return n.clone();
@@ -4238,7 +3959,7 @@ mod tests {
                 BigUint::from_u64(expect_sub as u64)
             );
         }
-        // The Barrett pair delegates to the same operations.
+        // Against a Barrett context's modulus.
         let ctx = super::BarrettContext::new(&BigUint::from_u64(1000)).expect("modulus >= 2");
         assert_eq!(
             BigUint::mod_add(
@@ -4409,32 +4130,18 @@ mod tests {
     fn barrett_reduce_straddles_the_half_product_cutoff() {
         // Above `BARRETT_HALF_PRODUCT_MAX_LIMBS`, `reduce` takes the window
         // from a dispatched full product instead of the schoolbook half
-        // product. Nothing else in the crate builds a modulus that wide, so
-        // without this test the branch is unexecuted by every gate and a
-        // corrupted arm passes the entire suite.
+        // product. No other test builds a modulus that wide.
         //
-        // What this cannot catch, and no value-based test can: the two arms
-        // are exactly equal by construction, so deleting the cutoff,
-        // inverting its predicate, or moving it to the wrong width all
-        // still compute the right answer. Only the timing changes, and only
-        // above 32 kbit. The constant is guarded by the comment on it and
-        // by `--ignored` measurement, not by this.
+        // The two arms compute equal values, so a misplaced cutoff changes
+        // only timing; no value-based test can catch that.
         use super::{BarrettContext, BARRETT_HALF_PRODUCT_MAX_LIMBS};
         let cutoff = BARRETT_HALF_PRODUCT_MAX_LIMBS;
         let mut seed = 0x5a11_b0bb_0000_0001;
         for k in [cutoff - 1, cutoff, cutoff + 1, cutoff + 2] {
-            // Four modulus shapes at each width, not one. `reduce` itself
-            // is parity-blind — comparisons, shifts, two products and the
-            // correction loop, with nothing that branches on the low bit —
-            // so the even shape is not closing a class of parity defect;
-            // the parity-sensitive code is in `MontgomeryContext::new` and in
-            // `mod_pow`'s routing, neither of which this test reaches. It
-            // is here because an even modulus is the case this type exists
-            // to serve and ought to be exercised at width somewhere, and
-            // because it is another independent μ. The other two shapes do
-            // carry a specific argument: a top limb of 1 maximizes μ and
-            // all-ones maximizes the quotient estimate's error, so between
-            // them they stress `q̂` from both ends.
+            // Four modulus shapes at each width. The even one exercises an
+            // even modulus at width and adds an independent μ; a top limb of
+            // 1 maximizes μ and all-ones maximizes the quotient estimate's
+            // error, stressing `q̂` from both ends.
             let mut shapes = Vec::new();
             let mut odd = seeded_biguint(k, &mut seed);
             odd.limbs[0] |= 1;
@@ -4531,11 +4238,8 @@ mod tests {
             }
         }
         println!("corrections histogram: {seen:?}");
-        // The gating test cites this probe for the claim that three
-        // corrections never occur, so the probe enforces it rather than
-        // merely printing it — a sweep that only reports cannot support a
-        // claim, which is the shape of error that let a running-maximum
-        // counter conclude two was unreachable.
+        // `barrett_correction_bound_is_attained_and_not_exceeded` cites this
+        // probe, so it asserts the bound rather than only printing it.
         assert_eq!(seen[3], 0, "HAC Note 14.44's bound of two was exceeded");
         assert!(seen[2] > 0, "the sweep must reach the bound: {seen:?}");
         if let Some((n, x)) = &witness {
@@ -4548,18 +4252,15 @@ mod tests {
 
     #[test]
     fn barrett_correction_bound_is_attained_and_not_exceeded() {
-        // HAC Note 14.44 bounds `q̂`'s shortfall at two, and the reduction
-        // loop carries a `debug_assert` for it. A bound that is never
-        // reached is indistinguishable from a bound that is wrong, so this
-        // demands the tight case exist rather than merely not be exceeded.
+        // HAC Note 14.44 bounds `q̂`'s shortfall at two. A bound never
+        // reached is indistinguishable from a wrong one, so this demands the
+        // tight case occur.
         //
-        // Finding it needs the right shapes. Two corrections are
-        // concentrated on moduli just above a power of the base — `b² + 1`
-        // is the readiest witness — and are missed entirely by a sweep over
-        // random moduli, or by dividends drawn only from near the top of the
-        // range. `barrett_correction_search`, run with `--ignored`, is the
-        // wider sweep this was cut down from: 678 two-correction reductions
-        // in 168 000, and no three-correction reduction at any width.
+        // Two corrections concentrate on moduli just above a power of the
+        // base (`b² + 1` is the readiest witness); random moduli miss them.
+        // The wider sweep `barrett_correction_search` (run with `--ignored`)
+        // finds 678 two-correction reductions in 168 000, and none with
+        // three.
         use super::BarrettContext;
         let mut seed = 0xc0de_1044_0000_0001;
         let mut seen = [0usize; 3];
@@ -4610,13 +4311,10 @@ mod tests {
         use super::BarrettContext;
         use crate::number_theory_impl::mod_pow;
 
-        // A deliberately slow reference: square-and-multiply with a full
-        // product and a direct division at every step, sharing no code with
-        // either context. It exists because `mod_pow` now *delegates* even
-        // moduli to `BarrettContext::mod_pow` — comparing the two against each
-        // other would be an identity, not a test, and the odd branch's
-        // independence (Montgomery) would have quietly become the only
-        // real coverage.
+        // An independent reference: square-and-multiply with a full product
+        // and a division at every step, sharing no code with either context.
+        // `mod_pow` routes even moduli to `BarrettContext`, so comparing the
+        // two against each other would test nothing.
         fn reference_pow(base: &BigUint, exponent: &BigUint, modulus: &BigUint) -> BigUint {
             if modulus.is_one() {
                 return BigUint::zero();
@@ -4663,8 +4361,7 @@ mod tests {
             }
         }
 
-        // The corners the random sweep will not reach, every one an even
-        // modulus so they exercise the delegated path: the smallest
+        // Corners the random sweep will not reach, all even moduli: the smallest
         // modulus, powers of two, a non-power-of-two even modulus, a
         // multi-limb even modulus, exponents 0 and 1, and bases far wider
         // than the modulus.
@@ -4917,10 +4614,8 @@ mod tests {
     #[test]
     fn radix_divide_and_conquer_matches_classical() {
         let mut seed = 0xfeed_beef_dead_cafe;
-        // 256 words is 3,169 digits even in base 36 — above the 1,024-digit
-        // dispatch threshold for every radix here — so the production path
-        // is divide and conquer throughout, with the classical engines as
-        // the oracle.
+        // 256 words is at least 3,169 digits in every radix here, above the
+        // divide-and-conquer thresholds; the classical engines are the oracle.
         for &radix in &[3u32, 10, 36] {
             let value = seeded_biguint(256, &mut seed);
             let classical = value.to_digits_classical(radix);
@@ -5347,7 +5042,7 @@ mod tests {
                 assert_eq!(to_i128(&r), i128::from(a % b), "remainder {a} % {b}");
             }
         }
-        // The named corner from the documentation: truncated, not floored.
+        // Truncated, not floored.
         let minus_seven = to_bigint(-7);
         let two = to_bigint(2);
         let (q, r) = minus_seven.div_rem(&two);
@@ -5410,9 +5105,7 @@ mod tests {
             }
         }
         // Interior zero limbs, which make whole rows of the cross-term
-        // pass vanish. (A *trailing* run of zeros cannot be built: the
-        // constructor normalizes it away, which is also why the Karatsuba
-        // squaring needs no empty-high-half bail-out — see its assertion.)
+        // pass vanish.
         let mut limbs = seeded_biguint(k + 4, &mut seed).limbs().to_vec();
         for limb in &mut limbs[2..(k + 4) / 2] {
             *limb = 0;
@@ -5420,9 +5113,8 @@ mod tests {
         limbs[0] |= 1;
         let holed = BigUint::from_limbs(limbs);
         assert_eq!(holed.square(), holed.mul(&holed));
-        // All-ones operands: the worst case for every carry chain in the
-        // three passes, and the shape that would expose a doubling that
-        // overflowed its buffer.
+        // All-ones operands: the worst case for every carry chain, and for
+        // the doubling pass.
         for words in [1usize, 2, 8, k, k + 1, 2 * k] {
             let ones = BigUint::from_limbs(vec![u64::MAX; words]);
             assert_eq!(
@@ -5486,9 +5178,9 @@ mod tests {
     #[test]
     fn toom4_matches_schoolbook_across_shapes() {
         let mut seed = 0x0f0f_1e1e_2d2d_3c3c;
-        // Direct Toom-4 kernel exercise: sizes not divisible by four, heavy
-        // imbalance (a short operand collapsing to fewer Toom parts), and sizes
-        // straddling its dispatch threshold — all against the schoolbook oracle.
+        // The Toom-4 kernel directly: sizes not divisible by four and heavy
+        // imbalance (a short operand collapsing to fewer Toom parts), against
+        // the schoolbook oracle.
         let sizes = [4usize, 5, 6, 7, 9, 13, 16, 33, 64, 128, 256, 260, 384, 500];
         for &la in &sizes {
             for &lb in &sizes {
@@ -5503,8 +5195,8 @@ mod tests {
                 }
             }
         }
-        // Full dispatch at Toom-4 sizes, plus squaring, plus a Toom-4 call that
-        // recurses (its n/4 parts themselves crossing the Toom-3 threshold).
+        // Full dispatch and squaring at Toom-3 sizes, below the Toom-4
+        // threshold.
         for &words in &[256usize, 300, 512, 768] {
             for _ in 0..3 {
                 let a = seeded_biguint(words, &mut seed);
@@ -5615,11 +5307,10 @@ mod tests {
     #[test]
     fn unbalanced_matches_schoolbook_across_shapes() {
         let mut seed = 0x9e37_79b9_7f4a_7c15;
-        // The block-decomposition kernel directly, below and above its
-        // dispatch threshold. 64×32 is the exact boundary the balanced
-        // admission excludes; 100×32 leaves a short final digit; 129×32 a
-        // one-limb one; the larger shapes recurse through several balanced
-        // kernels.
+        // The block-decomposition kernel directly, below its dispatch
+        // threshold. 64×32 is the exact boundary the balanced admission
+        // excludes; 100×32 leaves a short final digit; 129×32 a one-limb one;
+        // the larger shapes recurse through several balanced kernels.
         for &(la, lb) in &[
             (64usize, 32usize),
             (100, 32),
@@ -5646,7 +5337,7 @@ mod tests {
         // admission is strict, and its kernel would find an empty high half
         // there), one limb under 2:1 must go to Karatsuba, and one limb
         // under the threshold must fall back to schoolbook — checked by the
-        // predicates AND by value, so admission cannot silently regress.
+        // predicates and by value.
         let t = UNBALANCED_THRESHOLD_LIMBS;
         for (long_len, short_len, unbal, kara) in [
             (2 * t, t, true, false),      // exact 2:1 at the threshold
@@ -5693,16 +5384,10 @@ mod tests {
     #[test]
     fn mont_workspace_variants_match_allocating_forms() {
         // The with_workspace wrappers against their allocating twins and the
-        // plain modular product, with ONE buffer shared across widths and
-        // across both methods in both orders — so the resize-only-grow path,
-        // the smaller-window-after-larger path, and stale contents from a
-        // previous width are all exercised. The width order is deliberately
-        // non-monotonic: a narrower modulus following a wider one is the
-        // only shape that hands the kernels an over-long buffer (an
-        // ascending sweep always resizes to an exact fit), and the 16 → 2
-        // and 8 → 1 steps force that shape for both kernels. copy_padded
-        // zero-fills and the kernels clear their scratch on entry, so none
-        // of it may show.
+        // plain modular product, with one buffer shared across widths and
+        // both methods in both orders. The width order is non-monotonic so a
+        // narrower modulus follows a wider one (16 → 2, 8 → 1), handing the
+        // kernels an over-long buffer with stale contents.
         let mut seed = 0x0dd5_eed0_0000_0001;
         let mut ws = MontgomeryScratch::new();
         for &limbs in &[16usize, 2, 3, 8, 1, 5] {
@@ -5765,12 +5450,9 @@ mod tests {
         use std::hint::black_box;
         use std::time::Instant;
 
-        /// One pass: alternate the two forms in short chunks across the
-        /// whole pass, so slow drift (thermal, frequency scaling) hits both
-        /// sides equally instead of landing on whichever ran second; the
-        /// naive measure-A-then-measure-B design was shown to report up to
-        /// 20% on a function compared against itself. Returns the saving
-        /// of `b` over `a` in percent.
+        /// One pass: alternate the two forms in short chunks, so slow drift
+        /// (thermal, frequency scaling) hits both sides equally. Returns the
+        /// saving of `b` over `a` in percent.
         fn paired_saving(chunks: u32, chunk: u32, a: &mut dyn FnMut(), b: &mut dyn FnMut()) -> f64 {
             let (mut total_a, mut total_b) = (0f64, 0f64);
             for _ in 0..chunks {
@@ -5788,10 +5470,8 @@ mod tests {
             (total_a - total_b) / total_a * 100.0
         }
 
-        /// Five interleaved passes; print every pass so the spread is
-        /// visible, and report the median as the figure. A claimed saving
-        /// smaller than the printed spread is noise and must be quoted as
-        /// noise.
+        /// Print every pass so the spread is visible, and the median. A
+        /// saving smaller than the spread is noise.
         fn report(label: &str, limbs: usize, mut passes: [f64; 5]) {
             passes.sort_by(f64::total_cmp);
             eprintln!(
@@ -5887,8 +5567,8 @@ mod tests {
 
     #[test]
     fn mul_low_ref_matches_the_truncated_full_product() {
-        // The half-product against the full product it replaces, truncated
-        // to the same window: limits below, at, and above each operand's
+        // The half-product against the truncated full product: limits
+        // below, at, and above each operand's
         // width, and the degenerate limit of zero.
         let mut seed = 0x1010_7ef7_0000_0001;
         for &(la, lb) in &[(1usize, 1usize), (2, 3), (4, 4), (8, 5), (17, 16), (32, 32)] {
@@ -6018,8 +5698,8 @@ mod tests {
             }
 
             // The upper handoff: Karatsuba squaring against the Toom-3
-            // multiplication it hands over to, which is the comparison the
-            // 128-limb boundary actually rests on.
+            // multiplication it hands over to, the comparison
+            // `SQR_KARATSUBA_MAX_LIMBS` rests on.
             if w >= 64 {
                 let mut p = [0f64; 5];
                 for (k, slot) in p.iter_mut().enumerate() {
@@ -6323,8 +6003,7 @@ mod tests {
                     assert_eq!(widened, value, "(x << {n}) >> {n} != x");
 
                     // Independent oracle: shifting right by n is dividing by
-                    // 2^n, and division goes through Algorithm D, not the
-                    // shift code.
+                    // 2^n, and division does not use the shift code.
                     let mut shifted = value.clone();
                     shifted.shr_bits(n);
                     let mut power_of_two = BigUint::zero();
@@ -6390,7 +6069,7 @@ mod tests {
 
         // Random byte strings across limb boundaries, some with leading
         // (high) zero bytes. The oracle is the input bytes themselves, decoded
-        // by the unchanged big-endian parser: every encoder must reproduce
+        // by the big-endian parser: every encoder must reproduce
         // them, stripped or padded, and in either byte order.
         let mut seed = 0x1eb1_7e50_0000_0001;
         for byte_len in 0usize..=41 {
@@ -6624,8 +6303,7 @@ mod tests {
 
     #[test]
     fn mod_mul_handles_even_modulus() {
-        // Even moduli have no Montgomery representation, so this used to take a
-        // separate double-and-add path; multiply-then-reduce covers both.
+        // Even moduli have no Montgomery representation.
         let a = BigUint::from_u64(37);
         let b = BigUint::from_u64(19);
         let modulus = BigUint::from_u64(100);

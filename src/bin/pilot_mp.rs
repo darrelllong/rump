@@ -53,7 +53,8 @@ impl SplitMix64 {
             let word = self.next().to_le_bytes();
             chunk.copy_from_slice(&word[..chunk.len()]);
         }
-        // Force the top bit so the value really is `bits` wide.
+        // Clear the bits above the width and force the top one, so the value
+        // is exactly `bits` wide.
         let top = (bits - 1) % 8;
         bytes[0] &= (1u8 << top) - 1;
         bytes[0] |= 1u8 << top;
@@ -235,8 +236,8 @@ impl FieldPool {
 // ─── The operations ─────────────────────────────────────────────────────────
 
 /// A benchmark closure over the process's single random operand set.
-// One Bench exists per process, so the variants' size disparity buys
-// nothing to fix and costs a pointer chase to "improve".
+// One Bench exists per process, so boxing the larger variant would buy
+// nothing and add a pointer chase.
 #[allow(clippy::large_enum_variant)]
 enum Bench {
     Int(IntPool, fn(&mut IntPool)),
@@ -425,8 +426,7 @@ fn all_ops() -> Vec<String> {
 // ─── One reading ────────────────────────────────────────────────────────────
 
 /// Repeat the op on its single random operand until the elapsed interval
-/// exceeds the calibration floor,
-/// then print the per-op cost in ms. The whole batch uses the *same* operand,
+/// exceeds the 2 ms calibration floor, then print the per-op cost in ms. The whole batch uses the *same* operand,
 /// so the reading reflects that operand's data-dependent cost; the fresh draw
 /// per process is what makes the collection of readings a random sample.
 fn one_reading(bench: &mut Bench) {

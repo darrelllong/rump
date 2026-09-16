@@ -271,9 +271,8 @@ fn bound_corpus(bits: usize, shape: &str, count: usize) -> Corpus {
 ///
 /// `mod_sqrt` requires a prime modulus. A random odd integer is essentially
 /// never prime, so a corpus of random moduli measures only the rejection path
-/// and returns no root at all — which is what the first version of this audit
-/// did. These are stated as constants because a prime cannot be drawn by
-/// chance at these widths.
+/// and returns no root at all. These are stated as constants because a prime
+/// cannot be drawn by chance at these widths.
 ///
 /// The class matters as much as the width: for `p ≡ 3 (mod 4)` a root is one
 /// exponentiation, `a^((p+1)/4)`, while `p ≡ 1 (mod 4)` needs Tonelli–Shanks.
@@ -378,10 +377,8 @@ fn poly_roots_corpus(degree: usize, shape: &str, bits: usize, seed: u64) -> Corp
             //
             // The constant term is `degree!`, which passes i128 at degree 34.
             // The arithmetic below is checked rather than wrapping, because a
-            // release build wraps silently: an earlier version of this
-            // generator emitted a degree-64 "split" polynomial whose
-            // coefficients were wrap artefacts and whose roots were not
-            // 1..64 at all.
+            // release build wraps silently and would emit coefficients whose
+            // roots are not 1..degree at all.
             //
             // The binding limit is smaller and is conditioning, not range.
             // `∏ (x − r)` over `r = 1..n` is Wilkinson's polynomial, whose
@@ -433,7 +430,7 @@ fn poly_roots_corpus(degree: usize, shape: &str, bits: usize, seed: u64) -> Corp
 /// at 96 MiB would mean a 192 MiB hex corpus — the file would cost more to
 /// move between hosts than the measurement costs to take. So the corpus
 /// carries only the header, and both adapters expand it from the stated seed
-/// with the same generator. Determinism is unaffected: the expansion lives in
+/// with the same generator. Determinism is unaffected: the generator lives in
 /// the byte-identical `shared.rs`, and the digest check confirms the two
 /// revisions built the same operands.
 ///

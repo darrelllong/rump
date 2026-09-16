@@ -135,21 +135,17 @@ def pilot_required_readings(pilot_dir):
 
 def classify(cell):
     """The verdict, and the reason when it is inconclusive."""
-    # Exit 13 means Pilot stopped on the session limit. Measured here, that
-    # says nothing about whether its data is adequate: of the first 32 cells to
-    # finish under a two-hour budget, 25 satisfied both criteria Pilot itself
-    # reports -- readings at or above its own required reading size, and a
-    # confidence interval within the required fraction of the mean -- and every
-    # one of them still exited 13. Pilot's stopping rule does not fire for this
-    # workload even when its stated requirements are met, so treating the exit
-    # code as the arbiter would discard adequate data in three cells out of
-    # four.
+    # Exit 13 means Pilot stopped on the session limit, which says nothing
+    # about whether its data is adequate: Pilot's stopping rule does not fire
+    # for this workload even when its stated requirements are met (25 of 32
+    # cells under a two-hour budget met both and still exited 13). Treating the
+    # exit code as the arbiter would discard adequate data in three cells out
+    # of four.
     #
     # Pilot remains the sole statistical authority. Every number below is one
     # Pilot computed: the mean, the interval, the autocorrelation-merged
-    # subsession size, and the required reading count. What changed is only
-    # which signal decides publishability -- Pilot's own reported sufficiency
-    # rather than its exit status.
+    # subsession size, and the required reading count. Publishability is
+    # decided by Pilot's own reported sufficiency rather than its exit status.
     #
     # Any other non-zero exit is a real failure: a crashed child, a digest
     # mismatch, a refused workload.

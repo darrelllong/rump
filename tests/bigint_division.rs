@@ -163,7 +163,7 @@ fn div_rem_matches_bitwise_reference_over_limb_shapes() {
 
 #[test]
 fn div_rem_matches_bitwise_reference_at_key_sizes() {
-    // The sizes the public-key layer actually divides at, including the
+    // Common public-key sizes, including the
     // reduce-a-product shape (`2n` bits mod `n` bits) that `mod_mul` produces.
     let mut rng = rng();
     let per_shape = trials(24);
@@ -330,10 +330,9 @@ fn div_rem_estimate_overshoot_by_two() {
     // digit of `b - 1`.
     //
     // `dividend = (v + r) * b + u0 = v*b + (r*b + u0)` reaches that window on
-    // its final quotient digit. Verified against Python bigints, and verified
-    // to fail when the D3 correction loop is removed (mutation testing); on
-    // random input a missing correction is indistinguishable from a working
-    // one, because overshoot by one is repaired by D6 either way.
+    // its final quotient digit, and fails if the D3 correction loop is
+    // removed; on random input a missing correction is indistinguishable from
+    // a working one, because overshoot by one is repaired by D6 either way.
     let b = {
         let mut b = BigUint::zero();
         b.set_bit(64);
@@ -411,9 +410,9 @@ fn div_rem_rejects_zero_divisor() {
 
 #[test]
 fn mod_mul_matches_reference_and_montgomery() {
-    // `mod_mul` is now multiply-then-reduce for every modulus parity, so it
-    // must agree with an independent reduction and, for odd moduli, with the
-    // reusable Montgomery context it used to build internally.
+    // `mod_mul` is multiply-then-reduce for every modulus parity; it must
+    // agree with an independent reduction and, for odd moduli, with a
+    // Montgomery context.
     let mut rng = rng();
     let per_shape = trials(64);
 

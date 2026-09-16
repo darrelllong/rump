@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Turn the per-host `primitives_<host>.md` tables into the scaling graphs and
-fitted-complexity table for PERFORMANCE.md.
+tables for PERFORMANCE.md.
 
 Usage:
-  perf_analysis.py fit   host=path [host=path ...]        -> markdown fit table
-  perf_analysis.py plot  family out.svg host=path [...]    -> log-log scaling SVG
+  perf_analysis.py fit      host=path [host=path ...]      -> markdown fit table
+  perf_analysis.py means    host=path [host=path ...]      -> markdown means table
+  perf_analysis.py extrema  host=path                      -> markdown extrema table
+  perf_analysis.py compare  [--by-size] rump.md gmp.md     -> rump vs GMP table
+  perf_analysis.py plot     family out.svg host=path [...] -> log-log scaling SVG
 
 Each table row is
-`| <op>_<size> | mean | ±95% CI | min | p50 | p99 | max | max/min |`, mean in
-ms/op (a leading '~' marks a heavy-tailed op whose mean did not converge). The
-±95% CI cell is pilot-bench's confidence interval on the mean; it is skipped
-here. Sizes are bit widths (integers) or field degrees (gf2m).
+`| <op>_<size> | mean | ±95% CI | min | p50 | p99 | max | max/min | n |`, mean
+in ms/op (a leading '~' marks a heavy-tailed op whose mean did not converge).
+The ±95% CI cell is skipped here. Sizes are bit widths (integers) or field
+degrees (gf2m).
 """
 import math
 import re
@@ -244,9 +247,8 @@ def scaling_svg(family, out, hosts):
         s.append(f'<text x="{ML-8}" y="{y+4:.1f}" font-size="11" fill="#6F675C" '
                  f'text-anchor="end">{lbl}</text>')
     # series.
-    # Per host: solid, dashed, dotted, dash-dot. Four distinct patterns for the
-    # four hosts — a three-pattern map silently gave the fourth host (A18) a
-    # solid stroke identical to the first (M4), making the two indistinguishable.
+    # Per host: solid, dashed, dotted, dash-dot, one distinct pattern for each
+    # of up to four hosts.
     dash = {0: "", 1: "5,3", 2: "1,3", 3: "5,3,1,3"}  # per host
     for oi, op in enumerate(ops):
         col = PALETTE[oi % len(PALETTE)]

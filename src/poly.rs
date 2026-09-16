@@ -3,10 +3,10 @@
 //! Two concrete named types, in the crate's style — a documented
 //! representation rather than a tower of coefficient-ring traits:
 //! [`PolyZ`](crate::polynomial::PolyZ) over the integers and [`PolyMod`](crate::polynomial::PolyMod) over a fixed modulus. They
-//! are the substrate the general number field sieve is built on (the
-//! algebraic side is a degree-5 or -6 polynomial over ℤ and its behaviour
-//! modulo small primes), and more broadly the polynomial layer a computer
-//! algebra surface provides.
+//! are the polynomial layer of a computer algebra system: arithmetic,
+//! resultants, factorization modulo primes, roots modulo prime powers and
+//! over the reals. The number field sieve, which works with a polynomial
+//! over ℤ and its behaviour modulo small primes, is one use.
 //!
 //! Both store coefficients low-to-high (`coeffs[i]` multiplies `xⁱ`) and
 //! stay normalized: no trailing zero coefficient, so the zero polynomial is
@@ -37,8 +37,8 @@ pub use hensel_sqrt::HenselSquareRoot;
 /// a shorter one that barely reaches past that point saves almost nothing
 /// while paying the whole recombination.
 ///
-/// Medians of two runs, five passes each, alternating which side is timed
-/// first:
+/// Time saved by the split (medians, alternating which side is timed
+/// first):
 ///
 /// | shorter operand | 1:1 | 5:4 | 3:2 | (2s−1):s |
 /// |---|---|---|---|---|
@@ -54,19 +54,9 @@ pub use hensel_sqrt::HenselSquareRoot;
 ///
 /// So 96 is where the *balanced* split turns clearly profitable, and it is
 /// the threshold; it is not where every shape does. At 96 the near-2:1
-/// column still trails by 3%, ten of ten passes negative across the two
-/// runs, and does not turn until 128 — hence
+/// column still trails by 3% and does not turn until 128 — hence
 /// [`POLY_KARATSUBA_ANY_RATIO_Z`] and the two-clause gate in
-/// [`poly_split_admitted`], which both rings now share — the structure the
-/// modular side already had, for the same reason.
-///
-/// Two earlier revisions of this table were wrong in ways worth recording,
-/// since both were caught by review rather than by a test. The first said
-/// 64 and cited +19% at `(2s−1):s`, a figure from a four-repetition sample
-/// that did not survive calibrated repetitions. The second said +22% and
-/// +16% for the 96 row's 3:2 and 2:1 cells — numbers transcribed from the
-/// *modular* table's 512 row, which inverted the sign of the one cell that
-/// decides whether a ratio clause is needed at all.
+/// [`poly_split_admitted`], which both rings share.
 const POLY_KARATSUBA_THRESHOLD_Z: usize = 96;
 
 /// The size at which every operand ratio the dispatcher can reach becomes
@@ -79,15 +69,13 @@ const POLY_KARATSUBA_THRESHOLD_Z: usize = 96;
 /// *longer* operand and lands differently against each length, so the row
 /// is read for its sign rather than its ordering.
 ///
-/// End to end, against a build that gates on length alone: `PolyZ::mul` on
-/// a 96×191 pair is 1.19× faster for declining the split, and the shapes
-/// the clause still admits (128×255, 192×383, 256×511) are unchanged to
-/// within a point. Medians of six and seven runs.
+/// End to end, `PolyZ::mul` on a 96×191 pair is 1.19× faster for declining
+/// the split.
 const POLY_KARATSUBA_ANY_RATIO_Z: usize = 128;
 
 /// The same threshold for [`PolyMod`](crate::polynomial::PolyMod), with a balance rule attached.
 ///
-/// Two things move it out. The coefficients do not grow — every one stays
+/// Two things move it higher. The coefficients do not grow — every one stays
 /// reduced below the modulus — so the multiplication a split saves never
 /// becomes dear relative to the additions it adds. And each recombination
 /// addition is a *modular* one, a compare and a conditional subtraction
@@ -122,18 +110,7 @@ const POLY_KARATSUBA_THRESHOLD_MODP: usize = 128;
 /// profitable for the modular split, so the balance clause lifts.
 ///
 /// 192, from the table on [`POLY_KARATSUBA_THRESHOLD_MODP`]: +12%
-/// balanced, +7% at 5:4, +9% at 3:2 and +4% at `(2s−1):s`, with all twenty
-/// passes of the two marginal cells positive across two runs. An earlier
-/// revision set this to 512 — a size at which the clause had been
-/// *measured* rather than the size at which it turns — and so refused
-/// splits that measure +23% and +24% at 384.
-///
-/// End to end against that revision, `PolyMod::mul` gains 1.31× at 384×576
-/// and 1.26× at 384×767, 1.15× and 1.12× at 256, and 1.08× at 192×288;
-/// 192×383 is the marginal cell and does not move outside noise, which is
-/// what a threshold placed exactly at the turn should look like. Shapes
-/// already admitted at 512 and above are unchanged. Medians of six and
-/// seven runs.
+/// balanced, +7% at 5:4, +9% at 3:2 and +4% at `(2s−1):s`.
 const POLY_KARATSUBA_ANY_RATIO_MODP: usize = 192;
 
 /// Whether an operand shape admits the Karatsuba split, given the size
@@ -149,7 +126,8 @@ const POLY_KARATSUBA_ANY_RATIO_MODP: usize = 192;
 /// refuses shapes measured 20% and more ahead.
 ///
 /// The 5:4 cut-off in the balance clause is where the ratio columns turn:
-/// 5:4 is positive from the size threshold in both rings, 3:2 is not.
+/// 5:4 is positive from the size threshold in both rings, 3:2 is not in
+/// the modular one.
 fn poly_split_admitted(short: usize, long: usize, threshold: usize, any_ratio: usize) -> bool {
     if short < threshold {
         return false;
@@ -167,8 +145,7 @@ fn poly_split_admitted(short: usize, long: usize, threshold: usize, any_ratio: u
 /// +17%/+17% at 384, +23%/+23% at 512, +33%/+32% at 768. The turn is at
 /// 192 — above the product's balanced crossover of 128, not below it,
 /// because a square already saves the cross terms and so leaves the split
-/// less to win. An earlier revision borrowed the product's constant on the
-/// assumption the two curves matched.
+/// less to win.
 const POLY_SQUARE_SPLIT_THRESHOLD_MODP: usize = 192;
 
 /// Coefficient multiplications the Karatsuba split would perform on
@@ -259,42 +236,6 @@ fn karatsuba_square_products_estimate(len: usize, threshold: usize) -> usize {
         ))
 }
 
-/// Whether the operands are dense enough for the split to be worth taking.
-///
-/// The schoolbook convolution skips a zero coefficient's whole inner pass
-/// and puts the sparser operand outside, so its real cost is
-/// `nnz(sparser) · len(denser)` coefficient products, not `len · len`. The
-/// split destroys that saving: `a₀ + a₁` is dense even when `a` is not, so
-/// every recursive sub-convolution pays full freight. Dispatching on
-/// length alone made `(x^{n−1} + 1) · dense` **eight times slower** than
-/// the schoolbook path it replaced at 1024 coefficients, and half as fast
-/// at 64.
-///
-/// So the two counts are compared directly, against
-/// [`karatsuba_products_estimate`]. The density a shape must reach is that
-/// count over `len · len`, which *trends down as the operands grow*
-/// because the split's exponent is the better one: three quarters at 96
-/// coefficients, about three eighths at 512, under a quarter at 2048. A
-/// fixed cut cannot express that, and the fixed three-quarters cut this
-/// replaces — correct only at the crossover, where the two agree exactly —
-/// put a 2.2× cliff at 75% density on 2048-coefficient operands, so that
-/// reducing an operand's non-zero count by a quarter *doubled* the time it
-/// took.
-///
-/// The estimate is floored at the dense schoolbook count so that a fully
-/// dense pair is never refused on density grounds; whether it should split
-/// at all is the length and ratio gate's question, not this one's. With the
-/// counted estimate the floor almost never binds — with the closed form it
-/// bound over a band of thousands of admitted shapes and cost 1.18× for a
-/// single zero coefficient, which is how the closed form was caught.
-///
-/// Measured against the fixed cut, `PolyZ::mul` on 2048-coefficient
-/// operands gains 2.12× at 74% density, 1.72× at 60% and 1.27× at 76%;
-/// `PolyMod::mul` gains 1.40× at 74% on 1024. Densities on the far side
-/// of the old cut in either direction — 80% and above, 30% and below, and
-/// the two-term sparse shapes the fixed cut was introduced to protect —
-/// are unchanged to within a point, so nothing was traded for it. Medians
-/// of six and seven runs.
 /// Whether a *square* is dense enough for the split to be worth taking.
 ///
 /// The same argument as [`poly_split_dense_enough`], with the square's own
@@ -307,10 +248,10 @@ fn karatsuba_square_products_estimate(len: usize, threshold: usize) -> usize {
 /// [`PolyMod::mod_pow`] does at every step and the ladder's early values
 /// are the sparsest there are — `x`, `x²`, `x⁴` — staying sparse until
 /// reduction densifies them. Splitting a two-term value of 1024
-/// coefficients measured 13× slower than the schoolbook square it
-/// replaced, 10× at 512, 9× at 384 and 3× at 192: the split's
-/// recombination is linear per node and there are `3^d` nodes, so it pays
-/// `O(n^{lg 3})` for an answer schoolbook reaches in `O(nnz²)`.
+/// coefficients is 13× slower than the schoolbook square, 10× at 512, 9×
+/// at 384 and 3× at 192: the split's recombination is linear per node and
+/// there are `3^d` nodes, so it pays `O(n^{lg 3})` for an answer schoolbook
+/// reaches in `O(nnz²)`.
 fn poly_square_split_dense_enough(nonzero: usize, len: usize) -> bool {
     let schoolbook = nonzero.saturating_mul(nonzero);
     let dense = len.saturating_mul(len);
@@ -318,6 +259,27 @@ fn poly_square_split_dense_enough(nonzero: usize, len: usize) -> bool {
         >= karatsuba_square_products_estimate(len, POLY_SQUARE_SPLIT_THRESHOLD_MODP).min(dense)
 }
 
+/// Whether the operands are dense enough for the split to be worth taking.
+///
+/// The schoolbook convolution skips a zero coefficient's whole inner pass
+/// and puts the sparser operand outside, so its real cost is
+/// `nnz(sparser) · len(denser)` coefficient products, not `len · len`. The
+/// split destroys that saving: `a₀ + a₁` is dense even when `a` is not, so
+/// every recursive sub-convolution pays full freight. Split on length
+/// alone, `(x^{n−1} + 1) · dense` is eight times slower than schoolbook at
+/// 1024 coefficients.
+///
+/// So the two counts are compared directly, against
+/// [`karatsuba_products_estimate`]. The density a shape must reach is that
+/// count over `len · len`, which *trends down as the operands grow*
+/// because the split's exponent is the better one: three quarters at 96
+/// coefficients, about two fifths at 512, under a quarter at 2048. A fixed
+/// cut cannot express that: a three-quarters cut puts a 2.2× cliff at 75%
+/// density on 2048-coefficient operands.
+///
+/// The estimate is floored at the dense schoolbook count so that a fully
+/// dense pair is never refused on density grounds; whether it should split
+/// at all is the length and ratio gate's question, not this one's.
 fn poly_split_dense_enough(
     a_nonzero: usize,
     a_len: usize,
@@ -347,28 +309,18 @@ fn poly_split_dense_enough(
 /// Neither is bounded by the degree, so neither is bounded by anything the
 /// caller can see from the polynomial alone.
 ///
-/// The cap is on the count, which is what actually has to fit in memory,
-/// not on the prime. An earlier revision guarded only `p ≥ 2⁶⁴`, on the
-/// reasoning that a larger prime "has more lifts than can be listed"; that
-/// left every prime between `2³²` and `2⁶⁴` to exhaust memory silently
-/// while claiming in its documentation to have refused them. The consumer
-/// this routine was written for caps its own lift at 4096 for the same
-/// reason, and drops the tail; here the caller is told instead, because a
+/// The cap is on the count, which is what has to fit in memory, not on
+/// the prime. Passing it panics rather than truncating, because a
 /// root-finder that silently returns some of the roots is worse than one
 /// that refuses.
 pub const MAX_ENUMERATED_ROOTS: usize = 1 << 20;
 
 /// Panics unless a level of `current` candidates can absorb `adding` more
-/// without passing [`MAX_ENUMERATED_ROOTS`].
+/// without passing `limit` (in use, [`MAX_ENUMERATED_ROOTS`]).
 ///
-/// Both push paths go through this, which is the point. An earlier
-/// revision guarded only the branching push, and so enforced
-/// `|next| ≤ MAX_ENUMERATED_ROOTS + |level|` rather than the bound it documented
-/// — a level of one branching root followed by simple ones overran the cap
-/// by one per simple root, and since `|level|` obeys only the same
-/// recurrence the real ceiling was twice the stated one. The check is a
-/// function rather than two `assert!`s so that it can be tested at small
-/// widths, `MAX_ENUMERATED_ROOTS` being far too large to reach in a test.
+/// Every push of a candidate goes through this. It is a function with a
+/// `limit` parameter so that it can be tested at small widths,
+/// `MAX_ENUMERATED_ROOTS` being far too large to reach in a test.
 fn check_root_level_width(current: usize, adding: u64, limit: usize) {
     let total = (current as u64).checked_add(adding);
     assert!(
@@ -463,8 +415,8 @@ pub struct ApproximateRoot {
     /// where the polynomial is not.
     ///
     /// It is an estimate and not a bound. What counts as accurate enough
-    /// depends on what the roots are for, so this function reports the
-    /// quantity and refuses no root for being large.
+    /// depends on what the roots are for, so the quantity is reported and no
+    /// root is refused for a large one.
     pub forward_error: f64,
 }
 
@@ -593,7 +545,7 @@ fn bisect_f64(coefficients: &[f64], mut low: f64, mut high: f64) -> Option<f64> 
 //
 // A `(re, im)` pair rather than a type: these are four private functions used
 // by one algorithm, and a `Complex` in the public surface would be a promise
-// to grow one. If a second caller ever appears, that is when it earns a name.
+// to grow one.
 
 fn complex_add(x: (f64, f64), y: (f64, f64)) -> (f64, f64) {
     (x.0 + y.0, x.1 + y.1)
@@ -891,18 +843,14 @@ impl PolyZ {
         }
     }
 
-    /// `self · other`, by the schoolbook coefficient convolution below
-    /// 96 coefficients (`POLY_KARATSUBA_THRESHOLD_Z`, a measured crossover
-    /// taken over operand ratios, not balanced pairs alone) and by the
-    /// Karatsuba split above it — which is additionally refused to a
-    /// sparse operand, whose zeros the schoolbook path skips and the split
-    /// does not. The result buffer is sized `deg self + deg other + 1`
-    /// because ℤ is an integral domain — the leading coefficients cannot
-    /// cancel — so the product of two non-zero polynomials has exactly that
-    /// degree, and no renormalization can be needed. That is also why the
-    /// split needs no sign care that the integer Karatsuba does: polynomial
-    /// coefficients carry no borrows between positions, so the middle term
-    /// is a plain coefficient-wise difference.
+    /// `self · other`, by the schoolbook coefficient convolution below 96
+    /// coefficients (`POLY_KARATSUBA_THRESHOLD_Z`) and by the Karatsuba
+    /// split above it, unless the operand ratio or sparsity makes the split
+    /// the slower path. ℤ is an integral domain, so the leading coefficients
+    /// cannot cancel: the product has degree `deg self + deg other` and
+    /// needs no renormalization. Polynomial coefficients carry no borrows
+    /// between positions, so the split's middle term is a plain
+    /// coefficient-wise difference.
     #[must_use]
     pub fn mul(&self, other: &Self) -> Self {
         if self.is_zero() || other.is_zero() {
@@ -1105,7 +1053,7 @@ impl PolyZ {
     /// step does not divide evenly there is no integer quotient and this
     /// returns `None` — reach for [`Self::pseudo_div_rem`], which sidesteps the
     /// obstruction by premultiplying (`ℓ·self = quotient·divisor + remainder`)
-    /// and so is always defined; it is what the resultant path uses.
+    /// and so is always defined.
     ///
     /// Deciding and dividing are one operation, not two: each step calls
     /// `BigInt::div_exact_checked`, a single Knuth Algorithm D division
@@ -1146,7 +1094,7 @@ impl PolyZ {
             // same Algorithm D call yields the coefficient.
             let q_coeff = rem[top].div_exact_checked(&lc)?;
             let shift = top - divisor_degree;
-            // modulo ← modulo − q_coeff·xˢʰⁱᶠᵗ·divisor; the leading terms cancel
+            // remainder ← remainder − q_coeff·xˢʰⁱᶠᵗ·divisor; the leading terms cancel
             // exactly because the division above was exact.
             for (k, d) in divisor.coeffs.iter().enumerate() {
                 if !d.is_zero() {
@@ -1571,9 +1519,8 @@ impl PolyZ {
     /// `y = gcd(w, g)` off `w` then leaves precisely the factors of
     /// multiplicity `k` at step `k`.
     ///
-    /// Dividing by `g` repeatedly instead does *not* work, and fails in a way
-    /// worth recording: for `(x − 2)²` it emits the root once at multiplicity
-    /// one and again at multiplicity two, for a total of three.
+    /// Dividing by `g` repeatedly instead is wrong: for `(x − 2)²` it emits
+    /// the root once at multiplicity one and again at multiplicity two.
     fn squarefree_decomposition(&self) -> Vec<(usize, Self)> {
         let f = self.primitive_part();
         if f.degree().unwrap_or(0) == 0 {
@@ -1706,8 +1653,8 @@ impl PolyZ {
     /// term by a fresh small one, so the work at step `k` is proportional to
     /// `k` and the total is quadratic in the number of factors. Pairing
     /// instead keeps both operands the same size at every level, which is the
-    /// shape [`mul`](Self::mul)'s Karatsuba and Toom kernels want, and the
-    /// depth is logarithmic.
+    /// shape [`mul`](Self::mul)'s Karatsuba split and the integer kernels
+    /// beneath it want, and the depth is logarithmic.
     ///
     /// Reducing at every level rather than once at the end is both sound and
     /// the point: reduction modulo a monic polynomial is a ring homomorphism
@@ -1723,14 +1670,14 @@ impl PolyZ {
     /// The empty product is `1`, reduced — which is the zero polynomial when
     /// `divisor` is the constant `1`, the ring having collapsed.
     ///
-    /// # Panics
-    ///
-    /// Panics if `divisor` is the zero polynomial or is not monic.
-    ///
     /// The pairs of a level are multiplied in parallel over the threads
     /// the machine reports, as many as the level has pairs to give them;
     /// the top levels, a few products of the largest operands, parallelise
     /// inside the multiplication instead, through the NTT kernels.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `divisor` is the zero polynomial or is not monic.
     #[must_use]
     pub fn product_mod_monic(factors: &[Self], divisor: &Self) -> Self {
         let mut level: Vec<Self> = factors.iter().map(|f| f.rem_monic(divisor)).collect();
@@ -1790,15 +1737,16 @@ impl PolyZ {
     /// change of variables", and the two agree when `b` is the constant `1`.
     ///
     /// The homogeneous form is the one to use whenever the argument is a
-    /// ratio: the sieve's algebraic norm `bᵈ·f(a/b)` is exactly this at
-    /// `a = a`, `b = b`, and composing a linear change of coordinates into
-    /// `f` — following a lattice, rotating a polynomial — is this at linear
-    /// `a` and `b`. It keeps everything in `ℤ[x]` with no division.
+    /// ratio: the number field sieve's algebraic norm `bᵈ·f(a/b)` is exactly
+    /// this at constant `a` and `b`, and composing a linear change of
+    /// coordinates into `f` — following a lattice, rotating a polynomial — is
+    /// this at linear `a` and `b`. It keeps everything in `ℤ[x]` with no
+    /// division.
     ///
     /// Both power ladders are built once and indexed, so a degree-`d`
-    /// substitution costs `2d` multiplications to build them and `d + 1` to
-    /// combine, not `O(d²)` repeated powering. Zero coefficients are skipped,
-    /// which is what makes a sparse `f` cheap.
+    /// substitution costs `2d` multiplications to build them and one product
+    /// per coefficient to combine, not `O(d²)` repeated powering. Zero
+    /// coefficients are skipped, which is what makes a sparse `f` cheap.
     #[must_use]
     pub fn homogeneous_substitution(&self, a: &Self, b: &Self) -> Self {
         let Some(degree) = self.degree() else {
@@ -1870,8 +1818,7 @@ impl PolyZ {
     /// refused *before* the work, since the base level has to be found before
     /// it can be counted. That bound is on the *level*, not on the
     /// prime: a branching root modulo a 40-bit prime is refused even though
-    /// the prime is far below `2⁶⁴`, which is the case an earlier revision
-    /// of this documentation got wrong.
+    /// the prime is far below `2⁶⁴`.
     ///
     /// `prime` must be prime; over a composite the result is unspecified.
     #[must_use]
@@ -1928,8 +1875,7 @@ impl PolyZ {
         let mut level = base.roots(rng);
         // The base level obeys the same bound as every level above it:
         // `roots` returns up to `min(deg f, p)` of them, and at `exponent ==
-        // 1` the lift below never runs, so without this the base level could
-        // leave as the answer unchecked.
+        // 1` it is the answer, with no lift below to check it.
         check_root_level_width(0, level.len() as u64, MAX_ENUMERATED_ROOTS);
         let mut modulus = prime.clone();
 
@@ -2131,8 +2077,8 @@ impl<'a> Reducer<'a> {
 /// The convolution `a ⋆ b` modulo `m`, returning `a.len() + b.len() - 1`
 /// coefficients — the coefficient-vector core behind [`PolyMod::mul`].
 /// Shape and split rule are [`convolve_z`]'s, at
-/// [`POLY_KARATSUBA_THRESHOLD_MODP`] (far higher, for the reasons recorded
-/// on that constant); the differences are where the modular reductions sit
+/// [`POLY_KARATSUBA_THRESHOLD_MODP`] (higher, for the reasons given on that
+/// constant); the differences are where the modular reductions sit
 /// and that the recombination steps work in the ring, so intermediates
 /// never grow beyond it.
 fn convolve_modp(a: &[BigUint], b: &[BigUint], m: &BigUint) -> Vec<BigUint> {
@@ -2180,14 +2126,13 @@ fn convolve_modp(a: &[BigUint], b: &[BigUint], m: &BigUint) -> Vec<BigUint> {
 /// This is the difference between `a.len()·b.len()` divisions and
 /// `a.len() + b.len()` of them. Reducing every partial product — the
 /// obvious transcription of the ring operation — makes `BigUint::mod_mul`'s
-/// Knuth division the inner loop of the convolution, and measurement put
-/// that at roughly 2.4× the cost of the same convolution over ℤ.
+/// Knuth division the inner loop of the convolution, at roughly 2.4× the
+/// cost of the same convolution over ℤ.
 ///
 /// The accumulator is bounded and small: every partial product is below
 /// `m²`, and an output coefficient sums at most `min(a.len(), b.len())` of
 /// them, so it stays under `min(len)·m²` — about `2·bits(m) + lg(len)` bits,
-/// two limbs' worth of headroom over the modulus at any size this layer
-/// sees.
+/// at most a limb above `m²`.
 fn convolve_schoolbook_modp(a: &[BigUint], b: &[BigUint], m: &BigUint) -> Vec<BigUint> {
     // As in the ℤ case: the sparser operand goes outside, where its zeros
     // skip whole inner passes.
@@ -2235,24 +2180,20 @@ fn convolve_schoolbook_modp(a: &[BigUint], b: &[BigUint], m: &BigUint) -> Vec<Bi
 /// term count outgrows the split's overhead and the square splits too —
 /// three sub-*squarings* rather than three sub-products, since
 /// `(a₀+a₁)² − a₀² − a₁²` is the cross term. That threshold is its own
-/// constant, half again the product's, and deliberately so: the square
-/// already saves the cross terms, so the split has less left to win and
-/// has to reach further before it does. Reading the product's crossover
-/// across to the square is the mistake the separate constant exists to
-/// prevent.
+/// constant, half again the product's: the square already saves the cross
+/// terms, so the split has less left to win and has to reach further
+/// before it does.
 ///
 /// The split is also refused to a square too sparse to pay for it, by
 /// [`poly_square_split_dense_enough`] — the same clause the product has,
-/// for the same reason, and the case where it matters most.
+/// for the same reason.
 fn convolve_square_modp(a: &[BigUint], m: &BigUint) -> Vec<BigUint> {
     let n = a.len();
     if *m == BigUint::from_u64(2) {
         // Frobenius: (Σ aᵢxⁱ)² = Σ aᵢ²x²ⁱ = Σ aᵢx²ⁱ over 𝔽₂, every
         // coefficient being its own square there. Unlike the other two
         // branches this one performs no arithmetic and so has no closing
-        // reduction: it requires its input already reduced, which every
-        // caller inside the type supplies and which the type's own
-        // invariant guarantees.
+        // reduction: it relies on the type's reduced-coefficient invariant.
         let mut acc = vec![BigUint::zero(); 2 * n - 1];
         for (i, coeff) in a.iter().enumerate() {
             acc[2 * i] = coeff.clone();
@@ -2363,8 +2304,8 @@ fn sylvester_matrix(a: &PolyZ, b: &PolyZ) -> Vec<Vec<BigInt>> {
 /// diagonal makes the matrix singular and the determinant zero.
 ///
 /// `previous` is never zero: it starts at 1 and is thereafter the pivot of
-/// the preceding step, which the exchange-or-return above guaranteed
-/// non-zero.
+/// the preceding step, which the row exchange (or the early return for a
+/// singular matrix) makes non-zero.
 ///
 /// Public beside the lattice routines as the exact determinant of a Gram
 /// matrix under an integral form — the squared covolume of a lattice's
@@ -2581,10 +2522,7 @@ impl PolyMod {
     }
 
     fn check_modulus(&self, other: &Self) {
-        // A hard assert in every build: the whole point of the type is that the
-        // modulus cannot drift out of step with the coefficients, and a
-        // debug-only check would let a release build silently combine an 𝔽ₚ
-        // element with an 𝔽_q one and tag the result with one of the two moduli.
+        // A hard assert in every build; see the type documentation.
         assert_eq!(
             self.modulus, other.modulus,
             "PolyMod operands must share a modulus"
@@ -2635,8 +2573,8 @@ impl PolyMod {
     /// `self · other` (mod m) by the coefficient convolution — schoolbook
     /// below 128 coefficients (`POLY_KARATSUBA_THRESHOLD_MODP`), Karatsuba
     /// above it for shapes the measured admission rule accepts — near
-    /// balance up to 512 coefficients, any ratio above that, and dense
-    /// operands throughout. The threshold is higher than the ℤ one because
+    /// balance below 192 coefficients (`POLY_KARATSUBA_ANY_RATIO_MODP`), any
+    /// ratio from there, and operands dense enough throughout. The threshold is higher than the ℤ one because
     /// the coefficients here stay bounded by the modulus rather than
     /// growing, so a saved multiplication never becomes dear relative to
     /// the modular additions a split adds; both constants carry their
@@ -2836,9 +2774,8 @@ impl PolyMod {
             want_quotient.then(|| vec![BigUint::zero(); self_degree - divisor_degree + 1]);
         let mut top = self_degree;
         loop {
-            // Reduce the leading position: cheap when it is already reduced
-            // (`div_rem` short-circuits below the divisor), and this is
-            // simultaneously the cancellation test, since the step below
+            // Reduce the leading position: cheap when it is already reduced,
+            // and simultaneously the cancellation test, since the step below
             // leaves a multiple of `m` behind rather than a literal zero.
             rem[top] = reducer.reduce(&rem[top]);
             if rem[top].is_zero() {
@@ -2856,22 +2793,19 @@ impl PolyMod {
                 Some(inv) => BigUint::mod_mul(&rem[top], inv, &self.modulus),
                 None => rem[top].clone(),
             };
-            // modulo ← modulo − factor·xˢʰⁱᶠᵗ·divisor over the window, carried as
-            // the congruent addition described above.
+            // remainder ← remainder − factor·xˢʰⁱᶠᵗ·divisor over the window,
+            // carried as the congruent addition described above.
             for (k, d) in divisor.coeffs.iter().enumerate() {
                 if !d.is_zero() {
                     let offset = modulus_squared.sub(&factor.mul(d));
                     rem[shift + k].add_assign_ref(&offset);
                 }
             }
-            // The step must have cancelled the leading position — that is
-            // what the choice of `factor` is for — leaving a multiple of
-            // the modulus rather than a literal zero, since the window
-            // added `m² − factor·d` instead of subtracting. Without this
-            // check a failure would not raise: the loop would take a second
-            // step at the same `top`, and so at the same `shift`, and
-            // *overwrite* the quotient coefficient it had already written,
-            // then terminate normally with a silently wrong quotient.
+            // The step must have cancelled the leading position, leaving a
+            // multiple of the modulus rather than a literal zero. A failure
+            // would otherwise go unnoticed: the loop would step again at the
+            // same `shift` and overwrite the quotient coefficient already
+            // written.
             debug_assert!(
                 rem[top].rem(&self.modulus).is_zero(),
                 "the leading term cancels by construction"
@@ -2920,15 +2854,16 @@ impl PolyMod {
     }
 
     /// `self^exponent mod modulus_poly` by left-to-right binary
-    /// exponentiation — the primitive behind distinct-degree
-    /// factorization's `x^(p^d)`.
+    /// exponentiation — the primitive behind the Frobenius powers of
+    /// distinct-degree factorization and root finding, and the
+    /// `(pᵈ − 1)/2` power of the equal-degree split.
     ///
     /// Scanning the exponent from its top bit down, each step squares the
     /// accumulator and multiplies in the base when the bit is set, reducing
     /// modulo `modulus_poly` after every product. Reducing at every step,
     /// rather than at the end, is what keeps the degree bounded by
-    /// `deg modulus_poly`: the exponent is `p^d` in the factorization
-    /// routines, so the unreduced power is not representable.
+    /// `deg modulus_poly`: with exponents like `p` or `(pᵈ − 1)/2` the
+    /// unreduced power is not representable.
     ///
     /// # Panics
     ///
@@ -3272,7 +3207,7 @@ impl PolyMod {
         let mut factors = vec![self.make_monic()];
         let two = BigUint::from_u64(2);
         // Cantor–Zassenhaus is Las Vegas: each draw splits a given pair of
-        // factors with probability ≥ 1/2, so the loop finishes quickly for any
+        // factors with probability about 1/2, so the loop finishes quickly for any
         // RandomSource that produces entropy. Bound the consecutive draws that make no
         // progress so a dead or all-zero RandomSource fails loudly instead of spinning
         // forever — 256 fruitless draws has probability ≈ 2⁻²⁵⁶ for a working
@@ -3616,9 +3551,7 @@ impl PolyMod {
         // elements x, x + 1, x + 2, …. Not the constants: for even `d` the
         // field contains 𝔽_{q²}, in which every element of 𝔽_q is a square,
         // so no constant can serve — and even `d` is the case this routine
-        // exists for. (A first draft tried 256 constants first and paid 256
-        // full exponentiations for nothing at every even-degree call.) A
-        // linear element is a non-residue about half the time in every
+        // exists for. A linear element is a non-residue about half the time in every
         // degree, so this stops almost at once; the bound keeps a
         // pathological or mis-supplied field from looping forever.
         const NON_RESIDUE_TRIES: u64 = 512;
@@ -3740,7 +3673,7 @@ mod tests {
 
     #[test]
     fn karatsuba_convolution_matches_schoolbook_across_shapes() {
-        // The split kernel against the quadratic one it replaces, at the
+        // The split kernel against the schoolbook one, at the
         // shapes where a split rule can go wrong: exactly at the threshold,
         // one on either side of it, lopsided pairs (where the shorter
         // operand may not reach across the split point), odd lengths that
@@ -3776,11 +3709,10 @@ mod tests {
                 );
 
                 // The modular split logic gets the same shape sweep, forced
-                // one level at a time: its own dispatch threshold is an
-                // order of magnitude higher (a measured property of the
-                // ring, not of the algebra), so waiting for dispatch would
-                // leave the split rule untested at every shape that can
-                // break it.
+                // one level at a time: its own dispatch threshold is higher
+                // (a measured property of the ring, not of the algebra), so
+                // waiting for dispatch would leave the split rule untested
+                // at the shapes below it.
                 let am: Vec<BigUint> = (0..la)
                     .map(|_| BigUint::from_u64(rng.next_u64() % 97))
                     .collect();
@@ -3796,10 +3728,10 @@ mod tests {
         }
 
         // And the real modular dispatch at its own threshold, where the
-        // recursion actually engages: three shapes only, because these are
+        // recursion actually engages: four shapes only, because these are
         // genuinely large convolutions.
         let tm = POLY_KARATSUBA_THRESHOLD_MODP;
-        // The balance guard admits up to 3:2 and rejects beyond it; a
+        // The balance guard admits up to 5:4 and rejects beyond it; a
         // rejected shape still has to compute the right answer, so both
         // sides of the guard appear here.
         let any = super::POLY_KARATSUBA_ANY_RATIO_MODP;
@@ -3827,8 +3759,8 @@ mod tests {
 
     #[test]
     fn squaring_convolution_matches_the_general_one() {
-        // The dedicated squaring against the general convolution it
-        // replaces, including the shapes where the doubling could go wrong:
+        // The dedicated squaring against the general convolution,
+        // including the shapes where the doubling could go wrong:
         // a single coefficient (no cross terms at all), two (one cross
         // term), interior zeros (whose inner passes are skipped), and a
         // modulus of 2, where doubling annihilates every cross term and the
@@ -3878,11 +3810,9 @@ mod tests {
         use std::hint::black_box;
         use std::time::{Duration, Instant};
 
-        // Repetitions are calibrated, not guessed: an earlier revision of
-        // this probe fixed a floor of four repetitions, which at 384
-        // coefficients meant four samples of a millisecond-scale operation
-        // and put the modular crossover four times too high. Each chunk is
-        // now sized to a target duration from a measured single run.
+        // Repetitions are calibrated, not guessed: each chunk is sized to a
+        // target duration from a measured single run, since a fixed small
+        // count takes too few samples of a millisecond-scale operation.
         fn calibrate(target: Duration, f: &mut dyn FnMut()) -> u32 {
             let t = Instant::now();
             f();
@@ -4069,9 +3999,6 @@ mod tests {
         out
     }
 
-    /// One forced Karatsuba level regardless of the threshold, so the probe
-    /// above compares the two kernels at sizes where dispatch would not
-    /// normally choose the split.
     #[cfg(test)]
     #[test]
     fn split_gates_never_change_the_answer() {
@@ -4108,8 +4035,8 @@ mod tests {
             300,
             513,
         ];
-        // Densities as percentages, straddling the retired fixed 3/4 cut
-        // and the computed cut at each size.
+        // Densities as percentages, straddling 3/4 and the computed cut at
+        // each size.
         let densities = [100usize, 80, 76, 75, 74, 50, 34, 32, 24, 10, 2];
         let moduli = [
             BigUint::from_u64(2),
@@ -4206,14 +4133,9 @@ mod tests {
         // measurement, recorded in the tables on the constants themselves,
         // and a threshold can drift to a wrong value without changing a
         // single computed answer — so nothing else in the suite can notice.
-        // Four of them have already been wrong once each. Changing one here
-        // is meant to be work: re-run `poly_karatsuba_crossover_timing`
-        // with `--ignored`, update the table it feeds, then update this.
-        //
-        // An earlier version of this test asserted only that
-        // `poly_split_admitted` was self-consistent, threading each constant
-        // in as both the shape and the parameter. That is a tautology in the
-        // constant and caught none of the four.
+        // Changing one here is meant to be work: re-run
+        // `poly_karatsuba_crossover_timing` with `--ignored`, update the
+        // table it feeds, then update this.
         assert_eq!(POLY_KARATSUBA_THRESHOLD_Z, 96);
         assert_eq!(super::POLY_KARATSUBA_ANY_RATIO_Z, 128);
         assert_eq!(POLY_KARATSUBA_THRESHOLD_MODP, 128);
@@ -4231,8 +4153,7 @@ mod tests {
         };
 
         // Balance clause: 5:4 admitted at the size threshold, 3:2 and 2:1
-        // not, in both rings — the measured shape of both tables. Written
-        // against literal shapes so the assertions are not tautologies in
+        // not, in both rings. Written against literal shapes so the assertions are not tautologies in
         // the constants they exercise.
         assert!(poly_split_admitted(96, 96, TZ, AZ));
         assert!(poly_split_admitted(96, 120, TZ, AZ));
@@ -4261,7 +4182,7 @@ mod tests {
         assert_eq!(karatsuba_products_estimate(50, 50, TZ, AZ), 2_500);
 
         // The density a shape must reach trends *down* with size — the
-        // property the retired fixed cut could not express. It is not
+        // property a fixed cut cannot express. It is not
         // monotone, and must not be asserted to be: where the halvings
         // land decides whether one more level of splitting is taken, so
         // neighbouring lengths genuinely differ. The trend is the claim,
@@ -4282,10 +4203,9 @@ mod tests {
         }
         assert!(required(2048) < 0.25, "2048 must ask far less than 3/4");
 
-        // The dense floor must almost never bind. It bound over thousands
-        // of admitted shapes when the estimate was a closed form, which
-        // cost 18% for a single zero coefficient at 128x255; with the
-        // counted recursion that shape asks for three quarters.
+        // The dense floor must almost never bind: where it binds, a single
+        // zero coefficient sends an admitted shape to schoolbook. With the
+        // counted recursion 128x255 asks for three quarters.
         let pinned: Vec<(usize, usize)> = (TZ..=260)
             .flat_map(|short| (short..=2 * short - 1).map(move |long| (short, long)))
             .filter(|&(short, long)| poly_split_admitted(short, long, TZ, AZ))
@@ -4310,8 +4230,8 @@ mod tests {
             assert!(poly_split_dense_enough(n, n, 2 * n, 2 * n, TZ, AZ));
             assert!(poly_square_split_dense_enough(n, n));
         }
-        // A two-term operand is refused at every size — the regression the
-        // density clause exists to prevent, for products and for squares.
+        // A two-term operand is refused at every size — the case the
+        // density clause exists for, for products and for squares.
         for &n in &[64usize, 96, 128, 1024, 2048] {
             assert!(!poly_split_dense_enough(2, n, n, n, TZ, AZ));
         }
@@ -4321,7 +4241,7 @@ mod tests {
                 "a two-term square must not split at {n}"
             );
         }
-        // And the band that the fixed cut cut in half is now admitted.
+        // Moderately sparse operands at large sizes still split.
         for &(n, pct) in &[(1024usize, 40usize), (2048, 30), (2048, 74), (1024, 74)] {
             let nnz = n * pct / 100;
             assert!(
@@ -4362,10 +4282,7 @@ mod tests {
     #[test]
     fn root_level_width_guard_covers_both_push_paths() {
         // `MAX_ENUMERATED_ROOTS` is far too large to reach in a test, so the
-        // check itself is tested at small widths. Both push paths call it —
-        // an earlier revision guarded only the branching one, which let a
-        // level of one branching root followed by simple ones overrun the
-        // cap by one per simple root.
+        // check itself is tested at small widths. Both push paths call it.
         use super::check_root_level_width;
         check_root_level_width(0, 16, 16);
         check_root_level_width(15, 1, 16);
@@ -4411,9 +4328,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "widen past")]
     fn roots_mod_prime_power_refuses_a_branch_too_wide_to_list() {
-        // A 40-bit prime is far below 2⁶⁴, which is what an earlier
-        // revision guarded on; x² branches at every level, so the second
-        // level would hold p candidates.
+        // The cap is on the level, not the prime: a 40-bit prime is far
+        // below 2⁶⁴, but x² branches at every level, so the second level
+        // would hold p candidates.
         let mut rng = SplitMix64 { state: 7 };
         let _ = PolyZ::from_i64_slice(&[0, 0, 1]).roots_mod_prime_power(
             &BigUint::from_u64(1_099_511_627_791),
@@ -4425,13 +4342,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "widen past")]
     fn roots_mod_prime_power_guards_the_simple_lift_path_too() {
-        // The scenario that showed the guard was in the wrong place: one
-        // branching root widens the level to just under the cap — passing
-        // its own check, which is made while the level is still short — and
-        // the simple roots after it each add one more. With the check on
-        // the branching push alone the level ran past `MAX_ENUMERATED_ROOTS` by
-        // one per simple root, so the enforced bound was twice the
-        // documented one.
+        // One branching root widens the level to just under the cap —
+        // passing its own check, which is made while the level is still
+        // short — and the simple roots after it each add one more, so the
+        // simple-lift push must be checked too.
         //
         // p = 1048573 is the largest prime below 2²⁰ = MAX_ENUMERATED_ROOTS, so
         // the double root at 0 branches to within three of the cap and the
@@ -4477,6 +4391,9 @@ mod tests {
             PolyZ::from_i64_slice(&[1, 0, 1]).roots_mod_prime_power(&BigUint::one(), 2, &mut rng);
     }
 
+    /// One forced Karatsuba level regardless of the threshold, so the tests
+    /// and the timing probe can compare the kernels at sizes where dispatch
+    /// would not choose the split.
     fn karatsuba_forced_z(a: &[BigInt], b: &[BigInt]) -> Vec<BigInt> {
         let split = a.len().max(b.len()) / 2;
         if a.len() <= split || b.len() <= split || split == 0 {
@@ -5131,7 +5048,7 @@ mod tests {
     #[should_panic(expected = "share a modulus")]
     fn poly_mod_p_rejects_mixed_moduli() {
         // Combining an 𝔽₅ element with an 𝔽₇ one must panic in every build, not
-        // silently emit a value tagged with one modulus (review §2.1).
+        // silently emit a value tagged with one modulus.
         let a = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[2]), &BigUint::from_u64(5));
         let b = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[3]), &BigUint::from_u64(7));
         let _ = a.add(&b);
@@ -5140,10 +5057,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "made no progress")]
     fn factor_with_dead_rng_panics_rather_than_hangs() {
-        // An RandomSource that never yields entropy cannot drive the equal-degree split;
+        // A RandomSource that never yields entropy cannot drive the equal-degree split;
         // it must panic after a bounded number of fruitless draws, not loop
-        // forever (review §2.4 / §5.4). x² − 1 = (x−1)(x+1) mod 7 leaves a
-        // degree-1 block of two factors, so the split is actually entered.
+        // forever. x² − 1 = (x−1)(x+1) mod 7 leaves a degree-1 block of two
+        // factors, so the split is actually entered.
         struct ZeroRng;
         impl crate::random_impl::RandomSource for ZeroRng {
             fn fill_bytes(&mut self, dest: &mut [u8]) {
@@ -5317,8 +5234,9 @@ mod tests {
         // x⁴ + 1 is irreducible over ℤ but reducible modulo every prime: the
         // classic case where `false` is a refusal, not a verdict.
         assert!(!PolyZ::from_i64_slice(&[1, 0, 0, 0, 1]).certified_irreducible_below(200));
-        // A non-monic quartic: 2340x⁴ + 79192896x³ + … is CADO-NFS's c70
-        // polynomial, irreducible, and its leading coefficient vanishes
+        // A non-monic quartic: 2340x⁴ + 79192896x³ + … is a number field
+        // sieve polynomial from CADO-NFS, irreducible, and its leading
+        // coefficient vanishes
         // modulo 2, 3, 5 and 13 — those primes must not certify it, and
         // another prime must.
         let cado = PolyZ::new(vec![
@@ -5565,10 +5483,7 @@ mod tests {
                     // scaling by `p` alone only ever reaches valuation one,
                     // and the deep-stripping path where `pᵛ` is a real power
                     // and the expansion actually multiplies the root count
-                    // is the part worth exercising. This is the family an
-                    // earlier revision refused outright, with a panic
-                    // message asserting — falsely — that every residue was
-                    // a root.
+                    // is the part worth exercising.
                     _ => {
                         let power = 1 + (rng.next_u64() as u32 % e.max(1));
                         g.scale(&BigInt::from_biguint(prime.pow_u64(u64::from(power))))
@@ -5701,7 +5616,7 @@ mod tests {
 
     #[test]
     fn the_pieces_compose_into_a_newton_square_root_in_a_quotient_ring() {
-        // What the downstream use actually needs: recover β from δ = β² in
+        // The pieces composed: recover β from δ = β² in
         // ℤ[x]/(f) by lifting a square root out of 𝔽_q[x]/(f) with the
         // modulus squaring each round, then reading the answer back over ℤ.
         // `change_modulus` seeds each round, `rem_monic` keeps the degree down
@@ -6001,7 +5916,7 @@ mod real_root_tests {
         assert_eq!(f.real_roots(), Ok(Vec::new()));
     }
 
-    /// The two outcomes the downstream version conflated in one empty vector.
+    /// Both refusals are errors, distinguishable from an empty answer.
     #[test]
     fn the_two_refusals_are_distinguishable_from_an_empty_answer() {
         assert_eq!(
@@ -6078,11 +5993,11 @@ mod field_sqrt_tests {
 
     #[test]
     fn even_degree_fields_are_the_case_the_shortcut_cannot_serve() {
-        // x^4 + 1 is irreducible over 𝔽_q for q ≡ 3 (mod 4); the field has
-        // order q^4 ≡ 1 (mod 4), so the (q^d+1)/4 exponent is unavailable
-        // and Tonelli–Shanks is the only route. Every square must come back.
-        // Quartics verified irreducible over each prime by search, so the
-        // test pins real fields rather than assumed ones.
+        // Each quartic x^4 + c2·x^2 + c1·x + c0 is irreducible over its
+        // prime, asserted below, so the test pins real fields rather than
+        // assumed ones. The field has order q^4 ≡ 1 (mod 4), so the
+        // (q^d+1)/4 exponent is unavailable and Tonelli–Shanks is the only
+        // route. Every square must come back.
         for &(prime, c0, c1, c2) in &[
             (7u64, 1i64, 1i64, 0i64),
             (11, 1, 1, 7),
@@ -6155,8 +6070,7 @@ mod field_sqrt_tests {
 
     #[test]
     fn odd_degree_agrees_with_the_exponent_shortcut() {
-        // Where both routes exist they must agree up to sign, since the
-        // odd-degree path is what production has always used.
+        // Where both routes exist they must agree up to sign.
         let prime = 23u64;
         let (modulus_poly, q) = field(&[1, 3, 0, 1], prime); // cubic, verified
         assert!(modulus_poly.is_irreducible());

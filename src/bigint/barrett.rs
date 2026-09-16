@@ -5,23 +5,19 @@
 //! here follows HAC Algorithm 14.42 with Note 14.44's bound of two on the
 //! corrections.
 //!
-//! Separate from `montgomery` because the preconditions differ: Montgomery
-//! requires an odd modulus, Barrett takes either parity, which is the reason
-//! this context exists at all.
+//! Montgomery requires an odd modulus; Barrett takes either parity, which is
+//! why this context exists.
 //!
-//! The test module lives in the parent, which is why the threshold constant
-//! and `last_corrections` are visible there.
+//! The tests live in the parent module, so the threshold constant and
+//! `last_corrections` are visible there.
 
 use super::{bit_span, BigUint, ModulusError};
 
-// Modulus width up to which Barrett's second multiplication is taken as a
-// schoolbook half-product rather than a dispatched full product. The half
-// costs `k²/2` limb products against the ladder's `O(k^{1.585})`, so it
-// wins while `k` is small and loses once the better exponent tells:
-// measured on M4, `reduce` is 1.44× ahead at 2 kbit (32 limbs) and 1.33× at
-// 8 kbit (128 limbs), at parity near 32 kbit (512 limbs), and behind by
-// 1.19× at 64 kbit and 1.32× at 128 kbit. The handoff sits at the measured
-// parity point.
+// Modulus width up to which Barrett's second multiplication is a schoolbook
+// half-product rather than a dispatched full product. The half costs `k²/2`
+// limb products against the ladder's `O(k^{1.585})`: measured on M4,
+// `reduce` is 1.44× ahead at 2 kbit and 1.33× at 8 kbit, at parity near
+// 32 kbit (512 limbs), and 1.19× behind at 64 kbit.
 pub(super) const BARRETT_HALF_PRODUCT_MAX_LIMBS: usize = 512;
 
 /// Barrett reduction context for a fixed modulus of either parity — the
@@ -36,18 +32,17 @@ pub(super) const BARRETT_HALF_PRODUCT_MAX_LIMBS: usize = 512;
 /// most two (HAC Note 14.44), so at most two corrective subtractions
 /// follow.
 ///
-/// The products here are computed in full where the algorithm needs only
-/// a high and a low half. The second of the two products needs only its
-/// low `k+1` limbs, and forms only those — the half-product of HAC Note
-/// 14.45(ii), exact rather than approximate, since a partial product at or
-/// above the window cannot influence a limb below it.
+/// The second product needs only its low `k+1` limbs and forms only those:
+/// the half-product of HAC Note 14.45(ii), exact because a partial product
+/// at or above the window cannot influence a limb below it. The half-product
+/// is quadratic, so it is used only up to `BARRETT_HALF_PRODUCT_MAX_LIMBS`
+/// (32 kbit); above that the window is taken from the dispatched full
+/// product. The first product's high half is always formed in full; refining
+/// it (HAC Note 14.45(i)) would widen the correction bound.
 ///
-/// Measured on M4 against a plain division of the same operands, twelve
-/// random modulus/dividend pairs per width, each timed nine times with the
-/// order alternated, three runs. A figure is quoted only where every
-/// sampled pair falls on the same side of parity; where the distribution
-/// straddles 1.0 the width is named as parity and left without one, since
-/// a headline number there is a report of which draw was taken:
+/// Speed against a plain division of the same operands, measured on M4 over
+/// twelve random modulus/dividend pairs per width. A ratio is given only
+/// where every pair falls on the same side of parity:
 ///
 /// ```text
 ///   512 bits   1.4×      12/12 pairs ahead
@@ -58,32 +53,9 @@ pub(super) const BARRETT_HALF_PRODUCT_MAX_LIMBS: usize = 512;
 ///   256 bits   parity    per-pair medians 0.96–1.32, a fifth behind
 /// ```
 ///
-/// Those intervals are the spread *observed*, not a bound on it. A sample
-/// minimum and maximum over `n` runs is exceeded by run `n + 1` with
-/// probability about `2/n`, so quoting one as though it were a bound is
-/// the same error as quoting a median as though it were the answer, one
-/// level down. What the table is for is the classification in its second
-/// column; the intervals are there to show how close the parity rows are
-/// to their neighbours, not to bound anything.
-///
-/// Before the half-product, `reduce` *trailed* a division by up to a third
-/// at 2–4 kbit, so parity there is the gain. The series is not monotone —
-/// the win is large at 512, erodes through 2–4 kbit, and returns at 8192 —
-/// because the division it is measured against has its own crossovers.
-///
-/// This comment has been wrong three times in the same way: 0.96× at 256
-/// bits, then 1.23× at 256 bits, then 1.03× and 1.01× at 2048 and 4096.
-/// Each was a true reading of an under-sampled draw from a distribution
-/// sitting on 1.0. The rule above is the fix; quoting a fourth number
-/// would not be.
-/// The half-product is itself quadratic, so it is taken only up to
-/// `BARRETT_HALF_PRODUCT_MAX_LIMBS` (32 kbit, the measured parity point);
-/// above that the dispatched full product's better exponent wins and the
-/// window is taken from it. The first product's high half is always formed
-/// in full; refining it (HAC Note 14.45(i)) trades exactness for a wider
-/// correction bound and is not taken here. The context's other value is the capability: a
-/// fixed-modulus context on *even* moduli, where Montgomery cannot
-/// operate.
+/// The intervals are the observed spread, not a bound. The series is not
+/// monotone because the division it is measured against has its own
+/// crossovers.
 ///
 /// Like the rest of the crate, variable-time.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -103,11 +75,12 @@ impl BarrettContext {
     /// Build the context. The single division here computes
     /// `μ = ⌊b^{2k}/n⌋` for `b = 2⁶⁴` and `k` the modulus's limb count; every
     /// later [`Self::reduce`] spends two multiplications and at most two
-    /// subtractions instead of a division, which is the whole point of the
-    /// precomputation.
+    /// subtractions instead of a division.
     ///
-    /// `None` for a modulus below 2: zero has no residues, and modulo one
-    /// every residue is zero — neither needs a context.
+    /// # Errors
+    ///
+    /// [`ModulusError::Zero`] or [`ModulusError::One`] for a modulus below 2:
+    /// zero has no residues, and modulo one every residue is zero.
     pub fn new(modulus: &BigUint) -> Result<Self, ModulusError> {
         if modulus.is_zero() {
             return Err(ModulusError::Zero);
@@ -156,13 +129,8 @@ impl BarrettContext {
         // Only the low k+1 limbs of q̂·n survive the window, so only those
         // are formed (HAC Note 14.45(ii)); the half-product is exact.
         //
-        // It is also schoolbook, and therefore quadratic, where the full
-        // product would dispatch to Karatsuba and Toom. Half of `k²` beats
-        // `k^{1.585}` only up to a point: measured, `reduce` gains 1.44× at
-        // 2 kbit and 1.33× at 8 kbit, reaches parity near 32 kbit, and
-        // *loses* 1.19× at 64 kbit and 1.32× at 128 kbit. Past
-        // `BARRETT_HALF_PRODUCT_MAX_LIMBS` the full product's better
-        // exponent wins and the window is taken from it instead.
+        // It is schoolbook, so past `BARRETT_HALF_PRODUCT_MAX_LIMBS` the
+        // dispatched full product is faster and the window is taken from it.
         let qn_low = if k <= BARRETT_HALF_PRODUCT_MAX_LIMBS {
             BigUint::mul_low_ref(&q, &self.modulus, k + 1)
         } else {
@@ -193,11 +161,7 @@ impl BarrettContext {
     ///
     /// Two corrections happen about once in five hundred reductions and
     /// only on particular modulus shapes, so a test that does not look at
-    /// the count cannot tell whether it ever reached the bound — and an
-    /// earlier measurement, taken with a counter that tracked a running
-    /// maximum rather than the per-call value, concluded wrongly that two
-    /// was unreachable. The count is observable so that conclusion can be
-    /// checked rather than assumed.
+    /// the count cannot tell whether the bound is ever reached.
     #[cfg(test)]
     pub(crate) fn last_corrections() -> u32 {
         CORRECTIONS.with(std::cell::Cell::get)
@@ -215,11 +179,10 @@ impl BarrettContext {
         self.reduce(&a.mul(&b))
     }
 
-    /// `a² mod n`. The square comes from [`BigUint::square`], whose
-    /// specialized kernels form each cross term once between 8 and 256
-    /// limbs, so this costs a squaring plus one Barrett reduction. The
-    /// Montgomery domain's [`MontgomeryContext::square_residue`](crate::modular::MontgomeryContext::square_residue)(super::MontgomeryContext::square_mont) goes further
-    /// still, fusing the reduction into the kernel.
+    /// `a² mod n`: one [`BigUint::square`] (whose specialized kernels form
+    /// each cross term once from 8 to 447 limbs) plus one Barrett reduction.
+    /// [`MontgomeryContext::square_residue`](crate::modular::MontgomeryContext::square_residue)
+    /// goes further, fusing the reduction into the kernel.
     #[must_use]
     pub fn mod_square(&self, a: &BigUint) -> BigUint {
         let a = self.reduce(a);
@@ -229,8 +192,8 @@ impl BarrettContext {
     /// `base^exponent mod n` by left-to-right binary exponentiation (Knuth,
     /// *TAOCP* vol. 2, §4.6.3) with one [`Self::reduce`] after each step —
     /// the exponentiation route for even moduli, where Montgomery cannot
-    /// operate. The accumulator is seeded from the exponent's top set bit
-    /// (as the Montgomery ladder in this file does), so the cost is one
+    /// operate. The accumulator is seeded from the exponent's top set bit,
+    /// so the cost is one
     /// squaring per remaining exponent bit and one multiplication per
     /// remaining set bit; there is no window table here, unlike
     /// [`MontgomeryContext::pow`](super::MontgomeryContext::pow). `0^0 = 1` by the usual convention.
@@ -243,10 +206,8 @@ impl BarrettContext {
             return self.reduce(&BigUint::one());
         }
         let base = self.reduce(base);
-        // The top bit of a non-zero exponent is set by definition, so the
-        // ladder starts at `base` and scans the bits below it. Seeding from
-        // 1 would spend a squaring, a multiplication and two reductions
-        // arriving at the same state.
+        // The top bit of a non-zero exponent is set, so the ladder starts at
+        // `base` and scans the bits below it.
         let mut result = base.clone();
         for bit in (0..exponent.bits() - 1).rev() {
             result = self.reduce(&result.square());

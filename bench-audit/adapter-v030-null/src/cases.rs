@@ -1,5 +1,6 @@
-//! The workload set. This is the only file that differs between the two
-//! revision adapters, and only where the 0.3.0 rename forces it.
+//! The workload set. Apart from the `main.rs` banner, this is the only file
+//! that differs between the two revision adapters: where the 0.3.0 rename
+//! forces it, and in the v0.3.0-only cases at the end.
 //!
 //! v0.3.0 names used here: module paths (`rump::modular`, `rump::polynomial`,
 //! `rump::finite_field`), `add`/`sub`/`mul`/`square` without the `_ref` suffix,

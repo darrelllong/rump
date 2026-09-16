@@ -281,15 +281,10 @@ fn nearest_int(a: &BigInt, b: &BigInt) -> BigInt {
 /// division rounds toward zero, which for a negative dividend is one too
 /// large unless the division was exact.
 ///
-/// `den > 0` is unchecked, and the sign of `den` is not consulted — a
-/// negative denominator would yield `⌊num / |den|⌋` with the wrong sign.
-/// Every call arrives through [`nearest_int`] with a positive Gram
-/// determinant.
+/// `den > 0` is checked only in debug builds, and the division ignores the
+/// sign of `den`: a negative denominator would yield `⌊num / |den|⌋`. Every
+/// call arrives through [`nearest_int`] with a positive Gram determinant.
 fn floor_div(num: &BigInt, den: &BigInt) -> BigInt {
-    // The caller's contract: only `nearest_int` calls this, always with a Gram
-    // determinant, which is positive for an independent basis. The sign of
-    // `den` is never inspected below, so a negative one would silently yield
-    // ⌊num/|den|⌋ — check rather than trust.
     debug_assert!(
         den.sign() == Sign::Positive,
         "floor_div requires a positive divisor"
@@ -413,10 +408,10 @@ pub enum ReductionError {
     /// The two vectors are linearly dependent, so they are not a basis.
     DependentBasis,
     /// The arithmetic left `i128`. The rounding step forms `2⟨u,v⟩ + ‖u‖²`
-    /// over `2‖u‖²`, so it is twice the norm that must be representable:
-    /// every vector the reduction visits needs `(w₀·x)² + (w₁·y)² < 2¹²⁶`.
-    /// A wrapped norm compares wrongly and would return an unreduced basis
-    /// with no indication, so this is refused instead.
+    /// over `2‖u‖²`, so every weighted squared norm `S` the reduction visits
+    /// needs `3·S ≤ i128::MAX`; see [`gauss_reduce_weighted`]. A wrapped norm
+    /// compares wrongly and would return an unreduced basis with no
+    /// indication, so this is refused instead.
     OutOfRange,
 }
 
@@ -460,8 +455,8 @@ fn weighted_dot(u: [i128; 2], v: [i128; 2], weights: [i128; 2]) -> Option<i128> 
 fn round_div(numerator: i128, denominator: i128) -> Option<i128> {
     debug_assert!(denominator > 0);
     // Every one of these must fit, which is why the documented bound is on
-    // twice the norm rather than the norm: a basis whose norms reach the top
-    // of `i128` fails here, not in `weighted_norm_sq`.
+    // three times the norm rather than the norm: a basis whose norms reach
+    // the top of `i128` fails here, not in `weighted_norm_sq`.
     let doubled = numerator.checked_mul(2)?;
     let shifted = doubled.checked_add(denominator)?;
     Some(shifted.div_euclid(denominator.checked_mul(2)?))
@@ -501,16 +496,18 @@ fn round_div(numerator: i128, denominator: i128) -> Option<i128> {
 ///
 /// Each iteration replaces the shorter vector with a strictly shorter one, so
 /// the sequence of squared norms is strictly decreasing in the positive
-/// integers and the loop runs at most `log` many times. No iteration cap is
-/// needed and none is imposed — a cap here could only turn a correct answer
-/// into a wrong one.
+/// integers and the loop terminates. No iteration cap is imposed; a cap could
+/// only turn a correct answer into a wrong one.
 ///
-/// `None` rather than a panic in every rejecting case, so a caller can test
-/// rather than guard: the vectors are linearly dependent (a zero determinant
-/// is not a basis), a weight is not positive, or the arithmetic leaves
-/// `i128`.
+/// # Errors
 ///
-/// That last is a real restriction and tighter than it looks. Write `S` for
+/// An error rather than a panic in every rejecting case, so a caller can
+/// match rather than guard: [`ReductionError::DependentBasis`] when the
+/// vectors are linearly dependent (a zero determinant is not a basis), and
+/// [`ReductionError::OutOfRange`] when the arithmetic leaves `i128`. The
+/// weights are [`NonZeroU64`], so a non-positive weight is unrepresentable.
+///
+/// The range is a real restriction and tighter than it looks. Write `S` for
 /// the largest weighted squared norm the reduction visits. The rounding step
 /// forms `2·⟨u,v⟩ + ‖u‖²`, and `|⟨u,v⟩| ≤ S` by Cauchy–Schwarz, so the
 /// largest intermediate is `3S` and the working condition is
@@ -524,14 +521,8 @@ fn round_div(numerator: i128, denominator: i128) -> Option<i128> {
 /// `|w₀·x|` and `|w₁·y|` below `2⁶²` therefore holds comfortably — but `2⁶³`
 /// does not, since `6·(2⁶³)² = 2^128.585`.
 ///
-/// This bound was previously stated as `(w₀·x)² + (w₁·y)² < 2¹²⁶`, which is
-/// one and a half times too generous: a basis with `S` between `2^125.415`
-/// and `2¹²⁶` satisfies it and is still refused, and a downstream reader who
-/// derived a per-coordinate rail from it arrived at `2⁶³`, which overflows.
-/// The refusal was always correct; only the sentence was not.
-///
 /// A basis whose norms fill `i128` to the top yields an error rather than a
-/// wrapped answer — a wrapped norm compares wrongly and would return an
+/// wrapped answer; a wrapped norm compares wrongly and would return an
 /// unreduced basis with no indication.
 pub fn gauss_reduce_weighted(
     basis: [[i128; 2]; 2],
@@ -596,6 +587,9 @@ pub fn gauss_reduce_weighted(
 /// exactly before it is kept, so rounding can only ever offer an extra
 /// candidate, never lose one within the slack. The basis should be
 /// LLL-reduced first — the enumeration's cost is what reduction buys.
+/// A visit cap ends a search that a wide bound has made large; what was
+/// found by then is returned, so the result is a bounded search and not a
+/// certificate that nothing else lies within the bound.
 ///
 /// What it is for: LLL returns a reduced basis, and a reduced basis's
 /// rows are not the lattice's shortest vectors, only vectors within a
@@ -1369,7 +1363,7 @@ mod short_vector_tests {
         lll_reduce_form(&mut reduced, &form, 3, 4);
         let found = short_vectors_form(&reduced, &form, &big(100), 2);
         assert_eq!(found.len(), 2);
-        // The lattice { (7a + 3b, b) }: its shortest vectors are ±(1, 2)... (7·(-1) + 3·... ) — check by norm only.
+        // The lattice { (7a + 3b, b) }: its shortest vectors are ±(1, −2).
         let norm = |v: &[BigInt]| v[0].mul(&v[0]).add(&v[1].mul(&v[1]));
         assert_eq!(norm(&found[0]), norm(&found[1]));
         let negated: Vec<BigInt> = found[1].iter().map(BigInt::negated).collect();
@@ -1385,7 +1379,7 @@ mod tests {
     use crate::bigint::{BigInt, Sign};
     use core::num::NonZeroU64;
 
-    /// Weights as the signature now takes them.
+    /// Weights as the signature takes them.
     fn w(a: u64, b: u64) -> [NonZeroU64; 2] {
         [
             NonZeroU64::new(a).expect("test weight is non-zero"),
@@ -1484,15 +1478,13 @@ mod tests {
     /// A skewed sieve metric `(x/√s)² + (y·√s)²` for a *rational* `s = p/q`
     /// is `weights = [q, p]`, after multiplying the form through by `pq`.
     ///
-    /// The integer skew this test used to take is the easy case (`q = 1`) and
-    /// the one that does not occur: a sieve's skew is the argmin of a search
-    /// and is not an integer, so rounding it to one reduces under a different
-    /// form and can return a vector that is longer under the metric actually
-    /// wanted. That is what this checks — against the float metric the caller
-    /// means, not against the integer one the reduction was handed.
+    /// A skew found by search is rarely an integer, and rounding it reduces
+    /// under a different form. This checks the answer against the float
+    /// metric the caller means, not the integer form the reduction was
+    /// handed.
     #[test]
     fn gauss_reduce_weights_encode_a_rational_skew() {
-        // A non-integer skew of the shape `skew_for` produces.
+        // A non-integer skew with a power-of-ten denominator.
         let (p, q) = (2_113_745_839u64, 10_000_000u64); // s ≈ 211.3745839
         let s = p as f64 / q as f64;
         let float_norm = |v: [i128; 2]| {
@@ -1531,11 +1523,9 @@ mod tests {
         }
     }
 
-    /// Twice the norm must be representable, not the norm: the rounding step
-    /// forms `2⟨u,v⟩ + ‖u‖²` over `2‖u‖²`. This basis is already reduced and
-    /// its norms fit `i128` with room to spare, so it must come back
-    /// unchanged rather than panic — the case the documented bound used to
-    /// admit and the code used to refuse.
+    /// The rounding step forms `2⟨u,v⟩ + ‖u‖²` over `2‖u‖²`, so three times
+    /// the norm must be representable. These norms, `2¹²⁵`, are within that
+    /// bound, so the reduced basis comes back rather than an error.
     #[test]
     fn gauss_reduce_accepts_norms_that_fill_half_the_range() {
         let a = 1i128 << 62;
@@ -1916,7 +1906,7 @@ mod tests {
     #[test]
     fn lll_accepts_large_delta_components() {
         // δ = 5/6 with a numerator above u64::MAX/4: the range check must not
-        // overflow, nor falsely reject a valid δ (rung-D review, objection 1).
+        // overflow, nor falsely reject a valid δ.
         let (dn, dd) = (5_000_000_000_000_000_000u64, 6_000_000_000_000_000_000u64);
         let input = rows(&[&[201, 37], &[1648, 297]]);
         let before = gram_det(&input);
@@ -2013,14 +2003,10 @@ mod tests {
         assert_eq!(formed, unscaled);
     }
 
-    /// Under a dense form the shortest vector is not the Euclidean one:
-    /// the form `[[2, 1], [1, 2]]` (norm² = 2x² + 2xy + 2y²) makes
-    /// `(1, −1)` shorter (norm² 2) than `(1, 0)` (norm² 2) — equal — and
-    /// `(1, 1)` (norm² 6) longer than `(2, −1)` (norm² 6)... so take the
-    /// basis `{(3, 0), (1, 1)}`, whose Euclidean reduction is
-    /// `{(1, 1), (2, −1)}` and whose form reduction must lead with a vector
-    /// of form-norm² 6 or less, and verify every returned vector's
-    /// form-norm is what the form says, with the first the shortest.
+    /// Under the dense form `[[2, 1], [1, 2]]` (norm² = 2x² + 2xy + 2y²),
+    /// the lattice spanned by `(3, 0)` and `(1, 1)` has shortest form-norm²
+    /// 6; the reduction must lead with such a vector and still span the same
+    /// lattice.
     #[test]
     fn the_form_reduction_measures_by_the_form() {
         let rows = |entries: &[[i64; 2]]| -> Vec<Vec<BigInt>> {

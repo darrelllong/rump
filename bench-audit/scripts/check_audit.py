@@ -57,9 +57,9 @@ def main():
         # A failed session must not be published as anything but inconclusive.
         #
         # Exit 13 -- stopped on the session limit -- is not a failure and is
-        # judged on Pilot's own reported sufficiency instead, because measured
-        # here its stopping rule does not fire even when its stated
-        # requirements are met. The reducer records `pilot_required`, Pilot's
+        # judged on Pilot's own reported sufficiency instead, because its
+        # stopping rule does not fire even when its stated requirements are
+        # met. The reducer records `pilot_required`, Pilot's
         # own required reading count, and a cell that stopped on the limit is
         # publishable only when it reached it. See reduce.py's classify() for
         # the measurement behind this.
@@ -131,9 +131,8 @@ def main():
                     f"of mean ({allowed:.6g})"
                 )
 
-        # The mean must lie inside the range its own readings allow. This is the
-        # invariant that caught a corrupted reduction in this repository before:
-        # a mean outside its sample's range cannot describe that sample.
+        # The mean must lie inside the range its own readings allow: a mean
+        # outside its sample's range cannot describe that sample.
         readings = Path(r["dir"]) / "readings.csv"
         observed = reading_range(readings, 0)
         if observed is None:

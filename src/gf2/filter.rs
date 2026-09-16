@@ -3,12 +3,9 @@
 //! as between a sieve and its linear algebra.
 //!
 //! A sieve matrix has a few dozen nonzeros in a row and hundreds of
-//! thousands of columns, most of them touched by one or two rows. Holding
-//! it packed, one bit per column, made every row a kilobyte-scale word
-//! array: an XOR of two rows walked the whole width, a row's support was a
-//! scan, and the pairwise comparisons of a column's members cost the width
-//! squared — at 160,000 rows over 500,000 columns that was nine gigabytes
-//! and most of the filtering time. [`SparseMatrix`] holds each row as its
+//! thousands of columns, most of them touched by one or two rows. Packed one
+//! bit per column, every row is a kilobyte-scale word array and every XOR or
+//! comparison walks the whole width. [`SparseMatrix`] holds each row as its
 //! ascending column indices, so every operation costs the row's weight.
 //!
 //! # The elimination
@@ -55,7 +52,7 @@
 //! Every surviving row records the set of original rows it is the sum of.
 //! A dependency over the filtered matrix expands to one over the original
 //! by symmetric difference of those sets, an identity the tests check
-//! directly against the original rows rather than trusting a history log.
+//! directly against the original rows.
 
 use core::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -193,10 +190,9 @@ impl FilteredMatrix {
 
     /// Columns still touched by a surviving row. This — not
     /// [`Self::columns`] — is the number an over-determination test must
-    /// compare row counts against: comparing against the full width once
-    /// declared every filtered matrix under-determined and sent a run
-    /// widening forever, since filtering removes a row per eliminated
-    /// column but the width never moves.
+    /// compare row counts against. Filtering removes a row per eliminated
+    /// column but never changes the width, so against the full width every
+    /// filtered matrix looks under-determined.
     #[must_use]
     pub fn live_columns(&self) -> usize {
         self.live_columns

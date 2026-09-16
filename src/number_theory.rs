@@ -13,11 +13,9 @@
 //! CRT, rational reconstruction, Bernstein's product and remainder trees,
 //! and the p-adic valuation.
 //!
-//! Adversarially *hardened* primality testing lives with its consumer (the
-//! parent cryptography crate), where the hash lives. Prime generation is in
-//! this crate — [`crate::random_probable_prime`], driven by a
-//! caller-supplied generator — since rump chooses no entropy source of its
-//! own.
+//! Adversarially *hardened* primality testing needs a hash and is left to the
+//! caller. Prime generation is [`crate::random_probable_prime`], driven by a
+//! caller-supplied generator: rump chooses no entropy source of its own.
 
 use crate::bigint::{BarrettContext, BigInt, BigUint, MontgomeryContext, Sign};
 use crate::poly::PolyMod;
@@ -34,17 +32,14 @@ use crate::poly::PolyMod;
 // full operands with a handful of multiplications. The quotient test — accept
 // `q` only when the low and high leading-digit estimates agree — certifies each
 // batched quotient equals the true one, so the outcome is bit-for-bit classical
-// Euclid, with one matrix application in place of the whole run of divisions
-// the batch replaces. `gcd`, `gcd_extended`, and `mod_inverse` all share this
-// engine.
+// Euclid. `gcd`, `gcd_extended`, and `mod_inverse` all share this engine.
 
 /// Greatest common divisor of two machine words.
 ///
 /// Single-word Euclid, and the base case [`gcd`] falls to once both operands
-/// fit in one limb. Public because callers holding word-sized values — sieve
-/// coordinates, residues, small cofactors — would otherwise pay two heap
-/// allocations to ask a question the hardware answers directly, and the
-/// subquadratic machinery above has nothing to amortise at this size.
+/// fit in one limb. Public so callers holding word-sized values — sieve
+/// coordinates, residues, small cofactors — need not pay two heap
+/// allocations for a question the hardware answers directly.
 #[must_use]
 pub fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
@@ -59,8 +54,8 @@ pub fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
 ///
 /// Euclid on `u128` until both operands fit a word, then [`gcd_u64`]: a
 /// `u128` remainder is a library call, and after the first step or two the
-/// operands are at the size the hardware divides directly. For sieve
-/// coordinates that outgrow a word without earning a heap allocation.
+/// operands are at the size the hardware divides directly. For values that
+/// outgrow a word but do not warrant a heap allocation.
 #[must_use]
 pub fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
     while b != 0 {
@@ -97,8 +92,8 @@ fn leading_i128(limbs: &[u64], shift: usize) -> i128 {
 /// 2^124): the 2×2 transform `(m00, m01, m10, m11)` collecting every Euclidean
 /// step whose quotient the leading digits determine exactly. `m01 == 0` signals
 /// that the digits pinned no step, so the caller must take one full division
-/// step. Wider leading digits (124 bits, not one 64-bit limb) batch far more
-/// steps per call — the difference between a shallow and a useful transform.
+/// step. Leading digits of 124 bits, not one 64-bit limb, batch far more
+/// steps per call.
 ///
 /// Signs live in the entries, so `m00·u + m01·v` and `m10·u + m11·v` reproduce
 /// the post-step operands directly, both provably non-negative.
@@ -129,10 +124,10 @@ fn lehmer_transform(
         if q < 1 || q != (u + m01) / denom_high {
             break;
         }
-        // With 124-bit leading digits the accumulated entries can approach the
-        // digit size, so these products can genuinely overflow i128 near the
-        // end of a long batch. A checked break there is exact: it just ends the
-        // batch one step early, and the caller applies what was collected.
+        // The accumulated entries can approach the digit size, so these
+        // products can overflow i128 near the end of a long batch. Breaking
+        // there is exact: the batch ends one step early and the caller applies
+        // what was collected.
         let (Some(q_m10), Some(q_m11), Some(q_v)) =
             (q.checked_mul(m10), q.checked_mul(m11), q.checked_mul(v))
         else {
@@ -197,10 +192,9 @@ fn leading_pair(a: &BigUint, b: &BigUint) -> (i128, i128) {
 // The Lehmer transform is applied to the operands (and, for the extended
 // variants, to the Bézout cofactors) as `c0·x0 + c1·x1` with two-word signed
 // coefficients. Going through `mul`/`add` would allocate several
-// temporaries per application; the transform runs tens of times per gcd, so
-// these fused limb-level routines — accumulate `|c|·x` straight into a positive
-// or negative bucket by sign, then take the difference once — are what make the
-// batching actually pay off.
+// temporaries per application, and the transform runs tens of times per gcd.
+// These fused limb-level routines instead accumulate `|c|·x` into a positive
+// or negative bucket by sign and take the difference once.
 
 /// `out += (clo, chi)·x` in place, where `(clo, chi)` is a two-word magnitude
 /// and `out` is little-endian with room for the carries (`x.len() + 2` limbs
@@ -519,7 +513,7 @@ impl JacobiState {
 // costs O(M(n)·log n), where Lehmer, re-reading the leading digits after every
 // 124-bit batch, stays O(n²).
 //
-// The treachery is at the boundary. "These quotients are what full-width
+// The difficulty is at the boundary. "These quotients are what full-width
 // Euclid would do" holds for a half-run's beginning but can fail for its last
 // step or two — the discarded low bits can tip a quotient — so every reduction
 // here is size-guarded: it stops strictly above the certification boundary,
@@ -634,10 +628,10 @@ fn pair_size(a: &BigUint, b: &BigUint) -> usize {
     a.bits().max(b.bits())
 }
 
-/// Möller's underlined `#(a, b)` — bit-size of the *smaller* element. The
-/// distinction matters: hgcd's precondition and both of its recursion guards
-/// are conditions on the smaller element, and reading them as the larger is
-/// exactly the mistake that produces transforms invalid for the full operands.
+/// Möller's underlined `#(a, b)` — bit-size of the *smaller* element. hgcd's
+/// precondition and both of its recursion guards are conditions on the
+/// smaller element; read against the larger, they produce transforms invalid
+/// for the full operands.
 fn pair_min_size(a: &BigUint, b: &BigUint) -> usize {
     a.bits().min(b.bits())
 }
@@ -704,19 +698,8 @@ fn abs_diff_bits(a: &BigUint, b: &BigUint) -> usize {
     })
 }
 
-/// One size-guarded division step — Möller's `sdiv`: reduce the larger element
-/// by the largest multiple of the smaller that leaves the remainder strictly
-/// above `s` bits, folding the step into `t`. Returns `false` if no quotient
-/// can respect the guard (only reachable when the caller's invariants are
-/// already violated; the loops treat it as "stop here" rather than corrupt
-/// the transform).
-///
-/// The guard is what earns the right to work on high bits alone. Above the
-/// boundary these quotients are exactly what full-width Euclid would produce;
-/// a remainder allowed to dip to `s` bits or below would depend on low bits
-/// the recursion never saw, and every conclusion drawn after it would be
-/// unsound. So the step refuses — reduction stalls at the boundary by design,
-/// and the caller decides what happens next.
+/// Reusable buffers for [`sdiv_step`]: the boundary `2^s` and the adjusted
+/// dividend.
 struct SdivScratch {
     threshold: BigUint,
     adjusted: BigUint,
@@ -733,6 +716,17 @@ impl SdivScratch {
     }
 }
 
+/// One size-guarded division step — Möller's `sdiv`: reduce the larger element
+/// by the largest multiple of the smaller that leaves the remainder strictly
+/// above `s` bits, folding the step into `t`. Returns `false` if no quotient
+/// can respect the guard; the loops treat that as "stop here" rather than
+/// corrupt the transform.
+///
+/// The guard is what licenses working on high bits alone. Above the boundary
+/// these quotients are exactly what full-width Euclid would produce; a
+/// remainder at `s` bits or below would depend on low bits the recursion
+/// never saw. So the step refuses, reduction stalls at the boundary, and the
+/// caller decides what happens next.
 fn sdiv_step(
     a: &mut BigUint,
     b: &mut BigUint,
@@ -777,7 +771,7 @@ fn sdiv_step(
 }
 
 /// Below this many limbs [`hgcd`] stops recursing and runs [`hgcd_base`]
-/// directly — the analogue of GMP's `HGCD_THRESHOLD`. Tuned empirically.
+/// directly — the analogue of GMP's `HGCD_THRESHOLD`. Set by measurement.
 const HGCD_BASE_LIMBS: usize = 96;
 
 /// [`hgcd`]'s workhorse below the recursion threshold — the role GMP's
@@ -892,11 +886,10 @@ fn hgcd_base(
 ///
 /// The contract, from Möller's Lemma 5: the caller supplies both elements
 /// above `s` bits, and gets back both elements still above `s` bits with the
-/// *difference* at or below — the last moment reduction is still certifiable
-/// from the bits above `s`. Asking for one more step is asking for an answer
-/// the high bits do not contain; that boundary discipline, not the recursion,
-/// is what makes the function composable, because a caller holding `2p + n`
-/// bits can run it on the top `n` and trust the result for the whole number.
+/// *difference* at or below — the last point at which reduction is still
+/// certifiable from the bits above `s`. That boundary makes the function
+/// composable: a caller holding `2p + n` bits can run it on the top `n` and
+/// trust the result for the whole number.
 ///
 /// The recursion is that composition applied to itself: one sub-call on the
 /// top halves takes the pair to ~3N/4 bits, a second on the top halves of the
@@ -907,8 +900,7 @@ fn hgcd_base(
 /// repair is skipped. Both recursion guards test the *smaller* element: the
 /// sub-call's contract needs both of its inputs above its own boundary, and
 /// the guard is the parent-level condition that delivers exactly that
-/// (Lemma 7). Read the guards against the larger element and the recursion
-/// runs on pairs it has no contract for.
+/// (Lemma 7).
 ///
 /// `T` is `M⁻¹` in Möller's notation: unimodular with rows of alternating
 /// sign. det is ±1 rather than his +1 — the base case batches swapping Euclid
@@ -1007,12 +999,10 @@ fn hgcd(a: &BigUint, b: &BigUint, mut state: Option<&mut JacobiState>) -> (Mat2,
 
 /// Below this many limbs in the smaller operand, gcd runs on Lehmer; at or
 /// above it, on the Half-GCD driver — and the driver hands its own tail back
-/// to Lehmer at the same line, since below the crossover every round is
-/// better spent there. Measured on M4: a tie at 2048 limbs, Half-GCD ahead
-/// 1.3× at 4096 and 1.7× at 8192, the gap widening as the subquadratic curve
-/// pulls away (PERFORMANCE.md, "GCD at scale"). Correctness does not depend
-/// on the value — the suite validates with this set to 2, forcing every size
-/// through the recursion.
+/// to Lehmer at the same line. The two tie at 2048 limbs; Half-GCD leads
+/// 1.3× at 4096 and 1.7× at 8192 (PERFORMANCE.md, "GCD at scale").
+/// Correctness does not depend on the value: setting it to 2 forces every
+/// size through the recursion.
 const HGCD_THRESHOLD_LIMBS: usize = 2048;
 
 /// Greatest common divisor through [`hgcd`]. Each round halves the pair, so
@@ -1039,9 +1029,7 @@ fn gcd_via_hgcd(a: &BigUint, b: &BigUint) -> BigUint {
             return gcd_lehmer(&aa, &bb);
         }
         let s = aa.bits() / 2 + 1;
-        // hgcd needs the smaller element above the boundary and a gap wide
-        // enough to close; otherwise one division step makes sharp progress
-        // (an unbalanced pair collapses, a close pair drops to its difference).
+        // Outside hgcd's contract, one division step repairs the pair.
         if bb.bits() <= s || abs_diff_bits(&aa, &bb) <= s {
             let r = aa.rem(&bb);
             aa = core::mem::replace(&mut bb, r);
@@ -1056,10 +1044,10 @@ fn gcd_via_hgcd(a: &BigUint, b: &BigUint) -> BigUint {
 /// Lehmer; at or above it they ride the Half-GCD driver. The crossover sits
 /// *below* plain gcd's: Lehmer's extended form carries full-width signed
 /// cofactors through every batch, where the driver folds all cofactor work
-/// into one matrix accumulation per round — measured on M4, the driver ties
-/// Lehmer near 448 limbs and is 2× ahead by 16384 (PERFORMANCE.md).
-/// Correctness does not depend on the value — the suite validates with this
-/// set to 2, forcing every size through the driver and its canonicalization.
+/// into one matrix accumulation per round. The driver ties Lehmer near 448
+/// limbs and is 2× ahead by 16384 (PERFORMANCE.md). Correctness does not
+/// depend on the value: setting it to 2 forces every size through the driver
+/// and its canonicalization.
 const HGCD_EXT_THRESHOLD_LIMBS: usize = 512;
 
 /// Extended-gcd counterpart of [`gcd_via_hgcd`]: the same rounds, with the
@@ -1207,10 +1195,9 @@ fn gcd_lehmer(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 /// factor with the modulus; for a prime modulus that is exactly the
 /// multiples of it.
 ///
-/// The Bézout coefficients are carried in `i128`, which is what makes this
-/// total: they are bounded by the modulus in magnitude, but the intermediate
-/// `old_s - quotient * s` is not bounded by `u64`, and computing it there
-/// would wrap.
+/// The Bézout coefficients are signed and bounded by the modulus in
+/// magnitude, so they run at the narrowest signed width that holds the
+/// modulus: `i32` below 2³¹, `i64` below 2⁶³, and `i128` above.
 ///
 /// # Panics
 ///
@@ -1218,13 +1205,9 @@ fn gcd_lehmer(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 #[must_use]
 pub fn mod_inverse_u64(value: u64, modulus: u64) -> Option<u64> {
     assert!(modulus != 0, "modulus must be non-zero");
-    // Extended Euclid at the narrowest width that holds the cofactors:
-    // every cofactor stays below the modulus in magnitude, so a modulus
-    // under 2³¹ runs in `i32`, under 2⁶³ in `i64`, and only the top bit
-    // needs `i128`. A caller inverting modulo every prime of a large base
-    // asks this thousands of times per setup, and a two-word division per
-    // Euclid step — some forty steps for a twenty-bit prime — was most of
-    // what that setup cost.
+    // Narrow widths matter: inverting modulo every prime of a large base
+    // calls this thousands of times, and a two-word division per Euclid step
+    // would dominate that cost.
     if modulus < 1 << 31 {
         let m = modulus as i32;
         let (mut old_r, mut r) = ((value % modulus) as i32, m);
@@ -1423,17 +1406,11 @@ fn gcd_extended_lehmer(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
 /// A product tree: the levels of pairwise products over a leaf sequence,
 /// built by [`product_tree`] and consumed by [`remainder_tree`].
 ///
-/// The levels are private, and that is the point. [`remainder_tree`]'s
-/// descent is correct only against the exact shape [`product_tree`]
-/// produces — every parent the product of its two children, every level
-/// half the length of the one below it, rounded up — and neither a type
-/// alias for `Vec<Vec<BigUint>>` nor a documented precondition can keep a
-/// caller from handing over something else. A hand-built `[[2, 3], [5]]`
-/// against the modulus 7 returns `[0, 2]` where the leaves demand
-/// `[1, 1]`, and an undersized parent level indexes past the running
-/// remainders — a panic the descent never advertised. Construction is
-/// therefore the only way to obtain one, which establishes the invariant
-/// once instead of trusting it on every call.
+/// The levels are private. [`remainder_tree`]'s descent is correct only
+/// against the exact shape [`product_tree`] produces — every parent the
+/// product of its two children, every level half the length of the one
+/// below it, rounded up. A hand-built tree could return wrong remainders or
+/// index out of range, so [`product_tree`] is the only constructor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProductTree {
     levels: Vec<Vec<BigUint>>,
@@ -1557,25 +1534,18 @@ pub fn remainder_tree(tree: &ProductTree, modulus: &BigUint) -> Vec<BigUint> {
 /// `vᵢ` and `z mod vᵢ` divides `z` and is therefore in the base. One
 /// batched pass replaces per-value trial division (Bernstein, 2004).
 ///
-/// The `primes` are a caller obligation, and one of the two ways to break
-/// it is rejected rather than documented: an entry below two is not a
-/// prime and cannot mean one, so it panics. A *composite* entry is
-/// accepted and behaves predictably — the algorithm depends on the primes
-/// dividing `z`, not on the entries being irreducible, so passing `4`
-/// computes the smooth part over `{2}`. Passing genuine primes is still
-/// the intended use; passing `0` would have made `z` zero and reported
-/// every value fully smooth, which is why that case is now a panic and
-/// not a silent wrong answer.
+/// An entry of `primes` below two panics: `0` would make `z` zero and
+/// report every value fully smooth. A *composite* entry is accepted and
+/// behaves predictably — the algorithm needs the primes to divide `z`, not
+/// the entries to be irreducible — so `4` computes the smooth part over
+/// `{2}`.
 ///
 /// Trivial values pass through: `0` (divisible by every prime) maps to
 /// `0`, `1` maps to `1`, and neither joins the tree.
 ///
 /// # Panics
 ///
-/// Panics if any entry of `primes` is below two, and — through
-/// [`remainder_tree`] — if a non-trivial value is zero, which it would
-/// divide by. (A zero *value* is intercepted before the tree; the
-/// remaining zero-divisor path is unreachable from here.)
+/// Panics if any entry of `primes` is below two.
 #[must_use]
 pub fn smooth_parts(values: &[BigUint], primes: &[u64]) -> Vec<BigUint> {
     SmoothnessBase::new(primes)
@@ -1588,12 +1558,8 @@ pub fn smooth_parts(values: &[BigUint], primes: &[u64]) -> Vec<BigUint> {
 /// Reports the *first* such entry, by position and value, so a caller need
 /// not rescan to find it.
 ///
-/// The message does not call the value non-prime, and neither does this type:
-/// a composite entry is accepted deliberately — the algorithm needs the base's
-/// primes to divide the product, not the entries to be irreducible, so `4`
-/// computes the smooth part over `{2}`. Only values below two are refused,
-/// because zero would make the product zero and report every value fully
-/// smooth.
+/// The error does not call the value non-prime: composite entries are
+/// accepted (see [`SmoothnessBase::new`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct SmoothnessBaseError {
@@ -1630,15 +1596,11 @@ impl std::error::Error for SmoothnessBaseError {}
 /// A set of primes with their product `z` precomputed, so that batches can
 /// be sized by the caller rather than by what the setup costs.
 ///
-/// [`smooth_parts`] rebuilds `z` on every call. For a base to 20 000 that is
-/// a 13 500-bit product over about 1 100 primes — nothing once per run, but
-/// paid per batch it decides how the caller may batch, and a caller whose
-/// natural batch is a few values is pushed into one enormous batch at the end
-/// of a run. That is the wrong shape for a caller that streams values and
-/// stops as soon as it has found enough smooth ones.
+/// [`smooth_parts`] rebuilds `z` on every call. Hoisting it lets a caller
+/// that streams values test them in small batches, and stop as soon as it
+/// has found enough smooth ones, without paying for the product each time.
 ///
 /// The obligation on `primes` is checked here, once, instead of per batch.
-///
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SmoothnessBase {
     primes: Vec<u64>,
@@ -1647,12 +1609,11 @@ pub struct SmoothnessBase {
 }
 
 impl SmoothnessBase {
-    /// Precompute the product of `primes`, or `None` if any entry is below
+    /// Precompute the product of `primes`, or an error if any entry is below
     /// two.
     ///
-    /// An entry below two is not a prime and cannot mean one; `0` in
-    /// particular would make the product zero and report every value fully
-    /// smooth, a silent wrong answer rather than a refusal. A *composite*
+    /// An entry below two is not a prime; `0` in particular would make the
+    /// product zero and report every value fully smooth. A *composite*
     /// entry is accepted and behaves predictably — the algorithm needs the
     /// primes to divide the product, not the entries to be irreducible — so
     /// `4` computes the smooth part over `{2}`.
@@ -1699,7 +1660,6 @@ impl SmoothnessBase {
     /// The answer is [`smooth_parts`]'s; only the setup is hoisted. A value
     /// is smooth over the base exactly when its smooth part equals it, which
     /// is the predicate a sieve wants before paying for full trial division.
-    ///
     #[must_use]
     pub fn smooth_parts(&self, values: &[BigUint]) -> Vec<BigUint> {
         if values.is_empty() {
@@ -1858,9 +1818,8 @@ pub fn rational_reconstruct_bounded(
 /// modulus (CRT-lifted linear algebra, p-adic lifting).
 ///
 /// The bound is `⌊√((m−1)/2)⌋` taken by `sqrt_floor`'s Newton iteration,
-/// and computing it is not free relative to the walk it precedes: measured
-/// on M4 with generic operands, 0.3× the walk at 2048 bits and parity with
-/// it at 8192. Callers reconstructing many values under one modulus should
+/// and computing it is not free relative to the walk it precedes: 0.3× the
+/// walk at 2048 bits and parity with it at 8192. Callers reconstructing many values under one modulus should
 /// compute the bound once and call [`rational_reconstruct_bounded`], which
 /// removes that term from every call after the first.
 ///
@@ -1878,13 +1837,11 @@ pub fn rational_reconstruct(x: &BigUint, m: &BigUint) -> Option<(BigInt, BigUint
 /// on the order of `s²` base-field multiplications while Cipolla's ladder
 /// is flat in `s`, so the crossover sits where `s²` reaches a fixed
 /// multiple of the exponentiation cost, itself linear in the bit width.
-/// Measured on M4 with constructed primes `k·2^s + 1` by the ignored
-/// `cipolla_crossover_timing` probe, which times *both* engines at every
-/// `s` on a grid bracketing the crossing: the engines cross at `s ≈ 70`
-/// at 1024 bits, `s ≈ 93` at 2048, `s ≈ 124` at 4096 — `s²/bits` of 4.8,
-/// 4.2, and 3.8 — and this factor sits near their center. Correctness
-/// does not depend on the value: the suite drives both engines over the
-/// same primes.
+/// On primes `k·2^s + 1`, the ignored `cipolla_crossover_timing` probe
+/// finds the engines crossing at `s ≈ 70` at 1024 bits, `s ≈ 93` at 2048,
+/// and `s ≈ 124` at 4096 — `s²/bits` of 4.8, 4.2, and 3.8 — and this
+/// factor sits near their center. Correctness does not depend on the value:
+/// the suite drives both engines over the same primes.
 const CIPOLLA_THRESHOLD_FACTOR: usize = 4;
 
 /// The Tonelli–Shanks descent for `p − 1 = q·2^s`, `a` a residue already
@@ -2073,10 +2030,9 @@ fn mod_sqrt_cipolla(a: &BigUint, p: &BigUint, ctx: &MontgomeryContext) -> Option
 /// batch inverts to the empty vector.
 ///
 /// The gain approaches the ratio of one inversion to three
-/// multiplications: measured on M4 at 2048 bits, 1.5× at a batch of two,
-/// 3.3× at a hundred, levelling near 3.4× — this crate's Lehmer inversion
-/// costs about ten multiplications, which caps the trick's ceiling at
-/// that ratio over three.
+/// multiplications: at 2048 bits, 1.5× at a batch of two, 3.3× at a
+/// hundred, levelling near 3.4×, since the Lehmer inversion costs about
+/// ten multiplications.
 ///
 /// A modulus of zero yields `None` (nothing is invertible in no ring); a
 /// modulus of one yields the trivial ring's answer, zero for every
@@ -2207,11 +2163,9 @@ pub fn remove_factor(n: &BigUint, p: &BigUint) -> (BigUint, usize) {
 /// answer and then divide it back down. The cost is one [`gcd`], one exact
 /// division, and one multiplication.
 ///
-/// RSA-specific note: this is the Carmichael-function building block the
-/// parent cryptography crate's key generation uses, `λ(n) = lcm(p−1, q−1)`
-/// rather than Euler's `φ(n) = (p−1)(q−1)`, because the private exponent need
-/// only invert the public exponent modulo the exponent group's cycle length,
-/// and `λ` is that length.
+/// This is the building block of Carmichael's function, as in RSA's
+/// `λ(n) = lcm(p−1, q−1)`: the exponent of `(ℤ/nℤ)*`, which is all a private
+/// exponent needs to invert the public one modulo.
 #[must_use]
 pub fn lcm(lhs: &BigUint, rhs: &BigUint) -> BigUint {
     if lhs.is_zero() || rhs.is_zero() {
@@ -2226,23 +2180,17 @@ pub fn lcm(lhs: &BigUint, rhs: &BigUint) -> BigUint {
 
 // ─── Quadratic-residue symbols ─────────────────────────────────────────────────
 
-/// Jacobi symbol `(a/n)` for odd `n`, or `None` when `n` is even or zero.
-///
 /// The Jacobi symbol `(a/n)` for machine words, or `None` for even or zero
 /// `n`.
 ///
 /// The word-sized companion to [`jacobi`], as [`gcd_u64`] is to [`gcd`] and
 /// [`mod_inverse_u64`] to [`mod_inverse`]: the same contract with no
-/// allocation, for callers that hold both operands in registers. Sieves are
-/// the motivating shape — a quadratic-character test runs once per character
-/// per surviving candidate, and boxing two words into `BigUint`s to ask a
-/// one-word question is the kind of cost that only shows up multiplied by
-/// millions.
+/// allocation. For hot loops such as a sieve's quadratic-character tests,
+/// which run millions of times.
 ///
-/// Binary reciprocity throughout, as in [`jacobi`]'s small-operand engine:
-/// strip twos with the supplement — a sign flip exactly when `n ≡ 3, 5
-/// (mod 8)` — then swap, paying the reciprocity flip when both are `≡ 3
-/// (mod 4)`. No Lehmer tier, because there is no size here for it to win at.
+/// Quadratic reciprocity with a word remainder per step: strip twos with the
+/// supplement — a sign flip exactly when `n ≡ 3, 5 (mod 8)` — then swap,
+/// paying the reciprocity flip when both are `≡ 3 (mod 4)`, and reduce.
 ///
 /// For odd prime `n` this is the Legendre symbol: `1` for quadratic
 /// residues, `−1` for non-residues, `0` when `n` divides `a`. `(a/1) = 1` by
@@ -2325,27 +2273,22 @@ pub fn jacobi(a: &BigUint, n: &BigUint) -> Option<i8> {
 /// algorithm, whose shift-and-subtract steps are cheapest at small sizes; at
 /// or above it, the Lehmer-batched quotient sequence, which advances by ~35
 /// certified quotients per full-width pass where the binary loop advances by
-/// a few bits. Measured on M4: a tie near 32 limbs, the batched engine 1.8×
-/// ahead at 64 and 5.5× at 512, the gap compounding with size
-/// (PERFORMANCE.md). Correctness does not depend on the value — the suite
-/// validates with this set to 2, forcing every size through the new engine.
+/// a few bits. The two tie near 32 limbs; the batched engine leads 1.8× at
+/// 64 and 5.5× at 512 (PERFORMANCE.md). Correctness does not depend on the
+/// value: setting it to 2 forces every size through the batched engine.
 const JACOBI_LEHMER_THRESHOLD_LIMBS: usize = 64;
 
-/// [`jacobi`]'s below-crossover engine: binary quadratic reciprocity, taking
-/// `a` already reduced modulo the odd `n`.
 /// `value mod 2^k`, where `mask` is `2^k − 1` and `k ≤ 64`.
 ///
-/// Base 2⁶⁴ puts a factor of 2⁶⁴ on every limb above the first, so each of them
-/// is divisible by any power of two up to that, and the residue is a
-/// mask of the low limb. The alternative spelling, `rem_u64(2^k)`, runs a
-/// Horner division pass across every limb to compute a value that is already
-/// sitting in the first one — waste anywhere, and asymptotically significant in
-/// the reciprocity loops below, which ask on every iteration and would
-/// otherwise spend O(limbs) hardware divisions per bit of reduction.
+/// Every limb above the first carries a factor of 2⁶⁴, so the residue is a
+/// mask of the low limb. `rem_u64(2^k)` would spend a division per limb, and
+/// the reciprocity loops below ask on every iteration.
 fn low_bits_mod_pow2(value: &BigUint, mask: u64) -> u64 {
     value.limbs().first().copied().unwrap_or(0) & mask
 }
 
+/// [`jacobi`]'s below-crossover engine: binary quadratic reciprocity, taking
+/// `a` already reduced modulo the odd `n`.
 fn jacobi_binary(reduced: BigUint, n: BigUint) -> Option<i8> {
     let mut a = reduced;
     let mut n = n;
@@ -2475,12 +2418,11 @@ fn jacobi_lehmer_with_state(x: BigUint, y: BigUint, state: JacobiState) -> i8 {
 /// Below this many limbs in the smaller operand, [`jacobi`] stays on the
 /// Lehmer-batched engine; at or above it, the symbol state threads through
 /// the Half-GCD recursion and the whole computation runs in O(M(n)·log n).
-/// Measured on M4: Lehmer ahead 10% at 1536 limbs, the recursion ahead 7% at
-/// 2048 and pulling away — 1.5× at 4096, 1.9× at 8192, 2.2× at 16384 limbs
-/// (1 Mbit) — the same crossover as plain gcd's, which is also where GMP
-/// pins its analogous `JACOBI_DC_THRESHOLD`. Correctness does not depend on
-/// the value — the suite threads the state through [`hgcd`] at sizes from
-/// 130 bits up and exercises [`jacobi_hgcd_engine`]'s recursion directly.
+/// Lehmer leads 10% at 1536 limbs; the recursion leads 7% at 2048, 1.5× at
+/// 4096, 1.9× at 8192, and 2.2× at 16384 limbs — the same crossover as plain
+/// gcd's. Correctness does not depend on the value: the suite threads the
+/// state through [`hgcd`] at sizes from 130 bits up and exercises
+/// [`jacobi_hgcd_engine`]'s recursion directly.
 const JACOBI_HGCD_THRESHOLD_LIMBS: usize = 2048;
 
 /// [`jacobi`]'s subquadratic engine: the reduction of [`gcd_via_hgcd`] with
@@ -2490,9 +2432,8 @@ const JACOBI_HGCD_THRESHOLD_LIMBS: usize = 2048;
 /// The state's slots are fixed to `x` and `y`, and [`hgcd`] preserves slot
 /// order — its base case places each Lehmer batch's results by step parity,
 /// and its guarded divisions reduce one slot in place — so each round's pair
-/// drops back into the same slots. Nothing is ever sorted; the slots are
-/// semantic, and a swap would silently misdirect every subsequent state
-/// update. Each round halves the pair, so the rounds' costs form the same
+/// drops back into the same slots. Nothing is sorted: a swap would misdirect
+/// every later state update. Each round halves the pair, so the rounds' costs form the same
 /// geometric series as gcd's. When the pair falls below the crossover the
 /// Lehmer engine finishes mid-flight through [`jacobi_lehmer_with_state`].
 ///
@@ -2512,8 +2453,7 @@ fn jacobi_hgcd(x: BigUint, y: BigUint) -> i8 {
 
 /// The round loop of [`jacobi_hgcd`], with the Lehmer handoff size a
 /// parameter so the crossover probe can measure the recursion at sizes the
-/// shipped threshold routes elsewhere — the same discipline as the gcd
-/// probes, which measure the code as shipped rather than a copy of it.
+/// threshold routes elsewhere, without a copy of the code.
 fn jacobi_hgcd_engine(x: BigUint, y: BigUint, state: JacobiState, tail_limbs: usize) -> i8 {
     let mut state = state;
     let mut x = x;
@@ -2523,11 +2463,8 @@ fn jacobi_hgcd_engine(x: BigUint, y: BigUint, state: JacobiState, tail_limbs: us
             return jacobi_lehmer_with_state(x, y, state);
         }
         let s = pair_size(&x, &y) / 2 + 1;
-        // hgcd needs the smaller element above the boundary and a gap wide
-        // enough to close; otherwise one division step makes sharp progress
-        // (an unbalanced pair collapses, a close pair drops to its
-        // difference), with the state fed the as-applied quotient exactly as
-        // in the Lehmer engine's guarded path.
+        // Outside hgcd's contract, one division step repairs the pair (as in
+        // gcd_via_hgcd), with the state fed its quotient.
         if pair_min_size(&x, &y) <= s || abs_diff_bits(&x, &y) <= s {
             let x_is_hi = x >= y;
             let (q, r) = if x_is_hi {
@@ -2555,10 +2492,9 @@ fn jacobi_hgcd_engine(x: BigUint, y: BigUint, state: JacobiState, tail_limbs: us
 /// Every square root of `a` modulo `p^e` for a prime `p` and exponent
 /// `e ≥ 1`, ascending, empty when `a` is a non-residue.
 ///
-/// Sieving credits a prime power by the count of `x` with `x² ≡ kn`
-/// (mod `p^e`); this returns them all, so a value divisible by `p³` is
-/// counted at each of its roots. The awkward structure a caller should not
-/// have to own lives here: for odd `p` a residue has two roots lifted from
+/// Callers that need every root — a quadratic sieve crediting a prime power
+/// at each `x` with `x² ≡ kn (mod p^e)`, say — get the full set. The cases
+/// handled: for odd `p` a residue has two roots lifted from
 /// one by Hensel's construction; for `p = 2` the count runs 1, 2, 4 as `e`
 /// passes 1, 2, 3, and an odd `a` is a residue mod `2^e` (`e ≥ 3`) exactly
 /// when `a ≡ 1 (mod 8)`; and an `a` divisible by `p` reduces by its
@@ -2817,24 +2753,17 @@ pub fn mod_pow(base: &BigUint, exponent: &BigUint, modulus: &BigUint) -> BigUint
         return ctx.pow(base, exponent);
     }
 
-    // A zero exponent is answered before any context is built. `μ` costs a
-    // full `b^{2k} ÷ n` division, which for a wide modulus dwarfs the
-    // answer: measured, building it first made `mod_pow(base, 0, n)` 209×
-    // slower at 8192 bits than the empty ladder it replaced.
+    // A zero exponent is answered before any context is built: `μ` costs a
+    // full `b^{2k} ÷ n` division, which for a wide modulus dwarfs the answer.
     if exponent.is_zero() {
         return BigUint::one().rem(modulus);
     }
 
     // Even modulus: Montgomery cannot operate, so the ladder runs over a
-    // Barrett context rather than reducing each step by a full division.
-    // That routing is only correct to *prefer* since Barrett's second
-    // product became a half-product — before that, `reduce` trailed a
-    // division by up to a third at 2–4 kbit and this would have been a
-    // pessimization. Measured against the previous ladder on identical
-    // inputs: 1.25× at 256 bits, 1.31× at 512, 1.36× at 1024, 1.12× at
-    // 2048, 1.10× at 4096 — the win shrinks with width, because both the
-    // reduction's and the squaring's advantages do. The context exists for
-    // every modulus at least two, which the checks above have established.
+    // Barrett context rather than reducing each step by a full division —
+    // 1.25× to 1.36× faster from 256 to 1024 bits, 1.10× at 4096. The
+    // context exists for every modulus at least two, which the checks above
+    // have established.
     let ctx = BarrettContext::new(modulus).expect("modulus is at least two here");
     ctx.mod_pow(base, exponent)
 }
@@ -3221,9 +3150,8 @@ pub fn crt_combine_balanced(congruences: &[(BigUint, BigUint)], threads: usize) 
 /// - The first twelve prime bases make Miller-Rabin deterministic for every
 ///   `n < ψ₁₂ = 318 665 857 834 031 151 167 461 ≈ 3.19 × 10^23` (Sorenson &
 ///   Webster, *Strong Pseudoprimes to Twelve Prime Bases*, Math. Comp. 86
-///   (2017), 985–1003; arXiv:1509.00864 — ψ₁₂ is their headline result; the
-///   nearby `3.317 × 10^24` is ψ₁₃ and needs a thirteenth base), which
-///   covers the whole `n < 2^64 ≈ 1.8 × 10^19` range.
+///   (2017), 985–1003; arXiv:1509.00864), which covers the whole
+///   `n < 2^64 ≈ 1.8 × 10^19` range.
 /// - For larger `BigUint` candidates this remains a strong fixed-basis
 ///   probable-prime test, but not a proof of primality.
 const MR_BASES: [u64; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
@@ -3290,12 +3218,8 @@ fn is_witness(
     let n_minus_one_mont = ctx.modulus().sub(&one_mont);
     let mut value = ctx.encode(&ctx.pow(base, odd_factor));
 
-    // One workspace for the whole squaring chain: v₂(n−1) squarings per
-    // round, each of which would otherwise allocate and drop its scratch.
-    // Measured: invisible on is_probable_prime end to end — the chain is
-    // ~2 squarings for a random candidate against the ~`bits` inside
-    // `ctx.pow`, which reuses its workspace internally — so this is
-    // strictly-less-allocation housekeeping, not a performance claim.
+    // One workspace for the whole squaring chain, so each of the v₂(n−1)
+    // squarings does not allocate its own scratch.
     let mut workspace = Vec::new();
     for _ in 0..two_adic_exponent {
         let next = ctx.square_mont_with_workspace(&value, &mut workspace);
@@ -3349,11 +3273,9 @@ pub fn ln_gamma(x: f64) -> f64 {
 /// small-prime table (a factor base, a trial-division wheel, a wheel's
 /// spokes).
 ///
-/// A `Vec` is materialized; for a very large bound a segmented or
-/// streaming form would cost less memory, but the whole-vector form is
-/// what the immediate callers use. Cost is O(bound·log log bound) time and
-/// O(bound) *bytes* of sieve (one `bool` per odd number; a bit-packed
-/// sieve would use eight times less).
+/// Cost is O(bound·log log bound) time and O(bound) *bytes* of sieve, one
+/// `bool` per odd number. For primes past a cursor without materializing
+/// the prefix, use [`primes_past`].
 #[must_use]
 pub fn primes_below(bound: u64) -> Vec<u64> {
     if bound <= 2 {
@@ -3409,11 +3331,9 @@ const CROSSING_PRIMES_BELOW: u64 = 1 << 20;
 /// [`primes_below`], sieved when it is reached. The segmented companion
 /// of [`primes_below`]: where that materialises every prime from two, this
 /// supplies the primes just past a cursor at a cost that does not depend
-/// on the cursor — a window at ten million holds some four thousand primes
-/// and is crossed out in well under a millisecond — for a caller walking
-/// primes upward in batches from an arbitrary starting point, which would
-/// otherwise sieve and discard a growing prefix for every batch. Above `2⁴⁰` the crossing primes stop at `2²⁰` and
-/// the survivors are settled by the primality proof instead.
+/// on the cursor — a window at ten million holds some four thousand primes.
+/// Above `2⁴⁰` the crossing primes stop at `2²⁰` and the survivors are
+/// settled by [`is_probable_prime`] instead.
 ///
 /// Every integer above `lower` is classified, two included, and the
 /// supply ends with the word: a cursor at `u64::MAX` yields nothing.
@@ -3579,8 +3499,7 @@ mod prime_window_tests {
 /// keys, peer-supplied domain parameters) a *published* base set is the wrong
 /// defense: a strong pseudoprime to exactly these twelve bases can be
 /// constructed in advance, and this function will accept it. Harden with
-/// additional candidate-derived witnesses via [`miller_rabin_witness`], as the
-/// parent cryptography crate's `is_probable_prime_untrusted` does.
+/// additional candidate-derived witnesses via [`miller_rabin_witness`].
 #[must_use]
 pub fn is_probable_prime(n: &BigUint) -> bool {
     mr_probable_prime(n, &MR_BASES)
@@ -3787,23 +3706,13 @@ pub fn miller_rabin_with_bases(candidate: &BigUint, bases: &[u64]) -> bool {
 /// `candidate − 1` satisfies the strong test for every modulus and so yields
 /// `false`.
 ///
-/// Note what happens on candidates no round can run against, since there is no
-/// Montgomery context for them: zero, one, and every even value return `true`
-/// — **except `2`**, which returns `false`. That exception is the contract
-/// rather than a convenience. `true` here is an assertion that the candidate
-/// is *proven composite*, and `2` is prime, so no witness may claim otherwise;
-/// a caller screening its input with this primitive would otherwise discard
-/// the one even prime on the strength of a proof that does not exist. What
-/// `false` does not say, here as everywhere, is that the candidate is prime —
-/// only that this witness proved nothing.
+/// Candidates no round can run against — zero, one, and every even value —
+/// return `true`, **except `2`**, which is prime and returns `false`.
 #[must_use]
 pub fn miller_rabin_witness(candidate: &BigUint, witness: &BigUint) -> bool {
     let Ok(ctx) = MontgomeryContext::new(candidate) else {
-        // No Montgomery context exists for an even or zero modulus, so no
-        // round can run. Parity decides these outright, and the answer this
-        // function owes is whether the candidate is *proven composite*: two is
-        // the one even prime and no witness proves it composite, while every
-        // other even value, and zero, is composite by inspection.
+        // No Montgomery context exists for an even or zero modulus. Every
+        // such value but two is composite by inspection.
         return *candidate != BigUint::from_u64(2);
     };
     if candidate.is_one() {
@@ -3833,12 +3742,9 @@ pub fn miller_rabin_witness(candidate: &BigUint, witness: &BigUint) -> bool {
 /// assumes an odd `n > 1` throughout. The screen retires every such case
 /// before any of that machinery is asked to run.
 ///
-/// The divisibility test cannot distinguish a sieve prime from its multiples
-/// on its own, so a hit is disambiguated by a direct word comparison:
-/// `to_u64` narrows the candidate (or reports it too wide to equal any table
-/// entry) and equality decides identity, without building a `BigUint` per
-/// table entry and without any invariant tying the test to the table's
-/// current width — extending `SMALL_TRIAL_PRIMES` cannot break it.
+/// The divisibility test cannot distinguish a sieve prime from its multiples,
+/// so a hit is disambiguated by a word comparison: `to_u64` narrows the
+/// candidate (or reports it too wide to equal any table entry).
 fn small_prime_screen(candidate: &BigUint) -> Option<bool> {
     if candidate.is_zero() || candidate == &BigUint::one() {
         return Some(false);
@@ -3867,13 +3773,9 @@ fn small_prime_screen(candidate: &BigUint) -> Option<bool> {
 /// Montgomery context exists and the `n − 1 = d·2^s` split is shared across
 /// every round. Each base is reduced *before* it is classified as trivial: an
 /// unreduced `u64` at or above `candidate − 1` can still reduce to a
-/// non-trivial residue that testifies, and comparing the raw value instead
-/// would silently discard real witnesses — and, when every base was discarded
-/// that way, report a composite as prime. Trivial residues (`0`, `1`,
-/// `candidate − 1`) satisfy the strong test for every modulus, so they are
-/// skipped without counting; if that leaves no round run at all, the return is
-/// `false`, since nothing was tested and skipping a round must never be
-/// mistaken for passing it.
+/// non-trivial residue that testifies. Trivial residues (`0`, `1`,
+/// `candidate − 1`) are skipped without counting; if no round runs at all,
+/// the return is `false`, since nothing was tested.
 fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
     if let Some(verdict) = small_prime_screen(candidate) {
         return verdict;
@@ -3884,23 +3786,16 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
     }
 
     // The screen leaves an odd candidate above 997, so the context always
-    // builds; the `else` is a guard against a future screen that admits an
-    // even value, not a case reachable from here.
+    // builds; the `else` is unreachable.
     let Ok(ctx) = MontgomeryContext::new(candidate) else {
         return false;
     };
     let n_minus_one = candidate.sub(&BigUint::one());
     let (odd_factor, two_adic_exponent) = decompose_n_minus_one(candidate);
 
-    // Count the rounds that could actually testify. A base reducing to 0, 1,
-    // or n − 1 modulo the candidate is the trivial ±1 case and proves
-    // nothing; skipping it must not be mistaken for passing it.
+    // Count the rounds that could actually testify.
     let mut effective_rounds = 0usize;
     for &base in bases {
-        // Reduce before classifying as trivial: an unreduced u64 at or above
-        // n − 1 may still reduce to a non-trivial residue that testifies, so
-        // classifying the raw value would drop real witnesses — and, with
-        // every base dropped that way, would report a composite as prime.
         let witness = BigUint::from_u64(base).rem(candidate);
         if witness <= BigUint::one() || witness == n_minus_one {
             continue;
@@ -3911,9 +3806,7 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
         }
     }
 
-    // No effective round ran: nothing was tested, so nothing is proven. A
-    // composite whose every supplied base was trivial must not be stamped
-    // prime.
+    // No effective round ran: nothing was tested, so nothing is proven.
     effective_rounds > 0
 }
 
@@ -4240,10 +4133,8 @@ fn lucas_ladder_c33(candidate: &BigUint, ctx: &MontgomeryContext, discriminant: 
 /// Above 2⁶⁴ this is a probable-prime test, not a proof, and its
 /// parameters are a fixed function of the candidate: as with any fixed
 /// schedule, treat values from an untrusted source with additional
-/// candidate-derived witnesses ([`miller_rabin_witness`]), as the parent
-/// cryptography crate's `is_probable_prime_untrusted` does. No composite
-/// passing this test is known at any size — but absence of a known
-/// counterexample is not a proof, and the crate does not treat it as one.
+/// candidate-derived witnesses ([`miller_rabin_witness`]). No composite
+/// passing this test is known at any size, but that is not a proof.
 ///
 /// References: Baillie and Wagstaff, *Lucas pseudoprimes*, Math. Comp. 35
 /// (1980), 1391–1417; Pomerance, Selfridge and Wagstaff, *The pseudoprimes
@@ -4797,8 +4688,8 @@ mod tests {
     }
 
     /// The Jacobi state machine driven by a plain Euclidean quotient
-    /// sequence — the validation harness for the state machine in isolation,
-    /// before it is threaded through the Half-GCD reduction.
+    /// sequence, to validate the state machine apart from the Half-GCD
+    /// reduction.
     fn jacobi_by_quotient_state(a: &BigUint, n: &BigUint) -> Option<i8> {
         use super::JacobiState;
         if n.is_zero() || !n.is_odd() {
@@ -4869,8 +4760,8 @@ mod tests {
         }
     }
 
-    /// The GMP-vector-grounded binary implementation as an oracle, on the
-    /// same contract as the public function.
+    /// The binary implementation, checked against the reference vectors, as
+    /// an oracle on the same contract as the public function.
     fn jacobi_binary_oracle(a: &BigUint, n: &BigUint) -> Option<i8> {
         if n.is_zero() || !n.is_odd() {
             return None;
@@ -4899,8 +4790,8 @@ mod tests {
                 );
             }
         }
-        // Random sweep across sizes; the development threshold routes the
-        // public function through the Lehmer-batched engine everywhere.
+        // Random sweep across sizes, through the quotient driver and the
+        // dispatched public function.
         let mut rng = SplitMix64 {
             state: 0x0dd5_ba11_5eed_c0de,
         };
@@ -5239,9 +5130,8 @@ mod tests {
         let mut rng = SplitMix64 {
             state: 0x4859_2b17_ac3f_1d05,
         };
-        // Sizes below the driver's Lehmer handoff, across the batched base
-        // case, and through the recursion (dispatch is 64 limbs = 4096 bits;
-        // the recursion engages above 96 limbs = 6144 bits).
+        // Every size here is below HGCD_THRESHOLD_LIMBS, so gcd_via_hgcd
+        // hands each pair straight to gcd_lehmer.
         for &bits in &[
             130usize, 200, 256, 400, 512, 777, 1024, 1500, 2048, 3000, 4096, 5000, 8192, 16000,
             50000,
@@ -5319,13 +5209,11 @@ mod tests {
         BigUint::from_be_bytes(&bytes)
     }
 
-    /// Reference vectors, recomputed with SageMath 10.9's `jacobi_symbol`
-    /// (`scripts/check_symbol_vectors.sage` re-derives every one; 2026-09-06,
-    /// 254 of 254 agree): an independent oracle for the binary reciprocity
-    /// algorithm. Triples are (a, n, (a/n)) with a and n in hex, spanning 8-
-    /// to 1024-bit odd moduli, a below/at/above n, shared factors, and the
-    /// (2/n) supplement cases. The operand shapes were first drawn against
-    /// GMP 6.3.0's `mpz_jacobi`; the values are the symbol's and nobody's.
+    /// Reference vectors from SageMath's `jacobi_symbol`
+    /// (`scripts/check_symbol_vectors.sage` re-derives every one): an
+    /// independent oracle for the binary reciprocity algorithm. Triples are
+    /// (a, n, (a/n)) with a and n in hex, spanning 8- to 1024-bit odd moduli,
+    /// a below/at/above n, shared factors, and the (2/n) supplement cases.
     const JACOBI_VECTORS: &[(&str, &str, i8)] = &[
         ("8a", "bf", 1),
         ("f6ad", "bf", -1),
@@ -6104,15 +5992,9 @@ mod tests {
             assert!(v.rem(part).is_zero(), "smooth part divides the value");
         }
 
-        // The context is the same algorithm with the product hoisted, so it
-        // must agree with the free function value for value — and, since the
-        // point of hoisting is to let the caller choose the batch, it must
-        // give the same answers one value at a time as it does in one batch.
-        // A batch-size-dependent answer would be the defect this API invites.
-        // `smooth_parts` delegates to `SmoothnessBase`, so comparing the two is
-        // `f(x) == f(x)` and proves nothing. Every batching is therefore
-        // checked against the trial-division oracle instead, which is the
-        // only independent answer available.
+        // Answers must not depend on batch size. `smooth_parts` delegates to
+        // `SmoothnessBase`, so comparing the two proves nothing; every
+        // batching is checked against the trial-division oracle instead.
         let base = super::SmoothnessBase::new(&primes).expect("all entries >= 2");
         assert_eq!(base.primes(), &primes[..]);
         for size in [1usize, 2, 3, 7, values.len()] {
@@ -6370,9 +6252,8 @@ mod tests {
 
     /// OEIS A217120, *Lucas pseudoprimes* — "Lucas pseudoprimes with
     /// parameters (P, Q) defined by Selfridge's Method A" — every term below
-    /// 10⁵: terms 1 through 57 of the sequence's b-file, b217120.txt,
-    /// downloaded from oeis.org on 2026-09-11 (term 58 is
-    /// 100127).
+    /// 10⁵: terms 1 through 57 of the sequence's b-file, b217120.txt (term
+    /// 58 is 100127).
     const A217120_BELOW_BOUND: [u64; 57] = [
         323, 377, 1159, 1829, 3827, 5459, 5777, 9071, 9179, 10877, 11419, 11663, 13919, 14839,
         16109, 16211, 18407, 18971, 19043, 22499, 23407, 24569, 25199, 25877, 26069, 27323, 32759,
@@ -6626,7 +6507,7 @@ mod tests {
         }
         // High-s primes route through Cipolla inside the dispatch; the
         // returned root must verify, and the deepest case must be fast
-        // enough to sit in a unit test at all — which is the point.
+        // enough for a unit test.
         for &(bits, s) in &[(512usize, 128usize), (1024, 256), (2048, 512)] {
             let p = prime_with_two_adic_valuation(bits, s, &mut rng);
             assert!(
@@ -6673,10 +6554,9 @@ mod tests {
     #[test]
     fn mod_sqrt_terminates_on_odd_square_modulus() {
         use super::mod_sqrt;
-        // An odd perfect square has no Jacobi non-residue, so both engines'
-        // parameter scans would once run forever; the bound turns the
-        // pathology into None. 4097² routes to the descent's scan; a
-        // high-valuation square would route to Cipolla's.
+        // An odd perfect square has no Jacobi non-residue, so an unbounded
+        // parameter scan would never end; the bound turns it into None.
+        // 4097² (s = 13, s² > 4·bits) routes to Cipolla's scan.
         let square = BigUint::from_u64(4097).square();
         assert_eq!(mod_sqrt(&BigUint::from_u64(4), &square), None);
     }
@@ -6695,11 +6575,10 @@ mod tests {
                 "mod_sqrt(1, {m}) must terminate as None"
             );
         }
-        // Sharpened: an *actual* square residue hangs the unbounded scan too —
-        // 4 ≡ 2² ≡ 7² (mod 9), jacobi(4, 9) = 1. Tonelli needs a non-residue,
-        // which an odd square modulus does not have, so the bounded scan
-        // returns None (no root over a non-prime modulus) rather than looping.
-        // Use mod_sqrt_prime_power for roots modulo a prime power.
+        // An actual square residue too: 4 ≡ 2² ≡ 7² (mod 9), jacobi(4, 9) = 1.
+        // Tonelli needs a non-residue, which an odd square modulus does not
+        // have, so the bounded scan returns None. Roots modulo a prime power
+        // come from mod_sqrt_prime_power.
         assert_eq!(
             mod_sqrt(&BigUint::from_u64(4), &BigUint::from_u64(9)),
             None,
@@ -6874,8 +6753,7 @@ mod tests {
             }
         }
         // Planted wide valuations, including the ladder's descent edges:
-        // exponents on and off rung boundaries (2^i, 2^i ± 1, and 12 — the
-        // shape a guarded climb once got wrong).
+        // exponents on and off rung boundaries (2^i, 2^i ± 1, and 12).
         let mut rng = SplitMix64 {
             state: 0x0dd5_0006_0006_0006,
         };
@@ -7348,16 +7226,14 @@ mod tests {
         // ≤ 997). Each base is reduced modulo n before it is classified: one
         // reducing to 0, 1, or n − 1 is the trivial ±1 case and testifies to
         // nothing. A non-empty set of only such bases runs zero effective
-        // rounds, and the composite must not then be reported prime — that is
-        // the effective-rounds guard, which the all-trivial cases below cover
-        // (replacing `effective_rounds > 0` with `true` fails them).
+        // rounds, and the composite must not then be reported prime
+        // (replacing `effective_rounds > 0` with `true` fails these cases).
         let n = BigUint::from_u64(1_022_117);
         assert!(!miller_rabin_with_bases(&n, &[1_022_116])); // ≡ n − 1
         assert!(!miller_rabin_with_bases(&n, &[1_022_117])); // ≡ 0
         assert!(!miller_rabin_with_bases(&n, &[1, 1_022_116])); // 1 and n − 1
                                                                 // By contrast, a large *unreduced* base that reduces to a genuine
-                                                                // witness (u64::MAX ≡ 807_583) must still expose the composite — the
-                                                                // bug the reduce-first change fixed, where such bases were dropped.
+                                                                // witness (u64::MAX ≡ 807_583) must still expose the composite.
         assert!(!miller_rabin_with_bases(&n, &[u64::MAX]));
         assert!(!miller_rabin_with_bases(&n, &[2]));
         assert!(!is_probable_prime(&n));
@@ -7365,7 +7241,7 @@ mod tests {
 
     #[test]
     fn miller_rabin_wrapper_agrees_with_single_round_on_trivial_bases() {
-        // Second-pass §2.3: the batch wrapper and the single-round primitive
+        // The batch wrapper and the single-round primitive
         // share one trivial-base rule — reduce modulo n, discard {0, 1, n−1}.
         let prime = BigUint::from_u64(1_000_000_007); // large, reaches MR
         let composite = BigUint::from_u64(1_022_117); // 1009 × 1013, sieve-surviving
@@ -7373,8 +7249,8 @@ mod tests {
         // 0 and 1 are trivial: the single round proves nothing with them.
         assert!(!miller_rabin_witness(&prime, &BigUint::from_u64(0)));
         assert!(!miller_rabin_witness(&prime, &BigUint::from_u64(1)));
-        // A leading 0 must not stamp a prime composite (the old bug), and a
-        // valid base alongside it still decides.
+        // A leading 0 must not stamp a prime composite, and a valid base
+        // alongside it still decides.
         assert!(!miller_rabin_with_bases(&prime, &[0])); // 0 effective rounds
         assert!(miller_rabin_with_bases(&prime, &[0, 2])); // 0 discarded, 2 decides
         assert!(miller_rabin_with_bases(&prime, &[2]));
@@ -7407,11 +7283,8 @@ mod tests {
 /// (Abramowitz & Stegun, *Handbook of Mathematical Functions*, 26.7.1),
 /// inverted by bisection on `t`, stopped when the bracket is within a
 /// part in a billion. A Cornish–Fisher expansion about the normal
-/// quantile is within one per cent of the tables at the
-/// ninety-seven-and-a-half per cent point and five per cent short at the
-/// far points a simultaneous bound asks for on few degrees of freedom,
-/// where its terms have not begun to shrink; the inversion is exact to
-/// the bisection.
+/// quantile would be five per cent short at the far points on few degrees
+/// of freedom, where its terms have not begun to shrink.
 ///
 /// # Panics
 ///

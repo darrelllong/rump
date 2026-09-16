@@ -2,8 +2,8 @@
 //!
 //! rump chooses no entropy source: every function is driven by a
 //! caller-supplied [`RandomSource`], and the output is exactly as good as that
-//! source. Cryptographic callers must supply a CSPRNG (the parent
-//! cryptography crate bridges its DRBGs here); simulations may supply any
+//! source. Cryptographic callers must supply a CSPRNG, for example by
+//! bridging a DRBG to [`RandomSource`]; simulations may supply any
 //! deterministic generator. Temporary buffers holding drawn bytes are wiped
 //! before each sampler returns when the crate's `wipe` feature is enabled;
 //! the default build leaves them to the allocator.
@@ -20,8 +20,7 @@
 //! working generator trips it with probability at most `e⁻¹¹¹ ≈ 2⁻¹⁶⁰`
 //! (the loosest of the individual bounds; each function documents its
 //! own), so the panic is a diagnosis, never a sampling accident. What
-//! each guard can detect differs, and the one gap is stated below rather
-//! than papered over:
+//! each guard can detect differs:
 //!
 //! - [`random_below`] and [`random_nonzero_below`] accept every draw with
 //!   probability at least one half regardless of arguments, so they bound
@@ -447,7 +446,7 @@ mod tests {
         }
         assert_eq!(random_nonzero_below(&mut rng, &BigUint::one()), None);
         // Coprime-to-0 is degenerate (only 1 qualifies): None, not an
-        // unbounded rejection loop (review §4.10).
+        // unbounded rejection loop.
         assert_eq!(
             random_coprime_below(&mut rng, &bound, &BigUint::zero()),
             None

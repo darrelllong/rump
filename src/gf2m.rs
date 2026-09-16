@@ -61,20 +61,16 @@ use crate::bigint::BigUint;
 
 /// A binary extension field GF(2^m), defined by its irreducible polynomial.
 ///
-/// The stored degree and reduction taps are derived from the polynomial by
-/// [`Gf2m::new`], the only constructor, and are never supplied separately, so
-/// no caller can pair a polynomial with a degree or a tap set that does not
-/// belong to it.
+/// The degree and reduction taps are derived from the polynomial by
+/// [`Gf2m::new`], the only constructor, so they cannot disagree with it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Gf2m {
     poly: BigUint,
     degree: usize,
-    // Bit positions of the polynomial below the leading term, ascending —
-    // the reduction taps. The identity that makes them the whole of
-    // reduction: x^m ≡ Σ x^t over the taps, since f(x) = x^m + Σ x^t is zero
-    // in the quotient. Sparse for every standard modulus (FIPS binary curves
-    // are trinomials and pentanomials), and the per-word reduction cost is
-    // one shifted XOR per tap.
+    // Bit positions of the polynomial below the leading term, ascending: the
+    // reduction taps. x^m ≡ Σ x^t over the taps, since f(x) = x^m + Σ x^t is
+    // zero in the quotient. Standard moduli are trinomials and pentanomials,
+    // and reduction costs one shifted XOR per tap per word.
     taps: Vec<usize>,
 }
 
@@ -82,13 +78,10 @@ impl Gf2m {
     /// Build the field GF(2^m) from its modulus polynomial, or `None` when
     /// the polynomial has degree below one (a constant defines no field).
     ///
-    /// The degree is `poly.bits() - 1` — derived, never supplied, so it
-    /// cannot fall out of step with the polynomial. The reduction taps are
-    /// likewise read off the polynomial once, here, rather than recomputed
-    /// per operation.
+    /// The degree is `poly.bits() - 1`; the reduction taps are read off the
+    /// polynomial once, here.
     ///
-    /// Irreducibility is *not* checked; see the module-level contract for what
-    /// that costs a caller who supplies a reducible polynomial, and
+    /// Irreducibility is *not* checked; see the module-level contract, and
     /// [`Self::is_irreducible`] for the test to run when the polynomial is not
     /// a published constant.
     #[must_use]
@@ -121,14 +114,9 @@ impl Gf2m {
 
     /// Add two field elements: XOR, with no reduction needed.
     ///
-    /// Coefficients live in GF(2), so addition is addition without carry, and
-    /// the sum of two polynomials of degree below `m` has degree below `m`.
-    /// In characteristic 2 this is also subtraction — `a − b` and `a + b` are
-    /// the same operation, and there is no separate `sub`.
-    ///
-    /// An associated function rather than a method because addition does not
-    /// depend on the field polynomial — any two GF(2) polynomials add this
-    /// way.
+    /// In characteristic 2 this is also subtraction, so there is no separate
+    /// `sub`. An associated function because addition does not depend on the
+    /// field polynomial.
     #[inline]
     #[must_use]
     pub fn add(a: &BigUint, b: &BigUint) -> BigUint {
@@ -142,22 +130,17 @@ impl Gf2m {
     /// Left-to-right comb multiplication with 4-bit windows (López & Dahab,
     /// *High-speed software multiplication in F_{2^m}*, INDOCRYPT 2000, LNCS
     /// 1977, 203–212; as Hankerson, Menezes, Vanstone — *Guide to ECC*,
-    /// Algorithm 2.36, present it): precompute the
-    /// sixteen products `u(x)·b(x)` for 4-bit `u`, then sweep `a` one window
-    /// at a time, shifting the accumulator four bits between sweeps.
+    /// Algorithm 2.36, present it): precompute the sixteen products
+    /// `u(x)·b(x)` for 4-bit `u`, then sweep `a` one window at a time,
+    /// shifting the accumulator four bits between sweeps.
     ///
-    /// The point of the comb is that it never tests an individual bit of `a`.
-    /// A bit-serial shift-and-XOR pays one whole-accumulator shift for each of
-    /// the `64 · na` bits of `a`; the comb consumes four bits at a time
-    /// through the table, so the sweep costs at most sixteen passes of
-    /// `na · (nb + 1)` word XORs and exactly fifteen accumulator shifts, for
-    /// operands of `na` and `nb` limbs. Cost stays quadratic in the word
-    /// counts; the win is the constant.
+    /// A bit-serial shift-and-XOR pays one accumulator shift per bit of `a`;
+    /// the comb costs at most sixteen passes of `na · (nb + 1)` word XORs and
+    /// fifteen accumulator shifts, for operands of `na` and `nb` limbs. Still
+    /// quadratic; the win is the constant.
     ///
-    /// Word arithmetic throughout; the double-width product is then reduced
-    /// tap-wise by `reduce_limbs`. Neither operand need be reduced on entry —
-    /// reduction is linear over GF(2), so an unreduced representative gives
-    /// the same product — and the result always is.
+    /// The double-width product is reduced tap-wise by `reduce_limbs`.
+    /// Neither operand need be reduced on entry; the result always is.
     #[must_use]
     pub fn mul(&self, a: &BigUint, b: &BigUint) -> BigUint {
         if a.is_zero() || b.is_zero() {
@@ -173,10 +156,9 @@ impl Gf2m {
         let stride = b_limbs.len() + 1;
 
         // table[u] = u(x) · b(x) for the sixteen 4-bit patterns u, built by
-        // the recurrence 2u ↦ (u·b) · x and 2u+1 ↦ (2u·b) + b — each entry
-        // from one already written, so the table costs 16 word-passes rather
-        // than sixteen multiplications. table[0] stays zero and is skipped at
-        // use; table[1] is b itself.
+        // the recurrence 2u ↦ (u·b) · x and 2u+1 ↦ (2u·b) + b, each entry
+        // from one already written: fourteen word passes, no multiplications.
+        // table[0] stays zero and is skipped at use; table[1] is b itself.
         let mut table = vec![0u64; 16 * stride];
         table[stride..stride + b_limbs.len()].copy_from_slice(b_limbs);
         for u in 2..16 {
@@ -234,16 +216,13 @@ impl Gf2m {
     /// Square a field element (Hankerson, Menezes, Vanstone — *Guide to ECC*,
     /// Algorithm 2.39, "Polynomial squaring").
     ///
-    /// Squaring is linear over GF(2): `(Σ aᵢxⁱ)² = Σ aᵢx²ⁱ`, because every
-    /// cross term appears twice and cancels in characteristic 2. So squaring
-    /// is a fixed rearrangement of bits — each coefficient moves to twice its
-    /// index — and needs no multiplication at all: one lookup in a
-    /// 256-entry byte table per input byte turns each 32-bit half into a
-    /// 64-bit limb, then the doubled buffer is reduced tap-wise. That is
-    /// linear in the operand's word count where [`Self::mul`] is quadratic,
-    /// which is why squaring chains are the working part of [`Self::trace`],
-    /// [`Self::sqrt`], [`Self::half_trace`], [`Self::is_irreducible`], and
-    /// binary-curve point doubling.
+    /// `(Σ aᵢxⁱ)² = Σ aᵢx²ⁱ`, because every cross term appears twice and
+    /// cancels in characteristic 2. Squaring is a fixed rearrangement of bits:
+    /// one lookup in a 256-entry byte table per input byte turns each 32-bit
+    /// half into a 64-bit limb, then the doubled buffer is reduced tap-wise.
+    /// Linear in the word count where [`Self::mul`] is quadratic, which is why
+    /// [`Self::trace`], [`Self::sqrt`], [`Self::half_trace`], and
+    /// [`Self::is_irreducible`] are built from squaring chains.
     ///
     /// `a` need not be reduced on entry; linearity makes the result the same
     /// for any representative of its class, and the result is reduced.
@@ -262,20 +241,14 @@ impl Gf2m {
     /// Raise a field element to a non-negative integer power.
     ///
     /// Left-to-right binary square-and-multiply (Knuth, *TAOCP* vol. 2,
-    /// §4.6.3): seed the accumulator with the
-    /// base (the leading exponent bit, which is always set), then walk the
-    /// remaining bits from most to least significant, squaring at every step
-    /// and multiplying by the base where the bit is set. One squaring per
-    /// exponent bit below the leading one, and one multiplication per set bit
-    /// among them — the left-to-right order is what lets the multiplier stay
-    /// fixed at the base, so [`Self::square`], the cheap operation, carries the
-    /// loop.
+    /// §4.6.3), seeded with the base for the leading exponent bit: one
+    /// squaring per remaining bit and one multiplication by the base per set
+    /// bit among them.
     ///
-    /// The exponent is an ordinary integer, not a residue: it is not reduced
-    /// modulo the group order `2^m − 1`, so a wide exponent costs its full bit
-    /// length. `pow(a, 0)` is one for every `a`, including zero, matching
-    /// [`mod_pow`](crate::modular::mod_pow). The base is reduced once on entry; the exponent is
-    /// read bit by bit and never reduced.
+    /// The exponent is not reduced modulo the group order `2^m − 1`, so a wide
+    /// exponent costs its full bit length. `pow(a, 0)` is one for every `a`,
+    /// including zero, matching [`mod_pow`](crate::modular::mod_pow). The base
+    /// is reduced once on entry.
     #[must_use]
     pub fn pow(&self, base: &BigUint, exponent: &BigUint) -> BigUint {
         let bits = exponent.bits();
@@ -297,12 +270,9 @@ impl Gf2m {
     /// Divide one field element by another: `a · b⁻¹`, or `None` when `b` is
     /// not a unit.
     ///
-    /// Inversion then multiplication, with no separate division algorithm:
-    /// [`Self::inverse`] is one extended-Euclid pass and dominates the cost, so
-    /// a fused routine would save nothing. `None` propagates from
-    /// [`Self::inverse`] and means exactly what it means there — `b` is zero,
-    /// a non-canonical representative of zero, or a zero divisor under a
-    /// reducible modulus.
+    /// Inversion then multiplication; [`Self::inverse`] dominates the cost.
+    /// `None` means what it means there: `b` is zero, a non-canonical
+    /// representative of zero, or a zero divisor under a reducible modulus.
     #[must_use]
     pub fn div(&self, a: &BigUint, b: &BigUint) -> Option<BigUint> {
         Some(self.mul(a, &self.inverse(b)?))
@@ -310,18 +280,14 @@ impl Gf2m {
 
     /// The unique square root of `a`.
     ///
-    /// Squaring is the Frobenius map, an automorphism of GF(2^m); since the
-    /// field is finite, injectivity makes it a bijection, so every element has
-    /// exactly one square root and the map is invertible. Its inverse is
-    /// `a ↦ a^{2^{m−1}}`, because `a^{2^m} = a` for every element, and that
-    /// exponentiation is `m − 1` applications of [`Self::square`] — no
-    /// [`Self::pow`] call, no multiplications. The routine is total: every
-    /// element has a root, so there is no failure case to return.
+    /// Squaring is the Frobenius automorphism of GF(2^m), so every element has
+    /// exactly one square root. Since `a^{2^m} = a`, the root is
+    /// `a^{2^{m−1}}`: `m − 1` applications of [`Self::square`], no
+    /// multiplications.
     ///
     /// Under a reducible modulus squaring is not injective (in `GF(2)[x]/(x²)`
-    /// both 0 and `x` square to 0), so no inverse map exists and the value
-    /// returned here need not square back to `a`. That is the caller's
-    /// irreducibility contract, not a check this function can make cheaply.
+    /// both 0 and `x` square to 0), and the value returned need not square
+    /// back to `a`.
     #[must_use]
     pub fn sqrt(&self, a: &BigUint) -> BigUint {
         let mut root = self.reduce(a.clone());
@@ -337,8 +303,7 @@ impl Gf2m {
     /// The map `z ↦ z² + z` is GF(2)-linear with kernel `{0, 1}`, so its image
     /// is the index-two subspace `Tr(c) = 0`: a solution exists exactly when
     /// the trace vanishes, and when it does there are exactly two roots, `z`
-    /// and `z + 1`. This function returns the one its construction produces;
-    /// the caller obtains the other by adding one.
+    /// and `z + 1`. This function returns one; add one for the other.
     ///
     /// Two constructions, chosen on the parity of `m`:
     ///
@@ -349,49 +314,39 @@ impl Gf2m {
     ///   with any `δ` of trace one, `z = Σ_{i=0}^{m−2} sᵢ δ^{2^i}` where
     ///   `sᵢ = Σ_{j=i+1}^{m−1} c^{2^j}`. Because `Tr(c) = 0`, `s₀ = c`, and
     ///   `sᵢ₊₁ = sᵢ + c^{2^{i+1}}`, so one squaring of `c` and one of `δ` per
-    ///   term carries the whole sum — no re-summation, `m − 1` iterations.
-    ///   The half-trace is unavailable here: for even `m` it is not a solver
-    ///   of this equation.
+    ///   term carries the sum over `m − 1` iterations.
     ///
-    /// Where `δ` comes from, and why the search is bounded: the trace is a
-    /// non-zero GF(2)-linear functional, so it cannot vanish on all of a basis,
-    /// and at least one of the `m` monomials `x⁰ … x^{m−1}` has trace one.
-    /// Scanning exactly those `m` elements therefore always succeeds in a
-    /// genuine field, and terminates rather than looping when it does not.
+    /// `δ` is found among the `m` monomials `x⁰ … x^{m−1}`: the trace is a
+    /// non-zero GF(2)-linear functional, so it cannot vanish on a whole basis.
+    /// The scan is bounded, so it terminates even when no `δ` exists.
     ///
-    /// `None` covers three distinct situations, and every `Some` is checked:
+    /// `None` covers three situations, and every `Some` is checked:
     ///
     /// - `Tr(c) = 1`: the equation has no root, the mathematical case.
     /// - The modulus is reducible and the Frobenius sum escapes GF(2), so no
     ///   trace is defined (`trace_bit` reports this); or it is reducible with
     ///   no trace-one monomial, so the even-degree search finds no `δ`.
-    /// - The construction ran but its output fails `z² + z = c`, which a
-    ///   reducible modulus can cause on either branch. Both branches verify
-    ///   the root by substitution before returning it, so a `Some` from this
-    ///   function satisfies its equation whatever polynomial was supplied.
+    /// - The construction's output fails `z² + z = c`, which a reducible
+    ///   modulus can cause on either branch. Both branches verify the root by
+    ///   substitution, so a `Some` satisfies the equation whatever polynomial
+    ///   was supplied.
     #[must_use]
     pub fn solve_quadratic(&self, c: &BigUint) -> Option<BigUint> {
         let c = self.reduce(c.clone());
-        // A solution to z² + z = c exists iff Tr(c) = 0. `trace_bit` is `None`
-        // when the modulus is reducible (no well-defined trace) — an unfit
-        // ring, so no root — and `Some(1)` when the equation is unsolvable.
+        // A solution exists iff Tr(c) = 0. `trace_bit` is `None` when the
+        // Frobenius sum escapes GF(2) under a reducible modulus.
         if self.trace_bit(&c)? != 0 {
             return None;
         }
         if self.degree % 2 == 1 {
             let z = self.half_trace(&c);
-            // Verify rather than trust: a reducible odd-degree modulus can
-            // violate the identity, and a wrong root must be `None`.
+            // A reducible odd-degree modulus can violate the identity.
             return (Self::add(&self.square(&z), &z) == c).then_some(z);
         }
 
-        // Even degree needs a trace-one element δ to drive the construction.
-        // The trace is a nonzero GF(2)-linear functional, so in a genuine field
-        // at least one basis element xⁱ (bit pattern 2ⁱ) has trace one;
-        // scanning the m basis elements bounds the search and returns `None`
-        // for a ring (a reducible modulus) that has no trace-one element,
-        // rather than looping forever. `trace_bit` also keeps a reducible
-        // ring's escaped trace from tripping the `trace` assertion.
+        // Even degree needs a trace-one δ; scan the m basis elements xⁱ.
+        // `trace_bit` rather than `trace`, so a reducible ring gives `None`
+        // instead of a panic.
         let mut delta = None;
         let mut basis = BigUint::one();
         for _ in 0..self.degree {
@@ -414,47 +369,29 @@ impl Gf2m {
             delta_power = self.square(&delta_power);
         }
 
-        // Verify before returning: a reducible modulus that slipped past the
-        // trace checks yields no valid root, which must be `None`.
+        // A reducible modulus can pass the trace checks and still yield no
+        // valid root.
         (Self::add(&self.square(&z), &z) == c).then_some(z)
     }
 
     /// The absolute trace `Tr(c) = Σ_{i=0}^{m−1} c^{2^i}`, always 0 or 1
     /// (IEEE Std 1363-2000, Annex A.4.5, "Trace").
     ///
-    /// The sum is fixed by the Frobenius map, so it lies in the prime subfield
-    /// GF(2); the computation is `m − 1` squarings accumulated by XOR, no
-    /// multiplications. As a GF(2)-linear functional the trace decides
-    /// solvability of `z² + z = c`: a solution exists exactly when
-    /// `Tr(c) = 0` — the precondition of [`Self::half_trace`], checkable
-    /// through the public API. `Tr(1) = m mod 2`.
+    /// The sum is fixed by the Frobenius map, so it lies in GF(2); it costs
+    /// `m − 1` squarings accumulated by XOR. `z² + z = c` has a solution
+    /// exactly when `Tr(c) = 0`, the precondition of [`Self::half_trace`].
+    /// `Tr(1) = m mod 2`. The argument is reduced first.
     ///
-    /// The argument is reduced first, so any representative of a class gives
-    /// that class's trace.
-    ///
-    /// The contract is a field contract. Under a reducible modulus the sum
-    /// need not land in GF(2) at all, and then there is no trace to report.
-    /// Callers that must handle such a modulus without panicking use the total
-    /// form the crate keeps internally, `trace_bit`, which reports the escape
-    /// as `None`; [`Self::solve_quadratic`] is built on it.
+    /// Under a reducible modulus the sum need not land in GF(2);
+    /// [`Self::solve_quadratic`] handles that case without panicking.
     ///
     /// # Panics
     ///
-    /// When the Frobenius sum is neither 0 nor 1, in every build. That is
-    /// unreachable for an irreducible modulus and so signals a broken
-    /// constructor contract. It panics rather than substituting 0 because 0 is
-    /// the answer meaning `z² + z = c` is solvable: a caller told that would
-    /// go looking for a root that does not exist.
+    /// When the Frobenius sum is neither 0 nor 1, in every build, which
+    /// requires a reducible modulus. It panics rather than returning 0
+    /// because 0 would claim `z² + z = c` is solvable.
     #[must_use]
     pub fn trace(&self, c: &BigUint) -> u8 {
-        // In a genuine field the Frobenius sum always lands in GF(2). When it
-        // does not, the modulus is reducible and there is no trace to report —
-        // so this panics rather than return a number. Returning 0 would be the
-        // most damaging answer available: 0 is precisely the value that says
-        // `z² + z = c` is solvable, so a caller would go on to ask for a root
-        // that does not exist. Callers that must handle a reducible modulus
-        // without panicking use the total form, `trace_bit`, which
-        // `solve_quadratic` does.
         self.trace_bit(c)
             .expect("the Frobenius sum left GF(2): the field polynomial is reducible")
     }
@@ -462,15 +399,9 @@ impl Gf2m {
     /// The trace as a prime-subfield bit, or `None` when the Frobenius sum is
     /// neither 0 nor 1.
     ///
-    /// Why it can be `None`: `Tr(c) = Σ c^{2^i}` is guaranteed to lie in the
-    /// prime subfield GF(2) only when the modulus is irreducible, i.e. when the
-    /// ring is actually a field. [`Gf2m::new`] does not check irreducibility,
-    /// so a caller can hand us a reducible modulus; there the sum can be any
-    /// bit pattern, and reporting it as a bare 0 (as [`Self::trace`] does)
-    /// would let a routine like [`Self::solve_quadratic`] proceed on a ring
-    /// that has no well-defined trace. Returning `None` lets such a routine
-    /// recognise the unfit ring and bail rather than loop or fabricate an
-    /// answer.
+    /// The sum is guaranteed to lie in GF(2) only for an irreducible modulus,
+    /// which [`Gf2m::new`] does not check. `None` lets a caller such as
+    /// [`Self::solve_quadratic`] recognise a reducible ring and bail.
     fn trace_bit(&self, c: &BigUint) -> Option<u8> {
         let mut power = self.reduce(c.clone());
         let mut acc = power.clone();
@@ -489,10 +420,8 @@ impl Gf2m {
 
     /// Test whether a GF(2) polynomial is irreducible (Rabin's test).
     ///
-    /// [`Gf2m::new`] trusts its polynomial, the cheap default for the fixed,
-    /// published moduli of the FIPS curves; run this when the polynomial
-    /// arrives from an untrusted source — the same posture the parent
-    /// cryptography crate takes for primality. Rabin's criterion
+    /// [`Gf2m::new`] trusts its polynomial; run this when the polynomial is
+    /// not a published constant. Rabin's criterion
     /// (*Probabilistic algorithms in finite fields*, 1980, here in its
     /// deterministic GF(2) form): `f` of degree `m` is irreducible iff
     /// `x^{2^m} ≡ x (mod f)` and, for every prime `q` dividing `m`,
@@ -514,15 +443,12 @@ impl Gf2m {
     /// `x^{2^m}`, so the whole test costs `m` squarings plus one polynomial
     /// gcd per distinct prime divisor of `m`.
     ///
-    /// Degenerate inputs: constants (`bits < 2`) are units or zero, neither
-    /// irreducible; degree 1 (`x` and `x + 1`) is irreducible by inspection
-    /// and returns early, before the `m/q` machinery would face `m = 1`.
+    /// Constants are not irreducible; degree 1 (`x` and `x + 1`) is, and
+    /// returns early.
     ///
     /// # Panics
     ///
-    /// Does not panic. The internal `expect` on the context constructor is
-    /// discharged by the degree test immediately above it, and guards a case
-    /// no input can produce.
+    /// Never: the internal `expect` is discharged by the degree test above it.
     #[must_use]
     pub fn is_irreducible(poly: &BigUint) -> bool {
         let bits = poly.bits();
@@ -552,10 +478,8 @@ impl Gf2m {
                 frobenius = ring.square(&frobenius);
                 steps += 1;
             }
-            // The clone is inherent: Euclid consumes a mutable working copy
-            // of the modulus, one per gcd — ω(m) clones in all, exactly one
-            // for the prime degrees every FIPS curve uses, a handful for
-            // any composite m, against the m squarings above.
+            // Euclid consumes a working copy of the modulus: one clone per
+            // distinct prime divisor of m.
             if !gf2_poly_gcd(Self::add(&frobenius, &x), poly.clone()).is_one() {
                 return false;
             }
@@ -570,40 +494,30 @@ impl Gf2m {
     /// Invert a field element via the extended Euclidean algorithm over
     /// `GF(2)[x]`, or `None` when the element is not a unit.
     ///
-    /// Non-units are zero, any non-canonical representative of zero (the field
-    /// polynomial itself reduces to zero), and — when the modulus is reducible
-    /// rather than irreducible — the zero-divisors that share a factor with
-    /// it. Each returns `None` rather than looping.
+    /// Non-units are zero, any non-canonical representative of zero, and,
+    /// under a reducible modulus, the zero divisors that share a factor with
+    /// it.
     ///
     /// Algorithm 2.48 from Hankerson, Menezes, Vanstone — *Guide to ECC*: each
     /// step cancels the leading term of the higher-degree remainder by adding a
-    /// shifted copy of the other (`u ^= v · x^{deg u − deg v}`), carrying the
-    /// single cofactor of `a` alongside. Only the cofactor of `a` is tracked;
-    /// the cofactor of the modulus is never needed and is not computed.
+    /// shifted copy of the other (`u ^= v · x^{deg u − deg v}`), carrying only
+    /// the cofactor of `a` alongside.
     ///
-    /// Two invariants hold at every iteration of the loop, both established by
-    /// the initialization `u = a, v = poly, b = 1, c = 0`:
+    /// Invariants, established by `u = a, v = poly, b = 1, c = 0`:
     ///
-    /// - `u ≡ b · a` and `v ≡ c · a (mod poly)`. Explicitly,
-    ///   `u = b · a XOR s · poly` for a quotient `s` that is not tracked, and
-    ///   likewise for `v`. Each step adds a shifted multiple of one pair to
-    ///   the other, which preserves both congruences because the update is
-    ///   applied to `u`/`v` and `b`/`c` in lockstep.
+    /// - `u ≡ b · a` and `v ≡ c · a (mod poly)`, preserved because each
+    ///   update is applied to `u`/`v` and `b`/`c` in lockstep.
     /// - `gcd(u, v) = gcd(a, poly)`, since adding `v · x^j` to `u` changes
     ///   neither side's common divisors.
     ///
     /// Termination: `u ^= v · x^j` strictly lowers `deg u`, and the swap keeps
-    /// `deg u ≥ deg v`, so the degree pair decreases and the loop is finite.
-    /// It exits when `u = 1`, at which point the first invariant reads
-    /// `1 ≡ b · a`, so `b` reduced is the inverse. `u` can only reach zero if
-    /// `v` divides it, in which case `v` is the common gcd; when that gcd is
-    /// not 1, `a` is not a unit, and that is the `None`.
+    /// `deg u ≥ deg v`, so the loop is finite. It exits when `u = 1`, where
+    /// the first invariant gives `b` as the inverse, or when `u = 0`, where
+    /// `v` is a gcd other than 1 and `a` is not a unit.
     #[must_use]
     pub fn inverse(&self, a: &BigUint) -> Option<BigUint> {
-        // Reduce first: `is_zero()` is a limb-vector test, not a field test,
-        // so a representative of zero that is not the canonical
-        // `BigUint::zero()` — the field polynomial, or any multiple of it —
-        // must be reduced before the zero check can recognize it.
+        // Reduce first so the zero test catches non-canonical zeros such as
+        // the field polynomial itself.
         let a = self.reduce(a.clone());
         if a.is_zero() {
             return None;
@@ -616,10 +530,8 @@ impl Gf2m {
 
         // Loop until u = 1 (degree 0 polynomial over GF(2)).
         while !u.is_one() {
-            // A remainder of zero means gcd(a, poly) = v ≠ 1: `a` is not a
-            // unit (a reducible modulus, or a zero-divisor under one). The
-            // XOR-shift below cannot reduce a zero `u`, so bail here instead
-            // of spinning on a remainder that never reaches 1.
+            // gcd(a, poly) = v ≠ 1: `a` is not a unit. A zero `u` would
+            // never reach 1.
             if u.is_zero() {
                 return None;
             }
@@ -629,9 +541,8 @@ impl Gf2m {
             let mut deg_u = u.bits(); // deg(u) + 1
             let mut deg_v = v.bits(); // deg(v) + 1
 
-            // Ensure deg(u) >= deg(v) by swapping if necessary. The cofactors
-            // travel with their polynomials so the invariants hold across the
-            // swap, and the lengths travel with both so neither is recomputed.
+            // Ensure deg(u) >= deg(v). The cofactors and lengths travel with
+            // their polynomials.
             if deg_u < deg_v {
                 core::mem::swap(&mut u, &mut v);
                 core::mem::swap(&mut b, &mut c);
@@ -659,37 +570,26 @@ impl Gf2m {
     /// Compute the half-trace HT(c) = Σ_{i=0}^{(m−1)/2} c^{2^{2i}}, for odd
     /// field degree only.
     ///
-    /// For any `c` with absolute trace Tr(c) = 0, `z = HT(c)` solves
-    /// `z² + z = c` — the quadratic behind compressed-point decompression on
-    /// binary curves. The general identity is `HT(c)² + HT(c) = c + Tr(c)`,
-    /// which is why the trace must vanish; nothing here checks that, and on a
-    /// trace-one argument the result is the root of `z² + z = c + 1` instead.
-    /// [`Self::solve_quadratic`] is the total form: it tests the trace, works
-    /// at every degree, and verifies its root.
+    /// For any `c` with Tr(c) = 0, `z = HT(c)` solves `z² + z = c`, the
+    /// quadratic behind compressed-point decompression on binary curves. In
+    /// general `HT(c)² + HT(c) = c + Tr(c)`; the trace is not checked here,
+    /// and for a trace-one argument the result solves `z² + z = c + 1`.
+    /// [`Self::solve_quadratic`] tests the trace, works at every degree, and
+    /// verifies its root.
     ///
-    /// The sum telescopes: successive terms differ by two Frobenius steps, so
-    /// the loop squares twice and XORs, `(m − 1)/2` times, with no
-    /// multiplications. The argument is reduced first, as [`Self::trace`],
-    /// [`Self::sqrt`], and [`Self::solve_quadratic`] do, so a non-canonical
-    /// representative yields the same half-trace as its reduced form.
+    /// The loop squares twice and XORs, `(m − 1)/2` times, with no
+    /// multiplications. The argument is reduced first.
     ///
-    /// The odd-degree restriction is essential rather than incidental, and the
-    /// identity shows why. Squaring the sum shifts every exponent one
-    /// Frobenius step, so `HT(c)² + HT(c) = Σ_j c^{2^j}` over the union of the
-    /// even and odd steps. For odd `m` that union is `j = 0 … m`, and
-    /// `c^{2^m} = c` folds the last term back to give `Tr(c) + c`. For even
-    /// `m` the loop runs one fewer time and the union is only `j = 0 … m−1`,
-    /// which is `Tr(c)` — a constant in GF(2), carrying no information about
-    /// `c` at all. Every FIPS 186-4 binary curve degree (163, 233, 283, 409,
-    /// 571) is odd.
+    /// Why odd degree: squaring the sum shifts every exponent one Frobenius
+    /// step, so `HT(c)² + HT(c) = Σ_j c^{2^j}` over the even and odd steps.
+    /// For odd `m` that is `j = 0 … m`, and `c^{2^m} = c` gives `Tr(c) + c`.
+    /// For even `m` it is `j = 0 … m−1`, which is `Tr(c)` alone and carries
+    /// no information about `c`. Every FIPS 186-4 binary curve degree is odd.
     ///
     /// # Panics
     ///
-    /// Panics, in every build, if the field degree is even. This is reachable
-    /// — nothing stops a caller from building an even-degree [`Gf2m`](crate::finite_field::Gf2m) and
-    /// calling this — and it is deliberately a panic rather than a silent
-    /// wrong answer, because the function has no correct value to return
-    /// there. Use [`Self::solve_quadratic`] at even degree.
+    /// In every build, if the field degree is even. Use
+    /// [`Self::solve_quadratic`] there.
     #[must_use]
     pub fn half_trace(&self, c: &BigUint) -> BigUint {
         assert!(
@@ -715,17 +615,13 @@ impl Gf2m {
     /// Reduce `a` modulo the field polynomial, returning the canonical
     /// representative of its class — the unique value of degree below `m`.
     ///
-    /// The guard is the common case and is what makes calling this on entry to
-    /// [`Self::trace`], [`Self::sqrt`], [`Self::pow`], [`Self::half_trace`],
-    /// and [`Self::inverse`] cheap: an argument already in canonical form is
-    /// returned untouched, with no copy of the limb buffer. Only an unreduced
-    /// representative pays for the fold.
+    /// An argument already in canonical form, the common case, is returned
+    /// as is; only an unreduced representative pays for the fold.
     fn reduce(&self, a: BigUint) -> BigUint {
         if a.bits() <= self.degree {
             return a;
         }
-        // `a` is owned, so the fold mutates its own limb buffer in place
-        // rather than working on a copy.
+        // `a` is owned, so the fold works on its limb buffer in place.
         let mut limbs = a.into_limbs();
         self.reduce_limbs(&mut limbs);
         BigUint::from_limbs(limbs)
@@ -742,10 +638,9 @@ impl Gf2m {
     /// whose bits sit at positions `degree + k` folds back as `w << t` at
     /// each reduction tap `t`, and clearing the source word is what the
     /// polynomial's leading term would have done. This is the tap identity
-    /// `x^m ≡ Σ x^t` applied to 64 coefficients at once, which is sound
-    /// because the identity is GF(2)-linear. Cost is one shifted XOR per tap
-    /// per word — four or fewer for the trinomial and pentanomial moduli every
-    /// standard uses.
+    /// `x^m ≡ Σ x^t` applied to 64 coefficients at once, sound because the
+    /// identity is GF(2)-linear. Cost is one shifted XOR per tap per word:
+    /// two for a trinomial, four for a pentanomial.
     ///
     /// Termination. A bit at position `p ≥ degree` is folded to `p − degree +
     /// t`, and every tap satisfies `t ≤ degree − 1`, so each folded bit lands
@@ -788,11 +683,9 @@ impl Gf2m {
             }
         }
 
-        // Leave the buffer in normal form. Every current caller hands the
-        // buffer to `BigUint::from_limbs`, which normalizes again, so this
-        // pass is redundant today; it is what makes the function's own
-        // postcondition — no trailing zero words — hold for an in-place
-        // caller that does not.
+        // Postcondition: no trailing zero words. Callers that pass the buffer
+        // to `BigUint::from_limbs` get this twice; the function does not rely
+        // on them.
         while buf.last() == Some(&0) {
             buf.pop();
         }
@@ -850,12 +743,11 @@ fn limbs_bits(buf: &[u64]) -> usize {
 /// XOR `word` into the buffer at the given bit offset, straddling the two
 /// limbs the offset spans.
 ///
-/// The `shift > 0` test is not an optimization: `word >> 64` is undefined
-/// behaviour in Rust and would panic in a debug build, so the aligned case
-/// must skip the high half rather than compute it. The `high != 0` test is
-/// what keeps the write in bounds.
+/// The `shift > 0` test is not an optimization: `word >> 64` overflows the
+/// shift (a panic in a debug build), so the aligned case skips the high half.
+/// The `high != 0` test keeps the write in bounds.
 ///
-/// Bounds. The caller — `Gf2m::reduce_limbs`, the only one — must guarantee
+/// Bounds. The only caller, `Gf2m::reduce_limbs`, must guarantee
 /// `index < buf.len()`, which it does because every offset it passes is
 /// strictly below the bit position of the word being folded away. The write
 /// to `index + 1` can reach one past that word, and is in bounds for a
@@ -882,9 +774,8 @@ fn xor_shifted_word(buf: &mut [u64], word: u64, bit_offset: usize) {
 /// The inner loop is one Euclidean division of `a` by `b`, performed as
 /// repeated cancellation of the leading term (`a ^= b · x^{deg a − deg b}`)
 /// without ever forming the quotient, which is not needed. It terminates
-/// because each cancellation strictly lowers `deg a`. The swap then makes the
-/// remainder the new divisor, exactly as in Euclid, so the iteration is finite
-/// and ends with the gcd in `a` and zero in `b`.
+/// because each cancellation strictly lowers `deg a`. The swap makes the
+/// remainder the new divisor, ending with the gcd in `a` and zero in `b`.
 ///
 /// A zero argument is handled by the same code without a special case:
 /// `gcd(0, b) = b` falls out of the first swap. The result is monic by
@@ -903,11 +794,9 @@ fn gf2_poly_gcd(mut a: BigUint, mut b: BigUint) -> BigUint {
 
 /// Distinct prime divisors of `n`, ascending, by trial division to `√n`.
 ///
-/// Trial division rather than the crate's own sieve because the only caller is
-/// [`Gf2m::is_irreducible`] and `n` there is a field degree — 571 for the
-/// widest FIPS binary curve. Each divisor found is divided out completely, so
-/// the list holds each prime once; whatever survives the loop above 1 is the
-/// single prime factor larger than `√n`, and is appended.
+/// `n` is a field degree (571 for the widest FIPS binary curve), so trial
+/// division suffices. Each divisor found is divided out completely; whatever
+/// survives above 1 is the single prime factor larger than `√n`.
 fn prime_divisors(mut n: usize) -> Vec<usize> {
     let mut out = Vec::new();
     let mut d = 2usize;
@@ -1007,8 +896,7 @@ mod tests {
 
     #[test]
     fn inverse_returns_none_for_non_units() {
-        // Each of these once livelocked; reducing first and bailing on a
-        // zero remainder turns them into None. GF(2^4), x^4 + x + 1.
+        // Non-units must give None, not loop. GF(2^4), x^4 + x + 1.
         let field = gf4();
 
         // The field polynomial is 0 in the field: a non-canonical zero.
@@ -1037,9 +925,8 @@ mod tests {
     #[test]
     fn half_trace_reduces_its_input() {
         // A non-canonical representative of a field element must give the
-        // same half-trace as its reduced form. c XOR poly ≡ c, since the
-        // field polynomial is 0, and carries the degree-163 leading term, so
-        // before the reduce the accumulator kept that stray bit.
+        // same half-trace as its reduced form. c XOR poly ≡ c, and carries
+        // the degree-163 leading term.
         let field = gf163();
         let c = BigUint::from_u64(0b10); // x, already reduced
         let unreduced = Gf2m::add(&c, field.modulus()); // x XOR poly ≡ x
@@ -1056,7 +943,7 @@ mod tests {
     fn half_trace_panics_on_even_degree() {
         // half_trace is not a solver of z² + z = c on an even degree; calling
         // it there is a programming error and must panic in every build, not
-        // return a value that fails its own equation (review §2.2).
+        // return a value that fails its own equation.
         let field = gf4(); // GF(2^4), even degree
         let _ = field.half_trace(&BigUint::from_u64(0b10)); // x
     }
@@ -1201,8 +1088,8 @@ mod tests {
         assert!(!Gf2m::is_irreducible(&BigUint::from_u64(0b1000111)));
     }
 
-    /// The pre-comb algorithm, kept as an independent oracle: shift-and-XOR
-    /// per set bit, reduced bit-serially with no shared kernel code.
+    /// An independent oracle: shift-and-XOR per set bit, reduced bit-serially
+    /// with no shared kernel code.
     fn mul_reference(field: &Gf2m, a: &BigUint, b: &BigUint) -> BigUint {
         let mut acc = BigUint::zero();
         let mut temp = a.clone();
@@ -1317,7 +1204,7 @@ mod tests {
     #[test]
     fn solve_quadratic_terminates_on_reducible_rings() {
         // Reducible moduli have no well-defined trace-one element; the even-
-        // degree branch must return None rather than loop forever (review §2.4).
+        // degree branch must return None rather than loop forever.
         // x^2 (0b100) — the smallest reducible even-degree modulus.
         let ring = Gf2m::new(BigUint::from_u64(0b100)).expect("ring");
         assert_eq!(ring.solve_quadratic(&BigUint::zero()), None);

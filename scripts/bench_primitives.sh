@@ -33,9 +33,8 @@
 # never stabilizes. They get a larger budget, but budget alone is not enough at
 # the wide sizes: each reading needs a fresh random operand, and generating a
 # multi-kilobit random prime costs far more than the operation being timed, so a
-# 180 s session at 7168 bits collected four readings. A mean of four draws from a
-# bimodal cost is noise wearing a number's clothes; the floor rejects it rather
-# than publishing it.
+# session can end with only a handful of readings. The floor rejects a mean of so
+# few draws from a bimodal cost rather than publishing it.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -103,11 +102,9 @@ q = lambda p: ns[min(len(ns) - 1, int((len(ns) - 1) * p))] if ns else float("nan
 # from a warmup-then-steady-state process. Our heavy-tailed ops are i.i.d.
 # mixtures — runs of microsecond rejections punctured by rare enormous readings
 # — which that detector misreads as regime changes and drops, producing a
-# figure that need not even lie within the sample's own range (one session
-# reported 21.9 ms against its 0.12 ms p99 and 130 ms max; another 2.15 us
-# against a 194 ms p99). There is no warmup to eliminate here — every reading
-# is a fresh random operand — so the whole-sample mean is the correct and only
-# estimator.
+# figure that need not lie within the sample's own range. There is no warmup to
+# eliminate here — every reading is a fresh random operand — so the whole-sample
+# mean is the correct estimator.
 mean_ms = statistics.fmean(xs)
 lo = ns[0] if ns else float("nan")
 hi = ns[-1] if ns else float("nan")
@@ -124,16 +121,12 @@ if len(xs) > 2 and mean_ms > 0:
 else:
     ci_pct = float("nan")
 
-# A statistic is only as good as the sample behind it, and for the expensive
-# widths the sample can be tiny: one reading costs a fresh random operand, and
-# generating a multi-kilobit random prime takes far longer than the operation
-# being timed (at 7168 bits a 180 s session collected FOUR readings — its
-# "mean" of 202 ms was just the average of those four, two fast Jacobi exits and
-# two full descents, and a different four would have said 0.13 ms or 400 ms).
-# That is not a heavy-tailed measurement, it is no measurement. Below the floor
-# the cell says so instead of printing an authoritative-looking number; the
-# order statistics stay for transparency, and downstream mean parsers skip the
-# row because the column does not hold a number.
+# For the expensive widths the sample can be tiny: one reading costs a fresh
+# random operand, and generating a multi-kilobit random prime takes far longer
+# than the operation being timed. A mean of a few draws from a bimodal cost is
+# no measurement. Below the floor the cell says so instead of printing a number;
+# the order statistics stay, and downstream mean parsers skip the row because
+# the column does not hold a number.
 MIN_READINGS = 30
 mean_str = f"{mean_ms:.6g}"
 if len(xs) < MIN_READINGS:

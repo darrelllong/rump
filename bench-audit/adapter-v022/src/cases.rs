@@ -1,5 +1,6 @@
-//! The workload set. This is the only file that differs between the two
-//! revision adapters, and only where the 0.3.0 rename forces it.
+//! The workload set. Apart from the `main.rs` banner, this is the only file
+//! that differs between the two revision adapters: where the 0.3.0 rename
+//! forces it, and in the v0.3.0-only cases the other adapter adds.
 //!
 //! v0.2.2 names used here: the flat crate root, `add_ref`/`sub_ref`/`mul_ref`/
 //! `square_ref`, `BarrettCtx`/`MontgomeryCtx`, `encode`/`mul_mont`, `sqrt_mod`,

@@ -9,22 +9,19 @@
 //! # Why this exists beside [`crate::modular::MontgomeryContext`]
 //!
 //! The `BigUint` context serves moduli of any width and pays for it in limb
-//! loops, allocation, and provenance checks. The inner loops of a trial
-//! factorisation — a rho walk, an elliptic-curve stage, a strong-pseudoprime
-//! test on a word-sized cofactor — perform millions of modular
-//! multiplications on values that never exceed one or two words, and at that
-//! width the entire REDC is a handful of register operations. These contexts
-//! are that handful, with no heap in sight.
+//! loops, allocation, and provenance checks. Inner loops such as a rho walk,
+//! an elliptic-curve stage, or a strong-pseudoprime test perform millions of
+//! modular multiplications on values of one or two words, where REDC is a
+//! handful of register operations. These contexts are that handful, with no
+//! heap.
 //!
 //! # The residue types
 //!
 //! [`Residue64`] and [`Residue128`] are `Copy` newtypes around the bare
-//! word. They carry no context identity — a pointer per residue would double
-//! its size for a check the big-integer domain needs and this one does not
-//! bargain for — so mixing residues of two contexts is not caught here, and
-//! the types exist for the cheaper, commoner mistake: handing a plain
-//! integer to a kernel that expects Montgomery form, or reading a Montgomery
-//! word back as a value. Neither compiles.
+//! word. They carry no context identity, which would double their size, so
+//! mixing residues of two contexts is not caught. The types catch the
+//! commoner mistake: passing a plain integer where Montgomery form is
+//! expected, or reading a Montgomery word back as a value. Neither compiles.
 
 /// Montgomery arithmetic modulo an odd `u64`.
 ///
@@ -166,8 +163,8 @@ impl Montgomery64 {
 
     /// `base^exponent` in the domain, by binary square-and-multiply.
     ///
-    /// Not constant-time, like everything here: these contexts serve
-    /// factorisation searches, where the exponent is public.
+    /// Not constant-time, like everything here: the exponent is assumed
+    /// public.
     #[must_use]
     pub fn pow(&self, base: Residue64, exponent: u64) -> Residue64 {
         let mut result = self.one();
@@ -236,8 +233,8 @@ impl Montgomery128 {
         let one = (u128::MAX % modulus) + 1;
         let one = if one == modulus { 0 } else { one };
         // 2²⁵⁶ mod modulus: square 2¹²⁸ mod modulus with the wide product
-        // and reduce the 256-bit square by shift-and-subtract over the high
-        // half. Runs once per context; clarity over cleverness.
+        // and reduce the 256-bit square by double-and-add over the high
+        // half. Runs once per context; clarity over speed.
         let r_squared = {
             let (high, low) = wide_mul(one, one);
             // Reduce (high·2¹²⁸ + low) mod modulus. Horner over the high
@@ -383,7 +380,7 @@ fn mod_double(a: u128, modulus: u128) -> u128 {
     }
 }
 
-/// `a + b mod modulus` without overflow, for reduced inputs.
+/// `a + b mod modulus` without overflow; the inputs need not be reduced.
 #[inline]
 fn mod_add(a: u128, b: u128, modulus: u128) -> u128 {
     let b = b % modulus;
@@ -510,9 +507,8 @@ mod tests {
         let a = (1u128 << 99) + 12_345;
         let b = (1u128 << 98) + 67_890;
         let product = context.exit(context.mul(context.enter(a), context.enter(b)));
-        // Schoolbook: reduce the 256-bit product by folding the high half
-        // bit by bit, the same way the context builds r², but through an
-        // independent path.
+        // Reduce the 256-bit product by folding the high half bit by bit,
+        // as the context builds r², independently of REDC.
         let (high, low) = wide_mul(a % prime, b % prime);
         let mut expected = 0u128;
         for shift in (0..128).rev() {
@@ -536,9 +532,8 @@ mod tests {
 /// composite passing all twelve as 3 186 65…×10²⁴ — beyond 2⁶⁴ — so within a
 /// word the answer is a theorem, not a probability.
 ///
-/// Runs on [`Montgomery64`], so a test is a few dozen register-width
-/// exponentiation steps and no allocation: the width of candidate this
-/// serves — sieve cofactors, rho survivors — arrives by the million.
+/// Runs on [`Montgomery64`]: at most twelve word-width exponentiations and
+/// no allocation, for callers that test candidates by the million.
 #[must_use]
 pub fn is_prime_u64(candidate: u64) -> bool {
     if candidate < 2 {

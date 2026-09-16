@@ -20,23 +20,20 @@ quantile) bounds it from below:
     mean ≥ [(i50+1)·min + (i99-i50)·p50 + (n-1-i99)·p99] / n
 
 A mean outside that interval cannot have come from the sample its own quantiles
-describe.  That is the signature of the defect this check exists to catch: the
-harness once reported pilot-bench's `readings_mean`, a changepoint-truncated
-"dominant segment" average that discards the heavy tail and so need not lie in
-the sample's range at all (a 7168-bit mod_sqrt cell read 21.9 ms against its own
-0.12 ms p99).  The reduction now reports the whole-sample mean, which satisfies
-these bounds by construction, and this script keeps that true.
+describe.  pilot-bench's `readings_mean`, a changepoint-truncated "dominant
+segment" average that discards the heavy tail, can do exactly that.  The
+reduction reports the whole-sample mean, which satisfies these bounds by
+construction, and this script keeps that true.
 
 Why the bounds need `n`: at small `n` the quantile indices are coarse — with
 four readings `p99` is simply the largest of four, and "the top 1%" is really the
 top 25% — so the asymptotic form of the bound is wrong.  Rows that carry `n` are
-checked exactly.  Rows without it predate the column and are checked against the
-asymptotic form with a tolerance, and reported separately as unverifiable rather
-than silently passed.
+checked exactly.  Rows without it are checked against the asymptotic form with a
+tolerance, and reported separately as unverifiable rather than silently passed.
 
 Exit status is 1 when a row that carries a reading count is inconsistent — the
-current harness cannot produce one, so that is a live defect.  Rows predating the
-count are reported but do not fail the run unless `--strict` is given, because
+harness cannot produce one, so that is a live defect.  Rows without the count are
+reported but do not fail the run unless `--strict` is given, because
 re-measuring them is a per-host task rather than a code fix.
 
     python3 scripts/check_bench_consistency.py [--strict] bench/*.md
@@ -57,9 +54,9 @@ ROW = re.compile(
     r"(?:\s*(\d+)\s*\|)?"
 )
 
-# The reduction flags a cell approximate past this CI, and refuses to report a
-# mean below this many readings; both are echoed here so the report can say why
-# a row is weak rather than merely inconsistent.
+# The reduction refuses to report a mean below this many readings; the floor is
+# echoed here so the report can say why a row is weak rather than merely
+# inconsistent.
 MIN_READINGS = 30
 
 
@@ -126,14 +123,14 @@ def main(paths, strict=False):
     fresh = [row for row in bad if row[5] is not None]
     print(f"\n{len(bad)} inconsistent row(s): a mean outside its own sample's range.")
     if fresh:
-        # Data the current harness produced: the whole-sample mean satisfies the
-        # bounds by construction, so an inconsistency here is a live defect.
+        # Rows with a reading count come from the harness, whose whole-sample
+        # mean satisfies the bounds by construction: a live defect.
         print(f"{len(fresh)} of them carry a reading count and so came from the "
               f"current harness — that is a defect, not stale data.")
         return 1
-    # Only legacy rows, measured before the mean was fixed. They cannot be
-    # verified exactly (no reading count) and re-measuring them is a per-host
-    # task, so report without failing unless the caller demands strictness.
+    # Only rows without a reading count. They cannot be verified exactly and
+    # re-measuring them is a per-host task, so report without failing unless
+    # the caller demands strictness.
     print("All of them are legacy rows from the superseded harness; re-measure "
           "them on their hosts. Pass --strict to treat this as a failure.")
     return 1 if strict else 0

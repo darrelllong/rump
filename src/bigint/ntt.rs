@@ -9,12 +9,12 @@
 //! (1971), 365–374, with iterative radix-2 transforms after Cooley & Tukey,
 //! *An Algorithm for the Machine Calculation of Complex Fourier Series*,
 //! Math. Comp. 19 (1965), 297–301. It is not the recursive Schönhage–Strassen
-//! scheme over Z/(2^n+1); the transform length is fixed-capped by the primes'
-//! 2-adic valuation rather than recursed. Digit expansion supplies
-//! bit-reversed forward
-//! input directly. Scoped workers divide disjoint stages and butterfly lanes
-//! without exceeding reported machine parallelism; squaring uses one transform
-//! buffer and pointwise self-products.
+//! scheme over Z/(2^n+1); the transform length is capped by the primes'
+//! 2-adic valuation rather than recursed. Digit expansion writes the forward
+//! transform's bit-reversed input directly. Scoped workers divide disjoint
+//! stages and butterfly lanes without exceeding the reported machine
+//! parallelism; squaring uses one transform buffer and pointwise
+//! self-products.
 
 use super::BigUint;
 
@@ -31,20 +31,19 @@ const ROOT_1: u64 = 13;
 const MAX_TRANSFORM_LEN: usize = 1 << 26;
 const PRIME_PRODUCT: u64 = PRIME_0 * PRIME_1;
 
-// Linear transform passes need enough values per context to repay one scoped
-// worker wave. This grain is measured by the ignored phase/scaling probes and
-// limits workers by work size in addition to the caller's hardware ceiling.
+// Linear passes need enough values per context to repay one scoped worker
+// wave. Set by the ignored phase/scaling probes; it limits workers by work
+// size in addition to the caller's hardware ceiling.
 const MIN_LINEAR_VALUES_PER_WORKER: usize = 1 << 18;
 
 // Below this length, the extra gather pass of the parallel DIF inverse costs
-// more than the in-place DIT inverse's serial permutation. The crossover is
-// measured by `ntt_worker_scaling_timing` on both the local and many-core
-// benchmark hosts.
+// more than the in-place DIT inverse's serial permutation, as measured by
+// `ntt_worker_scaling_timing`.
 const DIF_INVERSE_MIN_LEN: usize = 1 << 19;
 
-// Below 2^16 coefficients NTT loses to the recursive multiplication ladder
-// even with four contexts on the crossover host. Keeping forced small-kernel
-// tests serial also prevents thread-launch time from dominating their work.
+// Below 2^16 coefficients the NTT loses to the recursive multiplication
+// ladder even with four contexts. Keeping forced small-kernel tests serial
+// also stops thread launch from dominating their work.
 const PARALLEL_TRANSFORM_MIN_LEN: usize = 1 << 16;
 
 /// Padded transform length for full-width operands, when supported.
@@ -65,13 +64,12 @@ pub(super) fn automatic_worker_count(transform_len: usize) -> usize {
     worker_count(transform_len, available)
 }
 
-/// Select a measured radix-compatible worker count from a hard context ceiling.
+/// Select a power-of-two worker count from a hard context ceiling.
 ///
-/// The targets follow the exact-worker scaling curve through every supported
-/// transform decade. They grow from four workers at 2^16 values to 64 at the
-/// 2^24–2^26 ceiling; 128 and 256 contexts were explicitly slower at 2^24,
-/// 2^25, and 2^26. The target is then rounded down to a power of two no larger
-/// than `max_contexts`, so a smaller machine uses only what it reports.
+/// The measured targets grow from four workers at 2^16 values to 64 at
+/// 2^24–2^26; 128 and 256 contexts are slower there. The target is capped at
+/// `max_contexts` and rounded down to a power of two, so a smaller machine
+/// uses only what it reports.
 pub(super) fn worker_count(transform_len: usize, max_contexts: usize) -> usize {
     debug_assert!(transform_len.is_power_of_two());
     if transform_len < PARALLEL_TRANSFORM_MIN_LEN || max_contexts <= 1 {
@@ -180,8 +178,8 @@ fn multiply_impl_selecting_workers(
 
     // The maximum coefficient is overlap·(2^16-1)^2.  At the largest
     // supported transform, overlap <= 2^25, while PRIME_0·PRIME_1 > 2^61.
-    // Keeping this executable assertion beside the CRT prevents a later base
-    // or transform-limit change from silently invalidating exact recovery.
+    // The assertion keeps a change of base or transform limit from silently
+    // breaking exact recovery.
     let coefficient_bound =
         (lhs_digits.min(rhs_digits) as u128) * u128::from(DIGIT_MASK) * u128::from(DIGIT_MASK);
     assert!(coefficient_bound < u128::from(PRIME_PRODUCT));
@@ -226,9 +224,8 @@ pub(super) struct MultiplicationProfile {
     pub(super) reconstruct: std::time::Duration,
 }
 
-/// Multiply while measuring the high-level phases without changing their
-/// implementation. This exists only in test builds so production calls do not
-/// pay for timestamps or carry a profiling interface.
+/// Multiply while timing the high-level phases. Test builds only, so
+/// production calls pay for no timestamps.
 #[cfg(test)]
 pub(super) fn multiply_profiled(
     lhs: &BigUint,
@@ -396,8 +393,8 @@ fn significant_digit_len(value: &BigUint) -> usize {
 }
 
 /// Expand directly into the permutation expected by a decimation-in-time
-/// transform. This removes four full-array bit-reversal passes per product;
-/// zero padding is already present in the destination allocation/fill.
+/// transform, saving four full-array bit-reversal passes per product. The
+/// destination must already be zero-filled.
 fn write_digits_bit_reversed(
     value: &BigUint,
     digit_len: usize,
@@ -704,8 +701,7 @@ fn transform_from_bit_reversed<const MODULUS: u64, const ROOT: u64>(
     // log2(workers) stages join segments; those split their independent blocks
     // and butterfly lanes over the same worker budget below. A power-of-two
     // worker count is required to keep every segment aligned to every radix-2
-    // stage; rounding down also guarantees that this call never exceeds its
-    // detected or explicitly supplied context budget.
+    // stage; rounding down also keeps this call within its context budget.
     // A radix-2 stage has only n/2 butterflies, so more contexts cannot do
     // work and would make the narrowest per-context lane empty.
     let worker_limit = max_contexts.max(1).min((values.len() / 2).max(1));

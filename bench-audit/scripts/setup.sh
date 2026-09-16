@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Prepare the audit: worktrees from the two tags, corpus, and all executables.
+# Prepare the audit: worktrees from the two tags, the corpus, and the abba,
+# adapter-v022 and adapter-v030 executables.
 #
 # Reproducible from committed state alone: the worktrees come from tags, and the
 # corpus is regenerated and checked against corpus.sha256, so a stale or edited

@@ -12,7 +12,7 @@
  *   - div_rem / modulo              n divided by n/2
  *
  * Operands are drawn once per size with the top bit forced, exactly as the
- * Rust harness does; the DRBG streams differ, so compare distributions, not
+ * Rust harness does; the generators differ, so compare distributions, not
  * individual draws.  Usage mirrors bench_bigint: sizes in bits as arguments,
  * with the same defaults when none are given.
  */

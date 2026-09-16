@@ -1,9 +1,6 @@
 //! Multiprecision integer arithmetic implemented from the literature.
 //!
-//! Extracted from [darrelllong/cryptography](https://github.com/darrelllong/cryptography)
-//! so the arithmetic can serve non-cryptographic consumers and the crate
-//! boundary keeps the API free of cryptography-specific coupling. The kernels
-//! are auditable against their sources: Knuth's Algorithm D for division
+//! The kernels are auditable against their sources: Knuth's Algorithm D for division
 //! (*TAOCP* vol. 2, §4.3.1),
 //! Montgomery multiplication with an explicit public Montgomery domain
 //! (Montgomery 1985; Koç, Acar & Kaliski 1996), schoolbook, Karatsuba, and
@@ -28,22 +25,19 @@
 //! - **Not a secret-scrubbing or constant-time type by default.** In the
 //!   default build nothing is wiped: values live in ordinary heap buffers,
 //!   freed memory keeps its contents, and `Debug` prints every limb. The
-//!   opt-in **`wipe` cargo feature** restores the drop-time scrub as cheap
+//!   opt-in **`wipe` cargo feature** adds a drop-time scrub as cheap
 //!   defense in depth: every [`BigUint`] volatile-wipes its live limbs on
 //!   drop, the in-place shrink paths wipe the limbs they abandon, the
 //!   exponentiation ladder and the Montgomery workspaces wipe on exit, and
-//!   the samplers wipe their drawn byte buffers. The caveats are unchanged
-//!   from when this was the default: spare capacity and buffers freed by
-//!   reallocation are not wiped, `Debug` still prints every limb, and none
-//!   of it makes any operation constant-time. Constant-time operation stays
-//!   out of scope either way; a consumer needing it adds it at its own layer
-//!   with a purpose-built representation.
+//!   the samplers wipe their drawn byte buffers. Spare capacity and buffers
+//!   freed by reallocation are not wiped, `Debug` still prints every limb,
+//!   and none of it makes any operation constant-time. Constant-time
+//!   operation is out of scope; a consumer needing it adds it at its own
+//!   layer with a purpose-built representation.
 //!
 //! Safety policy: `#![forbid(unsafe_code)]` crate-wide in the default build,
-//! with no exceptions — `forbid` rather than `deny` precisely because an
-//! inner `allow` cannot lift it, so the guarantee is enforced by the compiler
-//! against the crate's own code rather than being a default it could
-//! override. The `wipe` feature relaxes the attribute to `deny(unsafe_code)`
+//! with no exceptions. `forbid` rather than `deny` because an inner `allow`
+//! cannot lift it. The `wipe` feature relaxes the attribute to `deny(unsafe_code)`
 //! because a volatile scrub cannot be expressed in safe Rust; the two audited
 //! `unsafe` sites it admits are the scrub helper in `src/scrub.rs` and the
 //! read-back test that verifies it. `#![deny(missing_docs)]`
@@ -57,9 +51,8 @@
 //! 268 MB for `len · 128`, and on a 64-bit one it is not. There is no
 //! target-width rejection: 32-bit builds are supported and gated in CI.
 //!
-//! Minimum supported Rust version: 1.87, the release that stabilized
-//! `u64::is_multiple_of` and `usize::is_multiple_of`, which the kernels use
-//! throughout. The MSRV is recorded as `rust-version` in `Cargo.toml`.
+//! Minimum supported Rust version: 1.87, for `u64::is_multiple_of` and
+//! `usize::is_multiple_of`. Recorded as `rust-version` in `Cargo.toml`.
 //!
 //! ```
 //! use rump::{BigUint};
@@ -88,17 +81,11 @@ mod bigint;
 
 /// The machine's reported parallelism, asked once.
 ///
-/// [`std::thread::available_parallelism`] is not a cheap query on Linux: it
-/// opens and reads `/proc/self/cgroup` and the cgroup's CPU limits on every
-/// call, several file syscalls each time. Asked per multiplication — which
-/// is where the NTT admission asked it — that turned every
-/// [`BigUint::mul`] into a trip through procfs, and a 128-thread number
-/// field sieve on a Linux host spent 99% of its CPU in the kernel
-/// serialising on it (measured 2026-09-06: 460 s user against 49 354 s
-/// system). macOS answers the same question with one `sysctl`, so the cost
-/// was invisible on the machine the crate is developed on. The answer
-/// cannot change within a process in any way this crate should react to,
-/// so it is taken once and kept.
+/// [`std::thread::available_parallelism`] reads `/proc/self/cgroup` and the
+/// cgroup's CPU limits on every call on Linux, several file syscalls each
+/// time. The NTT asks it on every large multiplication, where that cost
+/// dominates under many threads. The answer does not change within a process
+/// in any way this crate should react to, so it is taken once and kept.
 pub(crate) fn available_parallelism() -> usize {
     static AVAILABLE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *AVAILABLE

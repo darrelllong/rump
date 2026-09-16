@@ -139,8 +139,7 @@ poly_mul poly-96-64-8
 poly_mul poly-128-64-8
 poly_mul poly-32-256-8
 
-# GF(2^m), lattices, batch algorithms and sampling. Added after the first
-# session; the paired matrix above was measured without them.
+# GF(2^m), lattices, batch algorithms and sampling.
 #
 # `rand_probable_prime` is a single draw from a right-skewed distribution at a
 # fixed seed, so its absolute cost is the luck of that seed and not a
@@ -213,8 +212,8 @@ rand_coprime_below bound-2048-abovehalf-16
 rand_probable_prime bound-2048-below2k-16
 
 # Modular square roots, over genuinely prime moduli in both congruence
-# classes. The earlier mod_sqrt cells used random odd moduli, which are not
-# prime, so they measured the rejection exit and never computed a root.
+# classes. Random odd moduli are rarely prime, so they would measure the
+# rejection exit and never compute a root.
 mod_sqrt prime-256-1mod4-32
 mod_sqrt prime-256-3mod4-32
 mod_sqrt prime-512-1mod4-32

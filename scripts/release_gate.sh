@@ -68,9 +68,7 @@ run "whitespace"     git diff --check HEAD
 
 printf '\n===== release gate =====\n'
 # `${arr[@]}` on an empty array trips `set -u`; the `+` expansions below make
-# the empty case expand to nothing instead. An earlier version of this script
-# died here with "unbound variable" *and still exited 0*, which is precisely
-# the failure the "trust only the exit status" rule exists to catch.
+# the empty case expand to nothing instead.
 for leg in ${passed[@]+"${passed[@]}"}; do printf '  pass  %s\n' "$leg"; done
 for leg in ${failed[@]+"${failed[@]}"}; do printf '  FAIL  %s\n' "$leg"; done
 

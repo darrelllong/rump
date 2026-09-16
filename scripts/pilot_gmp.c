@@ -7,8 +7,9 @@
  *   pilot_gmp --list   every operation name
  *
  * Only the operations with a genuine GMP mpz counterpart are here. rump's
- * Montgomery domain (mul_mont/pow), mod_sqrt, and GF(2^m) have no mpz
- * equivalent and are intentionally absent.
+ * Montgomery-domain rows (montsetup, montmul, montsqr, montpow_*), the
+ * sqrtmod rows, isprime_true, and GF(2^m) have no mpz equivalent and are
+ * absent. GMP's `modulo` row mirrors pilot_mp's `rem`.
  *
  * Build via scripts/bench_gmp.sh (which also builds bench_gmp).
  */

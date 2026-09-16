@@ -8,7 +8,7 @@
 //! The kernels take `&[u64]` slices rather than `BigUint` so the
 //! exponentiation ladder can reuse one workspace across a whole computation.
 //!
-//! The test module lives in the parent, which is why four of the kernels are
+//! The tests live in the parent module, so four of the kernels are
 //! `pub(super)` rather than private.
 
 use super::{bit_span, low_u64, BigUint, ModulusError};
@@ -17,16 +17,12 @@ use std::sync::Arc;
 
 /// The identity a context and its residues share.
 ///
-/// Deliberately carries no data: identity *is* the allocation, compared with
+/// Carries no data: identity is the allocation, compared with
 /// [`Arc::ptr_eq`]. A context and its clones share one `Arc`, so a clone
 /// accepts the original's residues; two separately built contexts never share
-/// one, so residues cannot cross between them.
-///
-/// It replaced an abbreviated tag — the modulus's low limb and limb count —
-/// that was not unique: `2⁶⁴ + 3` and `2⁶⁵ + 3` are both odd, both two limbs,
-/// both low limb 3, so each context accepted the other's residues and
-/// decoded them under the wrong modulus. A wider fingerprint would only move
-/// that boundary; sharing one allocation removes it.
+/// one, so residues cannot cross between them. A fingerprint of the modulus
+/// could collide (`2⁶⁴ + 3` and `2⁶⁵ + 3` share limb count and low limb); an
+/// allocation cannot.
 #[derive(Debug, Eq, PartialEq)]
 struct ContextIdentity;
 
@@ -41,8 +37,7 @@ struct ContextIdentity;
 /// Belonging is by provenance, not by modulus: a context and its clones share
 /// one identity, but a context *rebuilt* from the same modulus is a different
 /// one and refuses residues it did not make. That is stricter than the
-/// mathematics requires and deliberately so — it is the same rule in every
-/// case, with no value to compare and so nothing to collide.
+/// mathematics requires, and leaves nothing to collide.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MontgomeryResidue {
     value: BigUint,
@@ -331,8 +326,7 @@ impl MontgomeryContext {
     }
 
     /// Enter the Montgomery domain, reusing a caller-held workspace. Zero
-    /// encodes to zero (`0·R ≡ 0`), which also keeps the reduced-residue
-    /// precondition of the kernel satisfied for a modulus of one.
+    /// encodes to zero (`0·R ≡ 0`).
     fn encode_with_workspace(&self, value: &BigUint, workspace: &mut Vec<u64>) -> BigUint {
         if value.is_zero() {
             return BigUint::zero();
@@ -371,23 +365,14 @@ impl MontgomeryContext {
         result
     }
 
-    /// The exponentiation ladder shared by [`Self::pow`] and
-    /// The ladder: two engines selected by exponent width — binary
-    /// square-and-multiply for exponents inside one word, a fixed 4-bit
-    /// window above that — followed by a single decoding REDC. The result
-    /// leaves the Montgomery domain here, so both public entry points return
-    /// an ordinary residue.
+    /// The exponentiation ladder on an encoded base, returning the result
+    /// **still encoded**. [`Self::pow_residue`] keeps it in the domain;
+    /// `pow_encoded_with_workspace` (behind [`Self::pow`]) decodes it.
     ///
-    /// Both engines run on `width`-limb buffers swapped in place, so the
-    /// ladder allocates nothing after the table and every buffer that held an
-    /// exponent-dependent intermediate is wiped on the way out.
-    /// The exponentiation ladder, returning the result **still encoded**.
-    ///
-    /// Split from the decoding step because the two callers want different
-    /// halves: `pow_encoded_with_workspace` decodes, `pow_residue` keeps the
-    /// domain element. Conflating them is exactly the trap HANDOFF records —
-    /// a ladder that takes an encoded base and returns an ordinary residue —
-    /// and it cost a wrong answer here before the tests caught it.
+    /// Two engines, selected by exponent width: binary square-and-multiply
+    /// for exponents inside one word, a fixed 4-bit window above that. Both
+    /// run on `width`-limb buffers swapped in place, and every buffer that
+    /// held an exponent-dependent intermediate is wiped on the way out.
     fn pow_ladder_encoded(
         &self,
         base_mont: &BigUint,
@@ -408,9 +393,8 @@ impl MontgomeryContext {
         let modulus = &self.modulus.limbs;
         let scratch = self.scratch(workspace);
 
-        // The ladder runs on fixed-width buffers with a swap after each step,
-        // so the whole exponentiation performs no allocation and no
-        // intermediate wipes; every buffer that touched secret-derived state
+        // Fixed-width buffers with a swap after each step: no allocation
+        // inside the loops. Every buffer that touched secret-derived state
         // is wiped once on the way out (under the `wipe` feature; the calls
         // compile to nothing otherwise).
         let mut acc = vec![0u64; width];
@@ -451,10 +435,10 @@ impl MontgomeryContext {
             // Knuth, TAOCP vol. 2, §4.6.3; HAC algorithm 14.82). Per window:
             // four squarings plus at most one multiply out of a 16-entry
             // power table, ~1.23 multiplies per exponent bit against ~1.5
-            // for binary; the 15-step table amortizes over any exponent long
-            // enough to reach this path. A sliding window would shave a few
-            // percent more at the cost of variable-length window parsing;
-            // the fixed window keeps the scan trivially auditable.
+            // for binary; the table's 14 kernel calls amortize over any
+            // exponent long enough to reach this path. A sliding window would
+            // save a few percent more; the fixed window keeps the scan simple
+            // to audit.
             //
             // Like the rest of the crate this is variable-time: zero
             // windows skip their multiply.
@@ -579,8 +563,8 @@ impl MontgomeryContext {
         let r2_mod = r2.rem(modulus);
 
         // `R mod n`, the Montgomery encoding of 1, seeds exponentiation
-        // accumulators. One REDC derives it from the constant above —
-        // `REDC(R^2 mod n) = R mod n` — instead of a second division.
+        // accumulators. One REDC derives it from the constant above,
+        // `REDC(R^2 mod n) = R mod n`, instead of a second division.
         let width = modulus.limbs.len();
         let mut one_limbs = vec![0u64; width];
         let mut scratch = vec![0u64; mont_scratch_limbs(width)];
@@ -621,9 +605,8 @@ impl MontgomeryContext {
     ///
     /// Accepts any representative: an operand at or above the modulus (or wider
     /// than it) is reduced first, so the result is always the canonical value
-    /// in `[0, modulus)`. This is the domain's exit boundary, called once per
-    /// computation rather than in the inner loop, so the reduction is free in
-    /// practice and removes any way to get a non-canonical answer.
+    /// in `[0, modulus)`. Decoding happens once per computation, not in the
+    /// inner loop, so the extra reduction costs little.
     #[must_use]
     pub fn decode(&self, value: &BigUint) -> BigUint {
         let reduced = if value >= &self.modulus {
@@ -692,12 +675,9 @@ impl MontgomeryContext {
 
     /// Encode `value` into this context's Montgomery domain.
     ///
-    /// The returned [`MontgomeryResidue`] carries the domain invariant — it is
-    /// encoded, reduced, and belongs to this context — so no operation has to
-    /// re-check it and no caller can violate it. That is the point of the
-    /// type: the raw API this replaces took a bare `BigUint` and could only
-    /// check in debug builds, so a release build accepted an unencoded or
-    /// unreduced value and returned a wrong answer.
+    /// The returned [`MontgomeryResidue`] carries the domain invariant (it is
+    /// encoded, reduced, and belongs to this context), so no operation has to
+    /// re-check it and no caller can violate it.
     #[must_use]
     pub fn to_residue(&self, value: &BigUint) -> MontgomeryResidue {
         self.to_residue_with(value, &mut MontgomeryScratch::new())

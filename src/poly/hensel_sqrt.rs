@@ -29,7 +29,8 @@
 //!   coefficients, so `PolyZ::rem_monic` reduces a product by `f` over `ℤ`
 //!   with `deg f` products of a wide number by a *small* one per step —
 //!   linear time — and the coefficients are then reduced modulo `q^{2k}`
-//!   once each, by Barrett with a reciprocal computed once per level.
+//!   once each, by Barrett (once the modulus is wide) with a reciprocal
+//!   computed once per level.
 //! - **The correction lives at half width.** `β_k² − δ` is divisible by
 //!   `q^k`, so the correction is `q^k · ((β_k² − δ)/q^k · u mod q^k)`: the
 //!   only full-width work is the squaring of `β_k`, which is itself a
@@ -42,11 +43,8 @@
 //!   when — and if — a further level is asked for. The final level, the
 //!   widest and dearest, skips the refinement entirely.
 //!
-//! Every level checks nothing: the invariant is established once by
-//! [`HenselSquareRoot::new`] at the prime and preserved algebraically. A
-//! caller after an exact integer root (as the number field sieve is) squares
-//! the [`symmetric_lift`](HenselSquareRoot::symmetric_lift) back over `ℤ`
-//! and stops when it matches.
+//! No level checks anything: the invariant is established once by
+//! [`HenselSquareRoot::new`] at the prime and preserved algebraically.
 
 use super::{PolyMod, PolyZ};
 use crate::bigint::{BarrettContext, BigInt, BigUint, Sign, NEWTON_DIVISION_THRESHOLD_LIMBS};
@@ -160,7 +158,7 @@ impl<'a> HenselSquareRoot<'a> {
     ///
     /// # Panics
     ///
-    /// Panics if `f` is not monic, if `root` and `inverse` carry different
+    /// Panics if `f` is zero or not monic, if `root` and `inverse` carry different
     /// moduli, or if that modulus is below 2.
     #[must_use]
     pub fn new(f: &'a PolyZ, delta: &PolyZ, root: &PolyMod, inverse: &PolyMod) -> Option<Self> {
@@ -239,8 +237,8 @@ impl<'a> HenselSquareRoot<'a> {
     ///
     /// Each level needs `δ mod q^{2^j}`. Taken from `δ` itself that is a
     /// long division of a wide integer by a narrow one, per coefficient
-    /// per level, and at the widths the number field sieve reaches those
-    /// divisions outweigh the products they sit beside. Taken from the
+    /// per level, and at wide precisions those divisions outweigh the
+    /// products they sit beside. Taken from the
     /// level above instead — `δ mod q^{2^j} = (δ mod q^{2^{j+1}}) mod q^{2^j}`,
     /// with the input below the square of the modulus — each is one
     /// Barrett reduction. The hint says how far up to start; levels past
@@ -390,7 +388,8 @@ impl<'a> HenselSquareRoot<'a> {
         self.inverse_level = self.level;
     }
 
-    /// The product by `f` over `ℤ`, back to `deg f` signed coefficients.
+    /// `convolution` reduced by `f` over `ℤ`, padded to `deg f` signed
+    /// coefficients.
     fn reduce_by_f(&self, convolution: &[BigUint]) -> Vec<BigInt> {
         let degree = self.root.len();
         let poly = PolyZ::new(
@@ -623,9 +622,9 @@ mod tests {
         assert!(HenselSquareRoot::new(&f, &delta, &seed, &bad_inverse).is_none());
     }
 
-    /// Timing probe at number-field-sieve width: a root with coefficients
-    /// of half `RUMP_HENSEL_PROBE_BITS` (default 1,306,239, the c70 case),
-    /// levels above 100 kbit reported. Run with `--ignored --nocapture`.
+    /// Timing probe at wide precision: a root with coefficients of half
+    /// `RUMP_HENSEL_PROBE_BITS` (default 1,306,239) bits, levels above
+    /// 100 kbit reported. Run with `--ignored --nocapture`.
     #[test]
     #[ignore = "timing probe for the lift at NFS width; run with --ignored"]
     fn lift_timing_probe() {

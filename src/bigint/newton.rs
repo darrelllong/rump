@@ -3,33 +3,24 @@
 //!
 //! The quotient of `n` by `d` is `⌊n·(1/d)⌋`, and `1/d` to `k` limbs of
 //! precision is a fixed point of `x ↦ x·(2 − d·x)`, Newton's iteration for
-//! the reciprocal, which doubles its correct limbs at every step and so
-//! costs a constant number of multiplications at the target width plus the
-//! same again at half the width, and so on: `O(M(k))` in all, against the
-//! `O(k²)` of the schoolbook division. The quotient is then two
-//! multiplications and a short correction, exactly as Barrett reduction
-//! spends its precomputed `μ` — this *is* Barrett's `μ = ⌊b^{2k}/d⌋`,
-//! computed by Newton instead of by long division.
+//! the reciprocal, which doubles its correct limbs at every step: `O(M(k))`
+//! in all, against the `O(k²)` of the schoolbook division. The quotient is
+//! then two multiplications and a short correction. The reciprocal is
+//! Barrett's `μ = ⌊b^{2k}/d⌋`, computed by Newton instead of long division.
 //!
 //! Brent & Zimmermann, *Modern Computer Arithmetic*, Cambridge, 2010,
 //! §4.2.2 (Newton's reciprocal) and §2.4 (Barrett's division); the
 //! reciprocal's recursive half-precision start is their Algorithm
 //! `ApproximateReciprocal` in spirit, with every truncation replaced by a
-//! full product and an exact correction at the end, which costs a constant
-//! factor and buys a proof: the returned `μ` is exact whatever the
-//! iteration's rounding did, because the last thing done to it is to check
-//! `d·μ ≤ b^{2k} < d·(μ + 1)` and adjust until it holds.
+//! full product and an exact correction at the end. That costs a constant
+//! factor and makes the returned `μ` exact whatever the iteration's rounding
+//! did: the last step checks `d·μ ≤ b^{2k} < d·(μ + 1)` and adjusts until it
+//! holds.
 //!
-//! What this is not: the divide-and-conquer division of Burnikel and
-//! Ziegler (1998), which is `O(M(k) log k)` and has the better constant at
-//! moderate widths. The reciprocal wins where the products are already
-//! NTT-fast, which is the regime the threshold below selects; a
-//! Burnikel–Ziegler middle band is a measurement this crate has not made.
-//!
-//! Found wanting by measurement: a 70-digit number field sieve's algebraic
-//! square root, lifting a root modulo `q^k` with `q^k` near fifteen million
-//! bits, spent 558 of its 737 seconds in coefficient reductions that each
-//! ran Algorithm D over 234 000-limb operands.
+//! This is not the divide-and-conquer division of Burnikel and Ziegler
+//! (1998), which is `O(M(k) log k)` with a better constant at moderate
+//! widths. The reciprocal wins where the products are already fast, the
+//! regime the threshold below selects.
 
 use super::{bit_span, BigUint};
 
@@ -47,8 +38,7 @@ use super::{bit_span, BigUint};
 /// | 65 536 | 6.53 s | 0.84 s |
 ///
 /// Parity near 2 048; the threshold sits a little above it, where the
-/// products are already Toom-4's and the reciprocal's constant is paid
-/// back. Below it the quadratic division's small constant wins.
+/// products are Toom-4's and the reciprocal's constant is paid back.
 pub(crate) const NEWTON_DIVISION_THRESHOLD_LIMBS: usize = 3072;
 
 /// Widths at or below which the reciprocal is taken by long division.
@@ -73,8 +63,8 @@ pub(super) fn reciprocal(d: &BigUint) -> BigUint {
     );
     let two_k = power_of_base(2 * k);
     if k <= RECIPROCAL_BASE_LIMBS {
-        // Algorithm D directly; `div_rem` would route a one-limb divisor
-        // to the Horner path, which is also fine, so go through it.
+        // Below the Newton threshold, so `div_rem` takes Algorithm D (or the
+        // one-limb path when `k = 1`).
         return two_k.div_rem(d).0;
     }
     let h = k.div_ceil(2);
@@ -100,9 +90,8 @@ pub(super) fn reciprocal(d: &BigUint) -> BigUint {
     }
 
     // Exact: d·x ≤ b^{2k} < d·(x + 1), by adjusting until it holds. The
-    // Newton step leaves a handful of units at most; the loop is bounded
-    // in every build so a regression in the analysis above shows up as a
-    // failure and not as a slow division.
+    // Newton step leaves a handful of units at most; the bound is checked in
+    // every build so a flaw in that analysis fails loudly instead of slowly.
     let mut product = d.mul(&x);
     let mut corrections = 0u32;
     while product > two_k {

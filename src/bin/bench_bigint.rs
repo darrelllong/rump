@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use rump::modular::MontgomeryContext;
 use rump::BigUint;
 
-/// Deterministic test generator: splitmix64 (Steele, Lea & Flood 2014),
-/// vendored so the tests need no dependency. Not a CSPRNG and not meant to
-/// be one — the tests only need reproducible, well-scattered operand draws.
+/// Deterministic operand generator: splitmix64 (Steele, Lea & Flood 2014),
+/// vendored so the benchmark needs no dependency. Not a CSPRNG; the
+/// benchmark needs only reproducible, well-scattered operand draws.
 struct SplitMix64 {
     state: u64,
 }
@@ -82,9 +82,8 @@ fn random_biguint(rng: &mut SplitMix64, bits: usize) -> BigUint {
     rng.fill_bytes(&mut bytes);
 
     // Clear the bits above the requested width before forcing the top one, so
-    // the result really is `bits` bits wide. Only ORing the top bit in leaves
-    // the higher bits of the leading byte random, which silently widens any
-    // request that is not a multiple of 8.
+    // the result is exactly `bits` bits wide when `bits` is not a multiple
+    // of 8.
     let top_bit = (bits - 1) % 8;
     bytes[0] &= (1u8 << top_bit) - 1;
     bytes[0] |= 1u8 << top_bit;

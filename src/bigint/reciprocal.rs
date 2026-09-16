@@ -7,10 +7,9 @@
 //! 1994. The precomputed reciprocal replaces each division with a
 //! multiplication, a correction, and a rare second correction.
 //!
-//! **This is a multi-limb win and a word-sized loss**, at least on the
-//! hardware it has been measured on. Divisor table of the 2 262 primes below
-//! 20 000, M4, `--release`, minimum of nine rounds, against the hardware-divide
-//! path it replaces:
+//! **This is a multi-limb win and a word-sized loss** on the hardware
+//! measured. Divisors: the 2 262 primes below 20 000; M4, `--release`,
+//! minimum of nine rounds, against the hardware divide:
 //!
 //! ```text
 //!   width          hardware   WordReciprocal
@@ -21,17 +20,13 @@
 //! ```
 //!
 //! Apple's divider retires a 64-bit division in a few cycles, so a word-sized
-//! remainder has nothing to gain and pays for the setup and the correction
-//! branches. The often-quoted "20–40 cycles" for a hardware divide is an x86
-//! figure and does not describe this machine; it was in this comment,
-//! unmeasured, until the numbers above were taken. Reach for this type when
-//! the dividend is a `BigUint` of two limbs or more, not for reducing sieve
-//! positions that already fit a word.
+//! remainder has nothing to gain and pays for the correction branches. Use
+//! this type when the dividend is a `BigUint` of two limbs or more, not for
+//! values that already fit a word.
 //!
-//! One reciprocal serves every entry point here. Dividing a multi-limb value
-//! by a word is Horner's recurrence in base `2⁶⁴`, and each step of it is a
-//! two-word-by-one-word division — exactly what Algorithm 4 computes — so the
-//! word and multi-limb paths are the same kernel rather than two.
+//! Dividing a multi-limb value by a word is Horner's recurrence in base
+//! `2⁶⁴`, each step a two-word-by-one-word division, which is what
+//! Algorithm 4 computes; the word and multi-limb paths share that kernel.
 
 use super::BigUint;
 use core::num::NonZeroU64;
@@ -39,14 +34,13 @@ use core::num::NonZeroU64;
 /// A `u64` divisor with its reciprocal precomputed, for division repeated
 /// enough times that the setup is free.
 ///
-/// Build one per divisor and keep it. Construction costs a single hardware
-/// division; every use afterwards costs a multiplication and a correction.
+/// Build one per divisor and keep it. Construction costs one `u128`
+/// division; each word divided afterwards costs a multiplication and a
+/// correction.
 ///
 /// Worth it for `BigUint` dividends of two limbs or more, where the division
-/// this replaces is paid *per limb*. Not worth it for word-sized dividends:
-/// see the module documentation for measurements, which show the hardware
-/// divide ahead there.
-///
+/// this replaces is paid per limb. Not worth it for word-sized dividends,
+/// where the hardware divide is faster.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WordReciprocal {
     divisor: u64,
@@ -62,9 +56,8 @@ pub struct WordReciprocal {
 impl WordReciprocal {
     /// Precompute the reciprocal of `divisor`.
     ///
-    /// Total: non-zero is the entire precondition, so it is carried by
-    /// [`NonZeroU64`] rather than reported as a panic or as an unexplained
-    /// `None`. There is no failure left for the return type to describe.
+    /// Total: the only precondition, a non-zero divisor, is carried by
+    /// [`NonZeroU64`].
     #[must_use]
     pub fn new(divisor: NonZeroU64) -> Self {
         let divisor = divisor.get();
@@ -90,13 +83,11 @@ impl WordReciprocal {
     ///
     /// Möller–Granlund Algorithm 4. The additions and the product that forms
     /// `r` are deliberately wrapping: the algorithm works modulo `2⁶⁴` and
-    /// corrects afterwards, which is the whole trick.
+    /// corrects afterwards.
     ///
-    /// `u1 < self.normalized` is the precondition. It is not checkable at the
-    /// public boundary because no public entry point takes `u1` — the callers
-    /// below either pass a normalized high word or carry a running remainder
-    /// that is smaller than the divisor by induction — so it is a
-    /// `debug_assert` rather than a release check.
+    /// Requires `u1 < self.normalized`. No public entry point takes `u1`: the
+    /// callers pass either the word shifted off a normalized dividend or a
+    /// running remainder below the divisor, so a `debug_assert` suffices.
     #[inline]
     fn div2by1(&self, u1: u64, u0: u64) -> (u64, u64) {
         debug_assert!(
@@ -127,9 +118,8 @@ impl WordReciprocal {
     }
 
     /// The `i`-th limb of `limbs << shift`, where index `limbs.len()` is the
-    /// word shifted off the top. Normalizing the dividend costs nothing extra
-    /// this way: the shifted stream is produced a word at a time rather than
-    /// materialized.
+    /// word shifted off the top. The shifted dividend is produced a word at a
+    /// time rather than materialized.
     #[inline]
     fn normalized_limb(&self, limbs: &[u64], index: usize) -> u64 {
         let shift = self.shift;
@@ -155,8 +145,7 @@ impl WordReciprocal {
     #[must_use]
     pub fn rem(&self, value: u64) -> u64 {
         // Directly, not through `rem_limbs`: a one-word dividend is one
-        // `div2by1`, and routing it through the slice loop was measurably
-        // worse on the path where this type is already behind the hardware.
+        // `div2by1`, and the slice loop is measurably slower.
         let high = self.normalized_limb(&[value], 1);
         let low = self.normalized_limb(&[value], 0);
         self.div2by1(high, low).1 >> self.shift
@@ -174,10 +163,9 @@ impl WordReciprocal {
 
     /// The non-negative residue of a signed `value`, in `0..divisor`.
     ///
-    /// This is the shape a sieve wants: positions are signed and the residue
-    /// indexes a table, so a truncating remainder is the wrong answer for
-    /// half the inputs and every caller that re-derives this gets a chance to
-    /// be wrong. `i64::MIN` is handled — the magnitude is taken as `u64`.
+    /// For signed positions whose residue indexes a table, as in a sieve,
+    /// where a truncating remainder is wrong for negative inputs. `i64::MIN`
+    /// is handled: the magnitude is taken as `u64`.
     #[inline]
     #[must_use]
     pub fn rem_euclid_i64(&self, value: i64) -> u64 {
@@ -254,11 +242,9 @@ impl BigUint {
     /// `self mod r.divisor()`, using a precomputed reciprocal.
     ///
     /// The answer is [`Self::rem_u64`]'s; this trades a hardware division per
-    /// limb for a multiplication per limb. Since [`WordReciprocal::new`] costs one
-    /// division in total, that pays back within the first call on a dividend
-    /// of two limbs or more, and by a widening margin above — not, as an
-    /// earlier version of this sentence claimed, only after the divisor has
-    /// been reused a number of times.
+    /// limb for a multiplication per limb. [`WordReciprocal::new`] costs one
+    /// division in total, so it pays back within the first call on a dividend
+    /// of two limbs or more.
     #[must_use]
     pub fn rem_reciprocal(&self, r: &WordReciprocal) -> u64 {
         r.rem_limbs(self.limbs())

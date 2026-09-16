@@ -18,14 +18,11 @@ GMP_GCD_SCALE=bench/gmp_gcd_scaling_hardy.md
 OUT=PERFORMANCE.md
 
 # Refuse to build the document on data that contradicts itself: a reported mean
-# must lie inside the range its own order statistics allow. This catches the
-# class of defect that produced the superseded variable-time figures.
+# must lie inside the range its own order statistics allow.
 #
-# `--strict` makes that refusal real. The four legacy rows it rejects are named
-# in the prose below and in HANDOFF.md; until their hosts re-measure, build with
-# PERF_ALLOW_INVALID=1 to get a diagnostic-only run that inventories them
-# instead of failing. A report is not a place for numbers the checker can prove
-# cannot describe their own samples.
+# `--strict` makes that refusal real. Rows without a reading count that fail
+# the check are named in the banner below; PERF_ALLOW_INVALID=1 gives a
+# diagnostic-only run that inventories them instead of failing.
 if [[ -n "${PERF_ALLOW_INVALID:-}" ]]; then
     python3 scripts/check_bench_consistency.py bench/*.md
     PERF_INVALID_BANNER=1

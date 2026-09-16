@@ -45,8 +45,8 @@ if [[ ! -x "$PILOT_OUT" || "$PILOT_SRC" -nt "$PILOT_OUT" ]]; then
     "$CC" "${CFLAGS[@]}" -o "$PILOT_OUT" "$PILOT_SRC" "${LDFLAGS[@]}"
 fi
 
-# With no args, this is a build-only invocation (used to produce pilot_gmp);
-# otherwise run the classic bigint mirror for backward compatibility.
+# With no args, only build (build_performance.sh uses this to get pilot_gmp);
+# otherwise run the bench_bigint mirror at the given sizes.
 if [[ $# -eq 0 ]]; then
     echo "built: $OUT"
     echo "built: $PILOT_OUT"

@@ -1,8 +1,7 @@
 //! Corpus parsing, timing, calibration and digest machinery.
 //!
 //! This file is byte-identical between the two revision adapters: it touches no
-//! Rump API. Only `cases.rs` differs, and only where the 0.3.0 rename forces
-//! it.
+//! Rump API. See `cases.rs` for what differs.
 
 use std::time::Instant;
 

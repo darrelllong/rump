@@ -280,8 +280,8 @@ fn encode_decode_and_context_constants() {
             for _ in 0..8 {
                 let value = structured_biguint(modulus_words, &mut rng).rem(&modulus);
                 let encoded = ctx.to_residue(&value);
-                // Reducedness is the residue type's invariant now, not a
-                // property a caller can inspect; the decode is the observable.
+                // Reducedness is the residue type's invariant, not a property
+                // a caller can inspect; the decode is the observable.
                 assert!(ctx.from_residue(&encoded).expect("same context") < modulus);
                 assert_eq!(
                     ctx.from_residue(&encoded).expect("same context"),
@@ -340,13 +340,13 @@ fn mul_and_square_match_division_reference() {
 
 #[test]
 fn squaring_kernel_stresses_carry_chains() {
-    // `square_mont` runs the dedicated squaring kernel (mont_sqr: cross terms
-    // once, a separate doubling pass, then the diagonal) while `mul_mont` runs
-    // the generic multiply (mont_mul: full schoolbook product). These are
-    // distinct kernels, so this comparison is a genuine differential test of
-    // the squaring path — not, as before, a function against itself. Values
-    // with long all-ones runs and isolated high bits push the doubling pass's
-    // carries the furthest; compare at several widths, including key sizes.
+    // `square_residue` runs the dedicated squaring kernel (mont_sqr: cross
+    // terms once, a separate doubling pass, then the diagonal) while
+    // `mul_residue` runs the generic multiply (mont_mul: full schoolbook
+    // product). The kernels are distinct, so this is a differential test of
+    // the squaring path. Values with long all-ones runs and isolated high bits
+    // push the doubling pass's carries the furthest; compare at several
+    // widths, including key sizes.
     let mut rng = rng();
     for modulus_words in [2usize, 4, 8, 16, 32, 64] {
         let modulus = structured_odd_modulus(modulus_words, &mut rng);
@@ -378,8 +378,8 @@ fn squaring_kernel_stresses_carry_chains() {
 
 #[test]
 fn pow_at_public_key_sizes() {
-    // One full-size spot check per key size the schemes actually use; the
-    // reference ladder is quadratic, so counts stay small.
+    // One full-size spot check per common public-key size; the reference
+    // ladder is quadratic, so counts stay small.
     let mut rng = rng();
     for bits in [256usize, 1024, 2048] {
         let words = bits / 64;
@@ -392,20 +392,19 @@ fn pow_at_public_key_sizes() {
     }
 }
 
-/// Two moduli that the old abbreviated context tag could not tell apart.
+/// Two moduli that agree in limb count and low limb stay distinct contexts.
 ///
 /// `2⁶⁴ + 3` and `2⁶⁵ + 3` are both odd, both two limbs, and both have low
-/// limb 3, so a tag of (low limb, limb count) was identical for the two. Each
-/// context accepted the other's residues and decoded them under the wrong
-/// modulus — silently, with no error and a wrong answer. Identity is now the
-/// shared allocation, which cannot collide.
+/// limb 3, so a tag of (low limb, limb count) would collide. Context identity
+/// is the shared allocation, which cannot collide, so each context rejects
+/// the other's residues.
 #[test]
 fn colliding_moduli_do_not_share_a_context() {
     let a = BigUint::from_u128((1u128 << 64) + 3);
     let b = BigUint::from_u128((1u128 << 65) + 3);
     assert_ne!(a, b);
-    // The property that broke the old tag, stated in public terms: both need
-    // two 64-bit limbs, and both are ≡ 3 mod 2⁶⁴, so the low limb matched.
+    // The collision, stated in public terms: both need two 64-bit limbs, and
+    // both are ≡ 3 mod 2⁶⁴, so the low limbs match.
     assert_eq!(a.bits(), 65);
     assert_eq!(b.bits(), 66);
     let low = BigUint::from_u128(1u128 << 64);

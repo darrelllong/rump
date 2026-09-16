@@ -7,15 +7,11 @@
 //! to nothing, and the crate-wide `forbid(unsafe_code)` stands with no
 //! exceptions.
 //!
-//! Verbatim from the parent crate's audited helper (`cryptography-rs`,
-//! `src/ct.rs`), carried here so [`crate::BigUint`] can wipe its limbs on
-//! drop without a dependency.
-//!
-//! The one primitive below overwrites memory that the caller still owns and
-//! can address at the moment of the call. That is its entire scope: it is a
-//! hygiene measure against values lingering in freed heap blocks, not a
-//! side-channel countermeasure, and it does not make any operation in this
-//! crate constant-time. The crate-root scope statement governs.
+//! The one primitive below lets [`crate::BigUint`] wipe its limbs on drop
+//! without a dependency. It overwrites memory the caller still owns and can
+//! address at the moment of the call. It is a hygiene measure against values
+//! lingering in freed heap blocks, not a side-channel countermeasure, and it
+//! does not make any operation in this crate constant-time.
 
 #[cfg(feature = "wipe")]
 use core::ptr;

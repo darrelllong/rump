@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
 # The adapter source invariants, enforced rather than described.
 #
-# Two rules, both of which have been broken silently:
+# Two rules, both easy to break silently:
 #
 #   * adapter-v030-null must be byte-identical to adapter-v030. It exists to
 #     be a second, independently linked build of the *same* program, so that a
-#     null comparison measures the rig and nothing else. When it drifted, the
-#     null arm reported a 7.3% difference between what were, by then, two
-#     different programs -- and that reads as measurement bias rather than as
-#     the stale checkout it was.
+#     null comparison measures the rig and nothing else. A drifted copy makes
+#     the null arm compare two different programs, and the difference reads as
+#     measurement bias.
 #
 #   * adapter-v022 and adapter-v030 must share shared.rs byte for byte, and
-#     main.rs apart from its one-line banner. Only cases.rs may differ, and
-#     only where the 0.3.0 rename forces it.
+#     main.rs apart from its one-line banner. Only cases.rs may differ.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail=0
