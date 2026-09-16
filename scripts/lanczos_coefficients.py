@@ -24,7 +24,7 @@ Errors are absolute for 1/2 <= x <= 3, which holds both zeros of ln Gamma
 
 Usage (in a virtual environment with mpmath):
   lanczos_coefficients.py --check       derive, compare with src, report errors
-  lanczos_coefficients.py --reference   print Rust reference pairs (x, ln Gamma)
+  lanczos_coefficients.py --reference   print Rust reference pairs (x, ln Gamma rounded to nearest)
   lanczos_coefficients.py --sweep FILE  write the dense sweep for the ignored test
 """
 import re
@@ -113,7 +113,7 @@ def reference():
           2.0, 2 + 2 ** -51, 2.000001, 2.5, 3.0, 7.5, 10.0, 33.3, 100.0, 171.5, 1e3, 1e5, 1e10,
           1e15, 1e100, 1e300, 2.5e305]
     for x in xs:
-        print(f"        ({float(x)!r}, {mp.nstr(loggamma(mpf(x)), 20)}),")
+        print(f"        ({float(x)!r}, {float(loggamma(mpf(x)))!r}),")
     return 0
 
 
