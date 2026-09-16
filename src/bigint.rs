@@ -3586,7 +3586,7 @@ mod tests {
     use super::{
         BigInt, BigUint, MontgomeryContext, Sign, KARATSUBA_THRESHOLD_LIMBS,
         NTT_SERIAL_THRESHOLD_LIMBS, SQR_KARATSUBA_MAX_LIMBS, SQR_SCHOOLBOOK_MIN_LIMBS,
-        TOOM3_THRESHOLD_LIMBS, UNBALANCED_THRESHOLD_LIMBS,
+        TOOM3_THRESHOLD_LIMBS, TOOM4_THRESHOLD_LIMBS, UNBALANCED_THRESHOLD_LIMBS,
     };
     use super::{ModulusError, MontgomeryScratch};
     use core::num::NonZeroU64;
@@ -5194,6 +5194,24 @@ mod tests {
                     );
                 }
             }
+        }
+        // Public dispatch at and past the Toom-4 threshold, below the NTT's:
+        // equal lengths, the widest admitted imbalance (1.5×), and squaring.
+        let t = TOOM4_THRESHOLD_LIMBS;
+        for &(la, lb) in &[(t, t), (t + t / 2, t), (t + 77, t + 5)] {
+            let a = seeded_biguint(la, &mut seed);
+            let b = seeded_biguint(lb, &mut seed);
+            assert!(BigUint::should_use_toom4(&a, &b), "{la}x{lb} is Toom-4's");
+            assert!(
+                !BigUint::should_use_ntt(&a, &b),
+                "{la}x{lb} is not the NTT's"
+            );
+            assert_eq!(a.mul(&b), BigUint::mul_schoolbook_ref(&a, &b), "{la}x{lb}");
+            assert_eq!(
+                a.square(),
+                BigUint::mul_schoolbook_ref(&a, &a),
+                "{la} squared"
+            );
         }
         // Full dispatch and squaring at Toom-3 sizes, below the Toom-4
         // threshold.

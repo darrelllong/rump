@@ -33,8 +33,8 @@ echo "One row per op and size via \`bench_primitives.sh <op>\` (fresh random"
 echo "operands, pilot-bench convergence, same columns as the primitives"
 echo "tables). Sizes are bit widths."
 echo
-echo "| Operation | mean ms/op | ±95% CI | min ns | p50 ns | p99 ns | max ns | max/min |"
-echo "|---|---:|---:|---:|---:|---:|---:|---:|"
+echo "| Operation | mean ms/op | ±95% CI | min ns | p50 ns | p99 ns | max ns | max/min | n |"
+echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
 for size in "${GCD_SIZES[@]}"; do
     bash "$ROOT_DIR/scripts/bench_primitives.sh" "gcd_${size}"
 done

@@ -5252,8 +5252,9 @@ mod tests {
         let mut rng = SplitMix64 {
             state: 0x4859_2b17_ac3f_1d05,
         };
-        // Every size here is below HGCD_THRESHOLD_LIMBS, so gcd_via_hgcd
-        // hands each pair straight to gcd_lehmer.
+        // Below HGCD_THRESHOLD_LIMBS gcd_via_hgcd hands a pair straight to
+        // gcd_lehmer; these pin that handoff. The sizes past the threshold
+        // below are the ones that run the recursion.
         for &bits in &[
             130usize, 200, 256, 400, 512, 777, 1024, 1500, 2048, 3000, 4096, 5000, 8192, 16000,
             50000,
@@ -5267,6 +5268,33 @@ mod tests {
                     gcd_lehmer(&a, &b),
                     "hgcd != lehmer at {bits} bits"
                 );
+            }
+        }
+        // Past the threshold: random pairs, whose gcd is small, and pairs
+        // built on a common factor of half their width, so the recursion
+        // must carry a large gcd through its rounds.
+        let limb_bits = super::HGCD_THRESHOLD_LIMBS * 64;
+        for &bits in &[limb_bits + 64, limb_bits + limb_bits / 2] {
+            let bound = pow2(bits);
+            let half = pow2(bits / 2);
+            for _ in 0..2 {
+                let a = draw_below(&mut rng, &bound).add(&bound);
+                let b = draw_below(&mut rng, &bound).add(&bound);
+                assert_eq!(
+                    gcd_via_hgcd(&a, &b),
+                    gcd_lehmer(&a, &b),
+                    "hgcd != lehmer on random pairs at {bits} bits"
+                );
+                let common = draw_below(&mut rng, &half).add(&half);
+                let a = common.mul(&draw_below(&mut rng, &half).add(&half));
+                let b = common.mul(&draw_below(&mut rng, &half).add(&half));
+                let g = gcd_via_hgcd(&a, &b);
+                assert_eq!(
+                    g,
+                    gcd_lehmer(&a, &b),
+                    "hgcd != lehmer on a shared factor at {bits} bits"
+                );
+                assert!(g.bits() >= bits / 2, "the shared factor divides the gcd");
             }
         }
         // Structured: 2^2000 against 2^2000 − 1 (coprime), and a shared factor.
