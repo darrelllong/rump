@@ -121,7 +121,15 @@ impl Level {
 }
 
 /// A square root of `δ` in `ℤ[x]/(f)` modulo `q^k`, lifted one doubling of
-/// `k` at a time. See the [module documentation](self).
+/// `k` at a time by the p-adic Newton iteration `β ← β − (β² − δ)·(2β)⁻¹`,
+/// whose convergence is Hensel's lemma (Cohen, *A Course in Computational
+/// Algebraic Number Theory*, §3.5.3).
+///
+/// The seed is checked once, by [`Self::new`] or [`Self::in_field`]; after
+/// that no level checks anything, since each [`Self::double`] preserves
+/// `β² ≡ δ (mod f, q^k)` algebraically. A caller after an exact root over
+/// `ℤ`, as the number field sieve is, squares [`Self::symmetric_lift`] back
+/// over `ℤ` and stops when it matches.
 pub struct HenselSquareRoot<'a> {
     f: &'a PolyZ,
     /// `δ` reduced by `f` over `ℤ`, padded to `deg f` coefficients: the

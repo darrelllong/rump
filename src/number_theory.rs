@@ -3281,7 +3281,7 @@ pub fn ln_gamma(x: f64) -> f64 {
 /// up (Lambert, *Computational aspects of discrete logarithms*, PhD
 /// thesis, University of Waterloo, 1996, for the two- and three-prime
 /// cases). Integrated numerically with the midpoint rule on a grid of
-/// [`SEMISMOOTH_GRID`] points a dimension.
+/// 96 points a dimension.
 ///
 /// What it is for: a sieve accepts a relation whose values are smooth
 /// over the bases up to one or two large primes within a cap on each
@@ -3328,7 +3328,9 @@ pub fn semismooth_probability(ln_n: f64, ln_bound: f64, ln_cap: f64, large_prime
     total.min(1.0)
 }
 
-/// Points per dimension of the semismoothness integrals' grid.
+/// Points per dimension of the semismoothness integrals' grid. Private, so
+/// [`semismooth_probability`]'s public documentation states the value
+/// rather than linking here; change both together.
 const SEMISMOOTH_GRID: usize = 96;
 
 /// Every prime below `bound` (exclusive), ascending, by the sieve of

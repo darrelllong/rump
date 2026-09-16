@@ -161,7 +161,7 @@ impl SparseMatrix {
 }
 
 /// A filtered GF(2) matrix: rows merged and pruned, each carrying the set
-/// of original rows it is the sum of. See the [module documentation](self).
+/// of original rows it is the sum of. [`filter_merge`] builds it.
 #[derive(Clone, Debug)]
 pub struct FilteredMatrix {
     matrix: SparseMatrix,
@@ -679,8 +679,10 @@ impl Filter {
 /// rows beyond the live columns, then fill-ordered column merges.
 ///
 /// Columns are eliminated in order of increasing fill until the next
-/// elimination would raise `rows · nonzeros`, the Block Lanczos cost — see
-/// the [module documentation](self) for the rule. `weight_cap` bounds the
+/// elimination would raise `rows · nonzeros`, the Block Lanczos cost: one
+/// that changes the nonzero count by `Δ` takes that cost to
+/// `(rows − 1)(nonzeros + Δ)`, a gain exactly when
+/// `Δ · (rows − 1) < nonzeros`. `weight_cap` bounds the
 /// weight of a column the elimination will consider (a tree over `w`
 /// members costs `w²` row comparisons to plan); one is pruning alone, and
 /// two admits only the pairs, which never cost fill. `excess` is how many
