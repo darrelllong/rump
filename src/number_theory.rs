@@ -7692,37 +7692,31 @@ pub fn student_t_quantile(freedom: usize, probability: f64) -> Result<f64, Numer
 /// and through it of Student's `t` and the `F` and binomial distributions.
 ///
 /// `I_x(a, b) = x^a (1−x)^b / (a·B(a, b)) · C`, with `C` the continued
-/// fraction DLMF 8.17.22 evaluated by the modified Lentz method (Lentz,
-/// Applied Optics 15 (1976), 668–671; Thompson & Barnett, J. Comput. Phys.
-/// 64 (1986), 490–509), taken for `x` below `(a+1)/(a+b+2)` and otherwise
-/// on the other side of the symmetry `I_x(a, b) = 1 − I_{1−x}(b, a)`
-/// (DLMF 8.17.4). The smaller tail is therefore computed directly, and to
-/// relative accuracy.
+/// fraction DLMF 8.17.22 by the modified Lentz method (Lentz, Applied Optics
+/// 15 (1976), 668–671; Thompson & Barnett, J. Comput. Phys. 64 (1986),
+/// 490–509) in double-double arithmetic. For `x` below `(a+1)/(a+b+2)` it
+/// computes `I_x(a, b)`, otherwise `1 − I_x(a, b) = I_{1−x}(b, a)` (DLMF
+/// 8.17.4), with `1 − x` held exactly. The prefactor's logarithm is formed in
+/// the regime of the shapes so that nothing underflows or cancels; see
+/// `incomplete_beta_tail`.
 ///
-/// The prefactor is formed without subtracting large log-gammas: with
-/// `x₀ = a/(a+b)`, `y₀ = b/(a+b)` and `δ(t) = ln Γ(t) − (t−½) ln t + t −
-/// ½ ln 2π` the Stirling remainder,
+/// Accuracy, against 50-digit values over shapes from `10⁻³⁰⁰` to `10⁴` in
+/// every pairing (`scripts/incomplete_beta_reference.py`) and by closed forms
+/// and symmetry to `10¹⁵`: absolute error below `10⁻¹⁴`; and where the tail
+/// the fraction computes is a normal double, relative error within
+/// `10⁻¹⁴·(1 + |ln tail|)` of that tail.
 ///
-/// ```text
-/// ln[x^a (1−x)^b / B(a,b)] = a·ln(x/x₀) + b·ln((1−x)/y₀)
-///                          + ½ ln(ab/(a+b)) − ½ ln 2π − δ(a) − δ(b) + δ(a+b),
-/// ```
-///
-/// the rearrangement of DiDonato & Morris, ACM TOMS 18 (1992), 360–373,
-/// with each logarithm taken by `ln_1p` of the deviation from the mean. `δ`
-/// is its asymptotic series (DLMF 5.11.1, eight terms) from `t = 10`, and
-/// [`ln_gamma`] below.
-///
-/// Near the mean the continued fraction takes about `0.45·max(a, b)^0.32`
-/// steps (526 at `10⁶`, 192 166 at `10¹⁴`); it is allowed
-/// `64 + 64·⌈√max(a, b)⌉`, at most ten million.
+/// Near the mean the fraction takes about `0.45·max(a, b)^0.32` steps (526
+/// at `10⁶`, 192 166 at `10¹⁴`); it is allowed `64 + 64·⌈√max(a, b)⌉`, at
+/// most ten million.
 ///
 /// # Errors
 ///
 /// [`NumericalError::Domain`] if `a` or `b` is not a positive finite number
 /// or `x` lies outside `[0, 1]`; [`NumericalError::NotConverged`] if the
-/// continued fraction does not settle within its budget or the result is not
-/// in `[0, 1]`.
+/// fraction does not settle within its budget or the result lies outside
+/// `[0, 1]` by more than `10⁻¹⁴` (a result that close is rounded into the
+/// interval).
 pub fn regularized_incomplete_beta(x: f64, a: f64, b: f64) -> Result<f64, NumericalError> {
     let positive = |v: f64| v.is_finite() && v > 0.0;
     if !(positive(a) && positive(b) && (0.0..=1.0).contains(&x)) {
@@ -7741,52 +7735,94 @@ pub fn regularized_incomplete_beta(x: f64, a: f64, b: f64) -> Result<f64, Numeri
         let complement = DoubleDouble::from(1.0).add(DoubleDouble::from(-x));
         1.0 - incomplete_beta_tail(complement, b, a)?
     };
-    if (0.0..=1.0).contains(&value) {
-        Ok(value)
+    // A probability within the documented absolute error of 0 or 1 can land
+    // past it; that is rounding, not failure. Anything farther out is.
+    const SLACK: f64 = 1e-14;
+    if (-SLACK..=1.0 + SLACK).contains(&value) {
+        Ok(value.clamp(0.0, 1.0))
     } else {
         Err(NumericalError::NotConverged)
     }
 }
 
 /// `I_p(a, b)` by prefactor and continued fraction, for `p` (held exactly) on
-/// the side where the fraction converges.
+/// the side where the fraction converges: `I_p(a, b) = P·C` with
+/// `P = p^a q^b / (a·B(a, b))`, `q = 1 − p` and `C` the fraction. `ln P` is
+/// formed in the regime of the shapes, so that no intermediate underflows
+/// and no large terms cancel:
 ///
-/// With `p₀ = a/(a+b)`, `q₀ = b/(a+b)`, `q = 1 − p`, `r = (p − p₀)/p₀` and
-/// `s = (q − q₀)/q₀`, the terms `a·r + b·s` sum to zero, so the prefactor's
-/// exponent `a·ln(p/p₀) + b·ln(q/q₀)` is `a·(ln(1+r) − r) + b·(ln(1+s) − s)`:
-/// terms of the size of the squared deviation, with no large parts to cancel.
-/// The deviation is formed in double-doubles from the exact mean.
+/// - both shapes at least one: Stirling's form of `ln B` (DLMF 5.11.1).
+///   With `p₀ = a/(a+b)`, `r = (p − p₀)/p₀` and `s` likewise for `q`, the
+///   linear terms `a·r + b·s` sum to zero, leaving
+///   `ln P = a·(ln(1+r) − r) + b·(ln(1+s) − s) + ½ ln(b/(a(a+b))) − ½ ln 2π
+///   − δ(a) − δ(b) + δ(a+b)`, with `δ` Stirling's remainder;
+/// - one shape below one: `ln Γ(1 + t)` for the small shape `t`, whose
+///   Stirling remainder would be large, and Stirling's form for the large
+///   shape `u`: `ln Γ(u) − ln Γ(t+u) = −t ln(t+u) − (u − ½) ln(1 + t/u) + t
+///   + δ(u) − δ(t+u)`;
+/// - both below one: `ln B = ln Γ(1+a) + ln Γ(1+b) − ln Γ(1+a+b) + ln((a+b)/(ab))`.
+///
+/// The deviation from the mean is formed in double-doubles from the exact
+/// mean.
 fn incomplete_beta_tail(p: DoubleDouble, a: f64, b: f64) -> Result<f64, NumericalError> {
     let dd = DoubleDouble::from;
+    let negate = |v: DoubleDouble| DoubleDouble {
+        hi: -v.hi,
+        lo: -v.lo,
+    };
     let total = dd(a).add(dd(b));
-    let (p0, q0) = (dd(a).div(total), dd(b).div(total));
-    let q = dd(1.0).add(DoubleDouble {
-        hi: -p.hi,
-        lo: -p.lo,
-    });
-    let deviation = p.add(DoubleDouble {
-        hi: -p0.hi,
-        lo: -p0.lo,
-    });
-    let r = deviation.div(p0);
-    let s = DoubleDouble {
-        hi: -deviation.hi,
-        lo: -deviation.lo,
-    }
-    .div(q0);
-    let ln_prefactor = a * log_one_plus_minus(r, p.div(p0))
-        + b * log_one_plus_minus(s, q.div(q0))
-        + 0.5 * (a * b / (a + b)).ln()
-        - 0.5 * (2.0 * core::f64::consts::PI).ln()
-        - stirling_remainder(a)
-        - stirling_remainder(b)
-        + stirling_remainder(a + b);
+    let q = dd(1.0).add(negate(p));
+    let ln_p = log_of_complement_pair(p, q);
+    let ln_q = log_of_complement_pair(q, p);
+    let ln_prefactor = if a >= 1.0 && b >= 1.0 {
+        let (p0, q0) = (dd(a).div(total), dd(b).div(total));
+        let deviation = p.add(negate(p0));
+        let r = deviation.div(p0);
+        let s = negate(deviation).div(q0);
+        a * log_one_plus_minus(r, p.div(p0))
+            + b * log_one_plus_minus(s, q.div(q0))
+            + 0.5 * (b.ln() - a.ln() - (a + b).ln())
+            - 0.5 * (2.0 * core::f64::consts::PI).ln()
+            - stirling_remainder(a)
+            - stirling_remainder(b)
+            + stirling_remainder(a + b)
+    } else if a < 1.0 && b < 1.0 {
+        // ln P = a ln p + b ln q − ln a − ln B, and −ln a − ln B =
+        // ln(b/(a+b)) − ln Γ(1+a) − ln Γ(1+b) + ln Γ(1+a+b).
+        a * ln_p + b * ln_q - (a / b).ln_1p() - ln_gamma(1.0 + a) - ln_gamma(1.0 + b)
+            + ln_gamma(1.0 + a + b)
+    } else {
+        // The small shape t pairs with its variable; −ln a − ln B collects
+        // −ln Γ(1+t) + ln t − ln a + t ln(t+u) + (u − ½) ln(1 + t/u) − t
+        // − δ(u) + δ(t+u).
+        let (t, u) = if a < b { (a, b) } else { (b, a) };
+        // ln t − ln a is 0 or ln(b/a); it is formed before joining the sum,
+        // whose other terms can be far smaller than either logarithm.
+        let ln_ratio = t.ln() - a.ln();
+        a * ln_p + b * ln_q + ln_ratio + t * (t + u).ln() + (u - 0.5) * (t / u).ln_1p()
+            - t
+            - ln_gamma(1.0 + t)
+            - stirling_remainder(u)
+            + stirling_remainder(t + u)
+    };
     let fraction = beta_continued_fraction(p, a, b)?;
-    let value = ln_prefactor.exp() * fraction / a;
+    let value = ln_prefactor.exp() * fraction;
     if value.is_finite() {
         Ok(value)
     } else {
         Err(NumericalError::NotConverged)
+    }
+}
+
+/// `ln v` for `v` in `(0, 1)` given `v` and `1 − v` both exactly: `ln_1p` of
+/// `−(1 − v)` when `v` is near one, where the direct logarithm would lose
+/// the complement's digits.
+fn log_of_complement_pair(v: DoubleDouble, complement: DoubleDouble) -> f64 {
+    let c = complement.hi + complement.lo;
+    if c < 0.5 {
+        (-c).ln_1p()
+    } else {
+        (v.hi + v.lo).ln()
     }
 }
 
@@ -8038,12 +8074,12 @@ mod statistics_tests {
         }
     }
 
-    /// Against 50-digit values from `scripts/incomplete_beta_reference.py` over
-    /// shapes from `10⁻³` to `10⁶`, both small, both large and very unequal,
-    /// at the mean, from 1 to 40 standard deviations either side and either
-    /// side of the switch between the two sides of the symmetry: absolute
-    /// error below `10⁻¹⁴`, and where the side the fraction computes is the
-    /// smaller of `I` and `1 − I`, relative error below `5·10⁻¹³`.
+    /// Against 50-digit values from `scripts/incomplete_beta_reference.py`
+    /// over shapes from `10⁻³⁰⁰` to `10⁴` in every pairing, at the mean, from
+    /// 1 to 40 standard deviations either side and either side of the switch
+    /// between the two sides of the symmetry: absolute error below `10⁻¹⁴`,
+    /// and on the tail the fraction computes, when that tail is a normal
+    /// double, relative error within `10⁻¹⁴·(1 + |ln tail|)`.
     #[test]
     fn the_incomplete_beta_function_matches_high_precision_values() {
         let mut checked = 0;
@@ -8059,16 +8095,13 @@ mod statistics_tests {
             assert!(error < 1e-14, "{what}: absolute error {error:e}");
             let direct = x < (a + 1.0) / (a + b + 2.0);
             let tail = if direct { expected } else { 1.0 - expected };
-            if tail <= 0.5 && tail > 0.0 {
-                assert!(
-                    error <= 5e-13 * tail,
-                    "{what}: relative error {:e}",
-                    error / tail
-                );
+            if (f64::MIN_POSITIVE..=0.5).contains(&tail) {
+                let bound = 1e-14 * tail * (1.0 + tail.ln().abs());
+                assert!(error <= bound, "{what}: relative error {:e}", error / tail);
             }
             checked += 1;
         }
-        assert!(checked > 900, "only {checked} references");
+        assert!(checked > 1_500, "only {checked} references");
     }
 
     /// Beyond the references' reach, the closed forms that fix the answer:
@@ -8078,11 +8111,30 @@ mod statistics_tests {
     /// separately — for shapes to `10¹⁵`, at complements exact in doubles.
     #[test]
     fn the_incomplete_beta_function_holds_its_identities_at_large_shapes() {
-        for a in [0.5, 12.0, 1e4, 1e6, 1e8, 1e10, 1e12, 1e14] {
+        let least_normal = f64::MIN_POSITIVE;
+        for a in [
+            5e-324,
+            least_normal.next_down(),
+            least_normal,
+            least_normal.next_up(),
+            1e-300,
+            1e-200,
+            1e-160,
+            1e-100,
+            1e-20,
+            0.5,
+            12.0,
+            1e4,
+            1e6,
+            1e8,
+            1e10,
+            1e12,
+            1e14,
+        ] {
             let value = regularized_incomplete_beta(0.5, a, a).expect("converges");
             assert!((value - 0.5).abs() < 2e-15, "I_1/2({a:e}, {a:e}) = {value}");
         }
-        for b in [1e-3, 0.5, 2.0, 1e3, 1e6, 1e9, 1e12] {
+        for b in [1e-300, 1e-100, 1e-20, 1e-3, 0.5, 2.0, 1e3, 1e6, 1e9, 1e12] {
             for x in [1e-15, 1e-9, 1e-3, 0.1, 0.5, 0.9, 1.0 - 1e-9] {
                 let one_minus_power = -(b * f64::ln_1p(-x)).exp_m1();
                 let power = x.powf(b);

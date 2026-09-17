@@ -35,6 +35,17 @@ what a consumer must change, not everything that moved.
 
 ### Fixed
 
+- **`number_theory::regularized_incomplete_beta` is accurate for tiny shapes.**
+  The normalisation formed `a·b/(a+b)`, which underflows, and wrote `ln B`
+  through Stirling remainders that grow like `½ ln(1/t)` for tiny `t`, so
+  `I_(1/2)(10⁻²⁰⁰, 10⁻²⁰⁰)` returned `Ok(1.0)`. The prefactor's logarithm is
+  now formed by the regime of the shapes (both at least one, one below, both
+  below) without an underflowing product or cancelling large terms, and
+  before the exponential. Accuracy against 1 592 references over shapes from
+  `10⁻³⁰⁰` to `10⁴`: absolute error below `10⁻¹⁴`, and relative error within
+  `10⁻¹⁴·(1 + |ln tail|)` on the computed tail when that tail is a normal
+  double.
+
 - **`number_theory::ln_gamma` is finite up to its representable limit.**
   Lanczos's form multiplied `(x − ½)·ln t` before subtracting `t`, so
   `ln_gamma(2.557e305)` overflowed although its value, about

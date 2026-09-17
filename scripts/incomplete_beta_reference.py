@@ -4,7 +4,7 @@
 
 incomplete_beta.txt: `x a b I` per line, I_x(a, b) from mpmath's betainc at 50
 digits, printed to 30. The shapes are every pair from
-{1e-3, 0.1, 0.5, 1, 2.5, 10, 100, 1e3, 1e4}; for each pair x is taken at the
+{1e-300, 1e-100, 1e-20, 1e-3, 0.1, 0.5, 1, 2.5, 10, 100, 1e3, 1e4}; for each pair x is taken at the
 mean, at 1, 3, 10 and 40 standard deviations either side, just either side of
 the continued fraction's switch (a+1)/(a+b+2), at 1/2, and at four uniform
 draws (seed 20260917). Points outside (0, 1) are dropped, and a case mpmath has not finished within
@@ -36,7 +36,7 @@ def beta_cases():
 
     mp.dps = 30
     rng = random.Random(20260917)
-    shapes = [1e-3, 0.1, 0.5, 1.0, 2.5, 10.0, 100.0, 1e3, 1e4]
+    shapes = [1e-300, 1e-100, 1e-20, 1e-3, 0.1, 0.5, 1.0, 2.5, 10.0, 100.0, 1e3, 1e4]
     cases = []
     for a in shapes:
         for b in shapes:
