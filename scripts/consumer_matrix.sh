@@ -33,7 +33,9 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SIBLINGS="$(dirname "$ROOT")"
+# The consumers are checked out beside the main rump checkout, which is not
+# where a linked worktree lives; find it through the shared git directory.
+SIBLINGS="$(dirname "$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")")"
 
 # no_wipe DIRECTORY: 0 when `cargo tree` resolves the directory's graph and
 # rump's `wipe` is absent from it, 1 when it is present, 2 when the query
