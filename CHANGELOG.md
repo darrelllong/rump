@@ -7,6 +7,20 @@ what a consumer must change, not everything that moved.
 
 ### Breaking
 
+- **`number_theory::regularized_incomplete_beta` and `student_t_quantile`
+  return `Result<f64, number_theory::NumericalError>`.** The continued
+  fraction returned its last iterate whether or not it had converged, and the
+  normalisation subtracted large log-gammas, so `I_(1/2)(10¹⁰, 10¹⁰)` came out
+  `−5.78`. Both functions now return `NumericalError::Domain` for an argument
+  outside their domain (`student_t_quantile` no longer panics) and
+  `NumericalError::NotConverged` when the fraction does not settle within its
+  budget or the result is not a probability. The normalisation is the
+  DiDonato–Morris rearrangement with the deviation from the mean formed
+  exactly, and the fraction runs in double-double arithmetic, so the error no
+  longer grows with the shapes: against 50-digit values the absolute error is
+  below `10⁻¹⁴`, and the tail the fraction computes is relative-accurate to
+  `5·10⁻¹³`. A caller must decide what a failure means for it.
+
 - **`lattice::short_vectors_form` and `closest_vectors_form` return
   `lattice::Enumeration` and take `visit_limit: u64`.** Both panicked on
   valid forms whose scales differ widely — under `diag(1, 2¹⁰⁰⁰)` the

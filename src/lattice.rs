@@ -1804,6 +1804,63 @@ mod certified_enumeration_tests {
         assert_eq!(search.outcome(), EnumerationOutcome::NumericalLimit);
     }
 
+    /// Either side of the doubles' exponent range: scales `2²⁰⁰⁰` apart
+    /// still fit around their shared midpoint and are searched exactly,
+    /// with a target off the lattice; `2²²⁰⁰` apart they do not, and the
+    /// searches say so.
+    #[test]
+    fn the_exponent_range_is_used_to_its_limit_and_then_refused() {
+        let identity = vec![vec![big(1), big(0)], vec![big(0), big(1)]];
+        let wide = diagonal(&[big(1), power_of_two(2000)]);
+        let short = short_vectors_form(&identity, &wide, &big(1), 10, u64::MAX);
+        assert_eq!(short.outcome(), EnumerationOutcome::Exhausted);
+        assert_eq!(
+            sorted(short.into_vectors()),
+            sorted(vec![vec![big(-1), big(0)], vec![big(1), big(0)]])
+        );
+        // (3, 0) is at squared distance 1 from (2, 0) and (4, 0) and 0 from itself.
+        let target = vec![big(3), big(0)];
+        let closest = closest_vectors_form(&identity, &wide, &target, &big(1), 10, u64::MAX);
+        assert_eq!(closest.outcome(), EnumerationOutcome::Exhausted);
+        assert_eq!(closest.vectors()[0], target);
+        assert_eq!(closest.vectors().len(), 3);
+        let wider = diagonal(&[big(1), power_of_two(2200)]);
+        let refused = short_vectors_form(&identity, &wider, &big(1), 10, u64::MAX);
+        assert_eq!(refused.outcome(), EnumerationOutcome::NumericalLimit);
+        let refused = closest_vectors_form(&identity, &wider, &target, &big(1), 10, u64::MAX);
+        assert_eq!(refused.outcome(), EnumerationOutcome::NumericalLimit);
+    }
+
+    /// Either side of the exact-coefficient limit `2⁵³`: under the basis
+    /// `(1, 0), (N, 1)` the unit vector `(0, 1)` is `−N·b₀ + b₁`, so finding
+    /// it takes a coefficient of `N`. At `N = 2⁵² + 1` it is found and the
+    /// search is exhausted; at `N = 2⁶⁰ + 1` the coefficient cannot be held
+    /// exactly and the search reports a numerical limit rather than miss it.
+    #[test]
+    fn coefficients_past_the_exact_range_are_refused() {
+        let form = diagonal(&[big(1), big(1)]);
+        let near = power_of_two(52).add(&big(1));
+        let basis = vec![vec![big(1), big(0)], vec![near, big(1)]];
+        let search = short_vectors_form(&basis, &form, &big(1), 10, u64::MAX);
+        assert_eq!(search.outcome(), EnumerationOutcome::Exhausted);
+        assert_eq!(
+            sorted(search.into_vectors()),
+            sorted(vec![
+                vec![big(-1), big(0)],
+                vec![big(0), big(-1)],
+                vec![big(0), big(1)],
+                vec![big(1), big(0)],
+            ])
+        );
+        let far = power_of_two(60).add(&big(1));
+        let basis = vec![vec![big(1), big(0)], vec![far, big(1)]];
+        let search = short_vectors_form(&basis, &form, &big(1), 10, u64::MAX);
+        assert_eq!(search.outcome(), EnumerationOutcome::NumericalLimit);
+        for v in search.vectors() {
+            assert!(form_product(&form, v, v) <= big(1));
+        }
+    }
+
     /// A negative bound holds nothing, for both searches, and is exhausted.
     #[test]
     fn a_negative_bound_is_an_empty_exhausted_search() {

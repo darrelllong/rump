@@ -7623,105 +7623,361 @@ mod tests {
     }
 }
 
+/// Why a numerical function returned no value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum NumericalError {
+    /// An argument lies outside the function's domain.
+    Domain,
+    /// The evaluation could not reach its stated accuracy: an expansion did
+    /// not converge within its budget, or its result was not a valid value.
+    NotConverged,
+}
+
+impl core::fmt::Display for NumericalError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Domain => "an argument lies outside the function's domain",
+            Self::NotConverged => "the evaluation did not converge to its stated accuracy",
+        })
+    }
+}
+
+impl std::error::Error for NumericalError {}
+
 /// Student's `t` at `probability`, one-sided, on `freedom` degrees of
 /// freedom: the point `t` with `P(T ≤ t) = probability`, for a bound on a
 /// difference of means from few observations.
 ///
 /// The distribution function is `P(|T| > t) = I_x(ν/2, 1/2)` with
 /// `x = ν/(ν + t²)` and `I` the regularised incomplete beta function
-/// (Abramowitz & Stegun, *Handbook of Mathematical Functions*, 26.7.1),
-/// inverted by bisection on `t`, stopped when the bracket is within a
-/// part in a billion. A Cornish–Fisher expansion about the normal
-/// quantile would be five per cent short at the far points on few degrees
-/// of freedom, where its terms have not begun to shrink.
+/// (DLMF 8.17.1 and §8.18; Abramowitz & Stegun 26.7.1), inverted by
+/// bisection on `t` to a part in a billion. A Cornish–Fisher expansion
+/// about the normal quantile would be five per cent short at the far points
+/// on few degrees of freedom, where its terms have not begun to shrink.
 ///
-/// # Panics
+/// # Errors
 ///
-/// If `freedom` is zero or `probability` is not strictly between one half
-/// and one.
-#[must_use]
-pub fn student_t_quantile(freedom: usize, probability: f64) -> f64 {
-    assert!(freedom > 0, "no degrees of freedom");
-    assert!(
-        probability > 0.5 && probability < 1.0,
-        "the quantile is one-sided, above one half and below one"
-    );
+/// [`NumericalError::Domain`] if `freedom` is zero or `probability` is not
+/// strictly between one half and one; [`NumericalError::NotConverged`] if
+/// an incomplete-beta evaluation fails, or the bracket grows past the
+/// doubles.
+pub fn student_t_quantile(freedom: usize, probability: f64) -> Result<f64, NumericalError> {
+    if freedom == 0 || !(probability > 0.5 && probability < 1.0) {
+        return Err(NumericalError::Domain);
+    }
     let nu = freedom as f64;
     let tail = 2.0 * (1.0 - probability);
     let two_sided_tail = |t: f64| regularized_incomplete_beta(nu / (nu + t * t), nu / 2.0, 0.5);
     let (mut low, mut high) = (0.0f64, 1.0f64);
-    while two_sided_tail(high) > tail {
+    while two_sided_tail(high)? > tail {
         high *= 2.0;
+        if !high.is_finite() {
+            return Err(NumericalError::NotConverged);
+        }
     }
     while high - low > 1e-9 * high {
         let middle = 0.5 * (low + high);
-        if two_sided_tail(middle) > tail {
+        if two_sided_tail(middle)? > tail {
             low = middle;
         } else {
             high = middle;
         }
     }
-    0.5 * (low + high)
+    Ok(0.5 * (low + high))
 }
 
-/// The regularised incomplete beta function `I_x(a, b)`, for `a, b > 0`
-/// and `x` in `[0, 1]`: the distribution function of the beta
-/// distribution, and through it of Student's `t` and the `F` and
-/// binomial distributions.
+/// The regularised incomplete beta function `I_x(a, b)` for `a, b > 0` and
+/// `x` in `[0, 1]`: the distribution function of the beta distribution,
+/// and through it of Student's `t` and the `F` and binomial distributions.
 ///
-/// By the continued fraction of Press et al., *Numerical Recipes*, 3rd
-/// ed., §6.4, evaluated by the modified Lentz method, taken on the side
-/// of the symmetry `I_x(a, b) = 1 − I_{1−x}(b, a)` where it converges
-/// fastest, with [`ln_gamma`] for the normalisation.
-#[must_use]
-pub fn regularized_incomplete_beta(x: f64, a: f64, b: f64) -> f64 {
-    if x <= 0.0 {
-        return 0.0;
+/// `I_x(a, b) = x^a (1−x)^b / (a·B(a, b)) · C`, with `C` the continued
+/// fraction DLMF 8.17.22 evaluated by the modified Lentz method (Lentz,
+/// Applied Optics 15 (1976), 668–671; Thompson & Barnett, J. Comput. Phys.
+/// 64 (1986), 490–509), taken for `x` below `(a+1)/(a+b+2)` and otherwise
+/// on the other side of the symmetry `I_x(a, b) = 1 − I_{1−x}(b, a)`
+/// (DLMF 8.17.4). The smaller tail is therefore computed directly, and to
+/// relative accuracy.
+///
+/// The prefactor is formed without subtracting large log-gammas: with
+/// `x₀ = a/(a+b)`, `y₀ = b/(a+b)` and `δ(t) = ln Γ(t) − (t−½) ln t + t −
+/// ½ ln 2π` the Stirling remainder,
+///
+/// ```text
+/// ln[x^a (1−x)^b / B(a,b)] = a·ln(x/x₀) + b·ln((1−x)/y₀)
+///                          + ½ ln(ab/(a+b)) − ½ ln 2π − δ(a) − δ(b) + δ(a+b),
+/// ```
+///
+/// the rearrangement of DiDonato & Morris, ACM TOMS 18 (1992), 360–373,
+/// with each logarithm taken by `ln_1p` of the deviation from the mean. `δ`
+/// is its asymptotic series (DLMF 5.11.1, eight terms) from `t = 10`, and
+/// [`ln_gamma`] below.
+///
+/// Near the mean the continued fraction takes about `0.45·max(a, b)^0.32`
+/// steps (526 at `10⁶`, 192 166 at `10¹⁴`); it is allowed
+/// `64 + 64·⌈√max(a, b)⌉`, at most ten million.
+///
+/// # Errors
+///
+/// [`NumericalError::Domain`] if `a` or `b` is not a positive finite number
+/// or `x` lies outside `[0, 1]`; [`NumericalError::NotConverged`] if the
+/// continued fraction does not settle within its budget or the result is not
+/// in `[0, 1]`.
+pub fn regularized_incomplete_beta(x: f64, a: f64, b: f64) -> Result<f64, NumericalError> {
+    let positive = |v: f64| v.is_finite() && v > 0.0;
+    if !(positive(a) && positive(b) && (0.0..=1.0).contains(&x)) {
+        return Err(NumericalError::Domain);
     }
-    if x >= 1.0 {
-        return 1.0;
+    if x == 0.0 {
+        return Ok(0.0);
     }
-    let front =
-        (ln_gamma(a + b) - ln_gamma(a) - ln_gamma(b) + a * x.ln() + b * (1.0 - x).ln()).exp();
-    if x < (a + 1.0) / (a + b + 2.0) {
-        front * beta_continued_fraction(x, a, b) / a
+    if x == 1.0 {
+        return Ok(1.0);
+    }
+    let value = if x < (a + 1.0) / (a + b + 2.0) {
+        incomplete_beta_tail(DoubleDouble::from(x), a, b)?
     } else {
-        1.0 - front * beta_continued_fraction(1.0 - x, b, a) / b
+        // 1 − x exactly, so no input bit is lost on the complement side.
+        let complement = DoubleDouble::from(1.0).add(DoubleDouble::from(-x));
+        1.0 - incomplete_beta_tail(complement, b, a)?
+    };
+    if (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err(NumericalError::NotConverged)
     }
 }
 
-/// The continued fraction of the incomplete beta function, by the
-/// modified Lentz method (*Numerical Recipes*, 3rd ed., §6.4, `betacf`):
-/// `I_x(a, b) = x^a (1−x)^b / (a·B(a, b)) · 1/(1 + d₁/(1 + d₂/(1 + …)))`.
-fn beta_continued_fraction(x: f64, a: f64, b: f64) -> f64 {
-    const TINY: f64 = 1e-300;
-    let floored = |value: f64| if value.abs() < TINY { TINY } else { value };
-    let (qab, qap, qam) = (a + b, a + 1.0, a - 1.0);
-    let mut c = 1.0;
-    let mut d = 1.0 / floored(1.0 - qab * x / qap);
-    let mut h = d;
-    for m in 1..=300 {
-        let m = m as f64;
-        let m2 = 2.0 * m;
-        let even = m * (b - m) * x / ((qam + m2) * (a + m2));
-        d = 1.0 / floored(1.0 + even * d);
-        c = floored(1.0 + even / c);
-        h *= d * c;
-        let odd = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
-        d = 1.0 / floored(1.0 + odd * d);
-        c = floored(1.0 + odd / c);
-        let step = d * c;
-        h *= step;
-        if (step - 1.0).abs() < 3e-16 {
-            break;
+/// `I_p(a, b)` by prefactor and continued fraction, for `p` (held exactly) on
+/// the side where the fraction converges.
+///
+/// With `p₀ = a/(a+b)`, `q₀ = b/(a+b)`, `q = 1 − p`, `r = (p − p₀)/p₀` and
+/// `s = (q − q₀)/q₀`, the terms `a·r + b·s` sum to zero, so the prefactor's
+/// exponent `a·ln(p/p₀) + b·ln(q/q₀)` is `a·(ln(1+r) − r) + b·(ln(1+s) − s)`:
+/// terms of the size of the squared deviation, with no large parts to cancel.
+/// The deviation is formed in double-doubles from the exact mean.
+fn incomplete_beta_tail(p: DoubleDouble, a: f64, b: f64) -> Result<f64, NumericalError> {
+    let dd = DoubleDouble::from;
+    let total = dd(a).add(dd(b));
+    let (p0, q0) = (dd(a).div(total), dd(b).div(total));
+    let q = dd(1.0).add(DoubleDouble {
+        hi: -p.hi,
+        lo: -p.lo,
+    });
+    let deviation = p.add(DoubleDouble {
+        hi: -p0.hi,
+        lo: -p0.lo,
+    });
+    let r = deviation.div(p0);
+    let s = DoubleDouble {
+        hi: -deviation.hi,
+        lo: -deviation.lo,
+    }
+    .div(q0);
+    let ln_prefactor = a * log_one_plus_minus(r, p.div(p0))
+        + b * log_one_plus_minus(s, q.div(q0))
+        + 0.5 * (a * b / (a + b)).ln()
+        - 0.5 * (2.0 * core::f64::consts::PI).ln()
+        - stirling_remainder(a)
+        - stirling_remainder(b)
+        + stirling_remainder(a + b);
+    let fraction = beta_continued_fraction(p, a, b)?;
+    let value = ln_prefactor.exp() * fraction / a;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(NumericalError::NotConverged)
+    }
+}
+
+/// `ln(1 + r) − r`, given `r` and `1 + r` both to double-double accuracy: the
+/// series `−r²/2 + r³/3 − …` for `|r| < 1/10`, where it needs at most sixteen
+/// terms and `ln(1 + r)` and `r` would cancel, and `ln(1 + r) − r` from the
+/// ratio itself otherwise.
+fn log_one_plus_minus(r: DoubleDouble, one_plus_r: DoubleDouble) -> f64 {
+    let r_value = r.hi + r.lo;
+    if r_value.abs() < 0.1 {
+        let mut power = r_value * r_value;
+        let mut sum = 0.0;
+        let mut n = 2.0;
+        loop {
+            let term = power / n;
+            let signed = if (n as u64).is_multiple_of(2) {
+                -term
+            } else {
+                term
+            };
+            sum += signed;
+            if term.abs() <= f64::EPSILON * sum.abs() * 0.25 || n > 40.0 {
+                return sum;
+            }
+            power *= r_value;
+            n += 1.0;
         }
     }
-    h
+    let ratio = one_plus_r.hi + one_plus_r.lo;
+    ratio.ln() - r_value
+}
+
+/// `δ(t) = ln Γ(t) − (t − ½) ln t + t − ½ ln 2π`, the remainder of Stirling's
+/// approximation: its asymptotic series (DLMF 5.11.1) from `t = 10`, where the
+/// first omitted term is below `10⁻¹⁷`, and [`ln_gamma`] below.
+fn stirling_remainder(t: f64) -> f64 {
+    if t < 10.0 {
+        return ln_gamma(t) - (t - 0.5) * t.ln() + t - 0.5 * (2.0 * core::f64::consts::PI).ln();
+    }
+    // B₂ₖ / (2k(2k − 1)) for k = 1..8.
+    const COEFFICIENTS: [f64; 8] = [
+        1.0 / 12.0,
+        -1.0 / 360.0,
+        1.0 / 1260.0,
+        -1.0 / 1680.0,
+        1.0 / 1188.0,
+        -691.0 / 360_360.0,
+        1.0 / 156.0,
+        -3617.0 / 122_400.0,
+    ];
+    let inverse_square = 1.0 / (t * t);
+    let mut sum = 0.0;
+    for &c in COEFFICIENTS.iter().rev() {
+        sum = sum * inverse_square + c;
+    }
+    sum / t
+}
+
+/// A double-double number `hi + lo` with `|lo| ≤ ulp(hi)/2`: about 106
+/// bits, with error-free sums and products (Dekker, *A floating-point
+/// technique for extending the available precision*, Numer. Math. 18 (1971),
+/// 224–242; the product by fused multiply-add).
+#[derive(Clone, Copy, Debug)]
+struct DoubleDouble {
+    hi: f64,
+    lo: f64,
+}
+
+impl DoubleDouble {
+    fn from(value: f64) -> Self {
+        Self { hi: value, lo: 0.0 }
+    }
+
+    fn normalized(hi: f64, lo: f64) -> Self {
+        let sum = hi + lo;
+        Self {
+            hi: sum,
+            lo: lo - (sum - hi),
+        }
+    }
+
+    fn add(self, other: Self) -> Self {
+        let sum = self.hi + other.hi;
+        let virtual_b = sum - self.hi;
+        let error = (self.hi - (sum - virtual_b)) + (other.hi - virtual_b);
+        Self::normalized(sum, error + self.lo + other.lo)
+    }
+
+    fn mul(self, other: Self) -> Self {
+        let product = self.hi * other.hi;
+        let error = self.hi.mul_add(other.hi, -product);
+        Self::normalized(product, error + (self.hi * other.lo + self.lo * other.hi))
+    }
+
+    fn div(self, other: Self) -> Self {
+        let quotient = self.hi / other.hi;
+        let remainder = self.add(Self::from(-quotient).mul(other));
+        Self::normalized(quotient, remainder.hi / other.hi)
+    }
+}
+
+/// The continued fraction DLMF 8.17.22 by the modified Lentz method in
+/// double-double arithmetic:
+/// `I_x(a, b) = x^a (1−x)^b / (a·B(a, b)) · 1/(1 + d₁/(1 + d₂/(1 + …)))`.
+///
+/// Near the mean the fraction takes on the order of `√max(a, b)` steps, and in
+/// doubles their rounding and the last-place stopping test left an error that
+/// grew as `√max(a, b)·ε` (`10⁻¹⁰` at `a = b = 10¹²`). In double-doubles a
+/// step is accepted as converged within `10⁻³⁰`. [`NumericalError::NotConverged`]
+/// if that does not happen within [`continued_fraction_budget`] steps.
+fn beta_continued_fraction(x: DoubleDouble, a: f64, b: f64) -> Result<f64, NumericalError> {
+    beta_continued_fraction_within(x, a, b, continued_fraction_budget(a, b))
+}
+
+/// Steps allowed the continued fraction: `64 + 64·⌈√max(a, b)⌉`, and never
+/// more than ten million (about a second), past which shapes near `10¹⁹`
+/// are refused rather than computed slowly.
+fn continued_fraction_budget(a: f64, b: f64) -> f64 {
+    (64.0 + 64.0 * a.max(b).sqrt().ceil()).min(1e7)
+}
+
+fn beta_continued_fraction_within(
+    x: DoubleDouble,
+    a: f64,
+    b: f64,
+    budget: f64,
+) -> Result<f64, NumericalError> {
+    const TINY: f64 = 1e-300;
+    let dd = DoubleDouble::from;
+    let one = dd(1.0);
+    let floored = |value: DoubleDouble| {
+        if value.hi.abs() < TINY {
+            dd(TINY)
+        } else {
+            value
+        }
+    };
+    // Every coefficient is formed in double-doubles: with a shape such as
+    // 10⁻³, `b − m` and `a + 2m` are inexact in doubles, and that rounding
+    // compounds over the steps as the product's did.
+    let (a_dd, b_dd) = (dd(a), dd(b));
+    let negate = |v: DoubleDouble| DoubleDouble {
+        hi: -v.hi,
+        lo: -v.lo,
+    };
+    let qab = a_dd.add(b_dd);
+    let qap = a_dd.add(one);
+    let qam = a_dd.add(dd(-1.0));
+    let mut c = one;
+    let mut d = one.div(floored(one.add(negate(qab).mul(x).div(qap))));
+    let mut h = d;
+    let mut m = 1.0;
+    while m <= budget {
+        let (m_dd, m2) = (dd(m), dd(2.0 * m));
+        let even = m_dd
+            .mul(b_dd.add(negate(m_dd)))
+            .mul(x)
+            .div(qam.add(m2).mul(a_dd.add(m2)));
+        d = one.div(floored(one.add(even.mul(d))));
+        c = floored(one.add(even.div(c)));
+        h = h.mul(d).mul(c);
+        let odd = negate(a_dd.add(m_dd))
+            .mul(qab.add(m_dd))
+            .mul(x)
+            .div(a_dd.add(m2).mul(qap.add(m2)));
+        d = one.div(floored(one.add(odd.mul(d))));
+        c = floored(one.add(odd.div(c)));
+        let step = d.mul(c);
+        h = h.mul(step);
+        let change = step.add(dd(-1.0));
+        if (change.hi + change.lo).abs() <= 1e-30 {
+            let value = h.hi + h.lo;
+            return if value.is_finite() {
+                Ok(value)
+            } else {
+                Err(NumericalError::NotConverged)
+            };
+        }
+        m += 1.0;
+    }
+    Err(NumericalError::NotConverged)
 }
 
 #[cfg(test)]
 mod statistics_tests {
     use super::*;
+
+    /// Double-double `1 − x`, as the function forms it.
+    fn exact_complement_is_representable(x: f64) -> bool {
+        1.0 - (1.0 - x) == x
+    }
 
     /// The quantile is the table's, at the two-sided five, one and a tenth
     /// of a per cent points, from one degree of freedom up.
@@ -7740,7 +7996,7 @@ mod statistics_tests {
         ];
         for (freedom, points) in table {
             for (probability, expected) in [0.975, 0.995, 0.9995].into_iter().zip(points) {
-                let t = student_t_quantile(freedom, probability);
+                let t = student_t_quantile(freedom, probability).expect("in the domain");
                 assert!(
                     (t / expected - 1.0).abs() < 5e-4,
                     "{freedom} at {probability}: {t} against {expected}"
@@ -7749,23 +8005,157 @@ mod statistics_tests {
         }
     }
 
-    /// The incomplete beta function at its closed forms: `I_x(1, 1) = x`,
-    /// `I_x(1, b) = 1 − (1 − x)^b`, `I_x(a, 1) = x^a`, the symmetry
-    /// `I_{1/2}(a, a) = 1/2`, and the ends.
+    /// Against the 50-digit quantiles of `scripts/incomplete_beta_reference.py`
+    /// in the regime of factoring's polynomial race (its degrees of freedom and
+    /// Bonferroni-divided probabilities) and at the classical table points: the
+    /// bisection stops within a part in a billion.
     #[test]
-    fn the_incomplete_beta_function_matches_its_closed_forms() {
-        for x in [0.05, 0.3, 0.5, 0.77, 0.99] {
-            assert!((regularized_incomplete_beta(x, 1.0, 1.0) - x).abs() < 1e-14);
-            for b in [0.5, 2.0, 7.5] {
-                let expected = 1.0 - (1.0 - x).powf(b);
-                assert!((regularized_incomplete_beta(x, 1.0, b) - expected).abs() < 1e-13);
-                assert!((regularized_incomplete_beta(x, b, 1.0) - x.powf(b)).abs() < 1e-13);
+    fn student_t_matches_high_precision_quantiles() {
+        let mut checked = 0;
+        for line in include_str!("../tests/data/student_t.txt").lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let freedom: usize = fields[0].parse().expect("freedom");
+            let probability: f64 = fields[1].parse().expect("probability");
+            let expected: f64 = fields[2].parse().expect("quantile");
+            let t = student_t_quantile(freedom, probability).expect("in the domain");
+            assert!(
+                (t / expected - 1.0).abs() < 2e-9,
+                "{freedom} at {probability}: {t} against {expected}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 1_000, "only {checked} quantiles");
+    }
+
+    #[test]
+    fn student_t_refuses_its_domain_edges() {
+        assert_eq!(student_t_quantile(0, 0.9), Err(NumericalError::Domain));
+        for probability in [0.5, 1.0, 0.2, f64::NAN] {
+            assert_eq!(
+                student_t_quantile(3, probability),
+                Err(NumericalError::Domain)
+            );
+        }
+    }
+
+    /// Against 50-digit values from `scripts/incomplete_beta_reference.py` over
+    /// shapes from `10⁻³` to `10⁶`, both small, both large and very unequal,
+    /// at the mean, from 1 to 40 standard deviations either side and either
+    /// side of the switch between the two sides of the symmetry: absolute
+    /// error below `10⁻¹⁴`, and where the side the fraction computes is the
+    /// smaller of `I` and `1 − I`, relative error below `5·10⁻¹³`.
+    #[test]
+    fn the_incomplete_beta_function_matches_high_precision_values() {
+        let mut checked = 0;
+        for line in include_str!("../tests/data/incomplete_beta.txt").lines() {
+            let v: Vec<f64> = line
+                .split_whitespace()
+                .map(|field| field.parse().expect("number"))
+                .collect();
+            let (x, a, b, expected) = (v[0], v[1], v[2], v[3]);
+            let got = regularized_incomplete_beta(x, a, b).expect("converges");
+            let error = (got - expected).abs();
+            let what = format!("I_{x:e}({a:e}, {b:e}) = {got:e}, expected {expected:e}");
+            assert!(error < 1e-14, "{what}: absolute error {error:e}");
+            let direct = x < (a + 1.0) / (a + b + 2.0);
+            let tail = if direct { expected } else { 1.0 - expected };
+            if tail <= 0.5 && tail > 0.0 {
+                assert!(
+                    error <= 5e-13 * tail,
+                    "{what}: relative error {:e}",
+                    error / tail
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked > 900, "only {checked} references");
+    }
+
+    /// Beyond the references' reach, the closed forms that fix the answer:
+    /// `I_{1/2}(a, a) = 1/2` to `a = 10¹⁴`, `I_x(1, b) = 1 − (1 − x)^b` and
+    /// `I_x(a, 1) = x^a` by `expm1`/`ln_1p` to shapes of `10¹²`, and the
+    /// symmetry `I_x(a, b) + I_{1−x}(b, a) = 1` — the two sides evaluated
+    /// separately — for shapes to `10¹⁵`, at complements exact in doubles.
+    #[test]
+    fn the_incomplete_beta_function_holds_its_identities_at_large_shapes() {
+        for a in [0.5, 12.0, 1e4, 1e6, 1e8, 1e10, 1e12, 1e14] {
+            let value = regularized_incomplete_beta(0.5, a, a).expect("converges");
+            assert!((value - 0.5).abs() < 2e-15, "I_1/2({a:e}, {a:e}) = {value}");
+        }
+        for b in [1e-3, 0.5, 2.0, 1e3, 1e6, 1e9, 1e12] {
+            for x in [1e-15, 1e-9, 1e-3, 0.1, 0.5, 0.9, 1.0 - 1e-9] {
+                let one_minus_power = -(b * f64::ln_1p(-x)).exp_m1();
+                let power = x.powf(b);
+                for (got, expected) in [
+                    (regularized_incomplete_beta(x, 1.0, b), one_minus_power),
+                    (regularized_incomplete_beta(x, b, 1.0), power),
+                ] {
+                    let got = got.expect("converges");
+                    let tail = expected.min(1.0 - expected);
+                    let error = (got - expected).abs();
+                    assert!(
+                        error < 1e-14,
+                        "x {x:e}, shape {b:e}: {got:e} against {expected:e}"
+                    );
+                    if tail > 1e-300 {
+                        assert!(error < 1e-12 * tail.max(1e-3), "x {x:e}, shape {b:e}: tail");
+                    }
+                }
             }
         }
-        for a in [0.5, 1.0, 3.0, 12.0] {
-            assert!((regularized_incomplete_beta(0.5, a, a) - 0.5).abs() < 1e-13);
+        let unit = 2f64.powi(-53);
+        for a in [1e8f64, 1e10, 1e12] {
+            for ratio in [1.0, 3.0, 1e3] {
+                let b = a * ratio;
+                let mean = a / (a + b);
+                let sd = (a * b / ((a + b) * (a + b) * (a + b + 1.0))).sqrt();
+                for k in [-8.0, -2.0, -0.5, 0.0, 0.5, 2.0, 8.0] {
+                    let x = ((mean + k * sd) / unit).round() * unit;
+                    assert!(exact_complement_is_representable(x));
+                    let p = regularized_incomplete_beta(x, a, b).expect("converges");
+                    let q = regularized_incomplete_beta(1.0 - x, b, a).expect("converges");
+                    assert!(
+                        (p + q - 1.0).abs() < 4e-15,
+                        "a {a:e} b {b:e} k {k}: {p} + {q}"
+                    );
+                }
+            }
         }
-        assert_eq!(regularized_incomplete_beta(0.0, 2.0, 3.0), 0.0);
-        assert_eq!(regularized_incomplete_beta(1.0, 2.0, 3.0), 1.0);
+    }
+
+    /// The incomplete beta refuses what is outside its domain, returns the
+    /// ends exactly, and reports a continued fraction that has not settled.
+    #[test]
+    fn the_incomplete_beta_function_reports_failure() {
+        for (x, a, b) in [
+            (0.5, 0.0, 1.0),
+            (0.5, 1.0, -1.0),
+            (-0.1, 1.0, 1.0),
+            (1.1, 1.0, 1.0),
+            (f64::NAN, 1.0, 1.0),
+            (0.5, f64::INFINITY, 1.0),
+            (0.5, f64::NAN, 1.0),
+        ] {
+            assert_eq!(
+                regularized_incomplete_beta(x, a, b),
+                Err(NumericalError::Domain),
+                "{x} {a} {b}"
+            );
+        }
+        assert_eq!(regularized_incomplete_beta(0.0, 2.0, 3.0), Ok(0.0));
+        assert_eq!(regularized_incomplete_beta(1.0, 2.0, 3.0), Ok(1.0));
+        // Near the mean at a = b = 10⁶ the fraction needs hundreds of steps.
+        let half = DoubleDouble::from(0.5);
+        assert_eq!(
+            beta_continued_fraction_within(half, 1e6, 1e6, 3.0),
+            Err(NumericalError::NotConverged)
+        );
+        assert!(beta_continued_fraction_within(
+            half,
+            1e6,
+            1e6,
+            continued_fraction_budget(1e6, 1e6)
+        )
+        .is_ok());
     }
 }

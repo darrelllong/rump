@@ -134,8 +134,8 @@ pub mod number_theory {
         is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker, lcm, legendre, ln_gamma,
         miller_rabin_with_bases, miller_rabin_witness, primes_below, primes_past, product_tree,
         rational_reconstruct, rational_reconstruct_bounded, regularized_incomplete_beta,
-        remainder_tree, remove_factor, smooth_parts, student_t_quantile, valuation, ProductTree,
-        SmoothnessBase, SmoothnessBaseError,
+        remainder_tree, remove_factor, smooth_parts, student_t_quantile, valuation, NumericalError,
+        ProductTree, SmoothnessBase, SmoothnessBaseError,
     };
 }
 
