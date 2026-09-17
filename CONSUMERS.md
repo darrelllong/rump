@@ -70,3 +70,19 @@ covered by `scripts/release_gate.sh`.
 Last run, 2026-09-16, `--test` at `8df086eccfca543d026536081535d7095f7eaa3c`:
 every host built both feature modes and passed 408 tests with 0 failures —
 moore, twilight and knuth on rustc 1.95.0, darby and dmz on rustc 1.93.1.
+
+## Reported by consumers
+
+Runs by the consumers' own sessions, not by these scripts; recorded with
+their revisions so they can be repeated.
+
+| Date | Consumer | Revision | rump | Where | Result |
+|---|---|---|---|---|---|
+| 2026-09-16 | cryptography | `aa865da` | `8df086e` | Mac, moore, baase, darby, dmz | builds and tests pass; OpenSSL BER cross-check passes against 3.0.13, 3.5.5, 3.5.7 and 3.6.4 |
+| 2026-09-16 | entropy | `f980cf7` | `8df086e` | moore, baase, dmz, darby | builds and tests pass |
+| 2026-09-16 | entropy | `de1bd2d` | `1ccb3ce` | Mac | default features: 466 passed, 0 failed |
+
+cryptography's CI checks out rump main rather than a pinned revision, so a
+change to rump's public contracts is run through `consumer_matrix.sh` against
+the consumers' current revisions before it is pushed. entropy records the
+rump revision each battery run was built against (`scripts/provenance.sh`).
