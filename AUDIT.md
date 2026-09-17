@@ -4,181 +4,170 @@
 >
 > **Creed:** Experiment is asking God for peer review.
 
-## Reviewed state
+## Reviewed state and method
 
-Reviewed 2026-09-16 on `aarch64-apple-darwin`, rustc/Cargo 1.93.1.
-HEAD: `70d12839933c32569fdee5cb2bc1d5b4f3964f1a`. The reviewed tree includes concurrent comment/documentation edits.
-Tests ran against frozen sibling copies, with fresh build directories.
-This is a targeted mathematical and cross-repository review, supported by the
-runs below; it is not an assertion that every line or parameter regime was examined.
-Only AUDIT.md and SUGGESTIONS.md are changed by this review.
-Concurrent edits continued after capture; the results below apply to this
-recorded snapshot, not automatically to later working-tree contents.
+2026-09-16 PDT / 2026-09-17 UTC. Frozen sibling checkouts on
+`aarch64-apple-darwin`, rustc/Cargo 1.93.1; separate Rust 1.87 checks.
 
-| Sibling | Reviewed HEAD |
+| Repository | HEAD at capture |
 |---|---|
-| cryptography | `601c97bbd9049a4a2ba02e3b37d113f00d063e66` |
-| entropy | `b52a72ddc63dc5ae2a41df0deb6c780fc990079d` |
-| factoring | `5271af623135efbf7116d6e32e38ab8ac3d48eed` |
+| cryptography | `aa865da77502306f544b7031f65eaf3f7b7960b2` |
+| entropy | `de1bd2d061eea43fe1fca291edae346315b85983` |
+| rump | `66651ab0c82a21929c52da92823fad930766fef9` |
+| factoring | `d594060dc824a4f2c3a0800fdeb86c739dce7e71` |
 
-Reviewed-file manifest SHA-256: `c26e97e3f15b7f4de4b57f2fa47358447a3f4bbea7816730e84805046ce449a0` (108 files).
-The manifest includes tracked files and nonignored untracked regular files,
-except AUDIT.md and SUGGESTIONS.md. Sort repository-relative paths; emit
-`SHA256(file)`, two spaces, path and newline; hash that UTF-8 manifest.
-Hashes identify the captured working contents, including dirty files, rather
-than treating HEAD alone as their identity. A later source change requires
-revalidation of the affected findings and results.
+This repository's reviewed-file manifest SHA-256 is
+`a0cb6832502d7bd1961846626aa589a32cd07ed238101dd9a4bf54bccd3a4aff` (114 files).
+The manifest covers tracked and nonignored untracked regular files, excluding
+AUDIT.md and SUGGESTIONS.md: sort relative paths, emit `SHA256(file)`, two
+spaces, path and newline, then SHA-256 the UTF-8 manifest. It identifies working
+contents as well as commits. Tests used fresh build directories in the frozen
+copies. Later edits require checking which evidence still applies.
+
+This review combines source inspection, mathematical identities, the release
+suites, and focused boundary experiments. Reproduced failures, inspected risks,
+retained measurements and proposed experiments are distinguished below. Coverage
+is stated explicitly; passing suites do not establish every input domain,
+platform, timing property or statistical null law. This review changes the two
+review documents only. Diagnostic code ran in separate scratch copies.
 
 ## Assessment
 
-The tested integer and modular kernels satisfy their checked identities.
-Two numerical boundary defects are reproduced: a finite log-gamma becomes
-infinite, and lattice enumeration rejects a valid positive-definite problem.
-The latter matters to factoring's polynomial search; the former is inherited
-by entropy's public `lgamma` and is also relevant to factoring's distribution
-models. Neither experiment establishes that an ordinary factoring run reaches
-these extreme inputs.
+Exact lattice enumeration now preserves the anisotropic test metric and
+reports how a search ends. The coefficient generator reproduces all nine
+log-gamma coefficients bit for bit, and the 50,298-point reference sweep passes.
+The new numerical counterexamples are in incomplete beta and at log-gamma's
+upper representable boundary. The integer, modular, polynomial and GF(2)
+regressions in the exercised suites pass.
 
 ## Findings
 
-### R1 — High: floating conversion can destroy a valid lattice metric
+### R1 — High: incomplete beta returns an uncertified last iterate, including negative probabilities
 
-**Reproduced.** [src/lattice.rs](src/lattice.rs), `short_vectors_form` and
-`closest_vectors_form`. Take the identity basis of Z², the integral form
-`diag(1, 2^1000)`, squared bound 1, and, for closest vectors, target zero.
-The basis is already LLL-reduced. The nonzero short vectors are exactly
-`(−1,0)` and `(1,0)`; the closest-vector result also includes zero.
-Both functions panic on this input.
+**Reproduced; public API.** [src/number_theory.rs](src/number_theory.rs),
+`regularized_incomplete_beta` and `beta_continued_fraction`.
+Symmetry gives `I_(1/2)(a,a)=1/2` for every positive a. Fresh results:
 
-The Gram conversion shifts every integer right by `widest_bits − 900` before
-converting it to f64. Here the shift is 101, so the positive entry 1 becomes
-zero. The subsequent positivity assertion diagnoses a singular metric that
-the conversion itself created. Exact verification of candidates cannot recover
-candidates excluded before enumeration. A fixed relative slack of `1e-9`
-also supplies no general bound on cancellation in floating Gram–Schmidt.
+| a = b | Computed result | Exact result |
+|---:|---:|---:|
+| 1,000,000 | 0.49999961848374941 | 0.5 |
+| 100,000,000 | 0.20461178871784746 | 0.5 |
+| 10,000,000,000 | −5.776747550350140 | 0.5 |
+| 1,000,000,000,000 | −66.96555717858665 | 0.5 |
 
-**Required result:** preserve valid small Gram directions, or return an
-explicit numerical-limit outcome. A completeness claim needs rigorous pruning
-bounds or an exact fallback. Recompute all returned norms exactly. Factoring's
-`gnfs::kleinjung` calls `closest_vectors_form`; audit that caller's fallback
-when the upstream outcome becomes explicit.
+The continued fraction returns `h` after at most 300 iterations, whether or
+not the convergence test succeeds. The normalization also subtracts large
+log-gamma values. Thus neither a finite result nor a result inside [0,1]
+certifies accuracy. Clamping would conceal the failure.
 
-### R2 — Medium: log-gamma overflows before taking the logarithm
+Return explicit nonconvergence/numerical failure and use a stable regime-specific
+normalization and expansion. Validate symmetry, tails, transition regions and
+monotonicity against independent values. The exact identity follows from
+[DLMF 8.17.4](https://dlmf.nist.gov/8.17.E4).
 
-**Reproduced.** [src/number_theory.rs](src/number_theory.rs), `ln_gamma`.
-At `x = 1e-310`, the result is positive infinity. The reflection path evaluates
-`ln(π / sin(πx))`; the quotient overflows although its logarithm does not.
-The recurrence `ln Γ(x) = ln Γ(1+x) − ln x` gives approximately
-`713.8013788281542`, a finite f64. This identity follows directly from
-[the gamma recurrence, DLMF §5.5(i)](https://dlmf.nist.gov/5.5).
+`student_t_quantile` calls this function; factoring's polynomial race calls that
+quantile. These examples have two large equal shapes, while the Student path
+has one shape 1/2. A failure of the ordinary factoring race was **not** reproduced.
+Qualify that consumer's actual degrees of freedom and tail probabilities
+separately before changing the shared kernel.
 
-**Required result:** evaluate the small-positive regime in logarithmic form,
-with a stated domain and measured absolute error near zeros of log-gamma.
-Relative “fifteen digits” language is inappropriate where the answer is zero.
-Check subnormals, transition boundaries, infinities and invalid arguments.
-Entropy's `math::lgamma` delegates directly to this function. The defect is
-in that public numerical contract; corruption of a shipped χ² result was not
-reproduced.
-
-### R3 — Medium: bounded enumeration needs an explicit completion result
-
-**Source inspection.** `short_vectors_form` stops after 50,000,000 visits and
-returns the vectors collected so far, sorted and truncated. Its return type
-cannot distinguish exhaustion from truncation. Both enumeration functions
-document their visit caps, but neither returns completion or numerical status.
-Sorting the candidates found does not prove they are the globally shortest.
-
-Return completion status, visit count and numerical status alongside the
-candidates. Keep every returned vector certified; reserve “complete” for an
-exhausted, sound search. Also reconcile `short_vectors_form`'s documented
-negative-bound panic with its early empty return. The visit-cap behavior was
-inspected, not driven through 50 million iterations in this pass.
-
-### R4 — Medium: coefficient derivation is not reproducible in-tree
-
-**Source inspection.** `ln_gamma` embeds nine coefficients for `g = 7`.
-[CITATIONS.md](CITATIONS.md) identifies Lanczos's paper and the parameter,
-but the inspected tree supplies no generator or error analysis for this
-particular coefficient set. Integer/half-integer tests cover useful values,
-but cannot establish the full positive-real accuracy claim.
-
-Keep a mathematical derivation and a deterministic high-precision coefficient
-generator, with rounding rules and approximation error separated from floating
-evaluation error. This is an evidence requirement for a specific numeric
-table, not a claim that the table's ordinary values are wrong.
-
-## Verification
-
-| Fresh command or experiment | Result |
-|---|---|
-| `cargo test --offline --locked --release --all-targets` | 389 passed, 20 ignored |
-| Same with `--features wipe` | 390 passed, 20 ignored |
-| `cargo test --offline --locked --release --doc` | 7 passed |
-| Same doctests with `--features wipe` | 7 passed |
-| `mod_inverse_u128` against Python integer inversion | 2,500 cases, no mismatch |
-| `crt_combine_u64` against integer CRT and both congruences | 1,000 cases, no mismatch |
-| Lattice and small-positive log-gamma boundary probes | R1 and R2 reproduced |
-
-The arithmetic probes used seed 20260916. Inverse cases covered modulus 1,
-small moduli, 2^64, 2^127, 2^128−1 and 2^128−159, plus random 128-bit values;
-zero modulus is outside the API's nonpanicking domain. The first 500 cases
-cycle the moduli `[1,2,3,4,5,2^64,2^64−1,2^127,2^128−1,2^128−159]`; the
-next 2,000 draw `m=max(1,rng.getrandbits(128))`, then a 128-bit value. The first
-500 draw only the value. The same Python `random.Random(20260916)` then draws
-1,000 CRT tuples in `(m1,m2,r1,r2)` order, each component 64 bits.
-Expected inverses use `pow(a,-1,m)` when gcd is one; expected CRT uses
-`a=r1 % m1; x=a+m1*((r2-a)*pow(m1,-1,m2) % m2)` for coprime nonzero moduli.
-CRT inputs included unreduced residues and noncoprime moduli. Every returned CRT value additionally
-satisfied both congruences and `0 ≤ x < m1*m2`.
-The existing division tests check `n=q*d+r`, `r<d` and agreement with
-bitwise long division. GF(2) tests expand filtered dependencies and check their
-XOR against the original matrix. The 20 ignored tests, other architectures,
-MSRV and performance sweeps were not rerun.
-
-Minimal R1/R2 reproducer in a client depending on `rust-mp`:
+Minimal numerical witness:
 
 ```rust
-use rump::{BigInt, BigUint, Sign};
-let one = BigInt::from_i64(1);
-let zero = BigInt::zero();
-let basis = vec![vec![one.clone(), zero.clone()],
-                 vec![zero.clone(), one.clone()]];
-let mut power = BigUint::one();
-power.shl_bits(1000);
-let form = vec![vec![one.clone(), zero.clone()],
-                vec![zero.clone(), BigInt::from_parts(Sign::Positive, power)]];
-assert!(std::panic::catch_unwind(||
-    rump::lattice::short_vectors_form(&basis, &form, &one, 10)
-).is_err());
-assert!(std::panic::catch_unwind(||
-    rump::lattice::closest_vectors_form(&basis, &form, &[zero.clone(), zero], &one, 10)
-).is_err());
-assert!(rump::number_theory::ln_gamma(1e-310).is_infinite());
+let p = rump::number_theory::regularized_incomplete_beta(0.5, 1e10, 1e10);
+println!("{p:.17}"); // -5.77674755035013998; exact value is 0.5.
 ```
 
-These assertions reproduce defects, so their expected outcomes must change
-when the defects are repaired.
+### R2 — Medium: log-gamma overflows for some representable finite answers
+
+**Reproduced; public API.** `ln_gamma(2.557e305)` returns positive infinity.
+A 70-decimal-digit reference for the exact f64 input gives
+`1.7955951755681236831711000242607365e308`, which rounds to the finite f64
+`1.7955951755681237e308`. The same problem occurs at `2.558e305` and `2.559e305`.
+
+In `(z+0.5)*ln(t) - t`, the product overflows before subtracting t. An asymptotic
+rearrangement such as `x*(ln(x)-1)` avoids that specific intermediate; its
+rounding and correction terms still need analysis. The positive-real Stirling
+expansion and remainder bounds are in
+[DLMF §5.11](https://dlmf.nist.gov/5.11).
+
+The shipped dense sweep stops below `1e305`, so its passing result does not
+cover this boundary. The small-positive recurrence is sound on the exercised
+cases: `ln_gamma(1e-310)=713.8013788281542`. No ordinary entropy or factoring
+run reaching the upper counterexample was demonstrated.
+
+### R3 — Medium: a failed feature query can be reported as a successful absence check
+
+**Source inspection.** [scripts/consumer_matrix.sh](scripts/consumer_matrix.sh)
+uses `if cargo tree ... | grep -q '"wipe"'; then FAIL; else PASS; fi` for the
+factoring feature leg. With `pipefail`, a failed Cargo query still takes the
+`else` branch and prints that wiping is absent. Other failed test legs set the
+overall failure flag, but this particular leg is not reliable evidence of
+absence when its query fails.
+
+Capture and check Cargo's exit status before inspecting its output. Exercise
+three cases: successful graph without wipe, successful graph with wipe, and
+failed graph resolution. The latter two must fail the leg with distinct reasons.
+The fresh feature query in this review succeeded and showed no wipe in factoring.
+
+The local consumer script includes factoring and both entropy feature modes.
+The push workflow still includes only cryptography and entropy default. Use the
+full local matrix as an integration gate wherever all four repositories are
+accessible; do not treat the smaller hosted job as equivalent coverage.
+
+## Mathematical boundaries checked
+
+| Boundary | Current evidence |
+|---|---|
+| Lattice completeness | Exact integral Gram construction and fraction-free Gram–Schmidt; outward floating enclosures for pruning; exact returned distances. Existing exhaustive and change-of-basis tests pass. |
+| Anisotropic metric | Identity basis, `diag(1,2^1000)`, bound 1: short search returns exactly two nonzero vectors; closest search at zero returns three including zero. Both report `Exhausted`. |
+| Search budgets | The API distinguishes `Exhausted`, `VisitLimit` and `NumericalLimit`; the low-budget regressions pass. Exhaustion certifies the requested nearest subset, not retention of every point when `limit` is smaller. |
+| Arithmetic dispatch | The suite includes independent slow arithmetic at dispatch boundaries, division identities, Half-GCD/Toom coverage and Montgomery checks. |
+| GF(2) composition | Filtered dependencies are expanded and checked on the original matrix in the passing suite. |
+| Wiping | Both feature modes pass. The feature changes erasure behavior, not variable-time arithmetic into constant-time arithmetic. |
+
+The coefficient script solves the nine interpolation equations at 60-digit
+precision. All coefficients match. On its sampled domain, the exact-coefficient
+absolute error near the zeros is `2.26e-16`, and the rounded-coefficient error is
+`6.19e-16`; the latter's sampled relative error above 3 is `9.5e-16`. These are
+sampled maxima, not supremum proofs over the real domain.
+
+## Fresh verification
+
+| Check | Result |
+|---|---|
+| `cargo test --offline --locked --release --all-targets` | 401 passed, 21 ignored |
+| Same with `--features wipe` | 402 passed, 21 ignored |
+| `cargo test --offline --locked --release --doc` | 7 passed |
+| `cargo +1.87 check --offline --locked --all-targets` | Passed |
+| `scripts/lanczos_coefficients.py --check` | Nine bit-identical coefficients; sampled error report |
+| Generated `--sweep` file, then ignored `the_log_gamma_sweep_matches_high_precision` | 50,298 values checked; passed |
+| Public numerical/lattice client | R1/R2 reproduced; anisotropic searches exhausted correctly |
+
+All four consumer default release suites pass on the recorded combination;
+entropy minimal, cryptography all features and rump wipe also pass. This is a
+fresh local matrix, not a claim that the release scripts or remote hosts ran.
+The other ignored tests, fresh large-width randomized campaigns, i686/Linux,
+assembly/timing audits and remote benchmarks were not repeated.
 
 ## Cross-repository contracts
 
-| Owner | Contract and consumers |
+| Owner | Obligation at the boundary |
 |---|---|
-| [rump](../rump/AUDIT.md) | Exact integer/field arithmetic and matrix identities; numerical approximations identify their domain and error. Used by all three companions. |
-| [cryptography](../cryptography/AUDIT.md) | Scheme validation, entropy requirements, secret handling and timing properties. Enables rump's `wipe`; that feature does not make arithmetic constant-time. |
-| [entropy](../entropy/AUDIT.md) | The statistic, input projection, null distribution and calibrated decision rule. A statistical PASS is not a security claim. |
-| [factoring](../factoring/AUDIT.md) | Relation identities, matrix expansion and verified divisors. Uses entropy without default features; probable-prime leaves remain distinguished from proved primes. |
+| [rump](../rump/AUDIT.md) | Exact arithmetic and matrix identities; numerical domains, error and convergence; explicit search completion. |
+| [cryptography](../cryptography/AUDIT.md) | Scheme-specific validation, randomness requirements, confidentiality/authentication profiles, timing and secret handling. |
+| [entropy](../entropy/AUDIT.md) | Explicit input view, statistic, null law, calibrated decision and complete report; a statistical pass is not a security claim. |
+| [factoring](../factoring/AUDIT.md) | Exact relation identities and dependency expansion, verified proper divisors, measured selection cost; probable-prime leaves are not proofs. |
 
-The links assume the repositories are sibling checkouts. Mathematical kernels
-belong with their owner; consumers add their own preconditions and verify
-results at the boundary. With cryptography enabled, Cargo unifies rump's
-`wipe` feature across the dependency graph. Factoring alone was checked with
-`cargo tree --offline --locked -e features -i rust-mp`: no `wipe` and no active
-cryptography dependency.
+The links assume sibling checkouts. Cryptography enables rump's additive `wipe`
+feature. Entropy default inherits it; entropy minimal and factoring alone do
+not. The same rump version string can therefore describe different timing and
+allocation costs. Record the resolved dependency revisions, lockfiles,
+features, compiler and target alongside results.
 
-Implementation work starts from papers, specifications and mathematical
-derivations. A citation identifies the exact equation or algorithm, and the
-implementation states its representation, hypotheses and invariants. Numerical
-tables need a derivation or a precisely identified standard table. Published
-answer files are test data; another implementation's source is not an
-implementation reference. A passing round trip alone cannot validate two
-functions that share the same mistake.
+Implementations start from papers, specifications and mathematical derivations.
+State the equation, representation, hypotheses and invariant. Derive numerical
+tables reproducibly and separate approximation error from floating evaluation.
+Use published answer files and independently constructed oracles for checks;
+another implementation's source is not an implementation reference. A round
+trip alone cannot detect a shared error in its two halves.

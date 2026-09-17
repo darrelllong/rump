@@ -4,114 +4,93 @@
 >
 > **Creed:** Experiment is asking God for peer review.
 
-2026-09-16. Evidence and reviewed source identity: [AUDIT.md](AUDIT.md).
-These are proposed changes; no implementation or speedup is claimed here.
-Implement from papers, specifications and independently derived mathematics.
-Preserve the exact hypotheses, representation and invariants beside the algorithm.
-An experiment records its source/dependency identities, features, input, seed,
-measurement rule and acceptance criterion before its validation run.
+2026-09-16 PDT / 2026-09-17 UTC. Current findings, scope and measured evidence:
+[AUDIT.md](AUDIT.md). These are proposals, with their acceptance experiments;
+no implementation or speedup is claimed by this document. Work from the named
+papers, specifications and independently derived mathematics.
 
-## 1. Make lattice search numerically sound and explicit about completion
+## Priorities and acceptance
 
-Addresses **R1/R3**. Keep exact integral LLL as the basis preparation. For
-shortest/closest enumeration, derive an exact rational LDLᵀ decomposition of
-the integral Gram matrix, or enclosing intervals with adaptive precision.
-A branch may be pruned only when its certified lower norm bound exceeds the
-radius. Use approximate centers for ordering candidates, not for irrevocable
-exclusion without an error bound. Escalate precision when intervals overlap a
-branch boundary; retain an exact fallback for small dimension.
+| Priority | Work | Evidence needed |
+|---|---|---|
+| 1 | Checked incomplete-beta evaluation | Symmetry and tail fixtures; explicit failure when the chosen expansion cannot certify accuracy |
+| 2 | Log-gamma's upper finite boundary | Correct finite/overflow classification around the representability threshold |
+| 3 | Reliable consumer checks | Failed graph queries cannot pass; all four consumers checked at identified revisions |
+| 4 | Consumer-shaped arithmetic improvements | Lower complete workload cost with exact identities preserved |
 
-Return candidates, visits, a numerical outcome and whether enumeration was
-exhausted. Distinguish “best candidates found within budget” from “all candidates
-within this bound.” Recheck every emitted norm/distance in exact arithmetic.
-Do not call a valid form nonpositive merely because a floating approximation
-loses a direction.
+## Numerical contracts
 
-**Experiment:** enumerate small integral lattices independently over bounded
-integer coefficient boxes. Compare full sets, not only the first norm. Include
-boundary equality, nonorthogonal bases, targets outside the span, forms with
-widely separated diagonal scales, and changes of integral basis with determinant
-±1. The identity basis with `diag(1,2^1000)` must return its known candidates
-without numerical failure. Force low visit budgets and check the incomplete
-status. In factoring, compare shortlist quality and complete polynomial-search
-cost; certified pruning is useful only if its cost is justified.
+For **R1**, separate domain checks, stable normalization, expansion selection,
+convergence and output validation. Evaluate small tails directly. A successful
+continued-fraction stopping condition must be distinct from exhausting an
+iteration budget. A [0,1] range check detects some failures but cannot establish
+accuracy: the result 0.2046 at the exact answer 0.5 demonstrates why.
 
-## 2. Give numerical primitives defined domains and reproducible coefficients
+Start from [DLMF §8.17](https://dlmf.nist.gov/8.17), including its symmetry and
+continued fractions, and the appropriate large-parameter expansions. Derive the
+normalization without subtracting nearly equal large terms. Use `log1p` where
+its argument is small. Keep an absolute target near central probabilities and
+relative/log-tail targets for rare events; an absolute tolerance alone can erase
+a meaningful small probability.
 
-Addresses **R2/R4**. Use `ln Γ(x)=ln Γ(1+x)−ln x` for small positive x, avoiding
-an overflowing intermediate Γ-like quotient. Define behavior at zero, negative
-arguments, NaN and infinity. Publish an absolute-error target near log-gamma's
-zeros and an appropriate scaled-error target elsewhere.
+Validate in parameter strata: both small, both large, very unequal, central and
+tail x, and either side of each algorithm switch. Include exact
+`I_x(1,b)=1-(1-x)^b`, `I_x(a,1)=x^a` and `I_(1/2)(a,a)=1/2`, evaluated with
+stable independent formulas. Compare the Student quantiles actually used by
+factoring with high-precision values; numerical failure must retain contenders
+or stop selection explicitly, never silently discard them.
 
-For the chosen Lanczos approximation, derive and generate the coefficients at
-higher precision than f64, recording the mathematical construction, parameter,
-rounding and residual checks. Separate approximation error, rounded-coefficient
-error and evaluation error. A table is accepted because its construction and
-errors are known, not because its decimals appear in another implementation.
+For **R2**, derive an overflow-safe large-x log-gamma branch from
+[DLMF §5.11](https://dlmf.nist.gov/5.11). Add representable neighbors around the
+largest x with finite log-gamma, as well as `2.557e305` through `2.559e305`.
+Distinguish final-result overflow from an avoidable intermediate overflow.
+Preserve the reproducible coefficient construction and the measured small-x
+error envelope. A larger sweep complements, rather than replaces, these exact
+boundary arguments.
 
-**Experiment:** sweep logarithmically from the least positive subnormal through
-normal positive values, with dense probes around 0.5, 1 and 2. Check the gamma
-recurrence, `Γ(1/2)=sqrt(pi)`, integer factorial identities and independently
-computed high-precision values. Exercise entropy's gamma/χ²/beta consumers on
-both sides of their numerical branch boundaries. Extreme shapes are robustness
-checks; calibrating ordinary statistical tails remains entropy's responsibility.
-See [DLMF §5.5](https://dlmf.nist.gov/5.5) for the recurrence and reflection identities.
+Coordinate with entropy's incomplete-gamma work. A more accurate log-gamma
+cannot by itself repair reciprocal overflow or cancellation in a downstream
+probability formula.
 
-## 3. Reduce GF(2) work with certified composition tracking
+## Certified search and matrix algebra
 
-The existing structured filter already carries row compositions. Keep the
-invariant `filtered_row = XOR(original_rows named by composition)` through
-merges, compaction and purging. A dependency must expand to a nonempty original
-combination whose XOR is zero.
+The exact Gram–Schmidt and explicit enumeration outcomes are already present.
+Extend their tests at the f64 exponent and exact-coefficient limits, with targets
+outside the span and integral changes of basis. Compare complete small-lattice
+sets with independent bounded enumeration; force low budgets and assert the
+outcome as well as the validity of returned vectors. Charge exact setup and
+interval work in factoring's actual polynomial-search workload before adding a
+more elaborate arithmetic representation.
 
-A row retirement with fill Δ changes the iterative-solve proxy `r*W` to
-`(r−1)*(W+Δ)`, so it improves that proxy when `(r−1)*Δ < W`. Charge composition
-length and expansion cost as well: a cheaper matrix can have a more expensive
-proof of its relationship to the input.
+Preserve `filtered row = XOR(original rows named by its composition)` at every
+merge and compaction. Verify expanded dependencies before extraction. For any
+new filter policy measure dimensions, nonzeros, composition lengths, expansion
+cost and total solve cost. The retained parallel-filter experiment did not
+justify adoption; it supplies a baseline and a reason to require a different
+workload or mechanism before repeating that proposal.
 
-For parallel filtering, derive a batch of eliminations whose incident row sets
-are disjoint, so their updates commute. The method is developed in
-[Bouillaguet–Zimmermann, §4](https://perso.lip6.fr/Charles.Bouillaguet/static/publis/merge.pdf).
-Keep policy and workload selection in factoring, with general arithmetic here.
+## Arithmetic cost in real consumers
 
-**Experiment:** replay the same sparse matrices through serial and parallel
-filters; verify every expanded dependency against the untouched input. Record
-filter time, reduced dimensions, nonzeros, composition lengths, solve time and
-peak memory. Accept a change on filter-through-extraction cost, not its merge
-rate alone. Preserve a dense route for small remainders.
+Profile size and shape separately: balanced versus unbalanced multiplication,
+squaring, remainder-only division, repeated moduli, repeated bases and scratch
+reuse. Use the existing slow oracles at crossover boundaries. Include allocation,
+setup, wiping and destruction in a complete-operation measurement even when a
+steady-state microbenchmark deliberately excludes them.
 
-## 4. Measure the arithmetic actually used by each consumer
+A cryptography-linked graph enables wipe throughout rump; factoring's standalone
+graph does not. Record both modes where they matter and avoid transferring a
+crossover measured in one to the other without evidence. Retain the measured
+scratch/prepared-context results and verify any new choice on consumer inputs.
 
-Rump already has schoolbook, Karatsuba, Toom, exact NTT, reciprocal division,
-Montgomery/Barrett reduction, Lehmer/Half-GCD and batch inversion. Start with
-profiles before introducing another implementation of an existing operation.
-Select algorithm crossovers by operand size **and shape**: balanced multiplication,
-unbalanced multiplication, squaring, small remainders and repeated moduli differ.
+## Integration evidence
 
-**Experiment:** stratify at every dispatch boundary, with zero/one limbs,
-all-one limbs, long carry/borrow chains, nearly equal operands and sparse
-powers of two. Verify `n=q*d+r`, Bézout identities, residue ranges and exact
-polynomial reconstruction using independent slow arithmetic. Benchmark both
-feature modes, and measure reuse of Montgomery workspaces and prepared bases
-in real callers. Report setup and allocation separately from loop arithmetic.
-A consumer using cryptography must be timed with the unified `wipe` feature.
+For **R3**, validate query success before interpreting a graph. Test the failure
+branch with controlled command failure. Run the full consumer matrix for public
+API and numerical-contract changes, including entropy minimal and factoring.
+Keep exact revisions and lockfile digests in the result; preserve a fixed
+release combination alongside moving integration coverage.
 
-## 5. Close the consumer matrix
-
-Add factoring to the existing downstream checks. Test the proposed rump with
-cryptography, entropy default, entropy minimal, and factoring minimal; the
-latter two need fresh target directories. Record exact sibling commits rather
-than assuming matching version strings establish compatibility.
-
-Keep a fixed combination for reproducible release evidence and a moving
-combination for integration discovery. Run ignored arithmetic stress tests and
-supported architecture/MSRV checks before release. The current audit's 3,500
-integer probes are useful evidence, not a replacement for large-width coverage.
-
-| Work | Owner and required consumer check |
-|---|---|
-| Lattice numerical repair and completion result | rump; factoring's polynomial search |
-| Log-gamma and coefficient derivation | rump; entropy's tails and factoring's E′ model |
-| Scheme-specific primality/timing policy | cryptography; generic rump APIs keep their stated contracts |
-| Statistical calibration | entropy; cryptography reuses only a matching calibrated rule |
-| Factorization parameter and merge policy | factoring; rump verifies the general algebra |
+Separate correctness, numerical accuracy, resource behavior and performance in
+the record. A benchmark digest proves agreement between its tested outputs;
+an independently checked identity is still needed to rule out agreement on the
+same wrong answer.
