@@ -715,6 +715,27 @@ impl MontgomeryContext {
         Ok(self.decode_with_workspace(&residue.value, &mut scratch.limbs))
     }
 
+    /// `gcd(v, n)` for the value `v` the residue encodes, from the encoded
+    /// limbs without decoding them.
+    ///
+    /// The residue holds `v·R mod n` with `R = 2^(64k)`. The modulus is odd,
+    /// so `R` is a unit modulo `n` and `gcd(v·R mod n, n) = gcd(v·R, n) =
+    /// gcd(v, n)`. A residue of zero gives `n`.
+    ///
+    /// # Errors
+    ///
+    /// [`ContextMismatch`] if `residue` was produced by a different context.
+    pub fn gcd_with_modulus(
+        &self,
+        residue: &MontgomeryResidue,
+    ) -> Result<BigUint, ContextMismatch> {
+        self.check(residue)?;
+        Ok(crate::number_theory_impl::gcd(
+            &residue.value,
+            &self.modulus,
+        ))
+    }
+
     /// One, encoded in this context's domain.
     #[must_use]
     pub fn one(&self) -> MontgomeryResidue {

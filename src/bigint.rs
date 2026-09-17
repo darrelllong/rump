@@ -3994,6 +3994,69 @@ mod tests {
         );
     }
 
+    /// The gcd of a residue with the modulus is the gcd of the value it
+    /// encodes: for zero, one, a unit, each proper factor and their
+    /// products, and `n − 1`, under a three-prime modulus and under the
+    /// widest odd two-limb modulus, `2¹²⁸ − 1`; a residue from another
+    /// context is refused.
+    #[test]
+    fn a_residue_gcd_with_the_modulus_is_the_gcd_of_its_value() {
+        use crate::number_theory_impl::gcd;
+        let (p, q, r) = (
+            BigUint::from_u64(1_000_000_007),
+            BigUint::from_u64(998_244_353),
+            BigUint::from_u64(4_294_967_291),
+        );
+        let three_primes = p.mul(&q).mul(&r);
+        // 2^128 - 1 = 3 · 5 · 17 · 257 · 641 · 65537 · 274177 · 6700417 · 67280421310721.
+        let widest = BigUint::from_limbs(vec![u64::MAX, u64::MAX]);
+        let two_factors = BigUint::from_u64(641 * 65_537);
+        for (n, factors) in [
+            (
+                three_primes.clone(),
+                vec![p.clone(), q.clone(), r.clone(), p.mul(&q)],
+            ),
+            (
+                widest.clone(),
+                vec![
+                    BigUint::from_u64(3),
+                    BigUint::from_u64(67_280_421_310_721),
+                    two_factors,
+                ],
+            ),
+        ] {
+            let context = MontgomeryContext::new(&n).expect("odd modulus");
+            let mut values = vec![
+                BigUint::zero(),
+                BigUint::one(),
+                BigUint::from_u64(2),
+                n.sub(&BigUint::one()),
+            ];
+            for factor in &factors {
+                values.push(factor.clone());
+                values.push(factor.mul(&BigUint::from_u64(12_345)).rem(&n));
+            }
+            for value in values {
+                let residue = context.to_residue(&value);
+                assert_eq!(
+                    context.gcd_with_modulus(&residue).expect("same context"),
+                    gcd(&value, &n),
+                    "gcd({value}, {n})"
+                );
+            }
+            assert_eq!(
+                context.gcd_with_modulus(&context.to_residue(&BigUint::zero())),
+                Ok(n.clone())
+            );
+        }
+        let other = MontgomeryContext::new(&three_primes).expect("odd modulus");
+        let context = MontgomeryContext::new(&widest).expect("odd modulus");
+        assert_eq!(
+            context.gcd_with_modulus(&other.to_residue(&BigUint::from_u64(3))),
+            Err(crate::modular::ContextMismatch)
+        );
+    }
+
     #[test]
     fn montgomery_domain_add_sub_match_plain_arithmetic() {
         use super::MontgomeryContext;

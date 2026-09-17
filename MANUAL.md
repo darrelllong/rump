@@ -424,7 +424,9 @@ returns an opaque `MontgomeryResidue`, `from_residue` decodes one, `one()` is
 the encoding of one, and the domain operations are `mul_residue`,
 `square_residue`, `add_residue`, `sub_residue` and `pow_residue` — the
 encoding is linear, so domain addition and subtraction are one
-compare-and-correct each.
+compare-and-correct each. `gcd_with_modulus` gives `gcd(v, n)` for the value a
+residue encodes without decoding it: the modulus is odd, so `R` is a unit and
+the encoding leaves the gcd unchanged.
 
 Belonging is by provenance: a context and its clones share an identity, but a
 context rebuilt from the same modulus is a different one and refuses residues

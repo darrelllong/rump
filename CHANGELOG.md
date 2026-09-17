@@ -123,6 +123,12 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **`modular::MontgomeryContext::gcd_with_modulus`.** `gcd(v, n)` for the
+  value a residue encodes, taken from the encoded limbs: for odd `n` the
+  Montgomery radix is a unit, so encoding does not change the gcd. A caller
+  that multiplies in the domain and tests for a factor, as Pollard's rho
+  does, no longer decodes first. A foreign residue is `ContextMismatch`.
+
 - **`modular::mod_inverse_u128` and `number_theory::crt_combine_u64`.** The
   double-word inverse is total over every `u128` modulus, including those past
   `2¹²⁷` where signed cofactors run out of bits; the word CRT combines two
