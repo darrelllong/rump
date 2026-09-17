@@ -18,9 +18,11 @@ the nearest IEEE double; `--check` confirms all nine agree bit for bit.
 Error separation, for ln Gamma(x) = ln Gamma(z + 1) with z = x - 1:
   approximation error   the exact coefficients against mpmath's loggamma;
   coefficient rounding  the double coefficients, still evaluated exactly;
-  floating evaluation   measured by the Rust tests against `--reference`.
-Errors are absolute for 1/2 <= x <= 3, which holds both zeros of ln Gamma
-(x = 1 and x = 2, where a relative error is undefined), and relative above.
+  floating evaluation   measured by the Rust tests against `--reference` and
+                        `--sweep`, absolute on [0.1, 3] and relative elsewhere.
+`--check` covers the approximation's own range, x >= 1/2: errors absolute
+for 1/2 <= x <= 3, which holds both zeros of ln Gamma (x = 1 and x = 2, where
+a relative error is undefined), and relative above.
 
 Usage (in a virtual environment with mpmath):
   lanczos_coefficients.py --check       derive, compare with src, report errors
@@ -125,7 +127,7 @@ def sweep(path):
     xs = set()
     for _ in range(20000):
         xs.add(rng.uniform(0.5, 3.0))
-    for centre in (1.0, 2.0):
+    for centre in (0.5, 1.0, 2.0):
         for e in range(1, 53):
             xs.add(centre + 2.0 ** -e)
             xs.add(centre - 2.0 ** -e)

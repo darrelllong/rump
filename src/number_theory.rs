@@ -3245,13 +3245,13 @@ fn is_witness(
 /// intermediate that overflows, so the result is finite down to the least
 /// subnormal.
 ///
-/// Measured over 45 000 arguments against 40-digit values (the ignored
+/// Measured over 50 000 arguments against 40-digit values (the ignored
 /// test `the_log_gamma_sweep_matches_high_precision`): absolute error below
-/// `5·10⁻¹⁵` for `1/2 ≤ x ≤ 3`, the interval holding both zeros of `ln Γ`,
-/// and relative error below `2·10⁻¹⁵` elsewhere. The approximation itself,
-/// with the rounded coefficients, is good to `10⁻¹⁵`; the rest is
-/// cancellation in floating evaluation. `NaN` for `x ≤ 0` or `NaN`; `+∞`
-/// for `+∞`.
+/// `5·10⁻¹⁵` for `0.1 ≤ x ≤ 3`, the interval holding both zeros of `ln Γ`
+/// and the switch at `1/2`, and relative error below `2·10⁻¹⁵` elsewhere.
+/// The approximation itself, with the rounded coefficients, is good to
+/// `10⁻¹⁵`; the rest is cancellation in floating evaluation. `NaN` for
+/// `x ≤ 0` or `NaN`; `+∞` for `+∞`.
 ///
 /// The normalisation of the gamma, chi-squared, beta and Student's `t`
 /// densities; [`regularized_incomplete_beta`] is built on it.
@@ -4493,7 +4493,7 @@ mod tests {
         for (x, expected) in reference {
             let got = ln_gamma(x);
             let error = (got - expected).abs();
-            if (0.5..=3.0).contains(&x) {
+            if (0.1..=3.0).contains(&x) {
                 assert!(
                     error < 5e-15,
                     "ln Γ({x:e}) = {got:e}, expected {expected:e}, absolute error {error:e}"
@@ -4513,8 +4513,9 @@ mod tests {
     }
 
     /// The dense sweep: `scripts/lanczos_coefficients.py --sweep FILE`
-    /// writes 45 000 pairs `x ln Γ(x)` (seed 20260916, 40 digits) covering
-    /// subnormal to `1e305`, with dense bands around 1 and 2; run with
+    /// writes 50 000 pairs `x ln Γ(x)` (seed 20260916, 40 digits) covering
+    /// subnormal to `1e305`, with dense bands around the switch at 1/2 and
+    /// the zeros at 1 and 2; run with
     /// `RUMP_LN_GAMMA_SWEEP=FILE cargo test --release -- --ignored
     /// the_log_gamma_sweep`.
     #[test]
@@ -4529,7 +4530,7 @@ mod tests {
             let (x, expected): (f64, f64) =
                 (x.parse().expect("x"), expected.parse().expect("value"));
             let error = (ln_gamma(x) - expected).abs();
-            if (0.5..=3.0).contains(&x) {
+            if (0.1..=3.0).contains(&x) {
                 assert!(error < 5e-15, "ln Γ({x:e}): absolute error {error:e}");
             } else {
                 assert!(
@@ -4540,7 +4541,7 @@ mod tests {
             }
             checked += 1;
         }
-        assert!(checked > 40_000, "only {checked} reference pairs");
+        assert!(checked > 49_000, "only {checked} reference pairs");
     }
 
     #[test]

@@ -26,7 +26,7 @@ what a consumer must change, not everything that moved.
   before its logarithm is taken: `ln_gamma(1e-310)` was `+∞` where the answer
   is `713.80…`. It now uses `ln Γ(x) = ln Γ(1 + x) − ln x`. The domain is
   explicit (`NaN` for `x ≤ 0` or `NaN`, `+∞` for `+∞`), and the documented
-  accuracy is the measured one: absolute error below `5·10⁻¹⁵` on `[1/2, 3]`,
+  accuracy is the measured one: absolute error below `5·10⁻¹⁵` on `[0.1, 3]`,
   relative below `2·10⁻¹⁵` elsewhere. `scripts/lanczos_coefficients.py`
   derives the nine coefficients, which the table matches bit for bit.
 

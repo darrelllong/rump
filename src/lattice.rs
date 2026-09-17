@@ -1751,6 +1751,14 @@ mod certified_enumeration_tests {
                 sorted(short.into_vectors()),
                 "trial {trial}"
             );
+            let again =
+                closest_vectors_form(&changed, &form, &target, &bound, usize::MAX, u64::MAX);
+            assert_eq!(again.outcome(), EnumerationOutcome::Exhausted);
+            assert_eq!(
+                sorted(again.into_vectors()),
+                sorted(closest.into_vectors()),
+                "trial {trial}: closest vectors under a change of basis"
+            );
             checked += 1;
         }
         assert!(checked >= 10, "only {checked} independent bases");
