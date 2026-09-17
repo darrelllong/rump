@@ -4885,6 +4885,160 @@ mod tests {
 
     /// The binary implementation, checked against the reference vectors, as
     /// an oracle on the same contract as the public function.
+    /// Schoolbook product over the limbs, independent of every dispatched
+    /// multiplication kernel.
+    fn slow_mul(a: &BigUint, b: &BigUint) -> BigUint {
+        let (x, y) = (a.limbs(), b.limbs());
+        let mut out = vec![0u64; x.len() + y.len()];
+        for (i, &xi) in x.iter().enumerate() {
+            let mut carry = 0u128;
+            for (j, &yj) in y.iter().enumerate() {
+                let t = u128::from(xi) * u128::from(yj) + u128::from(out[i + j]) + carry;
+                out[i + j] = t as u64;
+                carry = t >> 64;
+            }
+            let mut k = i + y.len();
+            while carry != 0 {
+                let t = u128::from(out[k]) + carry;
+                out[k] = t as u64;
+                carry = t >> 64;
+                k += 1;
+            }
+        }
+        BigUint::from_limbs(out)
+    }
+
+    /// `g = gcd(a, b)` certified: `g` divides both, and `s·a + t·b = g`
+    /// with the products formed by [`slow_mul`].
+    fn assert_gcd_certificate(
+        a: &BigUint,
+        b: &BigUint,
+        g: &BigUint,
+        s: &BigInt,
+        t: &BigInt,
+        what: &str,
+    ) {
+        if !g.is_zero() {
+            assert!(
+                a.rem(g).is_zero() && b.rem(g).is_zero(),
+                "{what}: g divides both"
+            );
+        }
+        let term = |c: &BigInt, x: &BigUint| (c.sign(), slow_mul(c.magnitude(), x));
+        let (sign_s, sa) = term(s, a);
+        let (sign_t, tb) = term(t, b);
+        let (positive, negative) = match (sign_s == Sign::Negative, sign_t == Sign::Negative) {
+            (false, false) => (sa.add(&tb), BigUint::zero()),
+            (false, true) => (sa, tb),
+            (true, false) => (tb, sa),
+            (true, true) => (BigUint::zero(), sa.add(&tb)),
+        };
+        assert!(positive >= negative, "{what}: Bézout sum is negative");
+        assert_eq!(&positive.sub(&negative), g, "{what}: s·a + t·b = g");
+    }
+
+    fn boundary_values(words: usize, rng: &mut SplitMix64) -> Vec<(&'static str, BigUint)> {
+        let top = pow2(64 * words - 1);
+        let ones = mersenne(64 * words);
+        let random = draw_below(rng, &ones)
+            .add(&top)
+            .rem(&ones.add(&BigUint::one()));
+        vec![("top bit", top), ("all ones", ones), ("random", random)]
+    }
+
+    /// Plain and extended gcd one limb either side of their Half-GCD
+    /// thresholds, certified by divisibility and a Bézout identity checked
+    /// in schoolbook arithmetic: coprime extremes, consecutive values, equal
+    /// values, a zero, and a common factor of half the width.
+    #[test]
+    fn gcds_are_certified_at_every_dispatch_boundary() {
+        let mut rng = SplitMix64 {
+            state: 0x7a3c_9e21_05d4_b6f8,
+        };
+        for threshold in [HGCD_EXT_THRESHOLD_LIMBS, HGCD_THRESHOLD_LIMBS] {
+            for words in [threshold - 1, threshold, threshold + 1] {
+                let values = boundary_values(words, &mut rng);
+                let half = pow2(32 * words);
+                let common = draw_below(&mut rng, &half).add(&half);
+                let mut pairs: Vec<(String, BigUint, BigUint)> = Vec::new();
+                for (name, v) in &values {
+                    for (other, w) in &values {
+                        pairs.push((format!("{name}, {other}"), v.clone(), w.clone()));
+                    }
+                    pairs.push((
+                        format!("{name} and its predecessor"),
+                        v.clone(),
+                        v.sub(&BigUint::one()),
+                    ));
+                    pairs.push((format!("{name} and zero"), v.clone(), BigUint::zero()));
+                }
+                pairs.push((
+                    "shared factor".to_string(),
+                    slow_mul(&common, &draw_below(&mut rng, &half).add(&half)),
+                    slow_mul(&common, &draw_below(&mut rng, &half).add(&half)),
+                ));
+                for (what, a, b) in &pairs {
+                    let what = format!("{what} at {words} limbs");
+                    let g = gcd(a, b);
+                    let (g_ext, s, t) = gcd_extended(a, b);
+                    assert_eq!(g, g_ext, "{what}: gcd and gcd_extended agree");
+                    assert_gcd_certificate(a, b, &g_ext, &s, &t, &what);
+                }
+            }
+        }
+    }
+
+    /// The Jacobi symbol either side of its Lehmer and Half-GCD thresholds,
+    /// against values fixed by quadratic reciprocity: for `n ≡ 3 (mod 8)`
+    /// and `x` coprime to `n`, `(x²/n) = 1` and `(2x²/n) = −1`; below the
+    /// Half-GCD sizes also against the binary-reciprocity engine.
+    #[test]
+    fn jacobi_symbols_are_certified_at_every_dispatch_boundary() {
+        let mut rng = SplitMix64 {
+            state: 0x1f83_d9ab_fb41_bd6b,
+        };
+        let mut certified = 0;
+        for threshold in [JACOBI_LEHMER_THRESHOLD_LIMBS, JACOBI_HGCD_THRESHOLD_LIMBS] {
+            for words in [threshold - 1, threshold, threshold + 1] {
+                for (name, base) in boundary_values(words, &mut rng) {
+                    // n ≡ 3 (mod 8), same width.
+                    let n = base
+                        .sub(&BigUint::from_u64(
+                            base.rem(&BigUint::from_u64(8)).to_u64().expect("small"),
+                        ))
+                        .add(&BigUint::from_u64(3));
+                    let n = if n.bits() > 64 * words {
+                        n.sub(&BigUint::from_u64(8))
+                    } else {
+                        n
+                    };
+                    let x = draw_below(&mut rng, &n);
+                    if !gcd(&x, &n).is_one() {
+                        continue;
+                    }
+                    let square = slow_mul(&x, &x).rem(&n);
+                    let twice = square.add(&square).rem(&n);
+                    let what = format!("{name} modulus at {words} limbs");
+                    assert_eq!(jacobi(&square, &n), Some(1), "(x²/n), {what}");
+                    assert_eq!(jacobi(&twice, &n), Some(-1), "(2x²/n), {what}");
+                    certified += 1;
+                    if words < JACOBI_HGCD_THRESHOLD_LIMBS {
+                        let a = draw_below(&mut rng, &n);
+                        assert_eq!(
+                            jacobi(&a, &n),
+                            jacobi_binary_oracle(&a, &n),
+                            "(a/n), {what}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            certified >= 15,
+            "only {certified} of 18 moduli were certified"
+        );
+    }
+
     fn jacobi_binary_oracle(a: &BigUint, n: &BigUint) -> Option<i8> {
         if n.is_zero() || !n.is_odd() {
             return None;

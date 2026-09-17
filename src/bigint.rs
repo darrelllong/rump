@@ -3584,9 +3584,10 @@ mod tests {
         assert_eq!(*least.magnitude(), BigUint::from_u128(1u128 << 127));
     }
     use super::{
-        BigInt, BigUint, MontgomeryContext, Sign, KARATSUBA_THRESHOLD_LIMBS,
-        NTT_SERIAL_THRESHOLD_LIMBS, SQR_KARATSUBA_MAX_LIMBS, SQR_SCHOOLBOOK_MIN_LIMBS,
-        TOOM3_THRESHOLD_LIMBS, TOOM4_THRESHOLD_LIMBS, UNBALANCED_THRESHOLD_LIMBS,
+        BarrettContext, BigInt, BigUint, MontgomeryContext, Sign, KARATSUBA_THRESHOLD_LIMBS,
+        NTT_SERIAL_THRESHOLD_LIMBS, RADIX_FROM_DC_THRESHOLD_DIGITS, RADIX_TO_DC_THRESHOLD_BITS,
+        SQR_KARATSUBA_MAX_LIMBS, SQR_SCHOOLBOOK_MIN_LIMBS, TOOM3_THRESHOLD_LIMBS,
+        TOOM4_THRESHOLD_LIMBS, UNBALANCED_THRESHOLD_LIMBS,
     };
     use super::{ModulusError, MontgomeryScratch};
     use core::num::NonZeroU64;
@@ -5222,6 +5223,222 @@ mod tests {
                 assert_eq!(a.mul(&b), BigUint::mul_schoolbook_ref(&a, &b));
                 assert_eq!(a.square(), BigUint::mul_schoolbook_ref(&a, &a));
             }
+        }
+    }
+
+    /// Operands that stress carries, borrows, normalization and zero
+    /// digits at a given width: random limbs, all ones, a lone top bit,
+    /// alternating zero limbs, and one bit at each end.
+    fn boundary_patterns(words: usize, seed: &mut u64) -> Vec<(&'static str, BigUint)> {
+        let random = seeded_biguint(words, seed);
+        let mut top_bit = vec![0u64; words];
+        top_bit[words - 1] = 1 << 63;
+        let mut alternating = seeded_biguint(words, seed).limbs().to_vec();
+        for limb in alternating.iter_mut().skip(1).step_by(2) {
+            *limb = 0;
+        }
+        alternating[words - 1] |= 1;
+        let mut ends = vec![0u64; words];
+        ends[0] = 1;
+        ends[words - 1] |= 1 << 63;
+        vec![
+            ("random", random),
+            ("all ones", BigUint::from_limbs(vec![u64::MAX; words])),
+            ("top bit", BigUint::from_limbs(top_bit)),
+            ("alternating zero limbs", BigUint::from_limbs(alternating)),
+            ("both ends", BigUint::from_limbs(ends)),
+        ]
+    }
+
+    /// Every multiplication and squaring threshold, one limb either side,
+    /// against schoolbook: each pattern against itself, against the random
+    /// operand, and against its predecessor (nearly equal operands); at the
+    /// 2:1 unbalanced edge and the 1.5× Toom-4 edge the lopsided shapes too.
+    #[test]
+    fn products_agree_with_schoolbook_at_every_dispatch_boundary() {
+        let mut seed = 0x5bd1_e995_2545_f491;
+        let check = |a: &BigUint, b: &BigUint, what: &str| {
+            let expected = BigUint::mul_schoolbook_ref(a, b);
+            assert_eq!(a.mul(b), expected, "{what}");
+            assert_eq!(b.mul(a), expected, "{what}, swapped");
+        };
+        for threshold in [
+            KARATSUBA_THRESHOLD_LIMBS,
+            TOOM3_THRESHOLD_LIMBS,
+            UNBALANCED_THRESHOLD_LIMBS,
+        ] {
+            for words in [threshold - 1, threshold, threshold + 1] {
+                let patterns = boundary_patterns(words, &mut seed);
+                let random = patterns[0].1.clone();
+                for (name, value) in &patterns {
+                    check(value, value, &format!("{name} squared at {words}"));
+                    check(value, &random, &format!("{name} × random at {words}"));
+                    if !value.is_zero() {
+                        let before = value.sub(&BigUint::one());
+                        check(
+                            value,
+                            &before,
+                            &format!("{name} × its predecessor at {words}"),
+                        );
+                    }
+                    for long in [2 * words - 1, 2 * words, 2 * words + 1] {
+                        let wide = seeded_biguint(long, &mut seed);
+                        check(&wide, value, &format!("{long} random × {name} at {words}"));
+                    }
+                    assert_eq!(
+                        value.square(),
+                        BigUint::mul_schoolbook_ref(value, value),
+                        "square of {name} at {words}"
+                    );
+                }
+            }
+        }
+        for words in [
+            SQR_SCHOOLBOOK_MIN_LIMBS - 1,
+            SQR_SCHOOLBOOK_MIN_LIMBS,
+            SQR_SCHOOLBOOK_MIN_LIMBS + 1,
+            SQR_KARATSUBA_MAX_LIMBS - 1,
+            SQR_KARATSUBA_MAX_LIMBS,
+            SQR_KARATSUBA_MAX_LIMBS + 1,
+        ] {
+            for (name, value) in boundary_patterns(words, &mut seed) {
+                assert_eq!(
+                    value.square(),
+                    BigUint::mul_schoolbook_ref(&value, &value),
+                    "square of {name} at {words}"
+                );
+            }
+        }
+        // Toom-4: schoolbook at these widths is costly, so the all-ones and
+        // random patterns, balanced and at the 1.5× admission edge.
+        let t = TOOM4_THRESHOLD_LIMBS;
+        for words in [t - 1, t, t + 1] {
+            let patterns = boundary_patterns(words, &mut seed);
+            for (name, value) in patterns.iter().take(2) {
+                check(value, value, &format!("{name} squared at {words}"));
+                let edge = words + words / 2;
+                for long in [edge, edge + 1] {
+                    let wide = BigUint::from_limbs(vec![u64::MAX; long]);
+                    check(
+                        &wide,
+                        value,
+                        &format!("{long} all ones × {name} at {words}"),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Division one limb either side of the Newton threshold, and at one
+    /// and two limbs: the dividend is built as `q·d + r` by schoolbook with
+    /// `r` the largest remainder, so `div_rem` must return exactly `(q, r)`.
+    /// Divisors cover all ones, a lone top bit (already normalized) and a top
+    /// limb of one (the widest normalization shift).
+    #[test]
+    fn division_recovers_quotient_and_remainder_at_every_dispatch_boundary() {
+        let mut seed = 0x2545_f491_4f6c_dd1d;
+        let t = super::newton::NEWTON_DIVISION_THRESHOLD_LIMBS;
+        for words in [1usize, 2, t - 1, t, t + 1] {
+            let mut small_top = seeded_biguint(words, &mut seed).limbs().to_vec();
+            small_top[words - 1] = 1;
+            let mut top_bit = vec![0u64; words];
+            top_bit[words - 1] = 1 << 63;
+            let divisors = [
+                ("random", seeded_biguint(words, &mut seed)),
+                ("all ones", BigUint::from_limbs(vec![u64::MAX; words])),
+                ("top bit", BigUint::from_limbs(top_bit)),
+                ("top limb one", BigUint::from_limbs(small_top)),
+            ];
+            for (name, divisor) in &divisors {
+                let remainder = divisor.sub(&BigUint::one());
+                for quotient_words in [1usize, words, words + 1] {
+                    let quotient = seeded_biguint(quotient_words, &mut seed);
+                    let dividend = BigUint::mul_schoolbook_ref(&quotient, divisor).add(&remainder);
+                    let (q, r) = dividend.div_rem(divisor);
+                    assert_eq!(
+                        q, quotient,
+                        "quotient: {name} divisor of {words}, {quotient_words}-limb quotient"
+                    );
+                    assert_eq!(
+                        r, remainder,
+                        "remainder: {name} divisor of {words}, {quotient_words}-limb quotient"
+                    );
+                    assert_eq!(dividend.rem(divisor), remainder);
+                }
+            }
+        }
+    }
+
+    /// Barrett reduction one limb either side of its half-product limit,
+    /// against the division remainder, for products of residues including
+    /// the largest, `(n − 1)²`.
+    #[test]
+    fn barrett_reduces_like_division_at_its_half_product_limit() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15;
+        let t = super::barrett::BARRETT_HALF_PRODUCT_MAX_LIMBS;
+        for words in [t - 1, t, t + 1] {
+            for (name, modulus) in boundary_patterns(words, &mut seed) {
+                let context = BarrettContext::new(&modulus).expect("above one");
+                let top = modulus.sub(&BigUint::one());
+                let a = seeded_biguint(words, &mut seed).rem(&modulus);
+                for x in [
+                    BigUint::mul_schoolbook_ref(&top, &top),
+                    BigUint::mul_schoolbook_ref(&a, &top),
+                    modulus.clone(),
+                    top.clone(),
+                ] {
+                    assert_eq!(
+                        context.reduce(&x),
+                        x.rem(&modulus),
+                        "{name} modulus of {words}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Radix conversion either side of the divide-and-conquer thresholds,
+    /// against Horner's rule one decimal digit at a time.
+    #[test]
+    fn radix_conversion_agrees_with_horner_at_its_thresholds() {
+        let ten = BigUint::from_u64(10);
+        let horner = |digits: &str| {
+            digits.bytes().fold(BigUint::zero(), |value, digit| {
+                BigUint::mul_schoolbook_ref(&value, &ten)
+                    .add(&BigUint::from_u64(u64::from(digit - b'0')))
+            })
+        };
+        let d = RADIX_FROM_DC_THRESHOLD_DIGITS;
+        for length in [d - 1, d, d + 1] {
+            for digits in [
+                "9".repeat(length),
+                format!("1{}", "0".repeat(length - 1)),
+                "1234567890".repeat(length / 10 + 1)[..length].to_string(),
+            ] {
+                let value = BigUint::from_str_radix(&digits, 10).expect("decimal");
+                assert_eq!(value, horner(&digits), "parse of {length} digits");
+                assert_eq!(
+                    value.to_str_radix(10),
+                    digits.trim_start_matches('0'),
+                    "print of {length} digits"
+                );
+            }
+        }
+        let bits = RADIX_TO_DC_THRESHOLD_BITS;
+        let mut seed = 0x0bad_5eed_0bad_5eed;
+        for width in [bits - 1, bits, bits + 1] {
+            let mut value = seeded_biguint(width.div_ceil(64), &mut seed);
+            value.shr_bits(value.bits().saturating_sub(width));
+            let text = value.to_str_radix(10);
+            assert_eq!(horner(&text), value, "print of {width} bits");
+            let mut ones = BigUint::one();
+            ones.shl_bits(width);
+            let ones = ones.sub(&BigUint::one());
+            assert_eq!(
+                horner(&ones.to_str_radix(10)),
+                ones,
+                "print of 2^{width} − 1"
+            );
         }
     }
 
