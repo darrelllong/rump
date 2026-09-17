@@ -82,9 +82,11 @@ jobs:
   # A breaking push should turn THIS repository's CI red, not the consumers'
   # next push. The downstream crates build and test against the exact rump
   # commit under test, checked out side-by-side the way the path
-  # dependencies expect.
+  # dependencies expect. factoring is not on GitHub, so this job covers
+  # cryptography and both entropy feature modes only; scripts/consumer_matrix.sh
+  # is the full matrix and gates contract changes locally.
   downstream:
-    name: downstream (cryptography, entropy)
+    name: downstream (cryptography, entropy default and minimal)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -111,3 +113,6 @@ jobs:
       - name: entropy tests against this rump
         working-directory: entropy
         run: cargo test
+      - name: entropy tests against this rump, no default features
+        working-directory: entropy
+        run: cargo test --no-default-features

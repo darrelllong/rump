@@ -2,6 +2,7 @@
 # Test a rump revision against its consumers at recorded revisions.
 #
 #   scripts/consumer_matrix.sh [--ignored] [RUMP CRYPTOGRAPHY ENTROPY FACTORING]
+#   scripts/consumer_matrix.sh --self-test
 #
 # Each argument is a revision in the sibling checkout of that name (../rump is
 # this repository); without them every repository is taken at its HEAD. The
@@ -12,8 +13,9 @@
 #   cryptography       cargo test --release --no-fail-fast, OpenSSL required
 #   entropy-default    cargo test --release --no-fail-fast
 #   entropy-minimal    cargo test --release --no-fail-fast --no-default-features
-#   factoring          cargo test --release --no-fail-fast (entropy minimal),
-#                      and its feature graph must not enable rump's `wipe`
+#   factoring          cargo test --release --no-fail-fast (entropy minimal)
+#   factoring-no-wipe  `cargo tree` must succeed, and its graph must not
+#                      enable rump's `wipe`
 # With --ignored, also:
 #   cryptography-ignored  every ignored cryptography test
 #   rump-ignored          rump's ignored correctness tests (the timing probes
@@ -21,12 +23,62 @@
 #                         needs RUMP_LN_GAMMA_SWEEP, from
 #                         scripts/lanczos_coefficients.py --sweep FILE
 #
-# Prints the resolved revisions and one line per leg; exits nonzero if any leg
-# fails or cannot run. Logs stay in the work directory, which is printed.
+# Prints the resolved revisions with each repository's Cargo.lock digest and
+# one line per leg; exits nonzero if any leg fails or cannot run. Logs stay in
+# the work directory, which is printed.
+#
+# --self-test exercises the feature check on its three outcomes: a graph
+# without `wipe` (factoring at HEAD), a graph with it (cryptography at HEAD),
+# and a failed query (a manifest that does not parse). It builds nothing.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SIBLINGS="$(dirname "$ROOT")"
+
+# no_wipe DIRECTORY: 0 when `cargo tree` resolves the directory's graph and
+# rump's `wipe` is absent from it, 1 when it is present, 2 when the query
+# fails. The reason is printed either way.
+no_wipe() {
+    local graph status
+    graph="$(cd "$1" && cargo tree -e features -i rust-mp 2>&1)"
+    status=$?
+    if [[ $status -ne 0 ]]; then
+        echo "cargo tree failed (exit $status): $(printf '%s' "$graph" | tail -1)"
+        return 2
+    fi
+    if printf '%s\n' "$graph" | grep -q '"wipe"'; then
+        echo "rump's wipe feature is enabled"
+        return 1
+    fi
+    echo "rump's wipe feature is not enabled"
+    return 0
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+    WORK="$(mktemp -d "${TMPDIR:-/tmp}/rump-consumers-selftest.XXXXXX")"
+    git clone -q "$ROOT" "$WORK/rump"
+    for repo in cryptography entropy factoring; do
+        git clone -q "$SIBLINGS/$repo" "$WORK/$repo" || exit 2
+    done
+    mkdir -p "$WORK/broken" && printf '[package\nname = \n' >"$WORK/broken/Cargo.toml"
+    bad=0
+    expect() {
+        local dir=$1 want=$2 reason got
+        reason="$(no_wipe "$WORK/$dir")"
+        got=$?
+        if [[ $got -eq $want ]]; then
+            printf '  PASS  %-12s status %d: %s\n' "$dir" "$got" "$reason"
+        else
+            printf '  FAIL  %-12s status %d, wanted %d: %s\n' "$dir" "$got" "$want" "$reason"
+            bad=1
+        fi
+    }
+    expect factoring 0
+    expect cryptography 1
+    expect broken 2
+    rm -rf "$WORK"
+    exit $bad
+fi
 IGNORED=0
 if [[ "${1:-}" == "--ignored" ]]; then
     IGNORED=1
@@ -47,7 +99,8 @@ for i in 0 1 2 3; do
     [[ $repo == rump ]] && source_dir="$ROOT"
     commit="$(git -C "$source_dir" rev-parse --verify "${REVS[$i]}^{commit}")" || exit 2
     git clone -q "$source_dir" "$WORK/$repo" && git -C "$WORK/$repo" checkout -q "$commit" || exit 2
-    printf '%-13s %s\n' "$repo" "$commit"
+    lock="$(shasum -a 256 "$WORK/$repo/Cargo.lock" 2>/dev/null | cut -c1-16)"
+    printf '%-13s %s  Cargo.lock %s\n' "$repo" "$commit" "${lock:-absent}"
 done
 mkdir -p "$WORK/logs"
 
@@ -73,11 +126,11 @@ leg cryptography cryptography env CRYPTOGRAPHY_OPENSSL_REQUIRED=1 cargo test --r
 leg entropy-default entropy cargo test --release --no-fail-fast
 leg entropy-minimal entropy cargo test --release --no-fail-fast --no-default-features
 leg factoring factoring cargo test --release --no-fail-fast
-if (cd "$WORK/factoring" && cargo tree -e features -i rust-mp 2>/dev/null) | grep -q '"wipe"'; then
-    printf '  FAIL  %-22s %s\n' "factoring-no-wipe" "rump's wipe feature is enabled in factoring's graph"
-    failed=1
+if reason="$(no_wipe "$WORK/factoring")"; then
+    printf '  PASS  %-22s %s\n' "factoring-no-wipe" "$reason"
 else
-    printf '  PASS  %-22s %s\n' "factoring-no-wipe" "rump's wipe feature is not enabled"
+    printf '  FAIL  %-22s %s\n' "factoring-no-wipe" "$reason"
+    failed=1
 fi
 
 if [[ $IGNORED -eq 1 ]]; then
