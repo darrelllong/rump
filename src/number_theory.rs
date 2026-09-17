@@ -2277,22 +2277,18 @@ pub fn jacobi_u64(a: u64, n: u64) -> Option<i8> {
     }
 }
 
-/// Quadratic reciprocity, in the shape of *Handbook of Applied Cryptography*,
-/// Algorithm 2.149: strip factors of two using the supplement
-/// `(2/n) = (-1)^((n^2 - 1)/8)` — a sign flip exactly when `n ≡ 3, 5 (mod 8)`
-/// — then swap the arguments, paying the reciprocity sign flip when both are
-/// `≡ 3 (mod 4)`. The reduction, though, is division-free: rather than
-/// `a mod n`, subtract-and-halve using the symbol's periodicity in its top
-/// argument, `(a/n) = ((a - n)/n)` — the binary gcd this shadows, which is
-/// markedly faster here than a full division per step.
+/// The Jacobi symbol `(a/n)` for odd `n`, by the Euclidean quotient
+/// sequence of `(a mod n, n)`.
 ///
-/// That binary engine serves small operands. Above
-/// `JACOBI_LEHMER_THRESHOLD_LIMBS` the computation moves to the Euclidean
-/// quotient sequence with Lehmer batching, a state machine replaying each
-/// batch's quotients (Möller's design, after Schönhage's identities); above
-/// `JACOBI_HGCD_THRESHOLD_LIMBS` that state threads through the Half-GCD
-/// recursion and the symbol is subquadratic, O(M(n)·log n), matching the
-/// crate's gcd.
+/// Quadratic reciprocity, the supplement for 2 and periodicity in the top
+/// argument turn every Euclidean step `x = q·y + r` into a change of sign
+/// that depends only on `q` and the residues of `x` and `y` modulo 4, so a
+/// small state machine replaying the quotients carries the symbol while the
+/// remainders shrink (Möller's design, after Schönhage's identities). The
+/// sequence runs on Lehmer batches, and on machine words once both remainders
+/// fit one. Above `JACOBI_HGCD_THRESHOLD_LIMBS` the state threads through the
+/// Half-GCD recursion and the symbol is subquadratic, O(M(n)·log n),
+/// matching the crate's gcd.
 ///
 /// For prime `n` this is the Legendre symbol: `1` for quadratic residues,
 /// `-1` for non-residues, `0` when `n` divides `a`. `(a/1) = 1` by the
@@ -2317,20 +2313,8 @@ pub fn jacobi(a: &BigUint, n: &BigUint) -> Option<i8> {
     if inner >= JACOBI_HGCD_THRESHOLD_LIMBS {
         return Some(jacobi_hgcd(reduced, n.clone()));
     }
-    if inner >= JACOBI_LEHMER_THRESHOLD_LIMBS {
-        return Some(jacobi_lehmer(reduced, n.clone()));
-    }
-    jacobi_binary(reduced, n.clone())
+    Some(jacobi_lehmer(reduced, n.clone()))
 }
-
-/// Below this many limbs in the smaller operand, [`jacobi`] runs the binary
-/// algorithm, whose shift-and-subtract steps are cheapest at small sizes; at
-/// or above it, the Lehmer-batched quotient sequence, which advances by ~35
-/// certified quotients per full-width pass where the binary loop advances by
-/// a few bits. The two tie near 32 limbs; the batched engine leads 1.8× at
-/// 64 and 5.5× at 512 (PERFORMANCE.md). Correctness does not depend on the
-/// value: setting it to 2 forces every size through the batched engine.
-const JACOBI_LEHMER_THRESHOLD_LIMBS: usize = 64;
 
 /// `value mod 2^k`, where `mask` is `2^k − 1` and `k ≤ 64`.
 ///
@@ -2339,51 +2323,6 @@ const JACOBI_LEHMER_THRESHOLD_LIMBS: usize = 64;
 /// the reciprocity loops below ask on every iteration.
 fn low_bits_mod_pow2(value: &BigUint, mask: u64) -> u64 {
     value.limbs().first().copied().unwrap_or(0) & mask
-}
-
-/// [`jacobi`]'s below-crossover engine: binary quadratic reciprocity, taking
-/// `a` already reduced modulo the odd `n`.
-fn jacobi_binary(reduced: BigUint, n: BigUint) -> Option<i8> {
-    let mut a = reduced;
-    let mut n = n;
-    let mut sign = 1i8;
-
-    while !a.is_zero() {
-        // Strip a's factors of two; each one contributes the (2/n) supplement,
-        // a sign flip exactly when n ≡ 3 or 5 (mod 8).
-        let mut twos = 0usize;
-        while !a.bit(twos) {
-            twos += 1;
-        }
-        if twos % 2 == 1 && matches!(low_bits_mod_pow2(&n, 7), 3 | 5) {
-            sign = -sign;
-        }
-        a.shr_bits(twos);
-
-        // Order the (now both odd) arguments so a >= n. The swap is the
-        // reciprocity step, paying its sign flip when both are ≡ 3 (mod 4).
-        if a < n {
-            if low_bits_mod_pow2(&a, 3) == 3 && low_bits_mod_pow2(&n, 3) == 3 {
-                sign = -sign;
-            }
-            core::mem::swap(&mut a, &mut n);
-        }
-
-        // a >= n and both odd, so a - n is even and non-negative — stripped on
-        // the next pass. This is the reduction, division-free: the symbol is
-        // periodic in its top argument, so (a/n) = ((a - n)/n). Repeated
-        // subtract-and-halve is the binary gcd this loop already shadows.
-        a.sub_assign_ref(&n);
-    }
-
-    // The loop preserves (a/n) up to the accumulated sign; it ends with the
-    // gcd in `n`. A gcd above one means a and the original n share a factor,
-    // where the symbol is zero by definition.
-    if n.is_one() {
-        Some(sign)
-    } else {
-        Some(0)
-    }
 }
 
 /// [`jacobi`]'s above-crossover engine: the Euclidean quotient sequence with
@@ -2423,6 +2362,9 @@ fn jacobi_lehmer_with_state(x: BigUint, y: BigUint, state: JacobiState) -> i8 {
         }
         if y.is_zero() {
             return if x.is_one() { state.finish() } else { 0 };
+        }
+        if let (&[x_word], &[y_word]) = (x.limbs(), y.limbs()) {
+            return jacobi_words_with_state(x_word, y_word, state);
         }
         let x_is_hi = x >= y;
         let (hi, lo) = if x_is_hi { (&x, &y) } else { (&y, &x) };
@@ -2466,6 +2408,29 @@ fn jacobi_lehmer_with_state(x: BigUint, y: BigUint, state: JacobiState) -> i8 {
         } else {
             y = r;
         }
+    }
+}
+
+/// [`jacobi_lehmer_with_state`]'s finish once both slots fit in a word: the
+/// same exact division steps and state updates in machine arithmetic, where
+/// a full-width division per step would cost more than the whole loop.
+fn jacobi_words_with_state(mut x: u64, mut y: u64, mut state: JacobiState) -> i8 {
+    loop {
+        if x == 0 {
+            return if y == 1 { state.finish() } else { 0 };
+        }
+        if y == 0 {
+            return if x == 1 { state.finish() } else { 0 };
+        }
+        // Reduce the larger slot in place, as the wide loop does.
+        let x_is_hi = x >= y;
+        let (quotient, larger, smaller) = if x_is_hi {
+            (x / y, &mut x, y)
+        } else {
+            (y / x, &mut y, x)
+        };
+        state.update(u8::from(x_is_hi), (quotient & 3) as u8);
+        *larger -= quotient * smaller;
     }
 }
 
@@ -4946,49 +4911,6 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore = "timing probe for the binary/Lehmer jacobi crossover; run with --ignored"]
-    fn jacobi_crossover_timing() {
-        use std::hint::black_box;
-        use std::time::Instant;
-        let mut rng = SplitMix64 {
-            state: 0x7ac0_b1de_ba7c_4ed5,
-        };
-        eprintln!(
-            "{:>7} {:>12} {:>12}  winner",
-            "limbs", "binary_ms", "lehmer_ms"
-        );
-        for &limbs in &[2usize, 4, 8, 16, 32, 64, 128, 256, 512] {
-            let bits = limbs * 64;
-            let mut n = draw_below(&mut rng, &pow2(bits));
-            n.set_bit(bits - 1);
-            if !n.is_odd() {
-                n = n.add(&BigUint::one());
-            }
-            let a = draw_below(&mut rng, &pow2(bits)).rem(&n);
-            let reps = (512 / limbs).max(2);
-            let time = |f: &dyn Fn()| {
-                let mut best = f64::INFINITY;
-                for _ in 0..3 {
-                    let t0 = Instant::now();
-                    for _ in 0..reps {
-                        f();
-                    }
-                    best = best.min(t0.elapsed().as_secs_f64() / reps as f64 * 1e3);
-                }
-                best
-            };
-            let bin = time(&|| {
-                black_box(super::jacobi_binary(a.clone(), n.clone()));
-            });
-            let leh = time(&|| {
-                black_box(super::jacobi_lehmer(a.clone(), n.clone()));
-            });
-            let winner = if bin <= leh { "binary" } else { "lehmer" };
-            eprintln!("{limbs:7} {bin:12.4} {leh:12.4}  {winner}");
-        }
-    }
-
     /// The binary implementation, checked against the reference vectors, as
     /// an oracle on the same contract as the public function.
     /// Schoolbook product over the limbs, independent of every dispatched
@@ -5094,17 +5016,21 @@ mod tests {
         }
     }
 
-    /// The Jacobi symbol either side of its Lehmer and Half-GCD thresholds,
-    /// against values fixed by quadratic reciprocity: for `n ≡ 3 (mod 8)`
-    /// and `x` coprime to `n`, `(x²/n) = 1` and `(2x²/n) = −1`; below the
-    /// Half-GCD sizes also against the binary-reciprocity engine.
+    /// The Jacobi symbol either side of its word finish and its Half-GCD
+    /// threshold, against values fixed by quadratic reciprocity: for
+    /// `n ≡ 3 (mod 8)` and `x` coprime to `n`, `(x²/n) = 1` and
+    /// `(2x²/n) = −1`; below the Half-GCD sizes also against the binary
+    /// oracle.
     #[test]
     fn jacobi_symbols_are_certified_at_every_dispatch_boundary() {
+        // The Lehmer loop batches from two limbs; below that it runs the
+        // word finish.
+        const FIRST_BATCHED_LIMBS: usize = 2;
         let mut rng = SplitMix64 {
             state: 0x1f83_d9ab_fb41_bd6b,
         };
         let mut certified = 0;
-        for threshold in [JACOBI_LEHMER_THRESHOLD_LIMBS, JACOBI_HGCD_THRESHOLD_LIMBS] {
+        for threshold in [FIRST_BATCHED_LIMBS, JACOBI_HGCD_THRESHOLD_LIMBS] {
             for words in [threshold - 1, threshold, threshold + 1] {
                 for (name, base) in boundary_values(words, &mut rng) {
                     // n ≡ 3 (mod 8), same width.
@@ -5145,11 +5071,54 @@ mod tests {
         );
     }
 
+    /// The Jacobi symbol by binary quadratic reciprocity (*Handbook of
+    /// Applied Cryptography*, Algorithm 2.149, with subtract-and-halve in
+    /// place of the division): no quotient sequence and no state machine, so
+    /// it shares no code with the engines it checks.
     fn jacobi_binary_oracle(a: &BigUint, n: &BigUint) -> Option<i8> {
         if n.is_zero() || !n.is_odd() {
             return None;
         }
-        super::jacobi_binary(a.rem(n), n.clone())
+        let mut a = a.rem(n);
+        let mut n = n.clone();
+        let mut sign = 1i8;
+
+        while !a.is_zero() {
+            // Strip a's factors of two; each one contributes the (2/n) supplement,
+            // a sign flip exactly when n ≡ 3 or 5 (mod 8).
+            let mut twos = 0usize;
+            while !a.bit(twos) {
+                twos += 1;
+            }
+            if twos % 2 == 1 && matches!(super::low_bits_mod_pow2(&n, 7), 3 | 5) {
+                sign = -sign;
+            }
+            a.shr_bits(twos);
+
+            // Order the (now both odd) arguments so a >= n. The swap is the
+            // reciprocity step, paying its sign flip when both are ≡ 3 (mod 4).
+            if a < n {
+                if super::low_bits_mod_pow2(&a, 3) == 3 && super::low_bits_mod_pow2(&n, 3) == 3 {
+                    sign = -sign;
+                }
+                core::mem::swap(&mut a, &mut n);
+            }
+
+            // a >= n and both odd, so a - n is even and non-negative — stripped on
+            // the next pass. This is the reduction, division-free: the symbol is
+            // periodic in its top argument, so (a/n) = ((a - n)/n). Repeated
+            // subtract-and-halve is the binary gcd this loop already shadows.
+            a.sub_assign_ref(&n);
+        }
+
+        // The loop preserves (a/n) up to the accumulated sign; it ends with the
+        // gcd in `n`. A gcd above one means a and the original n share a factor,
+        // where the symbol is zero by definition.
+        if n.is_one() {
+            Some(sign)
+        } else {
+            Some(0)
+        }
     }
 
     #[test]
@@ -5303,11 +5272,12 @@ mod tests {
     #[test]
     #[ignore = "timing probe for the Lehmer/HGCD jacobi crossover; run with --ignored"]
     fn jacobi_hgcd_crossover_timing() {
-        use super::{
-            jacobi_hgcd_engine, jacobi_lehmer, JacobiState, JACOBI_LEHMER_THRESHOLD_LIMBS,
-        };
+        use super::{jacobi_hgcd_engine, jacobi_lehmer, JacobiState};
         use std::hint::black_box;
         use std::time::Instant;
+        // The recursion hands its tail to Lehmer at half the smallest size
+        // timed, so every size runs at least one round.
+        const TAIL_LIMBS: usize = 128;
         let mut rng = SplitMix64 {
             state: 0xc0de_57a7_e0f0_a11e,
         };
@@ -5335,12 +5305,7 @@ mod tests {
             });
             let state = JacobiState::new((x.limbs()[0] & 3) as u8, (y.limbs()[0] & 3) as u8);
             let hgcd_t = time(&|| {
-                black_box(jacobi_hgcd_engine(
-                    x.clone(),
-                    y.clone(),
-                    state,
-                    JACOBI_LEHMER_THRESHOLD_LIMBS,
-                ));
+                black_box(jacobi_hgcd_engine(x.clone(), y.clone(), state, TAIL_LIMBS));
             });
             let winner = if lehmer <= hgcd_t { "lehmer" } else { "hgcd" };
             eprintln!("{limbs:7} {lehmer:12.3} {hgcd_t:12.3}  {winner}");
