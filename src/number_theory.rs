@@ -97,11 +97,18 @@ fn leading_i128(limbs: &[u64], shift: usize) -> i128 {
 ///
 /// Signs live in the entries, so `m00·u + m01·v` and `m10·u + m11·v` reproduce
 /// the post-step operands directly, both provably non-negative.
+///
+/// Every entry stays inside `i64` and every quotient below 2^62, so no
+/// product in the loop can overflow `i128`. A step that would break either
+/// bound ends the batch, which is exact: the caller applies the steps
+/// collected so far. Near the end of a batch the entries approach the square
+/// root of the digits, about 2^62, so the bound rarely ends one early.
 fn lehmer_transform(
     u_hat: i128,
     v_hat: i128,
     mut quotients: Option<&mut QuotientLog>,
 ) -> (i128, i128, i128, i128) {
+    const QUOTIENT_LIMIT: i128 = 1 << 62;
     let (mut m00, mut m01, mut m10, mut m11) = (1i128, 0i128, 0i128, 1i128);
     let (mut u, mut v) = (u_hat, v_hat);
     loop {
@@ -118,34 +125,53 @@ fn lehmer_transform(
         if denom_low <= 0 || denom_high <= 0 {
             break;
         }
-        let q = (u + m00) / denom_low;
         // A genuine Euclid step has quotient >= 1; accepting only when the low
         // and high estimates agree certifies q is the true quotient.
-        if q < 1 || q != (u + m01) / denom_high {
+        let (q, remainder_low) = quotient_remainder(u + m00, denom_low);
+        if !(1..QUOTIENT_LIMIT).contains(&q) {
             break;
         }
-        // The accumulated entries can approach the digit size, so these
-        // products can overflow i128 near the end of a long batch. Breaking
-        // there is exact: the batch ends one step early and the caller applies
-        // what was collected.
-        let (Some(q_m10), Some(q_m11), Some(q_v)) =
-            (q.checked_mul(m10), q.checked_mul(m11), q.checked_mul(v))
-        else {
+        // The high estimate is q exactly when its remainder under q lies in
+        // [0, denom_high). That remainder differs from the low one by terms of
+        // the matrix, so it needs no second division:
+        // (u + m01) − q·(v + m11) = remainder_low + (m01 − m00) − q·(m11 − m10).
+        let remainder_high = remainder_low + (m01 - m00) - q * (m11 - m10);
+        if remainder_high < 0 || remainder_high >= denom_high {
             break;
-        };
-        let (Some(new_m10), Some(new_m11)) = (m00.checked_sub(q_m10), m01.checked_sub(q_m11))
-        else {
+        }
+        let (new_m10, new_m11) = (m00 - q * m10, m01 - q * m11);
+        if i64::try_from(new_m10).is_err() || i64::try_from(new_m11).is_err() {
             break;
-        };
+        }
+        // u − q·v = (u + m00) − q·(v + m10) − (m00 − q·m10).
+        (u, v) = (v, remainder_low - new_m10);
         (m00, m10) = (m10, new_m10);
         (m01, m11) = (m11, new_m11);
-        (u, v) = (v, u - q_v);
         if let Some(log) = quotients.as_deref_mut() {
             log.q_mod_4[log.len] = (q & 3) as u8;
             log.len += 1;
         }
     }
     (m00, m01, m10, m11)
+}
+
+/// `(dividend / divisor, dividend % divisor)` for a non-negative dividend and
+/// a positive divisor.
+///
+/// Euclidean quotients are small: by the Gauss–Kuzmin law a quotient is 1, 2
+/// or 3 about 68% of the time. Those are found by subtraction, a few register
+/// operations where a 128-bit division is a library call.
+#[inline]
+fn quotient_remainder(dividend: i128, divisor: i128) -> (i128, i128) {
+    let mut remainder = dividend;
+    for quotient in 0..4 {
+        if remainder < divisor {
+            return (quotient, remainder);
+        }
+        remainder -= divisor;
+    }
+    let quotient = dividend / divisor;
+    (quotient, dividend - quotient * divisor)
 }
 
 /// The applied-quotient log of one Lehmer batch: each entry a quotient's low
@@ -5442,6 +5468,133 @@ mod tests {
                     "transform must be unimodular (det = ±1) at {bits} bits"
                 );
             }
+        }
+    }
+
+    /// Replay a Lehmer batch against plain Euclid on the full operands: the
+    /// steps the transform certifies from the leading digits must be exactly
+    /// Euclid's, quotient for quotient, and its matrix must carry `(a, b)` to
+    /// the pair Euclid reaches after them. Returns the number of steps.
+    fn replay_lehmer_batch(a: &BigUint, b: &BigUint, u_hat: i128, v_hat: i128) -> usize {
+        use super::{lehmer_transform, QuotientLog};
+        let mut log = QuotientLog::new();
+        let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, Some(&mut log));
+        let (mut older, mut old) = (a.clone(), b.clone());
+        for (step, &q_mod_4) in log.q_mod_4[..log.len].iter().enumerate() {
+            let (quotient, remainder) = older.div_rem(&old);
+            assert_eq!(
+                quotient.rem_u64(4) as u8,
+                q_mod_4,
+                "step {step} of ({a}, {b}) from digits ({u_hat}, {v_hat})"
+            );
+            (older, old) = (old, remainder);
+        }
+        let apply = |c0: i128, c1: i128| {
+            BigInt::from_i128(c0)
+                .mul_biguint(a)
+                .add(&BigInt::from_i128(c1).mul_biguint(b))
+        };
+        assert_eq!(
+            apply(m00, m01),
+            BigInt::from_biguint(older),
+            "first row on ({a}, {b})"
+        );
+        assert_eq!(
+            apply(m10, m11),
+            BigInt::from_biguint(old),
+            "second row on ({a}, {b})"
+        );
+        log.len
+    }
+
+    #[test]
+    fn a_lehmer_batch_certifies_exactly_euclids_steps_from_narrow_digits() {
+        // The bracket that certifies a quotient holds for leading digits of
+        // any width. Narrow ones make its boundary cases (a corrected
+        // remainder of exactly zero or exactly the denominator) common
+        // instead of a 2^-62 event.
+        const DIGIT_BITS: std::ops::RangeInclusive<usize> = 2..=20;
+        // Operands run this many bits past their window, so the discarded
+        // low bits range from none to more than a word.
+        const EXTRA_BITS: u64 = 80;
+        const PAIRS_PER_WIDTH: usize = 2_000;
+        let mut rng = SplitMix64 {
+            state: 0x6c65_686d_6572_0001,
+        };
+        let mut steps = 0;
+        for digit_bits in DIGIT_BITS {
+            for _ in 0..PAIRS_PER_WIDTH {
+                let shift = (rng.next_u64() % EXTRA_BITS) as usize;
+                let top = pow2(digit_bits + shift - 1);
+                let a = draw_below(&mut rng, &top).add(&top);
+                let b = draw_below(&mut rng, &a);
+                let window = |x: &BigUint| {
+                    let mut digits = x.clone();
+                    digits.shr_bits(shift);
+                    i128::from(digits.to_u64().expect("the window is narrower than a word"))
+                };
+                let (u_hat, v_hat) = (window(&a), window(&b));
+                if v_hat != 0 {
+                    steps += replay_lehmer_batch(&a, &b, u_hat, v_hat);
+                }
+            }
+        }
+        assert!(steps > 0, "the draws certified no step at all");
+    }
+
+    #[test]
+    fn a_lehmer_batch_certifies_exactly_euclids_steps_from_full_digits() {
+        use super::leading_pair;
+        // Mean certified steps per batch on random operands. A 124-bit window
+        // certifies about half its bits, 62, and a Euclidean step shrinks
+        // the operands by π²/(12·ln²2) ≈ 1.71 bits on average (Lévy's
+        // constant), so a batch averages about 62 / 1.71 ≈ 36 steps. The
+        // floor sits a fifth below that, where a batch cut short by its
+        // bounds would land.
+        const MEAN_STEPS_FLOOR: usize = 29;
+        const OPERAND_BITS: [usize; 4] = [128, 200, 1024, 4096];
+        const PAIRS_PER_SIZE: usize = 250;
+        let mut rng = SplitMix64 {
+            state: 0x6c65_686d_6572_0002,
+        };
+        let (mut steps, mut batches) = (0, 0);
+        for bits in OPERAND_BITS {
+            let top = pow2(bits - 1);
+            for _ in 0..PAIRS_PER_SIZE {
+                let a = draw_below(&mut rng, &top).add(&top);
+                let b = draw_below(&mut rng, &top).add(&top);
+                let (a, b) = if a >= b { (a, b) } else { (b, a) };
+                let (u_hat, v_hat) = leading_pair(&a, &b);
+                steps += replay_lehmer_batch(&a, &b, u_hat, v_hat);
+                batches += 1;
+            }
+        }
+        assert!(
+            steps >= MEAN_STEPS_FLOOR * batches,
+            "{steps} steps over {batches} batches"
+        );
+
+        // Consecutive Fibonacci numbers: every quotient is 1, the longest run
+        // a window can hold, so the entries climb to the i64 bound.
+        const FIBONACCI_INDEX: usize = 3000;
+        let (mut older, mut old) = (BigUint::zero(), BigUint::one());
+        for _ in 0..FIBONACCI_INDEX {
+            (older, old) = (old.clone(), older.add(&old));
+        }
+        let (u_hat, v_hat) = leading_pair(&old, &older);
+        assert!(replay_lehmer_batch(&old, &older, u_hat, v_hat) >= MEAN_STEPS_FLOOR);
+
+        // A quotient at 2^62 or past it ends the batch before its first step:
+        // b = 2^64 + 1 and a = q·b + 1 for q on both sides of the limit.
+        const QUOTIENT_LIMIT_BITS: usize = 62;
+        let b = pow2(64).add(&BigUint::one());
+        for q in [
+            pow2(QUOTIENT_LIMIT_BITS).sub(&BigUint::one()),
+            pow2(QUOTIENT_LIMIT_BITS),
+        ] {
+            let a = q.mul(&b).add(&BigUint::one());
+            let (u_hat, v_hat) = leading_pair(&a, &b);
+            replay_lehmer_batch(&a, &b, u_hat, v_hat);
         }
     }
 
