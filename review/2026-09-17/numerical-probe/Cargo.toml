@@ -1,0 +1,7 @@
+[package]
+name="review-numerical-boundaries"
+version="0.0.0"
+edition="2021"
+[dependencies]
+rust-mp={path="../../.."}
+rng-entropy={path="../../../../entropy",default-features=false}

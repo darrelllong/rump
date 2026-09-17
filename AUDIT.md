@@ -1,173 +1,228 @@
-# Rump audit
+# Rump audit — 2026-09-17
 
 > **Motto:** better that, better algorithms
 >
 > **Creed:** Experiment is asking God for peer review.
 
-## Reviewed state and method
+## Scope and evidence
 
-2026-09-16 PDT / 2026-09-17 UTC. Frozen sibling checkouts on
-`aarch64-apple-darwin`, rustc/Cargo 1.93.1; separate Rust 1.87 checks.
+This review covers the captured sibling combination below on Apple M4 Pro,
+`aarch64-apple-darwin`, rustc/Cargo 1.93.1, with separate Rust 1.87 checks.
 
-| Repository | HEAD at capture |
+| Repository | Captured HEAD |
 |---|---|
-| cryptography | `aa865da77502306f544b7031f65eaf3f7b7960b2` |
-| entropy | `de1bd2d061eea43fe1fca291edae346315b85983` |
-| rump | `66651ab0c82a21929c52da92823fad930766fef9` |
-| factoring | `d594060dc824a4f2c3a0800fdeb86c739dce7e71` |
+| cryptography | `0242a217f1d79ab01bd43d4e5b79fc2a7be7a88f` |
+| entropy | `63592e02ab50a494499a87c3abe0ab406ab01bf5` |
+| rump | `ae7566b1b100239e1b511a9b05ff8229ea6613bd` |
+| factoring | `732801274f7a27640b3616995b7503855a870e99` |
 
-This repository's reviewed-file manifest SHA-256 is
-`a0cb6832502d7bd1961846626aa589a32cd07ed238101dd9a4bf54bccd3a4aff` (114 files).
-The manifest covers tracked and nonignored untracked regular files, excluding
-AUDIT.md and SUGGESTIONS.md: sort relative paths, emit `SHA256(file)`, two
-spaces, path and newline, then SHA-256 the UTF-8 manifest. It identifies working
-contents as well as commits. Tests used fresh build directories in the frozen
-copies. Later edits require checking which evidence still applies.
+The reviewed-file manifest for this repository has SHA-256
+`4e29e4ff3846e5c7fea88210bf13d6dfc9045bcf27a5d14ed3d7da44abd2cb77` (117 files).
+[The manifest](review/2026-09-17/reviewed-files.sha256) contains sorted
+`SHA256(file)  relative/path` lines; its own digest identifies the capture.
+It covers tracked and nonignored regular files, excluding these two review
+documents and the review artifacts added afterward. Entropy's final capture includes its new
+seeding, sampling, thread-local and `CryptoRng` APIs through `63592e0`.
 
-This review combines source inspection, mathematical identities, the release
-suites, and focused boundary experiments. Reproduced failures, inspected risks,
-retained measurements and proposed experiments are distinguished below. Coverage
-is stated explicitly; passing suites do not establish every input domain,
-platform, timing property or statistical null law. This review changes the two
-review documents only. Diagnostic code ran in separate scratch copies.
+The review distinguishes reproduced results, source inspection, retained
+measurements and proposed experiments. The files record current findings and
+acceptance criteria; they do not implement the proposed changes. Implementation
+references are papers, standards and mathematics. External libraries were called
+through public APIs for comparison; their implementation source was not used.
 
 ## Assessment
 
-Exact lattice enumeration now preserves the anisotropic test metric and
-reports how a search ends. The coefficient generator reproduces all nine
-log-gamma coefficients bit for bit, and the 50,298-point reference sweep passes.
-The new numerical counterexamples are in incomplete beta and at log-gamma's
-upper representable boundary. The integer, modular, polynomial and GF(2)
-regressions in the exercised suites pass.
+The exercised integer, modular, polynomial, lattice and GF(2) suites pass in
+both erasure modes. The probability API reports domain/nonconvergence errors,
+and large equal-shape beta cases now return accurate central values. A fresh
+small-shape counterexample nevertheless returns `Ok(1.0)` where the exact answer
+is 0.5. Error-aware return types need stable normalization as well as a stopping
+rule.
+
+Rump should remain the exact arithmetic foundation. Its floating probability
+functions have a better owner in entropy; its opaque modular arithmetic and
+exact matrix/lattice support should serve the other projects without absorbing
+their algorithm-selection policies.
 
 ## Findings
 
-### R1 — High: incomplete beta returns an uncertified last iterate, including negative probabilities
+### R1 — High: incomplete beta's normalization underflows for tiny shapes
 
-**Reproduced; public API.** [src/number_theory.rs](src/number_theory.rs),
-`regularized_incomplete_beta` and `beta_continued_fraction`.
-Symmetry gives `I_(1/2)(a,a)=1/2` for every positive a. Fresh results:
+**Reproduced public-API failure.**
+[src/number_theory.rs](src/number_theory.rs), `regularized_incomplete_beta` and
+`incomplete_beta_tail`.
 
-| a = b | Computed result | Exact result |
-|---:|---:|---:|
-| 1,000,000 | 0.49999961848374941 | 0.5 |
-| 100,000,000 | 0.20461178871784746 | 0.5 |
-| 10,000,000,000 | −5.776747550350140 | 0.5 |
-| 1,000,000,000,000 | −66.96555717858665 | 0.5 |
+| a = b, x = 1/2 | Returned result | Exact result |
+|---:|---|---:|
+| 10^-310 | `Ok(1.0)` | 0.5 |
+| 10^-200 | `Ok(1.0)` | 0.5 |
+| 10^-160 | `Ok(0.500002783212028)` | 0.5 |
+| 10^-100 | `Ok(0.5000000000000064)` | 0.5 |
+| 10^6 | `Ok(0.5000000000000002)` | 0.5 |
+| 10^10 | `Ok(0.49999999999999933)` | 0.5 |
+| 10^12 | `Ok(0.5000000000000001)` | 0.5 |
 
-The continued fraction returns `h` after at most 300 iterations, whether or
-not the convergence test succeeds. The normalization also subtracts large
-log-gamma values. Thus neither a finite result nor a result inside [0,1]
-certifies accuracy. Clamping would conceal the failure.
+The normalization evaluates `0.5 * ln(a*b/(a+b))`. At a=b=10^-200,
+the intermediate product rounds to zero although the quotient's mathematical
+value, a/2, is representable. The exponential becomes zero and the complement
+branch returns one, which passes range validation. Finite output, successful
+continued-fraction termination and a [0,1] check do not establish accuracy.
 
-Return explicit nonconvergence/numerical failure and use a stable regime-specific
-normalization and expansion. Validate symmetry, tails, transition regions and
-monotonicity against independent values. The exact identity follows from
-[DLMF 8.17.4](https://dlmf.nist.gov/8.17.E4).
+Symmetry gives `I_(1/2)(a,a)=1/2` for every a>0;
+[DLMF 8.17.4](https://dlmf.nist.gov/8.17.E4) supplies the identity. Fix the
+normalization and regime handling rather than special-casing just x=1/2.
+Include tiny unequal shapes and nearby x values so that the general failure
+cannot survive behind a symmetry shortcut.
 
-`student_t_quantile` calls this function; factoring's polynomial race calls that
-quantile. These examples have two large equal shapes, while the Student path
-has one shape 1/2. A failure of the ordinary factoring race was **not** reproduced.
-Qualify that consumer's actual degrees of freedom and tail probabilities
-separately before changing the shared kernel.
-
-Minimal numerical witness:
+Reproduce with:
 
 ```rust
-let p = rump::number_theory::regularized_incomplete_beta(0.5, 1e10, 1e10);
-println!("{p:.17}"); // -5.77674755035013998; exact value is 0.5.
+let p = rump::number_theory::regularized_incomplete_beta(0.5, 1e-200, 1e-200);
+assert_eq!(p, Ok(1.0));
 ```
 
-### R2 — Medium: log-gamma overflows for some representable finite answers
+The [retained client and output](review/2026-09-17/README.md) include this case.
+The Student path has one beta shape 1/2, so this counterexample does not imply
+failure of factoring's actual race. Eighteen Student cases, degrees of freedom
+1, 2, 5, 10, 100 and 10,000 at probabilities 0.75, 0.975 and 0.999999, differed
+from R's `qt` by at most 4.66e-10 relative. That is a sampled consumer check,
+not a bound over the complete Student domain.
 
-**Reproduced; public API.** `ln_gamma(2.557e305)` returns positive infinity.
-A 70-decimal-digit reference for the exact f64 input gives
-`1.7955951755681236831711000242607365e308`, which rounds to the finite f64
-`1.7955951755681237e308`. The same problem occurs at `2.558e305` and `2.559e305`.
+### R2 — Medium: arithmetic representation dominates some rho workloads
 
-In `(z+0.5)*ln(t) - t`, the product overflows before subtracting t. An asymptotic
-rearrangement such as `x*(ln(x)-1)` avoids that specific intermediate; its
-rounding and correction terms still need analysis. The positive-real Stirling
-expansion and remainder bounds are in
-[DLMF §5.11](https://dlmf.nist.gov/5.11).
+**Fresh consumer experiment; performance opportunity.** Factoring's generic rho
+uses heap-backed opaque Montgomery residues even for one-word inputs, while it
+already has a private native-word cofactor walker using `Montgomery64`. A matched
+four-input experiment in [factoring's audit](../factoring/AUDIT.md) finds about
+18–21× lower kernel wall time with the native path on this host. That is not a
+whole-factorization speedup and does not establish a 128-bit or large-BigInt ratio.
 
-The shipped dense sweep stops below `1e305`, so its passing result does not
-cover this boundary. The small-positive recurrence is sound on the exercised
-cases: `ln_gamma(1e-310)=713.8013788281542`. No ordinary entropy or factoring
-run reaching the upper counterexample was demonstrated.
+Rump owns the native modular operations; factoring owns dispatch, walk budgets
+and recovery. For larger inputs, inspect allocation and context ownership in
+returned residues, as well as scratch reuse. Reusing multiplication scratch
+does not eliminate every returned-value allocation or context reference count.
+Measure before adding more abstraction.
 
-### R3 — Medium: a failed feature query can be reported as a successful absence check
+The generic rho converts product residues out of the Montgomery domain before
+GCD. For odd n and its invertible Montgomery scale R,
+`gcd(R*d mod n,n)=gcd(d,n)`. A modulus-aware GCD operation on an opaque residue
+can avoid decoding without exposing representation. It should validate the
+domain and be exercised on 0, units, proper divisors and products equal to zero.
 
-**Source inspection.** [scripts/consumer_matrix.sh](scripts/consumer_matrix.sh)
-uses `if cargo tree ... | grep -q '"wipe"'; then FAIL; else PASS; fi` for the
-factoring feature leg. With `pipefail`, a failed Cargo query still takes the
-`else` branch and prints that wiping is absent. Other failed test legs set the
-overall failure flag, but this particular leg is not reliable evidence of
-absence when its query fails.
+### R3 — Medium: floating statistics exceed the intended foundation boundary
 
-Capture and check Cargo's exit status before inspecting its output. Exercise
-three cases: successful graph without wipe, successful graph with wipe, and
-failed graph resolution. The latter two must fail the leg with distinct reasons.
-The fresh feature query in this review succeeded and showed no wipe in factoring.
+**Source inspection.** `ln_gamma`, incomplete beta and Student quantiles sit
+among integer number-theory routines. Entropy calls rump for log-gamma while
+maintaining its own gamma tails and normal functions; factoring calls rump for
+Student probabilities. This divides numerical error policy and testing across
+owners without an arithmetic reason.
 
-The local consumer script includes factoring and both entropy feature modes.
-The push workflow still includes only cryptography and entropy default. Use the
-full local matrix as an integration gate wherever all four repositories are
-accessible; do not treat the smaller hosted job as equivalent coverage.
+Move floating probability functions into entropy's statistics module/feature,
+keeping exact BigInt, polynomial, finite-field, lattice and matrix operations
+here. BigInt rejection sampling is naturally here because it depends on the
+integer representation, provided bytes remain caller-supplied. No OS seeding,
+thread-local RNG or factoring schedule belongs in rump.
 
-## Mathematical boundaries checked
+### R4 — Qualification boundary: erasure and exactness have different contracts
 
-| Boundary | Current evidence |
+The `wipe` feature explicitly changes limb/scratch erasure. It does not change
+variable-time normalization, allocation, division or generic exponentiation into
+constant-time arithmetic. Preserve separate timing claims in cryptography.
+
+The exact lattice search reports `Exhausted`, `VisitLimit` and `NumericalLimit`;
+a consumer must inspect the outcome before claiming completeness. GF(2) filtering
+must preserve the composition of each filtered row and expand dependencies back
+to original rows. These are supported by the exercised tests; no new exhaustive
+large-width or adversarial campaign was performed here.
+
+### R5 — Medium: Block Lanczos needs a self-contained equation-to-state record
+
+**Source inspection.** [src/gf2.rs](src/gf2.rs)'s recurrence commentary names
+Montgomery's equations (18)–(20) and Figure 1, but also relies on an external
+implementation-oriented account of the indices. The review did not consult that
+implementation. Replace that explanatory dependency with a complete mapping from
+paper symbols to stored blocks, transposes, selected subspaces and update order.
+
+Final dependency checks establish that returned vectors annihilate the original
+matrix. They do not by themselves show that the recurrence retains the intended
+subspace or avoids unnecessary fallback. Add independently derived small-matrix
+step invariants and compare spans/ranks with dense elimination. This is a
+mathematical traceability and completeness/performance issue; no incorrect
+returned dependency was reproduced.
+
+## Controls and boundaries checked
+
+| Boundary | Evidence in this pass |
 |---|---|
-| Lattice completeness | Exact integral Gram construction and fraction-free Gram–Schmidt; outward floating enclosures for pruning; exact returned distances. Existing exhaustive and change-of-basis tests pass. |
-| Anisotropic metric | Identity basis, `diag(1,2^1000)`, bound 1: short search returns exactly two nonzero vectors; closest search at zero returns three including zero. Both report `Exhausted`. |
-| Search budgets | The API distinguishes `Exhausted`, `VisitLimit` and `NumericalLimit`; the low-budget regressions pass. Exhaustion certifies the requested nearest subset, not retention of every point when `limit` is smaller. |
-| Arithmetic dispatch | The suite includes independent slow arithmetic at dispatch boundaries, division identities, Half-GCD/Toom coverage and Montgomery checks. |
-| GF(2) composition | Filtered dependencies are expanded and checked on the original matrix in the passing suite. |
-| Wiping | Both feature modes pass. The feature changes erasure behavior, not variable-time arithmetic into constant-time arithmetic. |
-
-The coefficient script solves the nine interpolation equations at 60-digit
-precision. All coefficients match. On its sampled domain, the exact-coefficient
-absolute error near the zeros is `2.26e-16`, and the rounded-coefficient error is
-`6.19e-16`; the latter's sampled relative error above 3 is `9.5e-16`. These are
-sampled maxima, not supremum proofs over the real domain.
+| Tiny beta and large central beta | R1 table from current public API |
+| Upper finite log-gamma | `2.557e305`, `2.558e305`, `2.559e305` return finite values about 1.795595e308, 1.796298e308, 1.797002e308 |
+| Student consumer region | 18 successful cases compared with independent R `qt` values |
+| Arithmetic and matrix identities | Existing division/modular/polynomial/GF(2)/lattice regressions pass |
+| Consumer feature query | `consumer_matrix.sh --self-test`: absent wipe→0; present wipe→1; failed query→2 |
+| Factoring feature graph | Successful graph resolution; wipe absent |
 
 ## Fresh verification
 
 | Check | Result |
 |---|---|
-| `cargo test --offline --locked --release --all-targets` | 401 passed, 21 ignored |
-| Same with `--features wipe` | 402 passed, 21 ignored |
-| `cargo test --offline --locked --release --doc` | 7 passed |
-| `cargo +1.87 check --offline --locked --all-targets` | Passed |
-| `scripts/lanczos_coefficients.py --check` | Nine bit-identical coefficients; sampled error report |
-| Generated `--sweep` file, then ignored `the_log_gamma_sweep_matches_high_precision` | 50,298 values checked; passed |
-| Public numerical/lattice client | R1/R2 reproduced; anisotropic searches exhausted correctly |
+| Release, offline/locked, all targets | 407 passed; 21 ignored |
+| Same with `--features wipe` | 408 passed; 21 ignored |
+| Release doctests | 7 passed |
+| Rust 1.87 all-target check | Passed |
+| Consumer feature-query self-test | Three cases passed |
+| Four captured consumer/default combinations | Functional suites passed; see their individual records |
 
-All four consumer default release suites pass on the recorded combination;
-entropy minimal, cryptography all features and rump wipe also pass. This is a
-fresh local matrix, not a claim that the release scripts or remote hosts ran.
-The other ignored tests, fresh large-width randomized campaigns, i686/Linux,
-assembly/timing audits and remote benchmarks were not repeated.
+The current consumer script records revisions and lockfiles and distinguishes
+query failure from an absent feature. The fresh local tests are not a release
+preflight for factoring's separately pinned entropy revision. No full ignored
+campaign, new coefficient sweep, Linux/i686 campaign or timing qualification was
+run. [Validation records](review/2026-09-17/validation.json) retain the command
+identities and log digests.
 
-## Cross-repository contracts
+## Cross-repository ownership
 
-| Owner | Obligation at the boundary |
-|---|---|
-| [rump](../rump/AUDIT.md) | Exact arithmetic and matrix identities; numerical domains, error and convergence; explicit search completion. |
-| [cryptography](../cryptography/AUDIT.md) | Scheme-specific validation, randomness requirements, confidentiality/authentication profiles, timing and secret handling. |
-| [entropy](../entropy/AUDIT.md) | Explicit input view, statistic, null law, calibrated decision and complete report; a statistical pass is not a security claim. |
-| [factoring](../factoring/AUDIT.md) | Exact relation identities and dependency expansion, verified proper divisors, measured selection cost; probable-prime leaves are not proofs. |
+Keep the four repositories, with a focused boundary refactor. The desired graph
+is `cryptography → rump`, `entropy → cryptography` when crypto generators are
+enabled, and `factoring → rump + entropy` with only the RNG/statistics features
+it needs. Rump must not depend on either consumer.
 
-The links assume sibling checkouts. Cryptography enables rump's additive `wipe`
-feature. Entropy default inherits it; entropy minimal and factoring alone do
-not. The same rump version string can therefore describe different timing and
-allocation costs. Record the resolved dependency revisions, lockfiles,
-features, compiler and target alongside results.
+| Owner | Keep here | Boundary change |
+|---|---|---|
+| rump | BigInt, modular arithmetic, primality, exact polynomial/finite-field/GF(2)/lattice support, caller-driven BigInt sampling | Move floating probability kernels out; retain reusable arithmetic without factoring policy or OS entropy |
+| cryptography | Ciphers, hashes, authenticated schemes, DRBG mechanisms, cryptographic state evolution and erasure | Own Hash_DRBG, HMAC_DRBG and fast-key-erasure cores; entropy supplies their adapters |
+| entropy | Noncryptographic PRNGs, OS seeding, sampling, stream views, thread-local access, probability functions and test batteries | Separate application RNG, statistics and batteries by features; make FFT/battery dependencies optional |
+| factoring | Rho/ECM/QS/GNFS orchestration, relation/cofactor policy, polynomial selection and size/cost dispatch | Reuse native modular arithmetic; keep schedule, graph forecasting and algorithm selection here |
 
-Implementations start from papers, specifications and mathematical derivations.
-State the equation, representation, hypotheses and invariant. Derive numerical
-tables reproducibly and separate approximation error from floating evaluation.
-Use published answer files and independently constructed oracles for checks;
-another implementation's source is not an implementation reference. A round
-trip alone cannot detect a shared error in its two halves.
+Generic exact algebra in rump is supporting mathematics, not a reason to move
+QS/GNFS policy there. `ln_gamma`, incomplete beta and Student quantiles are
+floating statistical functions; entropy already owns most probability kernels
+and factoring already depends on entropy. Move them in a coordinated API release
+with reference fixtures. A rump forwarding wrapper that calls entropy would
+create a dependency cycle and is unsuitable.
+
+Preserve the distinction between rump's quality-neutral `RandomSource`,
+cryptography's byte-oriented `Csprng`, and entropy's generator/`CryptoRng`
+interfaces. Add explicit adapters with documented security and byte-stream
+contracts; never blanket-implement a cryptographic contract for every test RNG.
+A marker describes a construction, not the entropy in a caller-supplied seed.
+
+Cryptography enables rump's additive `wipe` feature. Entropy default inherits it;
+entropy minimal and standalone factoring do not. Record the resolved graph in
+benchmarks: compiling factoring alongside a consumer that enables wipe can change
+its arithmetic costs. Separate processes/packages may be needed when measuring
+that configuration. Optional features should remove unwanted dependencies, not
+silently weaken a cryptographic build's erasure contract.
+
+## Standard for accepting changes
+
+Derive the formula and state its domain, representation and invariant. Retain
+published known answers, independent mathematical identities and reproducible
+coefficient/table generation. Test boundary strata and algorithm switches as
+well as ordinary inputs. Source comments should explain the invariant, assumption
+or non-obvious choice and cite the relevant paper section when useful.
+
+Use paired measurements with fixed inputs, seeds, compiler, target, features and
+sibling revisions. Record wall time, total process-tree CPU, memory and work
+counters. Separate the cost of setup, steady-state work and teardown, then report
+the complete operation too. Statistical acceptance, semantic security, exact
+factorization and performance are separate claims with separate evidence.

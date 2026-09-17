@@ -1,0 +1,27 @@
+{
+  "cryptography": {
+    "head": "0242a217f1d79ab01bd43d4e5b79fc2a7be7a88f",
+    "status": "",
+    "sha256": "8f6afba1a69537ba101491e9fcebe03ff5defc6a15564a92334a9d0883815c63",
+    "files": 574
+  },
+  "entropy": {
+    "head": "63592e02ab50a494499a87c3abe0ab406ab01bf5",
+    "status": "",
+    "sha256": "aa2d0d9dcb11da46f8e05c9d8bc355548def1519db29d4d91d954e2f03111340",
+    "files": 393,
+    "captured_utc": "2026-09-17T15:47:11.983841+00:00"
+  },
+  "rump": {
+    "head": "ae7566b1b100239e1b511a9b05ff8229ea6613bd",
+    "status": "",
+    "sha256": "4e29e4ff3846e5c7fea88210bf13d6dfc9045bcf27a5d14ed3d7da44abd2cb77",
+    "files": 117
+  },
+  "factoring": {
+    "head": "732801274f7a27640b3616995b7503855a870e99",
+    "status": " M AUDIT.md\n M SUGGESTIONS.md\n",
+    "sha256": "9cd786729cd818e24dcc1f21c44634682a1cdc11cfb3010945c1a152b50825ed",
+    "files": 141
+  }
+}
