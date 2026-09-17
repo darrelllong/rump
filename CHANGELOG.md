@@ -35,6 +35,20 @@ what a consumer must change, not everything that moved.
 
 ### Fixed
 
+- **`poly::PolyZ::real_roots` decides every sign exactly, and its brackets
+  hold every root.** Signs came from `f64` Horner evaluation and the search
+  ran a fixed 200 bisections. Both fail at wide coefficient ranges: for
+  `x² + 10³⁰⁰x − 10³⁰⁰` the value at the Cauchy bound is `+1` but evaluates
+  to `−10³⁰⁰`, hiding the sign change that brackets the root near `−10³⁰⁰`,
+  and 200 halvings of a `10³⁰⁰`-wide bracket leave it `10²³⁹` wide, so the
+  root near `1` was returned as `1.56·10²³⁹`. That polynomial now returns
+  `[-1e300, 1.0]`. Signs are the exact signs of the integer polynomial at
+  dyadic points, the bound is rounded outward (adding to a rounded ratio does
+  not move it: the float gap at `10²⁰` is 16384), and bisection runs until the
+  bracket is one float wide. Callers that read the returned values keep
+  reading them; the values are now correct.
+
+
 - **`number_theory::regularized_incomplete_beta` is accurate for tiny shapes.**
   The normalisation formed `a·b/(a+b)`, which underflows, and wrote `ln B`
   through Stirling remainders that grow like `½ ln(1/t)` for tiny `t`, so

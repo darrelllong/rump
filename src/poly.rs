@@ -467,8 +467,14 @@ const DURAND_KERNER_STEPS: usize = 2_000;
 /// magnitude.
 const REAL_ROOT_TOLERANCE: f64 = 1e-9;
 
-/// Bisection steps: enough to exhaust `f64` resolution on any bracket.
-const REAL_ROOT_BISECTIONS: usize = 200;
+/// Bisection steps before the loop gives up on narrowing a bracket further.
+///
+/// A step halves the bracket, so exhausting `f64` takes as many steps as the
+/// format has powers of two: from the widest bracket, just under `2^1025`
+/// (twice the largest finite value), down to the smallest subnormal gap,
+/// `2^-1074`. The loop normally stops earlier, when the midpoint meets an
+/// endpoint, and this cap only bounds the work.
+const REAL_ROOT_BISECTIONS: usize = 1025 + 1074;
 
 /// Ascending `f64` coefficients, or `None` if any does not fit.
 fn poly_to_f64(f: &PolyZ) -> Option<Vec<f64>> {
@@ -490,12 +496,8 @@ fn poly_to_f64(f: &PolyZ) -> Option<Vec<f64>> {
         .then_some(coefficients)
 }
 
-/// Horner evaluation at a real point, coefficients ascending.
-fn eval_f64(coefficients: &[f64], x: f64) -> f64 {
-    coefficients.iter().rev().fold(0.0, |acc, c| acc * x + c)
-}
-
-/// Cauchy's bound: every root lies within this of the origin.
+/// Cauchy's bound from float coefficients: every root lies within this of
+/// the origin. For [`durand_kerner`], whose iteration is in `f64` anyway.
 fn cauchy_bound_f64(coefficients: &[f64], degree: usize) -> f64 {
     let leading = coefficients[degree];
     let largest = coefficients[..degree]
@@ -504,22 +506,139 @@ fn cauchy_bound_f64(coefficients: &[f64], degree: usize) -> f64 {
     1.0 + largest
 }
 
+/// One `BigInt` as the nearest `f64`, with the sign carried.
+fn to_f64(value: &BigInt) -> f64 {
+    let magnitude = value.magnitude().to_f64_lossy();
+    if value.sign() == Sign::Negative {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
+/// Cauchy's bound: every root of `f` lies within this of the origin.
+///
+/// `1 + maxᵢ|cᵢ/c_d|`, rounded outward at every step so the bracket can only
+/// be too wide: each ratio is the exact integer ceiling, the conversion to
+/// `f64` rounds to nearest, and the result steps one float up to cover that
+/// rounding. Rounding inward would put a root outside the bracket, where no
+/// bisection can find it — at `10²⁰` the float gap is 16384, so a bound
+/// formed by adding to a rounded ratio does not move at all.
+///
+/// Capped at the largest finite `f64`: the bound is used as an endpoint, and
+/// an infinite one has no midpoint to bisect at.
+fn cauchy_bound(f: &PolyZ) -> f64 {
+    let coefficients = f.coefficients();
+    let leading = coefficients
+        .last()
+        .expect("a non-zero polynomial")
+        .magnitude();
+    let largest = coefficients[..coefficients.len() - 1]
+        .iter()
+        .map(|c| {
+            let (quotient, remainder) = c.magnitude().div_rem(leading);
+            let ceiling = if remainder.is_zero() {
+                quotient
+            } else {
+                quotient.add(&BigUint::one())
+            };
+            ceiling.to_f64_lossy()
+        })
+        .fold(0.0f64, f64::max);
+    (largest + 1.0).next_up().min(f64::MAX)
+}
+
 /// Index of the highest non-zero coefficient.
 fn trimmed_degree_f64(coefficients: &[f64]) -> Option<usize> {
     coefficients.iter().rposition(|c| *c != 0.0)
 }
 
-/// Bisects for a root in `[low, high]`, or `None` if the ends agree in sign.
-fn bisect_f64(coefficients: &[f64], mut low: f64, mut high: f64) -> Option<f64> {
-    let mut low_value = eval_f64(coefficients, low);
-    let high_value = eval_f64(coefficients, high);
-    if low_value == 0.0 {
+/// The sign of `f(value)`, decided exactly.
+///
+/// Every `f64` is `mantissa·2^exponent` with an integer mantissa, so
+/// `f(value)` is a dyadic rational, and scaling it by `2^(|exponent|·degree)`
+/// — a positive factor, so the sign is untouched — clears the denominators:
+///
+/// ```text
+/// 2^(k·d)·f(m·2^e) = Σ cᵢ·mⁱ·2^(e·i + k·d),   k = max(0, −e)
+/// ```
+///
+/// where every exponent is non-negative, since `e·i + k·d ≥ 0` for `i ≤ d`.
+/// The sum is an integer, and `BigInt` adds it without rounding.
+///
+/// The float evaluation this replaces cancels: on `x² + 10³⁰⁰x − 10³⁰⁰` at
+/// the Cauchy bound the true value is `+1` and `f64` Horner returns
+/// `−10³⁰⁰`, hiding the sign change that brackets the negative root.
+fn sign_at(f: &PolyZ, value: f64) -> Sign {
+    let Some(degree) = f.degree() else {
+        return Sign::Zero;
+    };
+    let (mantissa, exponent) = mantissa_and_exponent(value);
+    let shift = usize::try_from(-exponent.min(0)).expect("a negative exponent is small");
+    let mut total = BigInt::zero();
+    let mut power = BigInt::from_biguint(BigUint::one()); // mⁱ
+    for (i, coefficient) in f.coefficients().iter().enumerate() {
+        // e·i + k·d, non-negative by the choice of k.
+        let scale = exponent * i as i64 + (shift * degree) as i64;
+        let mut term = coefficient.mul(&power).magnitude().clone();
+        term.shl_bits(usize::try_from(scale).expect("a non-negative scale is small"));
+        let term = BigInt::from_parts(coefficient.mul(&power).sign(), term);
+        total = total.add(&term);
+        power = power.mul(&mantissa);
+    }
+    total.sign()
+}
+
+/// `value` as `mantissa·2^exponent` with an integer mantissa.
+///
+/// IEEE-754 binary64: 52 stored significand bits, an 11-bit biased exponent,
+/// and an implicit leading one for every normal value. The exponent bias is
+/// 1023 and the significand carries 52 fraction bits, so a normal value is
+/// `(2^52 + fraction)·2^(biased − 1023 − 52)`; a subnormal (biased zero) is
+/// `fraction·2^(1 − 1023 − 52)`.
+fn mantissa_and_exponent(value: f64) -> (BigInt, i64) {
+    const FRACTION_BITS: u32 = f64::MANTISSA_DIGITS - 1; // 52 stored bits
+    const EXPONENT_BIAS: i64 = 1023;
+    let bits = value.to_bits();
+    let fraction = bits & ((1u64 << FRACTION_BITS) - 1);
+    let biased = ((bits >> FRACTION_BITS) & 0x7ff) as i64;
+    let negative = bits >> 63 == 1;
+    let (magnitude, exponent) = if biased == 0 {
+        (fraction, 1 - EXPONENT_BIAS - i64::from(FRACTION_BITS))
+    } else {
+        (
+            fraction | (1u64 << FRACTION_BITS),
+            biased - EXPONENT_BIAS - i64::from(FRACTION_BITS),
+        )
+    };
+    let sign = if negative {
+        Sign::Negative
+    } else {
+        Sign::Positive
+    };
+    (
+        BigInt::from_parts(sign, BigUint::from_u64(magnitude)),
+        exponent,
+    )
+}
+
+/// Bisects for a root of `f` in `[low, high]`, or `None` if the ends agree in
+/// sign.
+///
+/// Every sign is [`sign_at`]'s, so the bracket is a genuine sign change at
+/// every step and the returned value is one `f64` from a true root: the loop
+/// runs until the midpoint meets an endpoint, which is the end of the
+/// format's resolution, not of a step budget.
+fn bisect_f64(f: &PolyZ, mut low: f64, mut high: f64) -> Option<f64> {
+    let low_sign = sign_at(f, low);
+    let high_sign = sign_at(f, high);
+    if low_sign == Sign::Zero {
         return Some(low);
     }
-    if high_value == 0.0 {
+    if high_sign == Sign::Zero {
         return Some(high);
     }
-    if low_value.signum() == high_value.signum() {
+    if low_sign == high_sign {
         return None;
     }
     for _ in 0..REAL_ROOT_BISECTIONS {
@@ -527,17 +646,14 @@ fn bisect_f64(coefficients: &[f64], mut low: f64, mut high: f64) -> Option<f64> 
         if middle <= low || middle >= high {
             break; // exhausted f64 resolution
         }
-        let value = eval_f64(coefficients, middle);
-        if value == 0.0 {
-            return Some(middle);
-        }
-        if value.signum() == low_value.signum() {
-            low = middle;
-            low_value = value;
-        } else {
-            high = middle;
+        match sign_at(f, middle) {
+            Sign::Zero => return Some(middle),
+            sign if sign == low_sign => low = middle,
+            _ => high = middle,
         }
     }
+    // The ends are now adjacent floats straddling the root, so either is
+    // within one ulp of it.
     Some(low + (high - low) / 2.0)
 }
 
@@ -676,33 +792,32 @@ fn forward_error(coefficients: &[f64], degree: usize, z: (f64, f64)) -> f64 {
 ///
 /// The real roots of `f′` split the line into intervals on which `f` is
 /// monotone, so each holds at most one root and one bisection finds it;
-/// recursing on the derivative produces those split points.
+/// recursing on the derivative produces those split points. The interval
+/// ends come from [`cauchy_bound`], rounded outward, and every sign is
+/// decided exactly by [`sign_at`]; only the split points themselves are
+/// approximate.
 ///
 /// It finds only roots where `f` changes sign, which is why the caller must
 /// hand it a squarefree polynomial: an even-multiplicity root does not change
 /// sign and would be missed entirely.
-fn simple_real_roots(coefficients: &[f64]) -> Vec<f64> {
-    let Some(degree) = trimmed_degree_f64(coefficients) else {
+fn simple_real_roots(f: &PolyZ) -> Vec<f64> {
+    let Some(degree) = f.degree() else {
         return Vec::new();
     };
     if degree == 0 {
         return Vec::new();
     }
+    let coefficients = f.coefficients();
     if degree == 1 {
-        return vec![-coefficients[0] / coefficients[1]];
+        let (numerator, denominator) = (&coefficients[0], &coefficients[1]);
+        return vec![-to_f64(numerator) / to_f64(denominator)];
     }
 
-    let derivative: Vec<f64> = coefficients
-        .iter()
-        .enumerate()
-        .skip(1)
-        .map(|(power, c)| c * power as f64)
-        .collect();
-    let mut critical = simple_real_roots(&derivative);
+    let mut critical = simple_real_roots(&f.derivative());
     critical.retain(|value| value.is_finite());
     critical.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
 
-    let bound = cauchy_bound_f64(coefficients, degree);
+    let bound = cauchy_bound(f);
     let mut edges = Vec::with_capacity(critical.len() + 2);
     edges.push(-bound);
     edges.extend(critical.iter().copied().filter(|v| v.abs() <= bound));
@@ -714,7 +829,7 @@ fn simple_real_roots(coefficients: &[f64]) -> Vec<f64> {
         if low >= high {
             continue;
         }
-        if let Some(root) = bisect_f64(coefficients, low, high) {
+        if let Some(root) = bisect_f64(f, low, high) {
             roots.push(root);
         }
     }
@@ -1348,8 +1463,14 @@ impl PolyZ {
     /// decomposition `f = s₁ · s₂² · s₃³ · …` follows from repeated exact gcd
     /// over the integers. Each `sₖ` is squarefree, so its real roots are
     /// simple and bisection finds all of them, and each is emitted `k` times.
+    ///
     /// Floating point is then used only to *locate* roots whose count is
-    /// already known.
+    /// already known: every sign the bisection reads is the exact sign of the
+    /// integer polynomial at a dyadic point, so a bracket is a true sign
+    /// change and each root returned has one within a float of it. A sign
+    /// read in `f64` would not survive the cancellation at wide coefficient
+    /// ranges, where the value at the bracket's own end comes back with the
+    /// wrong sign.
     ///
     /// # Errors
     ///
@@ -1364,8 +1485,10 @@ impl PolyZ {
         }
         let mut roots = Vec::new();
         for (multiplicity, factor) in self.squarefree_decomposition() {
-            let coefficients = poly_to_f64(&factor).ok_or(RealRootError::CoefficientOutOfRange)?;
-            for root in simple_real_roots(&coefficients) {
+            // The roots are located in f64, so a polynomial it cannot hold
+            // has no answer here even though the search itself is exact.
+            poly_to_f64(&factor).ok_or(RealRootError::CoefficientOutOfRange)?;
+            for root in simple_real_roots(&factor) {
                 for _ in 0..multiplicity {
                     roots.push(root);
                 }
@@ -3669,6 +3792,91 @@ mod tests {
             }
         }
         PolyZ::new(coeffs)
+    }
+
+    /// Real roots over coefficient ranges where float evaluation cancels and
+    /// a fixed bisection budget cannot converge.
+    ///
+    /// Each returned root is checked for what the routine promises: the
+    /// polynomial's exact sign differs on the two sides of it, so a true root
+    /// lies within one float. Sign changes the search must find are counted
+    /// too, since a bracket whose ends are compared in floating point loses
+    /// the root whose neighbourhood cancels.
+    #[test]
+    fn real_roots_bracket_true_sign_changes_over_wide_coefficient_ranges() {
+        // Scales spanning the exponent range: a root near one beside a root
+        // near 10^k stresses both the bracket width and the cancellation at
+        // the Cauchy bound.
+        const SCALES: [u64; 4] = [20, 100, 300, 308];
+        let scale_of = |k: u64| BigInt::from_biguint(BigUint::from_u64(10).pow_u64(k));
+        let one = BigInt::from_biguint(BigUint::one());
+        let mut cases: Vec<(String, PolyZ, Vec<f64>)> = Vec::new();
+        for k in SCALES {
+            let big = scale_of(k);
+            // x² + 10^k·x − 10^k: roots near 1 and near −10^k.
+            cases.push((
+                format!("x^2 + 10^{k} x - 10^{k}"),
+                PolyZ::new(vec![big.negated(), big.clone(), one.clone()]),
+                vec![-(10f64.powi(k as i32)), 1.0],
+            ));
+            // (x − 1)(x + 10^k) = x² + (10^k − 1)x − 10^k, the same roots
+            // exactly, written so the ends of the bracket cancel differently.
+            cases.push((
+                format!("(x - 1)(x + 10^{k})"),
+                PolyZ::new(vec![big.negated(), big.sub(&one), one.clone()]),
+                vec![-(10f64.powi(k as i32)), 1.0],
+            ));
+        }
+        // 2x² − 5x − 4: the largest coefficient ratio is 5/2, so a bound
+        // built from the truncated ratio is 3 while the root is 3.14.
+        cases.push((
+            "2x^2 - 5x - 4".to_string(),
+            PolyZ::new(vec![
+                BigInt::from_i64(-4),
+                BigInt::from_i64(-5),
+                BigInt::from_i64(2),
+            ]),
+            vec![(5.0 - 57f64.sqrt()) / 4.0, (5.0 + 57f64.sqrt()) / 4.0],
+        ));
+        // x³ − 10^k·x = x(x − 10^(k/2))(x + 10^(k/2)) for even k.
+        for k in [20u64, 100, 300] {
+            let mut coefficients = vec![BigInt::zero(); 4];
+            coefficients[1] = scale_of(k).negated();
+            coefficients[3] = one.clone();
+            let root = 10f64.powi(k as i32 / 2);
+            cases.push((
+                format!("x^3 - 10^{k} x"),
+                PolyZ::new(coefficients),
+                vec![-root, 0.0, root],
+            ));
+        }
+
+        for (name, f, expected) in cases {
+            let roots = f.real_roots().expect("coefficients fit f64");
+            assert_eq!(
+                roots.len(),
+                expected.len(),
+                "root count of {name}: {roots:?}"
+            );
+            for (root, want) in roots.iter().zip(&expected) {
+                // Within one part in 2^50 of the true root: the search is a
+                // bisection in f64, not an exact solve.
+                const RELATIVE_SLACK: f64 = 1.0 / (1u64 << 50) as f64;
+                assert!(
+                    (root - want).abs() <= want.abs().max(1.0) * RELATIVE_SLACK,
+                    "{name}: root {root} is not {want}"
+                );
+                // A true root within one float of the one returned: the exact
+                // sign differs across it.
+                if *root != 0.0 {
+                    assert_ne!(
+                        super::sign_at(&f, root.next_down()),
+                        super::sign_at(&f, root.next_up()),
+                        "{name}: no sign change across {root}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
