@@ -67,7 +67,7 @@ A session limit is a safety stop, not success. Pilot exit 13, a missing CI, a
 CI wider than required, or too few subsession samples makes that cell
 **inconclusive**. Do not use `|| true`, publish a mean from a stopped session,
 or silently accept a nonconverged heavy operation. Increase the budget or
-reduce the case into honest conditioned workloads.
+reduce the case into conditioned workloads that do converge.
 
 The existing `scripts/bench_primitives.sh` computes its own IID normal CI and
 therefore is not the deciding runner for this task. It may still supply raw

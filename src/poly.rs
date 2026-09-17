@@ -404,8 +404,8 @@ pub struct ApproximateRoot {
     ///
     /// An estimate of how far the reported root may be from a true one, in the
     /// units the root itself is in. `f64::INFINITY` when the derivative
-    /// underflows, which is the honest answer: there the evaluation can say
-    /// nothing about where the root is.
+    /// underflows: there the evaluation can say nothing about where the
+    /// root is.
     ///
     /// Measured against the squarefree factor rather than against the whole
     /// polynomial, because that is what located the root. At a repeated root
@@ -5561,8 +5561,8 @@ mod tests {
 
     #[test]
     fn product_mod_monic_agrees_with_an_unreduced_fold() {
-        // The tree, which reduces at every level, against the honest thing:
-        // multiply everything out over ℤ and reduce once. Sizes chosen to
+        // The tree, which reduces at every level, against the direct
+        // computation: multiply everything out over ℤ and reduce once. Sizes
         // straddle the pairing — odd counts leave a factor unpaired at some
         // level, which is where a tree gets its off-by-one.
         let mut rng = SplitMix64 {
