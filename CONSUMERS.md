@@ -21,7 +21,9 @@ runs, each in a fresh target directory:
 | cryptography-ignored | every ignored cryptography test (`--ignored` only) |
 | rump-ignored | rump's ignored correctness tests: the AKS stress test, the Barrett correction search and the log-gamma sweep (`--ignored` only; needs `RUMP_LN_GAMMA_SWEEP`) |
 
-rump's other ignored tests are timing probes that assert nothing.
+rump's other ignored tests are timing probes that assert nothing. Entropy
+defines two feature modes, default and no default features, and the matrix
+runs both.
 
 Last run, 2026-09-16, on the development Mac (aarch64-apple-darwin, rustc
 1.95.0), with `--ignored`:
