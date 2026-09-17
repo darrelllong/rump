@@ -25,35 +25,39 @@ rump's other ignored tests are timing probes that assert nothing. Entropy
 defines two feature modes, default and no default features, and the matrix
 runs both.
 
-Last run, 2026-09-16, on the development Mac (aarch64-apple-darwin, rustc
-1.95.0), with `--ignored`:
+Last run, 2026-09-17, on the development Mac (aarch64-apple-darwin, rustc
+1.93.1), without `--ignored`:
 
 | Repository | Revision |
 |---|---|
-| rump | `4218630e0e3ca9bc2937a3d8ebc2b387e8cef1eb` |
-| cryptography | `40a9bdff34fa926e343eb9acf1a4d00aa362dbd9` |
-| entropy | `7b574f1ff394219197aeb24e4ce137c91329fadf` |
-| factoring | `cec57c8f9ba5508a87c77689562bde94b167219f` |
+| rump | `b58186e76021ad95d009a1d9da92b00a2685e5de` |
+| cryptography | `d107d1273ee825b4c5995ba23d58f7b868795a21` |
+| entropy | `7c728649d5e10a7f88c997324f8646878fa262d9` |
+| factoring | `73d99de63175559069eb535deff7d12ec05eb34d` |
 
 | Leg | Result |
 |---|---|
-| cryptography | 1677 passed, 0 failed, 19 ignored |
-| entropy-default | 443 passed, 0 failed, 1 ignored |
-| entropy-minimal | 329 passed, 0 failed, 1 ignored |
-| factoring | 295 passed, 0 failed, 3 ignored |
+| cryptography | 1707 passed, 0 failed, 21 ignored |
+| cryptography-all | 1707 passed, 0 failed, 21 ignored |
+| entropy-default | 520 passed, 0 failed, 2 ignored |
+| entropy-minimal | 140 passed, 0 failed, 1 ignored |
+| factoring | 302 passed, 0 failed, 3 ignored |
 | factoring-no-wipe | wipe not enabled |
-| cryptography-ignored | 18 passed, 1 failed |
-| rump-ignored | 2 passed, 1 failed |
 
-Both failures are understood. cryptography's
-`constant_time_eq_mask_timing_is_length_only` compared means of five short
-samples and failed at ratio 4.55 while other builds loaded the machine; run
-alone it passed 3 of 3, and cryptography's working tree now compares the
-fastest of 101 samples. rump's log-gamma sweep failed at `x = 0.45` because
-the bound documented at `4218630` was wrong below 1/2; `bdbe724` corrected the
-bound and the test. The same cryptography ignored tests passed 19 of 19 on
-twilight (x86_64) against rump `4218630`, and the three rump tests passed there
-with the earlier sweep.
+This is the combination in which rump's floating statistics are gone and
+`entropy::math` is their only home: factoring `73d99de` calls entropy for
+them and pins entropy 0.6.0, and entropy `7c72864` carries them with their
+references. An earlier attempt at the same combination failed the
+`entropy-minimal` leg on an entropy example that Cargo built in every
+configuration without declaring the feature it needs; entropy fixed that in
+`7c72864` and now checks each feature mode in its own release script.
+
+The ignored legs were last run on 2026-09-16 against rump
+`4218630e0e3ca9bc2937a3d8ebc2b387e8cef1eb`, where cryptography's
+`constant_time_eq_mask_timing_is_length_only` failed at ratio 4.55 while
+other builds loaded the machine — run alone it passed 3 of 3, and
+cryptography now compares the fastest of 101 samples — and the same tests
+passed 19 of 19 on twilight (x86_64).
 
 ## Hosts
 
