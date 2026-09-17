@@ -6,15 +6,20 @@ Mathematical Cryptology 1 (2021), §4, to be accepted on filter-through-
 extraction cost rather than merge rate. It was implemented and measured; it
 is **not** on main, because it does not pay.
 
-## What was built
+## What was measured
 
-Branch `parallel-filter`, commit `db9dc2f`: `Filter::merge_batched` takes
-merges in batches of columns with fresh plans whose member rows are pairwise
-disjoint — the XOR of two rows that do not hold a column cannot hold it, so
-every plan in a batch stays exact — forms plans and row updates in parallel,
-and applies the bookkeeping serially in fill order with the cost rule
-rechecked. Every row remains the XOR of its composition; the branch tests
-this at several worker counts, and dropping the disjointness check fails them.
+A `Filter::merge_batched` that takes merges in batches of columns with fresh
+plans whose member rows are pairwise disjoint — the XOR of two rows that do
+not hold a column cannot hold it, so every plan in a batch stays exact —
+forms plans and row updates in parallel, and applies the bookkeeping serially
+in fill order with the cost rule rechecked. Every row remains the XOR of its
+composition, checked at several worker counts; dropping the disjointness
+check fails those checks, which is what makes the rule the load-bearing part
+of the design rather than an optimisation detail.
+
+The implementation is not kept. It was written to answer the question below
+and the answer was no, so what remains is the design, the inputs, and the
+numbers — enough to rebuild it if a future workload changes the verdict.
 
 ## Inputs
 
