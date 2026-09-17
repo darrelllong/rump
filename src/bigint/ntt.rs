@@ -18,18 +18,30 @@
 
 use super::BigUint;
 
+// The convolution base. A digit width must divide the limb width, or a limb
+// would straddle digits, and the largest such width whose coefficients the
+// two primes still recover is 16: a coefficient is at most
+// overlap·(2^DIGIT_BITS − 1)^2, which at the largest supported transform
+// (overlap ≤ 2^25) is 1.4·10^17 against a prime product of 3.6·10^18, while
+// 32-bit digits exceed it by ten orders of magnitude. The assertion in
+// `multiply` checks the bound on every call.
 const DIGIT_BITS: usize = 16;
 const DIGITS_PER_LIMB: usize = 64 / DIGIT_BITS;
 const DIGIT_MASK: u64 = (1 << DIGIT_BITS) - 1;
 
-// Both primes are c·2^k + 1 and admit the listed primitive root.  The second
-// prime sets the common transform ceiling at 2^26.
+// Both primes are c·2^k + 1, and each root is the smallest primitive root of
+// its prime — reproducible by testing 2, 3, … against the factors of p − 1.
+// The second prime's 2-adic valuation, 26, sets the common transform ceiling.
 const PRIME_0: u64 = 2_013_265_921; // 15·2^27 + 1
 const ROOT_0: u64 = 31;
 const PRIME_1: u64 = 1_811_939_329; // 27·2^26 + 1
 const ROOT_1: u64 = 13;
 const MAX_TRANSFORM_LEN: usize = 1 << 26;
 const PRIME_PRODUCT: u64 = PRIME_0 * PRIME_1;
+
+// PRIME_0⁻¹ ≡ −9 (mod PRIME_1): the Garner coefficient that lifts a pair of
+// residues to one integer. 9·PRIME_0 mod PRIME_1 is PRIME_1 − 1.
+const NEG_PRIME_0_INVERSE_MOD_1: u64 = 9;
 
 // Linear passes need enough values per context to repay one scoped worker
 // wave. Set by the ignored phase/scaling probes; it limits workers by work
@@ -493,7 +505,7 @@ fn crt_two(residue_0: u64, residue_1: u64) -> u64 {
     } else {
         residue_1 + PRIME_1 - residue_0_mod_1
     };
-    let negated = (9 * delta) % PRIME_1;
+    let negated = (NEG_PRIME_0_INVERSE_MOD_1 * delta) % PRIME_1;
     let multiplier = if negated == 0 { 0 } else { PRIME_1 - negated };
     residue_0 + PRIME_0 * multiplier
 }

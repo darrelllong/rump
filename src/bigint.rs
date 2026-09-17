@@ -39,28 +39,48 @@ pub use reciprocal::WordReciprocal;
 #[cfg(test)]
 use barrett::BARRETT_HALF_PRODUCT_MAX_LIMBS;
 
-// Measured crossover where the recursive split starts beating schoolbook.
-const KARATSUBA_THRESHOLD_LIMBS: usize = 32;
+// Width from which one Karatsuba split beats a flat schoolbook pass, by
+// `karatsuba_crossover_timing`. The crossover is machine-dependent and this
+// is the width at which no measured machine loses: on the Cortex-A76 the
+// split is ahead from 48 limbs (+5%, and +22% at 96), while on the EPYC 7452
+// schoolbook holds until parity at 96 (-17% at 48, -47% at 64) and the split
+// only pulls ahead at 192 (+16%). Below 96 a machine would pay for the
+// split; at 96 one gains and the other is level. Correctness does not depend
+// on the value.
+const KARATSUBA_THRESHOLD_LIMBS: usize = 96;
 // Largest long/short length ratio Karatsuba accepts; beyond it the extra
 // recursion and temporaries outweigh the saved multiplications.
 const KARATSUBA_MAX_IMBALANCE: usize = 2;
 // Toom-3 crossover: from this many limbs in the shorter operand, the five
 // sub-multiplications of size n/3 overtake Karatsuba's three of size n/2,
-// despite the heavier evaluate/interpolate pass. The measured crossover is
-// ~120 limbs, so Karatsuba still covers 4096-bit sizes; see PERFORMANCE.md.
+// despite the heavier evaluate/interpolate pass. `toom_crossover_timing` on
+// the EPYC 7452: Karatsuba leads at 96 limbs (12.1 µs against 16.4), Toom-3
+// from 128 (21.4 against 25.6).
 const TOOM3_THRESHOLD_LIMBS: usize = 128;
 // Toom-4 crossover. Its exponent (log 7 / log 4 ≈ 1.404) beats Toom-3's
 // (1.465), but the seven-point interpolation carries a much larger constant,
-// so it overtakes Toom-3 only near 3000 limbs (~190 kbit). See PERFORMANCE.md.
-const TOOM4_THRESHOLD_LIMBS: usize = 3072;
-// Exact NTT multiplication crossover. The transform works in base 2^16 under
-// two 31-bit primes and reconstructs every convolution coefficient by CRT;
-// this threshold is measured against Toom-4 by `ntt_crossover_timing`.
-// Correctness is independent of it.
-const NTT_SERIAL_THRESHOLD_LIMBS: usize = 65_536;
+// so it overtakes Toom-3 only in the thousands of limbs.
+// `toom_crossover_timing` puts the last width where a machine still prefers
+// Toom-3 at 3072 (EPYC 7452: 2.75 ms against Toom-4's 2.97) and has both
+// machines on Toom-4 from 4096 (EPYC 4.06 ms against 4.43; Cortex-A76
+// 6.46 ms against 6.73) and above.
+const TOOM4_THRESHOLD_LIMBS: usize = 4096;
+// Exact NTT multiplication crossover on one execution context. The transform
+// works in base 2^16 under two 31-bit primes and reconstructs every
+// convolution coefficient by CRT. `ntt_crossover_timing` puts the crossover
+// at 131,072 limbs on both measured machines and nowhere below it: on the
+// EPYC 7452 a serial transform loses to Toom-4 at every narrower width in
+// the sweep (180 ms against 156 ms at 65,536) and wins at 131,072 (379 ms
+// against 448 ms); on the M4 it wins at 32,768, loses again at 65,536 — the
+// padding staircase — and wins from 131,072 on. The threshold is the width
+// past which no measured machine prefers Toom-4, not the first width where
+// one of them does. Correctness is independent of it.
+const NTT_SERIAL_THRESHOLD_LIMBS: usize = 131_072;
 // The same kernel crosses earlier when its transform stages run on
-// independent execution contexts: measured at 32,768 limbs with two contexts,
-// 8,192 with four or more. `ntt::automatic_worker_count` never exceeds the
+// independent execution contexts: `ntt_crossover_timing` measures two
+// contexts ahead of Toom-4 from 32,768 limbs on the M4 and from 8,192 on the
+// EPYC, and four or more ahead from 8,192 on both, so each threshold is the
+// wider of the two machines. `ntt::automatic_worker_count` never exceeds the
 // reported machine parallelism and returns one if detection fails.
 const NTT_TWO_WORKER_THRESHOLD_LIMBS: usize = 32_768;
 const NTT_PARALLEL_THRESHOLD_LIMBS: usize = 8_192;
@@ -1582,8 +1602,10 @@ impl BigUint {
     /// forward transform per prime instead of a general product's two.
     ///
     /// Against `self.mul(self)`: +12% at 8 limbs, +36% at 16, +32% at 32,
-    /// +27% at 64, +26% at 127. The NTT square is about 1.47x faster than
-    /// the NTT product and uses half its transform-array storage.
+    /// +27% at 64, +26% at 127. Against the NTT product the NTT square runs
+    /// 1.26x to 1.39x faster over 8,192 to 131,072 limbs (PERFORMANCE.md,
+    /// "NTT and the multiplication ladder"), and uses half its
+    /// transform-array storage.
     ///
     /// Montgomery residues have their own squaring
     /// ([`MontgomeryContext::square_residue`](crate::modular::MontgomeryContext::square_residue)),
@@ -5599,7 +5621,20 @@ mod tests {
         assert!(BigUint::should_use_ntt_with_contexts(&at_16k, &at_16k, 4));
         assert!(!BigUint::should_use_ntt_with_contexts(&at_98k, &at_98k, 1));
         assert!(BigUint::should_use_ntt_with_contexts(&at_98k, &at_98k, 4));
-        assert!(BigUint::should_use_ntt_with_contexts(&at_114k, &at_114k, 1));
+        // One context takes the transform only past its own threshold: at
+        // 114,688 limbs the padding is friendly but Toom-4 is still ahead
+        // (144 ms against 388 ms on the EPYC), and at 131,072 the transform
+        // wins on both measured machines.
+        assert!(!BigUint::should_use_ntt_with_contexts(
+            &at_114k, &at_114k, 1
+        ));
+        assert!(BigUint::should_use_ntt_with_contexts(&at_114k, &at_114k, 4));
+        let at_serial_threshold = BigUint::from_limbs(vec![u64::MAX; NTT_SERIAL_THRESHOLD_LIMBS]);
+        assert!(BigUint::should_use_ntt_with_contexts(
+            &at_serial_threshold,
+            &at_serial_threshold,
+            1
+        ));
     }
 
     #[test]
@@ -6035,6 +6070,74 @@ mod tests {
         }
     }
 
+    /// Schoolbook against Karatsuba over the widths around
+    /// `KARATSUBA_THRESHOLD_LIMBS`, which is the crossover this measures and
+    /// nothing else sets.
+    #[test]
+    #[ignore = "timing probe for the schoolbook/Karatsuba crossover; run with --ignored"]
+    fn karatsuba_crossover_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        // From where a split first has anything to save up to well past the
+        // shipped threshold, so the crossover falls inside the sweep.
+        const WIDTHS: [usize; 13] = [8, 12, 16, 20, 24, 32, 40, 48, 64, 96, 128, 192, 256];
+        // Operand pairs per width, each timed as the best of several runs and
+        // the row taken as the median over operands: the best run sheds
+        // scheduler interference, the median sheds an unlucky operand. A
+        // crossover decided by a few percent needs both.
+        const OPERANDS: usize = 9;
+        const RUNS: usize = 5;
+        // Repetitions sized to about a millisecond of work per run at the
+        // narrowest width, and held above a floor where the clock's
+        // resolution would otherwise show through.
+        const WORK_UNITS: usize = 2_000_000;
+        const MIN_REPS: usize = 200;
+        let mut seed = 0x4b41_5241_5453_5542; // "KARATSUB"
+        eprintln!(
+            "{:>6} {:>12} {:>12} {:>7}  best",
+            "words", "school_us", "kara_us", "saving"
+        );
+        for words in WIDTHS {
+            let reps = (WORK_UNITS / (words * words)).max(MIN_REPS);
+            let operands: Vec<(BigUint, BigUint)> = (0..OPERANDS)
+                .map(|_| {
+                    (
+                        seeded_biguint(words, &mut seed),
+                        seeded_biguint(words, &mut seed),
+                    )
+                })
+                .collect();
+            let time = |f: &dyn Fn(&BigUint, &BigUint) -> BigUint| {
+                let mut per_operand: Vec<f64> = operands
+                    .iter()
+                    .map(|(a, b)| {
+                        let mut best = f64::INFINITY;
+                        for _ in 0..RUNS {
+                            black_box(f(a, b));
+                            let start = Instant::now();
+                            for _ in 0..reps {
+                                black_box(f(a, b));
+                            }
+                            best = best.min(start.elapsed().as_secs_f64() / reps as f64 * 1e6);
+                        }
+                        best
+                    })
+                    .collect();
+                per_operand.sort_by(|x, y| x.partial_cmp(y).expect("finite"));
+                per_operand[per_operand.len() / 2]
+            };
+            let school = time(&|a, b| BigUint::mul_schoolbook_ref(a, b));
+            let kara = time(&|a, b| a.mul_karatsuba_ref(b));
+            let best = if school <= kara {
+                "schoolbook"
+            } else {
+                "karatsuba"
+            };
+            let saving = (school - kara) / school * 100.0;
+            eprintln!("{words:6} {school:12.4} {kara:12.4} {saving:+6.1}%  {best}");
+        }
+    }
+
     #[test]
     #[ignore = "timing probe for tuning the Toom thresholds; run with --ignored"]
     fn toom_crossover_timing() {
@@ -6045,8 +6148,10 @@ mod tests {
             "{:>6} {:>11} {:>11} {:>11}  best",
             "words", "kara_us", "toom3_us", "toom4_us"
         );
+        // Past the shipped Toom-4 threshold as well as up to it: a sweep that
+        // stops at a crossover cannot show one.
         for &words in &[
-            96usize, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072,
+            96usize, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288,
         ] {
             let reps = (2_000_000 / words).max(20);
             // Average each kernel over several independent operand pairs, each

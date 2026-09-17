@@ -41,6 +41,12 @@ use super::{bit_span, BigUint};
 /// products are Toom-4's and the reciprocal's constant is paid back.
 pub(crate) const NEWTON_DIVISION_THRESHOLD_LIMBS: usize = 3072;
 
+/// Corrections the exact-adjustment loop may take before the Newton step is
+/// declared broken. The step leaves a few units, so this is that handful with
+/// room to spare; a diverging step misses by the operand's width, not by
+/// tens, so the cap still catches it.
+const MAX_RECIPROCAL_CORRECTIONS: u32 = 256;
+
 /// Widths at or below which the reciprocal is taken by long division.
 ///
 /// The recursion halves the width until this floor, where a single
@@ -98,7 +104,10 @@ pub(super) fn reciprocal(d: &BigUint) -> BigUint {
         x = x.sub(&BigUint::one());
         product = product.sub(d);
         corrections += 1;
-        assert!(corrections < 256, "the Newton reciprocal did not converge");
+        assert!(
+            corrections < MAX_RECIPROCAL_CORRECTIONS,
+            "the Newton reciprocal did not converge"
+        );
     }
     let mut next = product.add(d);
     while next <= two_k {
@@ -106,7 +115,10 @@ pub(super) fn reciprocal(d: &BigUint) -> BigUint {
         product = next;
         next = product.add(d);
         corrections += 1;
-        assert!(corrections < 256, "the Newton reciprocal did not converge");
+        assert!(
+            corrections < MAX_RECIPROCAL_CORRECTIONS,
+            "the Newton reciprocal did not converge"
+        );
     }
     x
 }

@@ -1400,7 +1400,9 @@ mod tests {
     /// - `WⱼᵀAVᵢ₊₁ = 0` for every `j ≤ i`, with `Wⱼ = VⱼSⱼ`, and so
     ///   `WᵢᵀAWⱼ = 0` for `i ≠ j`;
     /// - the dependencies returned span the null space dense elimination
-    ///   finds, when that space is narrower than a block.
+    ///   finds, when that space is narrow enough that one block holds it with
+    ///   room to spare — half a block, so the comparison is not made where a
+    ///   wider space could have been truncated to the block width.
     #[test]
     fn the_recurrence_keeps_montgomerys_invariants() {
         // (VᵀAU)[l][m] for n × 64 blocks, by definition.

@@ -418,7 +418,9 @@ mod tests {
 
     /// Odd moduli near the top of the word, where the sum of two residues
     /// overflows it (and, in the wide context, so does REDC's folded value),
-    /// plus small ones where nothing does.
+    /// plus small ones where nothing does. `u64::MAX - 58` is 2⁶⁴ − 59 and
+    /// `u128::MAX - 158` is 2¹²⁸ − 159, the largest primes below each power,
+    /// so a context built on them is also a field.
     const EDGE_MODULI_64: [u64; 8] = [
         3,
         65_537,
@@ -729,6 +731,11 @@ mod tests {
     }
 }
 
+/// The first twelve primes: the bases Sorenson & Webster proved sufficient
+/// below 2⁶⁴, and the trial divisors that settle the smallest candidates
+/// before any exponentiation.
+const MILLER_RABIN_BASES: [u64; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
+
 /// Whether a `u64` is prime, decided deterministically.
 ///
 /// Strong-pseudoprime tests (Miller, *Riemann's hypothesis and tests for
@@ -736,8 +743,9 @@ mod tests {
 /// primality*, J. Number Theory 12 (1980)) to the first twelve primes as
 /// bases. Sorenson & Webster, *Strong pseudoprimes to twelve prime bases*,
 /// Mathematics of Computation 86 (2017), 985–1003, computed the least
-/// composite passing all twelve as 3 186 65…×10²⁴ — beyond 2⁶⁴ — so within a
-/// word the answer is a theorem, not a probability.
+/// composite passing all twelve as 318 665 857 834 031 151 167 461
+/// (≈3.19×10²³) — beyond 2⁶⁴ — so within a word the answer is a theorem,
+/// not a probability.
 ///
 /// Runs on [`Montgomery64`]: at most twelve word-width exponentiations and
 /// no allocation, for callers that test candidates by the million.
@@ -746,7 +754,7 @@ pub fn is_prime_u64(candidate: u64) -> bool {
     if candidate < 2 {
         return false;
     }
-    for &small in &[2u64, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37] {
+    for &small in &MILLER_RABIN_BASES {
         if candidate == small {
             return true;
         }
@@ -759,7 +767,7 @@ pub fn is_prime_u64(candidate: u64) -> bool {
     let trailing = (candidate - 1).trailing_zeros();
     let odd_part = (candidate - 1) >> trailing;
     let minus_one = domain.sub(domain.zero(), domain.one());
-    'bases: for &base in &[2u64, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37] {
+    'bases: for &base in &MILLER_RABIN_BASES {
         let mut x = domain.pow(domain.enter(base), odd_part);
         if x == domain.one() || x == minus_one {
             continue;
