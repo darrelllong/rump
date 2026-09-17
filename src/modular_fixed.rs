@@ -56,8 +56,9 @@ impl Montgomery64 {
             inverse = inverse.wrapping_mul(2u64.wrapping_sub(modulus.wrapping_mul(inverse)));
         }
         debug_assert_eq!(modulus.wrapping_mul(inverse), 1);
-        let one = (u64::MAX % modulus) + 1; // 2⁶⁴ mod modulus, since modulus > 1
-        let one = if one == modulus { 0 } else { one };
+        // 2⁶⁴ mod modulus. The sum stays below modulus: an odd modulus above
+        // one does not divide 2⁶⁴.
+        let one = (u64::MAX % modulus) + 1;
         // 2¹²⁸ mod modulus by squaring 2⁶⁴ mod modulus in the plain ring.
         let r_squared = ((u128::from(one) * u128::from(one)) % u128::from(modulus)) as u64;
         Some(Self {
@@ -230,8 +231,8 @@ impl Montgomery128 {
             inverse = inverse.wrapping_mul(2u128.wrapping_sub(modulus.wrapping_mul(inverse)));
         }
         debug_assert_eq!(modulus.wrapping_mul(inverse), 1);
+        // 2¹²⁸ mod modulus, below modulus for the same reason.
         let one = (u128::MAX % modulus) + 1;
-        let one = if one == modulus { 0 } else { one };
         // 2²⁵⁶ mod modulus: square 2¹²⁸ mod modulus with the wide product
         // and reduce the 256-bit square by double-and-add over the high
         // half. Runs once per context; clarity over speed.
@@ -395,6 +396,7 @@ fn mod_add(a: u128, b: u128, modulus: u128) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BigUint;
 
     #[test]
     fn even_and_trivial_moduli_are_refused() {
@@ -404,6 +406,211 @@ mod tests {
         assert!(Montgomery128::new(0).is_none());
         assert!(Montgomery128::new(1).is_none());
         assert!(Montgomery128::new(1 << 100).is_none());
+        assert!(Montgomery64::new(2).is_none());
+        assert!(Montgomery64::new(u64::MAX - 1).is_none());
+        assert!(Montgomery128::new(2).is_none());
+        assert!(Montgomery128::new(u128::MAX - 1).is_none());
+        assert!(Montgomery64::new(3).is_some());
+        assert!(Montgomery64::new(u64::MAX).is_some());
+        assert!(Montgomery128::new(3).is_some());
+        assert!(Montgomery128::new(u128::MAX).is_some());
+    }
+
+    /// Odd moduli near the top of the word, where the sum of two residues
+    /// overflows it (and, in the wide context, so does REDC's folded value),
+    /// plus small ones where nothing does.
+    const EDGE_MODULI_64: [u64; 8] = [
+        3,
+        65_537,
+        (1 << 32) + 1,
+        (1 << 63) - 1,
+        (1 << 63) + 1,
+        u64::MAX - 58,
+        u64::MAX - 2,
+        u64::MAX,
+    ];
+
+    const EDGE_MODULI_128: [u128; 9] = [
+        3,
+        u64::MAX as u128,
+        (1 << 64) + 1,
+        (1 << 127) - 1,
+        (1 << 127) + 1,
+        u128::MAX - 158,
+        u128::MAX - 2,
+        u128::MAX,
+        (u64::MAX as u128) << 64 | 1,
+    ];
+
+    /// Operands for a modulus: zero, one, the modulus's own neighbourhood,
+    /// and word values with every half all-ones or all-zeros, which drive
+    /// the longest carry chains. Unreduced values test `enter`'s reduction.
+    fn edge_operands_128(modulus: u128) -> Vec<u128> {
+        let word = u128::from(u64::MAX);
+        vec![
+            0,
+            1,
+            2,
+            modulus / 2,
+            modulus / 2 + 1,
+            modulus - 2,
+            modulus - 1,
+            modulus,
+            word,
+            word + 1,
+            word << 64,
+            1 << 127,
+            u128::MAX - 1,
+            u128::MAX,
+        ]
+    }
+
+    fn big(value: u128) -> BigUint {
+        BigUint::from_u128(value)
+    }
+
+    #[test]
+    fn the_context_constants_are_what_they_claim_at_the_word_edges() {
+        for modulus in EDGE_MODULI_64 {
+            let context = Montgomery64::new(modulus).expect("odd modulus above one");
+            assert_eq!(modulus.wrapping_mul(context.neg_inverse), u64::MAX);
+            let one = (1u128 << 64) % u128::from(modulus);
+            assert_eq!(u128::from(context.one), one, "2^64 mod {modulus}");
+            let r_squared = big(1 << 64)
+                .mul(&big(1 << 64))
+                .rem(&big(u128::from(modulus)));
+            assert_eq!(
+                big(u128::from(context.r_squared)),
+                r_squared,
+                "2^128 mod {modulus}"
+            );
+        }
+        for modulus in EDGE_MODULI_128 {
+            let context = Montgomery128::new(modulus).expect("odd modulus above one");
+            assert_eq!(modulus.wrapping_mul(context.neg_inverse), u128::MAX);
+            let r = big(u128::MAX).add(&big(1));
+            assert_eq!(
+                big(context.one),
+                r.rem(&big(modulus)),
+                "2^128 mod {modulus}"
+            );
+            assert_eq!(
+                big(context.r_squared),
+                r.mul(&r).rem(&big(modulus)),
+                "2^256 mod {modulus}"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_products_carry_through_every_half() {
+        let word = u128::from(u64::MAX);
+        let operands = [
+            0,
+            1,
+            word,
+            word + 1,
+            word << 64,
+            (word << 64) | 1,
+            1 << 127,
+            u128::MAX - 1,
+            u128::MAX,
+        ];
+        for a in operands {
+            for b in operands {
+                let (high, low) = wide_mul(a, b);
+                let product = big(high)
+                    .mul(&big(1 << 64))
+                    .mul(&big(1 << 64))
+                    .add(&big(low));
+                assert_eq!(product, big(a).mul(&big(b)), "{a:#x} * {b:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_word_context_is_exact_at_the_top_of_its_range() {
+        for modulus in EDGE_MODULI_64 {
+            let context = Montgomery64::new(modulus).expect("odd modulus above one");
+            let wide_modulus = u128::from(modulus);
+            let operands: Vec<u64> = edge_operands_128(wide_modulus)
+                .into_iter()
+                .map(|value| value as u64)
+                .collect();
+            for &a in &operands {
+                let (x, plain_a) = (context.enter(a), u128::from(a) % wide_modulus);
+                assert_eq!(
+                    u128::from(context.exit(x)),
+                    plain_a,
+                    "round trip {a} mod {modulus}"
+                );
+                let squared = (plain_a * plain_a % wide_modulus) as u64;
+                assert_eq!(
+                    context.exit(context.square(x)),
+                    squared,
+                    "{a}^2 mod {modulus}"
+                );
+                assert_eq!(context.square(x), context.mul(x, x));
+                assert_eq!(context.pow(x, 0), context.one());
+                assert_eq!(context.pow(x, 3), context.mul(context.square(x), x));
+                for &b in &operands {
+                    let (y, plain_b) = (context.enter(b), u128::from(b) % wide_modulus);
+                    let expect = |value: u128| (value % wide_modulus) as u64;
+                    assert_eq!(context.exit(context.mul(x, y)), expect(plain_a * plain_b));
+                    assert_eq!(context.exit(context.add(x, y)), expect(plain_a + plain_b));
+                    assert_eq!(
+                        context.exit(context.sub(x, y)),
+                        expect(plain_a + wide_modulus - plain_b),
+                        "{a} - {b} mod {modulus}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_wide_context_is_exact_at_the_top_of_its_range() {
+        for modulus in EDGE_MODULI_128 {
+            let context = Montgomery128::new(modulus).expect("odd modulus above one");
+            let big_modulus = big(modulus);
+            let reduce = |value: BigUint| value.rem(&big_modulus);
+            let operands = edge_operands_128(modulus);
+            for &a in &operands {
+                let (x, plain_a) = (context.enter(a), reduce(big(a)));
+                assert_eq!(
+                    big(context.exit(x)),
+                    plain_a,
+                    "round trip {a} mod {modulus}"
+                );
+                let squared = reduce(plain_a.mul(&plain_a));
+                assert_eq!(
+                    big(context.exit(context.square(x))),
+                    squared,
+                    "{a}^2 mod {modulus}"
+                );
+                assert_eq!(context.square(x), context.mul(x, x));
+                assert_eq!(context.pow(x, 0), context.one());
+                assert_eq!(context.pow(x, 3), context.mul(context.square(x), x));
+                for &b in &operands {
+                    let (y, plain_b) = (context.enter(b), reduce(big(b)));
+                    assert_eq!(
+                        big(context.exit(context.mul(x, y))),
+                        reduce(plain_a.mul(&plain_b)),
+                        "{a} * {b} mod {modulus}"
+                    );
+                    assert_eq!(
+                        big(context.exit(context.add(x, y))),
+                        reduce(plain_a.add(&plain_b)),
+                        "{a} + {b} mod {modulus}"
+                    );
+                    assert_eq!(
+                        big(context.exit(context.sub(x, y))),
+                        reduce(plain_a.add(&big_modulus).sub(&plain_b)),
+                        "{a} - {b} mod {modulus}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
