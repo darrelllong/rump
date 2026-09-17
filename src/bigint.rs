@@ -84,15 +84,6 @@ const NTT_SERIAL_THRESHOLD_LIMBS: usize = 131_072;
 // reported machine parallelism and returns one if detection fails.
 const NTT_TWO_WORKER_THRESHOLD_LIMBS: usize = 32_768;
 const NTT_PARALLEL_THRESHOLD_LIMBS: usize = 8_192;
-// A radix-2 transform rounds the convolution length up to a power of two, so
-// one extra input limb can double its work. Equal 98,304-limb operands (10.67
-// transform coefficients per short limb) favour Toom-4; 114,688 (9.14) favour
-// NTT decisively. This gate keeps the size threshold from selecting NTT on the
-// expensive side of that padding staircase.
-const NTT_SERIAL_MAX_PADDED_COEFFICIENTS_PER_SHORT_LIMB: usize = 10;
-// Parallel transforms admit a ratio of 11 (two workers at 49,152 limbs; four
-// from the 11,916-limb padding boundary onward).
-const NTT_PARALLEL_MAX_PADDED_COEFFICIENTS_PER_SHORT_LIMB: usize = 11;
 // Block-decomposition crossover for lopsided products (long ≥ 2·short): the
 // shorter length from which cutting the longer operand into short-sized
 // digits and multiplying each pair through the balanced kernels beats one
@@ -1520,12 +1511,7 @@ impl BigUint {
         let Some(transform_len) = ntt::transform_len(lhs.limbs.len(), rhs.limbs.len()) else {
             return false;
         };
-        Self::should_use_ntt_with_workers(
-            lhs,
-            rhs,
-            transform_len,
-            ntt::automatic_worker_count(transform_len),
-        )
+        Self::should_use_ntt_with_workers(lhs, rhs, ntt::automatic_worker_count(transform_len))
     }
 
     /// Deterministic form of NTT admission, parameterized for its tests.
@@ -1535,15 +1521,10 @@ impl BigUint {
             return false;
         };
         let workers = ntt::worker_count(transform_len, max_contexts.max(1));
-        Self::should_use_ntt_with_workers(lhs, rhs, transform_len, workers)
+        Self::should_use_ntt_with_workers(lhs, rhs, workers)
     }
 
-    fn should_use_ntt_with_workers(
-        lhs: &Self,
-        rhs: &Self,
-        transform_len: usize,
-        workers: usize,
-    ) -> bool {
+    fn should_use_ntt_with_workers(lhs: &Self, rhs: &Self, workers: usize) -> bool {
         let short = lhs.limbs.len().min(rhs.limbs.len());
         let long = lhs.limbs.len().max(rhs.limbs.len());
         let threshold = match workers {
@@ -1551,16 +1532,16 @@ impl BigUint {
             2 => NTT_TWO_WORKER_THRESHOLD_LIMBS,
             _ => NTT_PARALLEL_THRESHOLD_LIMBS,
         };
-        let maximum_padding = if workers == 1 {
-            NTT_SERIAL_MAX_PADDED_COEFFICIENTS_PER_SHORT_LIMB
-        } else {
-            NTT_PARALLEL_MAX_PADDED_COEFFICIENTS_PER_SHORT_LIMB
-        };
-        short >= threshold
-            && long <= short + short / 2
-            && short
-                .checked_mul(maximum_padding)
-                .is_some_and(|limit| transform_len <= limit)
+        // Padding is not a reason to refuse. A radix-2 transform rounds the
+        // convolution up to a power of two, so the work per limb depends on
+        // where a width falls in that staircase — 16,384 limbs pad to 8
+        // coefficients per limb, 20,410 to 12.8 — but `ntt_padding_gate_timing`
+        // has the transform ahead at every width and every ratio it measures
+        // on both machines: at the worst ratio, 12.84, by 43% on the EPYC 7452
+        // and 13% on the Cortex-A76, and never behind at the friendlier ones.
+        // Refusing the wasteful side used to cost the NFS square root a factor
+        // of six, since it lifts at 1.3 Mbit — 20,410 limbs, ratio 12.84.
+        short >= threshold && long <= short + short / 2
     }
 
     /// Exact large multiplication through two modular transforms and CRT.
@@ -5597,34 +5578,29 @@ mod tests {
         assert_eq!(all_ones.mul(&all_ones), expected);
         assert_eq!(all_ones.square(), expected);
 
-        // Radix-2 padding is a staircase, not a monotone size cost. The
-        // dispatcher accepts the measured efficient side and rejects the
-        // expensive side immediately after a transform-length doubling.
+        // Admission is by width and balance, not by where the width falls in
+        // the radix-2 padding staircase. The NFS square root lifts at
+        // 1.3 Mbit — 20,410 limbs, whose convolution pads to 12.8
+        // coefficients per limb, the worst ratio the staircase produces —
+        // and the transform is ahead there on every machine measured, so
+        // the dispatcher must take it.
+        const NFS_LIFT_LIMBS: usize = 20_410;
         let at_8k = BigUint::from_limbs(vec![u64::MAX; 8_192]);
-        let before_wide_padding = BigUint::from_limbs(vec![u64::MAX; 11_915]);
-        let at_wide_padding = BigUint::from_limbs(vec![u64::MAX; 11_916]);
+        let at_worst_padding = BigUint::from_limbs(vec![u64::MAX; NFS_LIFT_LIMBS]);
         let at_16k = BigUint::from_limbs(vec![u64::MAX; 16_384]);
         let at_98k = BigUint::from_limbs(vec![u64::MAX; 98_304]);
         let at_114k = BigUint::from_limbs(vec![u64::MAX; 114_688]);
         assert!(!BigUint::should_use_ntt_with_contexts(&at_8k, &at_8k, 1));
         assert!(BigUint::should_use_ntt_with_contexts(&at_8k, &at_8k, 4));
-        assert!(!BigUint::should_use_ntt_with_contexts(
-            &before_wide_padding,
-            &before_wide_padding,
-            4
-        ));
         assert!(BigUint::should_use_ntt_with_contexts(
-            &at_wide_padding,
-            &at_wide_padding,
+            &at_worst_padding,
+            &at_worst_padding,
             4
         ));
         assert!(BigUint::should_use_ntt_with_contexts(&at_16k, &at_16k, 4));
         assert!(!BigUint::should_use_ntt_with_contexts(&at_98k, &at_98k, 1));
         assert!(BigUint::should_use_ntt_with_contexts(&at_98k, &at_98k, 4));
-        // One context takes the transform only past its own threshold: at
-        // 114,688 limbs the padding is friendly but Toom-4 is still ahead
-        // (144 ms against 388 ms on the EPYC), and at 131,072 the transform
-        // wins on both measured machines.
+        // One context takes the transform only past its own threshold.
         assert!(!BigUint::should_use_ntt_with_contexts(
             &at_114k, &at_114k, 1
         ));
@@ -6135,6 +6111,61 @@ mod tests {
             };
             let saving = (school - kara) / school * 100.0;
             eprintln!("{words:6} {school:12.4} {kara:12.4} {saving:+6.1}%  {best}");
+        }
+    }
+
+    /// The transform against the ladder across the padding staircase.
+    ///
+    /// A radix-2 transform rounds the convolution length up to a power of
+    /// two, so the cost per limb depends on where a width falls in that
+    /// staircase: 16,384 limbs pad to 8 coefficients per limb and 20,410 to
+    /// 12.8. The gates admit the NTT only below a measured ratio, which is
+    /// what this measures. The awkward widths are not academic — the NFS
+    /// square root lifts at 1.3 Mbit, which is 20,410 limbs.
+    #[test]
+    #[ignore = "timing probe for the NTT padding gates; run with --ignored"]
+    fn ntt_padding_gate_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        const RUNS: usize = 3;
+        let mut seed = 0x6e74_745f_7061_6421; // "ntt_pad!"
+        eprintln!(
+            "{:>8} {:>7} {:>11} {:>11} {:>8}  best",
+            "words", "ratio", "toom_us", "ntt_us", "saving"
+        );
+        for words in [
+            12_288usize,
+            16_384,
+            20_410,
+            24_576,
+            32_768,
+            40_960,
+            49_152,
+            65_536,
+            81_920,
+            98_304,
+        ] {
+            let a = seeded_biguint(words, &mut seed);
+            let b = seeded_biguint(words, &mut seed);
+            // Base-2^16 digits per limb, and the radix-2 length the
+            // convolution rounds up to.
+            let digits = words * 4;
+            let padded = (2 * digits - 1).next_power_of_two();
+            let ratio = padded as f64 / words as f64;
+            let time = |f: &dyn Fn() -> BigUint| {
+                let mut best = f64::INFINITY;
+                for _ in 0..RUNS {
+                    let start = Instant::now();
+                    black_box(f());
+                    best = best.min(start.elapsed().as_secs_f64() * 1e6);
+                }
+                best
+            };
+            let toom = time(&|| a.mul_toom4_ref(&b));
+            let ntt = time(&|| a.mul_ntt_ref(&b));
+            let best = if toom <= ntt { "toom4" } else { "ntt" };
+            let saving = (toom - ntt) / toom * 100.0;
+            eprintln!("{words:8} {ratio:7.2} {toom:11.1} {ntt:11.1} {saving:+7.1}%  {best}");
         }
     }
 
