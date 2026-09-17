@@ -288,20 +288,42 @@ pub fn prune_singletons(rows: &[Vec<u64>], columns: usize) -> PrunedMatrix {
 // iteration advances all of them. For ten thousand rows that is about 160
 // iterations where a scalar method needs `2·rows ≈ 20 000`.
 //
-// # Provenance
+// # Equations and state
 //
-// The recurrence is Montgomery's: equations (18)–(20) and the subspace
-// selection of figure 1 from *A Block Lanczos Algorithm for Finding
-// Dependencies over GF(2)*, EUROCRYPT '95, pages 106–120. The coefficients
-// follow the paper exactly: a wrong one yields *no* dependencies rather than
-// wrong ones, a silent failure. The code is this repository's own expression
-// of the equations.
+// Montgomery, *A Block Lanczos Algorithm for Finding Dependencies over
+// GF(2)*, EUROCRYPT '95, LNCS 921, 106–120: the recurrence (18)–(19), the
+// solution (20) and the subspace selection of figure 1. A wrong coefficient
+// yields no dependencies rather than wrong ones, so the mapping is stated
+// here and its invariants are tested step by step.
 //
-// Sebastian Wouters' BSD-licensed C++ implementation
-// (`github.com/SebWouters/blanczos`) annotates its variables with
-// Montgomery's names and serves as a check on the reading of the indices. No
-// code is taken from it; the data structures here (a sparse matrix held by
-// rows and by columns at once, a `[u64; 64]` block) share nothing with its.
+// Representation: `N = 64`. An `n × N` block is a `Vec<u64>` whose word `r`
+// holds row `r`, so lane `j` is column `j`. An `N × N` matrix is a `Small`
+// whose word `l` holds row `l`. `dot(P, Q)` is `PᵀQ`, `mul(P, Q)` is `PQ`,
+// and masking every row of a product by `mask` multiplies it on the right by
+// `SᵢSᵢᵀ`. Over GF(2) subtraction is addition, so the paper's signs vanish.
+//
+// | Paper                                   | Here              | Formed                         |
+// |-----------------------------------------|-------------------|--------------------------------|
+// | `A = MᵀM`                               | `matrix.apply`    | applied, never stored          |
+// | `Y`, `V₀ = AY`                          | `x` (start), `q`  | once                           |
+// | `Vᵢ`, `Vᵢ₋₁`, `Vᵢ₋₂`                    | `v0`, `v1`, `v2`  | shifted after (18)             |
+// | `AVᵢ`                                   | `av0`             | after `Vᵢ`                     |
+// | `Tᵢ = VᵢᵀAVᵢ`, `Tᵢ₋₁`                   | `t0`, `t1`        | after `AVᵢ`                    |
+// | `Sᵢ` (lanes)                            | `mask`            | `invert(Tᵢ, Sᵢ₋₁)`, figure 1   |
+// | `Winvᵢ = Sᵢ(SᵢᵀTᵢSᵢ)⁻¹Sᵢᵀ`, `i−1`, `i−2` | `w0i`, `w1i`, `w2i` | `invert`                     |
+// | `Gᵢ = Vᵢ₋₁ᵀA²Vᵢ₋₁Sᵢ₋₁Sᵢ₋₁ᵀ + Tᵢ₋₁`       | `g` before update | read by `F`                    |
+// | `Gᵢ₊₁ = VᵢᵀA²VᵢSᵢSᵢᵀ + Tᵢ`                | `g` after update  | `(AVᵢ)ᵀ(AVᵢ)` masked, plus `Tᵢ` |
+// | `Dᵢ₊₁ = I − Winvᵢ Gᵢ₊₁`                   | `d`               | (19)                           |
+// | `Eᵢ₊₁ = −Winvᵢ₋₁ TᵢSᵢSᵢᵀ`                 | `e`               | (19)                           |
+// | `Fᵢ₊₁ = −Winvᵢ₋₂(I − Tᵢ₋₁Winvᵢ₋₁)GᵢSᵢSᵢᵀ`  | `f`               | (19)                           |
+// | `Vᵢ₊₁ = AVᵢSᵢSᵢᵀ + VᵢDᵢ₊₁ + Vᵢ₋₁Eᵢ₊₁ + Vᵢ₋₂Fᵢ₊₁` | `recurrence` | (18)                      |
+// | `X = Y + Σ VᵢWinvᵢVᵢᵀV₀`                  | `x`               | (20), so `AX = AY + V₀ = 0`    |
+//
+// Invariants, tested on small matrices against dense arithmetic
+// (`the_recurrence_keeps_montgomerys_invariants`): `WᵢᵀAWⱼ = 0` for `i ≠ j`
+// with `Wᵢ = VᵢSᵢ`; `Winvᵢ` inverts `Tᵢ` on `Sᵢ`; `WⱼᵀAVᵢ₊₁ = 0` for every
+// `j ≤ i`; and the dependencies returned span the null space found by dense
+// elimination.
 //
 // # The two things that make it delicate
 //
@@ -889,6 +911,25 @@ fn lanczos<R: RandomSource + ?Sized>(
     rng: &mut R,
     is_null: impl Fn(&[usize]) -> bool,
 ) -> Option<Vec<Vec<usize>>> {
+    lanczos_observed(matrix, rng, is_null, &mut |_| {})
+}
+
+/// One iteration's state as the tests read it: `Vᵢ`, `Tᵢ`, `Winvᵢ` and `Sᵢ`.
+#[cfg_attr(not(test), allow(dead_code))]
+struct LanczosStep<'a> {
+    v: &'a [u64],
+    t: &'a Small,
+    winv: &'a Small,
+    selected: u64,
+}
+
+/// [`lanczos`], showing `observe` each iteration's state once `Sᵢ` is chosen.
+fn lanczos_observed<R: RandomSource + ?Sized>(
+    matrix: &Sparse,
+    rng: &mut R,
+    is_null: impl Fn(&[usize]) -> bool,
+    observe: &mut dyn FnMut(LanczosStep),
+) -> Option<Vec<Vec<usize>>> {
     let count = matrix.relations();
 
     // The starting block is random; rump chooses no entropy source, so the
@@ -934,6 +975,12 @@ fn lanczos<R: RandomSource + ?Sized>(
         }
         let w0i = next_w0i;
         mask = next_mask;
+        observe(LanczosStep {
+            v: &v0,
+            t: &t0,
+            winv: &w0i,
+            selected: mask,
+        });
         if mask == 0 {
             break;
         }
@@ -1013,8 +1060,9 @@ fn lanczos<R: RandomSource + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{
-        block_lanczos_dependencies, borrow_two, dense_null_space, fold_range, prune_singletons,
-        recurrence, words_for, xor_mul_block_into, FoldPool, Small, SmallProduct, WORD,
+        block_lanczos_dependencies, borrow_two, dense_null_space, fold_range, lanczos_observed,
+        prune_singletons, recurrence, words_for, xor_mul_block_into, FoldPool, Small, SmallProduct,
+        Sparse, WIDTH, WORD,
     };
     use std::sync::Arc;
 
@@ -1344,6 +1392,137 @@ mod tests {
     }
 
     /// Degenerate shapes are refused rather than guessed at.
+    /// Montgomery's invariants, step by step, against dense arithmetic built
+    /// here from the rows (`A[r][s]` is the parity of rows `r` and `s`'s
+    /// common columns), not from the sparse code under test:
+    ///
+    /// - `Winvᵢ` inverts `Tᵢ = VᵢᵀAVᵢ` on the selected lanes `Sᵢ`;
+    /// - `WⱼᵀAVᵢ₊₁ = 0` for every `j ≤ i`, with `Wⱼ = VⱼSⱼ`, and so
+    ///   `WᵢᵀAWⱼ = 0` for `i ≠ j`;
+    /// - the dependencies returned span the null space dense elimination
+    ///   finds, when that space is narrower than a block.
+    #[test]
+    fn the_recurrence_keeps_montgomerys_invariants() {
+        // (VᵀAU)[l][m] for n × 64 blocks, by definition.
+        fn form(v: &[u64], a_u: &[u64]) -> Small {
+            let mut out = [0u64; WIDTH];
+            for (&row_v, &row_au) in v.iter().zip(a_u) {
+                for (l, slot) in out.iter_mut().enumerate() {
+                    if row_v >> l & 1 == 1 {
+                        *slot ^= row_au;
+                    }
+                }
+            }
+            out
+        }
+        fn rank(mut vectors: Vec<Vec<u64>>) -> usize {
+            let mut rank = 0;
+            let bits = vectors.first().map_or(0, |v| v.len() * WORD);
+            for bit in 0..bits {
+                let Some(pivot) = (rank..vectors.len())
+                    .find(|&i| vectors[i][bit / WORD] >> (bit % WORD) & 1 == 1)
+                else {
+                    continue;
+                };
+                vectors.swap(rank, pivot);
+                let row = vectors[rank].clone();
+                for (i, other) in vectors.iter_mut().enumerate() {
+                    if i != rank && other[bit / WORD] >> (bit % WORD) & 1 == 1 {
+                        for (a, b) in other.iter_mut().zip(&row) {
+                            *a ^= b;
+                        }
+                    }
+                }
+                rank += 1;
+            }
+            rank
+        }
+        let mut compared = 0;
+        for seed in 1..=12u64 {
+            let (relations, columns) = (360, 330 + 3 * seed as usize);
+            let rows = sparse_rows(relations, columns, 10, seed);
+            let dense_a: Vec<Vec<usize>> = (0..relations)
+                .map(|r| {
+                    (0..relations)
+                        .filter(|&t| {
+                            rows[r]
+                                .iter()
+                                .zip(&rows[t])
+                                .map(|(x, y)| (x & y).count_ones())
+                                .sum::<u32>()
+                                % 2
+                                == 1
+                        })
+                        .collect()
+                })
+                .collect();
+            let apply = |v: &[u64]| -> Vec<u64> {
+                dense_a
+                    .iter()
+                    .map(|row| row.iter().fold(0u64, |acc, &t| acc ^ v[t]))
+                    .collect()
+            };
+            let mut steps: Vec<(Vec<u64>, Small, Small, u64)> = Vec::new();
+            let matrix = Sparse::from_packed(&rows, columns, 1);
+            let found = lanczos_observed(
+                &matrix,
+                &mut TestRng(0x9e37_79b9_7f4a_7c15 ^ seed),
+                |_| true,
+                &mut |step| steps.push((step.v.to_vec(), *step.t, *step.winv, step.selected)),
+            );
+            assert!(
+                steps.len() > 2,
+                "seed {seed}: only {} iterations",
+                steps.len()
+            );
+            let lanes = |mask: u64| (0..WIDTH).filter(move |l| mask >> l & 1 == 1);
+            let a_v: Vec<Vec<u64>> = steps.iter().map(|(v, ..)| apply(v)).collect();
+            for (i, (v, t, winv, selected)) in steps.iter().enumerate() {
+                assert_eq!(&form(v, &a_v[i]), t, "seed {seed}, step {i}: Tᵢ");
+                let product: Small = std::array::from_fn(|l| {
+                    (0..WIDTH)
+                        .filter(|&k| winv[l] >> k & 1 == 1)
+                        .fold(0u64, |acc, k| acc ^ t[k])
+                });
+                for l in lanes(*selected) {
+                    assert_eq!(
+                        product[l] & selected,
+                        1u64 << l,
+                        "seed {seed}, step {i}: Winv·T on S, lane {l}"
+                    );
+                }
+                // Vᵢ is step i − 1's Vᵢ₊₁: Wⱼᵀ A Vᵢ = 0 for every j < i, which
+                // includes Wⱼᵀ A Wᵢ = 0.
+                for (j, (v_j, _, _, selected_j)) in steps.iter().enumerate().take(i) {
+                    let w_j_a_v = form(v_j, &a_v[i]);
+                    for l in lanes(*selected_j) {
+                        assert_eq!(w_j_a_v[l], 0, "seed {seed}: W{j}ᵀAV{i}, lane {l}");
+                    }
+                }
+            }
+            let null_space = dense_null_space(&rows, columns);
+            if let Some(found) = found {
+                if null_space.len() < WIDTH / 2 {
+                    let indicator = |set: &[usize]| {
+                        let mut bits = vec![0u64; words_for(relations)];
+                        for &r in set {
+                            bits[r / WORD] |= 1 << (r % WORD);
+                        }
+                        bits
+                    };
+                    let found_rank = rank(found.iter().map(|d| indicator(d)).collect());
+                    let dense_rank = rank(null_space.iter().map(|d| indicator(d)).collect());
+                    assert_eq!(
+                        found_rank, dense_rank,
+                        "seed {seed}: the span differs from dense elimination"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert!(compared >= 8, "only {compared} spans compared");
+    }
+
     #[test]
     fn block_lanczos_refuses_the_degenerate_shapes() {
         let mut rng = TestRng(1);
