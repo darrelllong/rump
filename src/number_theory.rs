@@ -393,6 +393,28 @@ fn combine_signed_into(
     *out = BigInt::from_parts(sign, BigUint::from_limbs(limbs));
 }
 
+/// Classical extended Euclid on a pair of words, in machine arithmetic: the
+/// gcd and the first row `(m00, m01)` of the transform the steps compose,
+/// so `gcd = m00·r0 + m01·r1`.
+///
+/// The extended Lehmer loops finish here once both remainders fit in a word,
+/// where a full-width division, multiplication and subtraction per step
+/// would cost more than the whole word loop. The steps and so the cofactors
+/// are exactly classical Euclid's. Every entry is at most `r0` in magnitude
+/// (each is a continuant of the quotients, bounded by the operand they
+/// reduce), so `i128` holds every entry and every product formed.
+fn word_euclid_row(mut r0: u64, mut r1: u64) -> (u64, i128, i128) {
+    let (mut m00, mut m01, mut m10, mut m11) = (1i128, 0i128, 0i128, 1i128);
+    while r1 != 0 {
+        let quotient = r0 / r1;
+        (r0, r1) = (r1, r0 - quotient * r1);
+        let quotient = i128::from(quotient);
+        (m00, m10) = (m10, m00 - quotient * m10);
+        (m01, m11) = (m11, m01 - quotient * m11);
+    }
+    (r0, m00, m01)
+}
+
 // ─── Jacobi state machine ───────────────────────────────────────────────────
 //
 // The Jacobi symbol can ride the same left-to-right quotient sequence as gcd:
@@ -1391,6 +1413,12 @@ fn gcd_extended_lehmer(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
     let mut scratch = LinearScratch::default();
 
     while !r1.is_zero() {
+        if let (&[word0], &[word1]) = (r0.limbs(), r1.limbs()) {
+            let (g, m00, m01) = word_euclid_row(word0, word1);
+            combine_signed_into(&mut next_s0, &mut scratch, m00, &s0, m01, &s1);
+            combine_signed_into(&mut next_t0, &mut scratch, m00, &t0, m01, &t1);
+            return (BigUint::from_u64(g), next_s0, next_t0);
+        }
         let n = r1.limbs().len();
         // A Lehmer step only when the operands share a multi-limb length and
         // r0 >= r1, so the 124-bit leading digits are aligned and in range.
@@ -2847,6 +2875,14 @@ pub fn mod_inverse(a: &BigUint, n: &BigUint) -> Option<BigUint> {
     let mut scratch = LinearScratch::default();
 
     while !r1.is_zero() {
+        if let (&[word0], &[word1]) = (r0.limbs(), r1.limbs()) {
+            let (g, m00, m01) = word_euclid_row(word0, word1);
+            if g != 1 {
+                return None;
+            }
+            combine_signed_into(&mut next_u0, &mut scratch, m00, &u0, m01, &u1);
+            return Some(next_u0.rem_euclid(n));
+        }
         let m = r1.limbs().len();
         if m >= 2 && r0.limbs().len() == m && r0 >= r1 {
             let (u_hat, v_hat) = leading_pair(&r0, &r1);
@@ -6230,6 +6266,69 @@ mod tests {
         let (g, s, _) = super::gcd_extended(&BigUint::zero(), &BigUint::from_u64(7));
         assert_eq!(g, BigUint::from_u64(7));
         assert!(matches!(s.sign(), crate::bigint::Sign::Zero));
+    }
+
+    /// Classical extended Euclid, one full-width step at a time: the pair
+    /// `gcd_extended` promises and the inverse `mod_inverse` must agree with.
+    fn classical_extended_euclid(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
+        let (mut r0, mut r1) = (a.clone(), b.clone());
+        let (mut s0, mut s1) = (BigInt::from_biguint(BigUint::one()), BigInt::zero());
+        let (mut t0, mut t1) = (BigInt::zero(), BigInt::from_biguint(BigUint::one()));
+        while !r1.is_zero() {
+            let (quotient, remainder) = r0.div_rem(&r1);
+            let quotient = BigInt::from_biguint(quotient);
+            (s0, s1) = (s1.clone(), s0.sub(&quotient.mul(&s1)));
+            (t0, t1) = (t1.clone(), t0.sub(&quotient.mul(&t1)));
+            (r0, r1) = (r1, remainder);
+        }
+        (r0, s0, t0)
+    }
+
+    #[test]
+    fn extended_euclid_is_classical_across_word_and_multiword_shapes() {
+        // Operand widths on both sides of one word and of the Lehmer window,
+        // in every pairing, so each loop enters its word finish from a
+        // one-word pair, from a wider pair, and never with a wide operand.
+        const WIDTHS: [usize; 8] = [1, 2, 63, 64, 65, 128, 200, 400];
+        const PAIRS_PER_SHAPE: usize = 12;
+        let mut rng = SplitMix64 {
+            state: 0x7761_6f72_645f_7461,
+        };
+        let mut shapes: Vec<(BigUint, BigUint)> = Vec::new();
+        for a_bits in WIDTHS {
+            for b_bits in WIDTHS {
+                for _ in 0..PAIRS_PER_SHAPE {
+                    // A value of exactly `bits` bits: the top bit plus a
+                    // draw below it, which for one bit is nothing.
+                    let draw = |rng: &mut SplitMix64, bits: usize| {
+                        let top = pow2(bits - 1);
+                        if bits == 1 {
+                            top
+                        } else {
+                            draw_below(rng, &top).add(&top)
+                        }
+                    };
+                    shapes.push((draw(&mut rng, a_bits), draw(&mut rng, b_bits)));
+                }
+            }
+        }
+        // A shared factor, so the word finish meets a gcd other than one.
+        let common = BigUint::from_u64(u64::MAX - 58);
+        shapes.push((common.mul(&pow2(70)), common.mul(&BigUint::from_u64(3))));
+        let word_max = BigUint::from_u64(u64::MAX);
+        shapes.push((word_max.clone(), word_max.sub(&BigUint::one())));
+        for (a, b) in &shapes {
+            assert_eq!(
+                super::gcd_extended(a, b),
+                classical_extended_euclid(a, b),
+                "gcd_extended({a}, {b})"
+            );
+            if b.bits() > 1 {
+                let (g, s, _) = classical_extended_euclid(&a.rem(b), b);
+                let expected = g.is_one().then(|| s.rem_euclid(b));
+                assert_eq!(mod_inverse(a, b), expected, "mod_inverse({a}, {b})");
+            }
+        }
     }
 
     #[test]
