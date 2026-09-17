@@ -20,9 +20,7 @@
 # With --ignored, also:
 #   cryptography-ignored  every ignored cryptography test
 #   rump-ignored          rump's ignored correctness tests (the timing probes
-#                         assert nothing and are not run); the log-gamma sweep
-#                         needs RUMP_LN_GAMMA_SWEEP, from
-#                         scripts/lanczos_coefficients.py --sweep FILE
+#                         assert nothing and are not run)
 #
 # Prints the resolved revisions with each repository's Cargo.lock digest and
 # one line per leg; exits nonzero if any leg fails or cannot run. Logs stay in
@@ -140,14 +138,8 @@ fi
 if [[ $IGNORED -eq 1 ]]; then
     leg cryptography-ignored cryptography env CRYPTOGRAPHY_OPENSSL_REQUIRED=1 \
         cargo test --release --no-fail-fast -- --ignored
-    if [[ -z "${RUMP_LN_GAMMA_SWEEP:-}" ]]; then
-        printf '  FAIL  %-22s %s\n' "rump-ignored" "RUMP_LN_GAMMA_SWEEP is not set"
-        failed=1
-    else
-        leg rump-ignored rump cargo test --release --lib -- --ignored \
-            barrett_correction_search aks_stress_matches_an_independent_sieve \
-            the_log_gamma_sweep_matches_high_precision
-    fi
+    leg rump-ignored rump cargo test --release --lib -- --ignored \
+        barrett_correction_search aks_stress_matches_an_independent_sieve
 fi
 
 exit $failed

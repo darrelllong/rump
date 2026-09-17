@@ -131,11 +131,10 @@ pub mod number_theory {
     pub use crate::number_theory_impl::{
         crt_combine, crt_combine_balanced, crt_combine_u64, gcd, gcd_extended, gcd_u128, gcd_u64,
         is_lucas_probable_prime, is_prime_aks, is_probable_prime, is_probable_prime_bpsw,
-        is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker, lcm, legendre, ln_gamma,
+        is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker, lcm, legendre,
         miller_rabin_with_bases, miller_rabin_witness, primes_below, primes_past, product_tree,
-        rational_reconstruct, rational_reconstruct_bounded, regularized_incomplete_beta,
-        remainder_tree, remove_factor, smooth_parts, student_t_quantile, valuation, NumericalError,
-        ProductTree, SmoothnessBase, SmoothnessBaseError,
+        rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
+        smooth_parts, valuation, ProductTree, SmoothnessBase, SmoothnessBaseError,
     };
 }
 

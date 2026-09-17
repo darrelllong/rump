@@ -7,19 +7,16 @@ what a consumer must change, not everything that moved.
 
 ### Breaking
 
-- **`number_theory::regularized_incomplete_beta` and `student_t_quantile`
-  return `Result<f64, number_theory::NumericalError>`.** The continued
-  fraction returned its last iterate whether or not it had converged, and the
-  normalisation subtracted large log-gammas, so `I_(1/2)(10¹⁰, 10¹⁰)` came out
-  `−5.78`. Both functions now return `NumericalError::Domain` for an argument
-  outside their domain (`student_t_quantile` no longer panics) and
-  `NumericalError::NotConverged` when the fraction does not settle within its
-  budget or the result is not a probability. The normalisation is the
-  DiDonato–Morris rearrangement with the deviation from the mean formed
-  exactly, and the fraction runs in double-double arithmetic, so the error no
-  longer grows with the shapes: against 50-digit values the absolute error is
-  below `10⁻¹⁴`, and the tail the fraction computes is relative-accurate to
-  `5·10⁻¹³`. A caller must decide what a failure means for it.
+- **`number_theory::ln_gamma`, `regularized_incomplete_beta`,
+  `student_t_quantile` and `NumericalError` are gone.** They are floating
+  statistical kernels, not arithmetic, and they now live in `entropy::math`
+  (entropy 0.6.0), unchanged in signature and behaviour and on the same
+  reference fixtures. A caller depends on entropy and changes the path;
+  entropy compiles that module with or without its default features, so it
+  does not drag in a generator. rump keeps no forwarding wrapper: entropy
+  depends on rump, so a wrapper would close a cycle. The reference generators
+  `scripts/lanczos_coefficients.py` and `scripts/incomplete_beta_reference.py`
+  and the fixtures under `tests/data/` moved with them.
 
 - **`lattice::short_vectors_form` and `closest_vectors_form` return
   `lattice::Enumeration` and take `visit_limit: u64`.** Both panicked on
@@ -47,37 +44,6 @@ what a consumer must change, not everything that moved.
   not move it: the float gap at `10²⁰` is 16384), and bisection runs until the
   bracket is one float wide. Callers that read the returned values keep
   reading them; the values are now correct.
-
-
-- **`number_theory::regularized_incomplete_beta` is accurate for tiny shapes.**
-  The normalisation formed `a·b/(a+b)`, which underflows, and wrote `ln B`
-  through Stirling remainders that grow like `½ ln(1/t)` for tiny `t`, so
-  `I_(1/2)(10⁻²⁰⁰, 10⁻²⁰⁰)` returned `Ok(1.0)`. The prefactor's logarithm is
-  now formed by the regime of the shapes (both at least one, one below, both
-  below) without an underflowing product or cancelling large terms, and
-  before the exponential. Accuracy against 1 592 references over shapes from
-  `10⁻³⁰⁰` to `10⁴`: absolute error below `10⁻¹⁴`, and relative error within
-  `10⁻¹⁴·(1 + |ln tail|)` on the computed tail when that tail is a normal
-  double.
-
-- **`number_theory::ln_gamma` is finite up to its representable limit.**
-  Lanczos's form multiplied `(x − ½)·ln t` before subtracting `t`, so
-  `ln_gamma(2.557e305)` overflowed although its value, about
-  `1.7956·10³⁰⁸`, is a finite double. From `x = 10⁷` the Stirling series is
-  used at half scale; the result is finite exactly up to the largest double
-  whose `ln Γ` rounds to one (`0x1.754d9278b51a7p+1014`), which the
-  coefficient script derives and checks, and `+∞` above it.
-
-- **`number_theory::ln_gamma` is finite for small positive arguments.** Below
-  `1/2` it used the reflection formula, whose quotient `π / sin πx` overflows
-  before its logarithm is taken: `ln_gamma(1e-310)` was `+∞` where the answer
-  is `713.80…`. It now uses `ln Γ(x) = ln Γ(1 + x) − ln x`. The domain is
-  explicit (`NaN` for `x ≤ 0` or `NaN`, `+∞` for `+∞`), and the documented
-  accuracy is the measured one: absolute error below `5·10⁻¹⁵` on `[0.1, 3]`,
-  relative below `2·10⁻¹⁵` elsewhere. `scripts/lanczos_coefficients.py`
-  derives the nine coefficients, which the table matches bit for bit.
-
-### Removed
 
 - **`number_theory::dickman_rho` and `number_theory::semismooth_probability`.**
   Both existed only to rank a sieve's expected relation yield, and their one

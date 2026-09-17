@@ -19,7 +19,7 @@ runs, each in a fresh target directory:
 | factoring | `cargo test --release --no-fail-fast` (entropy without default features) |
 | factoring-no-wipe | `cargo tree` succeeds and rump's `wipe` feature is absent from factoring's graph; `--self-test` checks this leg on a graph without `wipe`, one with it, and a manifest that fails to parse |
 | cryptography-ignored | every ignored cryptography test (`--ignored` only) |
-| rump-ignored | rump's ignored correctness tests: the AKS stress test, the Barrett correction search and the log-gamma sweep (`--ignored` only; needs `RUMP_LN_GAMMA_SWEEP`) |
+| rump-ignored | rump's ignored correctness tests: the AKS stress test and the Barrett correction search (`--ignored` only) |
 
 rump's other ignored tests are timing probes that assert nothing. Entropy
 defines two feature modes, default and no default features, and the matrix
