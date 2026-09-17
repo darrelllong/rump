@@ -20,7 +20,10 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use rump::finite_field::Gf2m;
-use rump::modular::{mod_inverse, mod_pow, mod_sqrt, MontgomeryContext, MontgomeryResidue};
+use rump::modular::{
+    mod_inverse, mod_pow, mod_sqrt, BarrettContext, MontgomeryContext, MontgomeryResidue,
+    MontgomeryScratch,
+};
 use rump::number_theory::{gcd, gcd_extended, is_probable_prime, jacobi};
 use rump::BigUint;
 
@@ -108,6 +111,10 @@ struct IntPool {
     /// calls its capacity covers every result, and the measurement is the
     /// arithmetic alone rather than an allocation per call.
     out: BigUint,
+    /// A prepared Barrett context for the modulus with the operands reduced
+    /// by it, as an exponentiation loop holds them, for the row that pairs
+    /// the context's reuse against the one-shot `modmul`.
+    barrett: Option<(BarrettContext, BigUint, BigUint)>,
 }
 
 /// The Montgomery-domain slice of the pool.
@@ -115,6 +122,9 @@ struct MontState {
     ctx: MontgomeryContext,
     a_mont: MontgomeryResidue,
     b_mont: MontgomeryResidue,
+    /// Scratch kept across calls, for the `_scratch` rows: the difference
+    /// from `montmul`/`montsqr` is the per-call scratch allocation.
+    scratch: MontgomeryScratch,
 }
 
 impl IntPool {
@@ -136,7 +146,12 @@ impl IntPool {
         let modulus = rng.odd(bits);
         let mont = matches!(
             op,
-            "montmul" | "montsqr" | "montpow_e65537" | "montpow_rand"
+            "montmul"
+                | "montsqr"
+                | "montmul_scratch"
+                | "montsqr_scratch"
+                | "montpow_e65537"
+                | "montpow_rand"
         )
         .then(|| {
             let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
@@ -146,6 +161,7 @@ impl IntPool {
                 ctx,
                 a_mont,
                 b_mont,
+                scratch: MontgomeryScratch::new(),
             }
         });
         // A prime near a fresh random point, for the prime-conditioned ops.
@@ -186,6 +202,11 @@ impl IntPool {
             let p = prime.as_ref().expect("conditioned ops build a prime");
             BigUint::mod_mul(&a, &a, p)
         });
+        let barrett = matches!(op, "barrettmul").then(|| {
+            let context = BarrettContext::new(&modulus).expect("modulus above one");
+            let (a, b) = (a.rem(&modulus), b.rem(&modulus));
+            (context, a, b)
+        });
         // Reused output storage for the ops that write in place; seeded from
         // `a` so its capacity already covers a full-width result.
         let out = a.clone();
@@ -198,6 +219,7 @@ impl IntPool {
             prime,
             residue,
             out,
+            barrett,
             e65537: BigUint::from_u64(65_537),
             exp_rand: rng.biguint(256),
         }
@@ -302,6 +324,29 @@ fn int_op(name: &str) -> Option<fn(&mut IntPool)> {
             let m = p.mont();
             black_box(m.ctx.square_residue(&m.a_mont).expect("same context"));
         },
+        "montmul_scratch" => |p| {
+            let m = p.mont.as_mut().expect("op reads the Montgomery pool");
+            black_box(
+                m.ctx
+                    .mul_residue_with(&m.a_mont, &m.b_mont, &mut m.scratch)
+                    .expect("same context"),
+            );
+        },
+        "montsqr_scratch" => |p| {
+            let m = p.mont.as_mut().expect("op reads the Montgomery pool");
+            black_box(
+                m.ctx
+                    .square_residue_with(&m.a_mont, &mut m.scratch)
+                    .expect("same context"),
+            );
+        },
+        "barrettsetup" => |p| {
+            let _ = black_box(BarrettContext::new(&p.modulus));
+        },
+        "barrettmul" => |p| {
+            let (context, a, b) = p.barrett.as_ref().expect("op reads the Barrett context");
+            black_box(context.mod_mul(a, b));
+        },
         "montpow_e65537" => |p| {
             black_box(p.mont().ctx.pow(&p.a, &p.e65537));
         },
@@ -374,9 +419,13 @@ const INT_OPS: &[&str] = &[
     "divrem",
     "rem",
     "modmul",
+    "barrettsetup",
+    "barrettmul",
     "montsetup",
     "montmul",
     "montsqr",
+    "montmul_scratch",
+    "montsqr_scratch",
     "montpow_e65537",
     "montpow_rand",
     "modpow",

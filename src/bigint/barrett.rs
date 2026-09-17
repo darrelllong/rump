@@ -55,7 +55,10 @@ pub(super) const BARRETT_HALF_PRODUCT_MAX_LIMBS: usize = 512;
 ///
 /// The intervals are the observed spread, not a bound. The series is not
 /// monotone because the division it is measured against has its own
-/// crossovers.
+/// crossovers. The ratios are the M4's: on an AMD EPYC 7452 a prepared
+/// context's [`Self::mod_mul`] on reduced operands trails the one-shot
+/// [`BigUint::mod_mul`] by 23% at 256 bits and 5% at 2048
+/// (`bench/modes_dennard.md`).
 ///
 /// Like the rest of the crate, variable-time.
 #[derive(Clone, Debug, Eq, PartialEq)]

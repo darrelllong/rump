@@ -154,7 +154,10 @@ degree of GF(2^m)):
 | `add` `sub` `mul` `sqr` | schoolbook/Karatsuba/Toom arithmetic on two random operands |
 | `divrem` `modulo` | Knuth Algorithm D division, full width by half width |
 | `modmul` | one `mul` then a reduction, general (non-Montgomery) modulus |
-| `montmul` `montsqr` | one Montgomery multiply / square, operands already in the domain |
+| `barrettmul` | `BarrettContext::mod_mul` with the context prepared once and the operands already reduced, as in an exponentiation loop — the reuse counterpart of `modmul` |
+| `barrettsetup` | building a `BarrettContext` (the one division for μ) |
+| `montmul` `montsqr` | one Montgomery multiply / square, operands already in the domain, fresh scratch per call |
+| `montmul_scratch` `montsqr_scratch` | the same with one `MontgomeryScratch` kept across calls — the difference is the per-call scratch allocation |
 | `montsetup` | building a `MontgomeryContext` (the one division and R² setup) |
 | `gcd` `gcdext` `modinv` `jacobi` | the number-theory family |
 | `sqrtmod` | `mod_sqrt` — a modular square root by Tonelli–Shanks (several exponentiations) |
