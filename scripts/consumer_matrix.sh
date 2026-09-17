@@ -11,6 +11,7 @@
 #
 # Legs:
 #   cryptography       cargo test --release --no-fail-fast, OpenSSL required
+#   cryptography-all   the same with --all-features
 #   entropy-default    cargo test --release --no-fail-fast
 #   entropy-minimal    cargo test --release --no-fail-fast --no-default-features
 #   factoring          cargo test --release --no-fail-fast (entropy minimal)
@@ -125,6 +126,7 @@ leg() {
 }
 
 leg cryptography cryptography env CRYPTOGRAPHY_OPENSSL_REQUIRED=1 cargo test --release --no-fail-fast
+leg cryptography-all cryptography env CRYPTOGRAPHY_OPENSSL_REQUIRED=1 cargo test --release --no-fail-fast --all-features
 leg entropy-default entropy cargo test --release --no-fail-fast
 leg entropy-minimal entropy cargo test --release --no-fail-fast --no-default-features
 leg factoring factoring cargo test --release --no-fail-fast

@@ -13,6 +13,7 @@ runs, each in a fresh target directory:
 | Leg | Command |
 |---|---|
 | cryptography | `CRYPTOGRAPHY_OPENSSL_REQUIRED=1 cargo test --release --no-fail-fast` |
+| cryptography-all | the same with `--all-features` |
 | entropy-default | `cargo test --release --no-fail-fast` |
 | entropy-minimal | `cargo test --release --no-fail-fast --no-default-features` |
 | factoring | `cargo test --release --no-fail-fast` (entropy without default features) |
