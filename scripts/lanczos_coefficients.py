@@ -63,6 +63,35 @@ def shipped():
     return [float(v.replace("_", "")) for v in re.findall(r"-?[0-9][0-9_.]*(?:e-?[0-9]+)?", body)]
 
 
+def finite_limit():
+    """The largest double whose ln Gamma rounds to a finite double, by
+    bisection over doubles at 80 digits: ln Gamma(x) < MAX + ulp(MAX)/2."""
+    import math
+
+    mp.dps = 80
+    limit = mpf(sys.float_info.max) + mpf(2) ** (1023 - 53)
+    lo, hi = 2.0, sys.float_info.max
+    while True:
+        mid = lo + (hi - lo) / 2
+        if mid in (lo, hi):
+            break
+        if loggamma(mpf(mid)) < limit:
+            lo = mid
+        else:
+            hi = mid
+    while loggamma(mpf(math.nextafter(lo, math.inf))) < limit:
+        lo = math.nextafter(lo, math.inf)
+    while loggamma(mpf(lo)) >= limit:
+        lo = math.nextafter(lo, -math.inf)
+    return lo
+
+
+def shipped_limit():
+    text = SOURCE.read_text(encoding="utf-8")
+    value = re.search(r"const LN_GAMMA_FINITE_BELOW: f64 = ([0-9_.e]+);", text).group(1)
+    return float(value.replace("_", ""))
+
+
 def ln_gamma_lanczos(x, coefficients):
     z = mpf(x) - 1
     t = z + G + mpf(1) / 2
@@ -104,6 +133,10 @@ def check():
     print(f"  absolute, 1/2 <= x <= 3: {mp.nstr(near['exact'], 3)}   relative, x > 3: {mp.nstr(far['exact'], 3)}")
     print("with the double coefficients, evaluated exactly:")
     print(f"  absolute, 1/2 <= x <= 3: {mp.nstr(near['double'], 3)}   relative, x > 3: {mp.nstr(far['double'], 3)}")
+    derived, limit = finite_limit(), shipped_limit()
+    same = derived == limit
+    ok &= same
+    print(f"largest x with finite ln Gamma: derived {derived.hex()}  shipped {limit.hex()}  {'ok' if same else 'MISMATCH'}")
     return 0 if ok else 1
 
 
@@ -113,13 +146,14 @@ def reference():
           0.1, 0.25, 0.4999999999999999, 0.5, 0.5000000000000001, 0.75,
           1 - 2 ** -52, 1.0, 1 + 2 ** -52, 1 + 1e-8, 1.4616321449683622, 1.5, 1.999999, 2 - 2 ** -51,
           2.0, 2 + 2 ** -51, 2.000001, 2.5, 3.0, 7.5, 10.0, 33.3, 100.0, 171.5, 1e3, 1e5, 1e10,
-          1e15, 1e100, 1e300, 2.5e305]
+          1e15, 1e100, 1e300, 2.5e305, 2.557e305, 2.558e305, 2.559e305]
     for x in xs:
         print(f"        ({float(x)!r}, {float(loggamma(mpf(x)))!r}),")
     return 0
 
 
 def sweep(path):
+    import math
     import random
 
     mp.dps = 40
@@ -137,6 +171,10 @@ def sweep(path):
         xs.add(10 ** rng.uniform(-323, 0))
     for _ in range(10000):
         xs.add(10 ** rng.uniform(0.47, 305))
+    for _ in range(2000):
+        xs.add(1e7 * (1 + rng.uniform(-1e-3, 1e-3)))  # the switch to Stirling
+    for _ in range(2000):
+        xs.add(10 ** rng.uniform(305, math.log10(finite_limit())))  # up to the finite limit
     with open(path, "w", encoding="utf-8") as out:
         for x in sorted(v for v in xs if v > 0):
             out.write(f"{x!r} {mp.nstr(loggamma(mpf(x)), 25)}\n")

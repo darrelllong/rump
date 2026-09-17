@@ -21,6 +21,14 @@ what a consumer must change, not everything that moved.
 
 ### Fixed
 
+- **`number_theory::ln_gamma` is finite up to its representable limit.**
+  Lanczos's form multiplied `(x − ½)·ln t` before subtracting `t`, so
+  `ln_gamma(2.557e305)` overflowed although its value, about
+  `1.7956·10³⁰⁸`, is a finite double. From `x = 10⁷` the Stirling series is
+  used at half scale; the result is finite exactly up to the largest double
+  whose `ln Γ` rounds to one (`0x1.754d9278b51a7p+1014`), which the
+  coefficient script derives and checks, and `+∞` above it.
+
 - **`number_theory::ln_gamma` is finite for small positive arguments.** Below
   `1/2` it used the reflection formula, whose quotient `π / sin πx` overflows
   before its logarithm is taken: `ln_gamma(1e-310)` was `+∞` where the answer

@@ -3245,7 +3245,18 @@ fn is_witness(
 /// intermediate that overflows, so the result is finite down to the least
 /// subnormal.
 ///
-/// Measured over 50 000 arguments against 40-digit values (the ignored
+/// From `x = 10⁷` the Stirling series `ln Γ(x) = x(ln x − 1) − ½ ln x +
+/// ½ ln 2π + 1/(12x) + R` is used (DLMF 5.11.1), whose remainder is bounded
+/// by the first omitted term, `1/(360x³)` (DLMF §5.11(ii)), below `10⁻²³`
+/// here. It is evaluated at half scale and doubled, so no intermediate
+/// overflows. `ln Γ` increases past 2, so the answer is finite exactly for
+/// `x` up to the largest double whose `ln Γ` rounds to a finite value,
+/// `0x1.754d9278b51a7p+1014` (about `2.56·10³⁰⁵`, found and checked by
+/// `scripts/lanczos_coefficients.py`); there the true value is within one
+/// unit in the last place of `f64::MAX`, so a result that rounds past it is
+/// returned as `f64::MAX`, and above it the result is `+∞`.
+///
+/// Measured over 54 000 arguments against 40-digit values (the ignored
 /// test `the_log_gamma_sweep_matches_high_precision`): absolute error below
 /// `5·10⁻¹⁵` for `0.1 ≤ x ≤ 3`, the interval holding both zeros of `ln Γ`
 /// and the switch at `1/2`, and relative error below `2·10⁻¹⁵` elsewhere.
@@ -3257,6 +3268,10 @@ fn is_witness(
 /// densities; [`regularized_incomplete_beta`] is built on it.
 #[must_use]
 pub fn ln_gamma(x: f64) -> f64 {
+    /// Where the Stirling series takes over from Lanczos's approximation.
+    const STIRLING_FROM: f64 = 1e7;
+    /// The largest double whose `ln Γ` rounds to a finite double.
+    const LN_GAMMA_FINITE_BELOW: f64 = 2.559_983_327_851_638_3e305;
     const G: f64 = 7.0;
     const COEFFICIENTS: [f64; 9] = [
         0.999_999_999_999_809_9,
@@ -3277,6 +3292,17 @@ pub fn ln_gamma(x: f64) -> f64 {
     }
     if x < 0.5 {
         return ln_gamma(1.0 + x) - x.ln();
+    }
+    if x >= STIRLING_FROM {
+        if x > LN_GAMMA_FINITE_BELOW {
+            return f64::INFINITY;
+        }
+        let ln_x = x.ln();
+        let half = 0.5 * x * (ln_x - 1.0) - 0.25 * ln_x
+            + 0.25 * (2.0 * core::f64::consts::PI).ln()
+            + 1.0 / (24.0 * x);
+        let value = 2.0 * half;
+        return if value.is_finite() { value } else { f64::MAX };
     }
     let z = x - 1.0;
     let t = z + G + 0.5;
@@ -4448,7 +4474,7 @@ mod tests {
     /// where the value approaches `f64::MAX`.
     #[test]
     fn the_log_gamma_is_accurate_from_the_least_subnormal_up() {
-        let reference: [(f64, f64); 40] = [
+        let reference: [(f64, f64); 43] = [
             (5e-324, 744.4400719213812),
             (1e-310, 713.8013788281542),
             (2.2250738585072014e-308, 708.3964185322641),
@@ -4489,6 +4515,9 @@ mod tests {
             (1e+100, 2.2925850929940456e+102),
             (1e+300, 6.897755278982137e+302),
             (2.5e+305, 1.7555118602376452e+308),
+            (2.557e+305, 1.7955951755681237e+308),
+            (2.558e+305, 1.7962984030516992e+308),
+            (2.559e+305, 1.7970016309262054e+308),
         ];
         for (x, expected) in reference {
             let got = ln_gamma(x);
@@ -4506,6 +4535,20 @@ mod tests {
                 );
             }
         }
+        // The finite limit exactly: the largest double whose ln Γ rounds to a
+        // finite double, and its neighbours.
+        let limit = 2.559_983_327_851_638_3e305;
+        assert_eq!(ln_gamma(limit), f64::MAX, "ln Γ at the finite limit");
+        assert!(
+            ln_gamma(limit.next_down()).is_finite(),
+            "below the finite limit"
+        );
+        assert_eq!(
+            ln_gamma(limit.next_up()),
+            f64::INFINITY,
+            "past the finite limit"
+        );
+        assert_eq!(ln_gamma(f64::MAX), f64::INFINITY);
         assert!(ln_gamma(0.0).is_nan());
         assert!(ln_gamma(-1.5).is_nan());
         assert!(ln_gamma(f64::NAN).is_nan());
@@ -4513,9 +4556,10 @@ mod tests {
     }
 
     /// The dense sweep: `scripts/lanczos_coefficients.py --sweep FILE`
-    /// writes 50 000 pairs `x ln Γ(x)` (seed 20260916, 40 digits) covering
-    /// subnormal to `1e305`, with dense bands around the switch at 1/2 and
-    /// the zeros at 1 and 2; run with
+    /// writes 54 000 pairs `x ln Γ(x)` (seed 20260916, 40 digits) covering
+    /// the least subnormal to the finite limit near `2.56·10³⁰⁵`, with dense
+    /// bands around the switches at 1/2 and `10⁷` and the zeros at 1 and 2;
+    /// run with
     /// `RUMP_LN_GAMMA_SWEEP=FILE cargo test --release -- --ignored
     /// the_log_gamma_sweep`.
     #[test]
@@ -4541,7 +4585,7 @@ mod tests {
             }
             checked += 1;
         }
-        assert!(checked > 49_000, "only {checked} reference pairs");
+        assert!(checked > 54_000, "only {checked} reference pairs");
     }
 
     #[test]
