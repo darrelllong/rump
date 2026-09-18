@@ -159,7 +159,7 @@ pub mod gf2 {
 /// Linear algebra over a large prime field GF(l): sparse matrices with small
 /// integer entries, and Wiedemann's algorithm.
 pub mod gfp {
-    pub use crate::gfp_impl::{kernel_vector, minimal_polynomial, Field, SparseMatrix};
+    pub use crate::gfp_impl::{kernel_vector, minimal_polynomial, Field, Kernel, SparseMatrix};
 }
 
 /// Binary extension fields GF(2^m).

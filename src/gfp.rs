@@ -394,8 +394,35 @@ pub fn minimal_polynomial(field: &Field, sequence: &[BigUint]) -> Option<Vec<Big
     Some(current)
 }
 
-/// A non-zero `x` with `matrix · x = 0`, or `None` when this attempt found
-/// none.
+/// What one Wiedemann draw settled.
+///
+/// The two failures want opposite responses from a caller — draw again, or
+/// go back and change the matrix — so they are not the same answer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Kernel {
+    /// A non-zero `x` with `M·x = 0`.
+    Vector(Vec<BigUint>),
+    /// The matrix has no kernel: this draw's recurrence has a non-zero
+    /// constant term, so zero is not a root of it.
+    ///
+    /// Certain when the recurrence reached the matrix's dimension, since it
+    /// is then the matrix's own minimal polynomial. Otherwise the recurrence
+    /// is a divisor of that polynomial and could have divided a zero root
+    /// away, which happens with probability about `n/l` — the same risk
+    /// every other answer here carries, and negligible at a field of
+    /// cryptographic size. Either way the response is to change the matrix,
+    /// not to draw again.
+    NoKernel,
+    /// This draw settled nothing: its sequence gave a proper divisor of the
+    /// matrix's minimal polynomial, which happens about `n/l` of the time.
+    /// Draw again. Repeated failures are evidence about the matrix — a caller
+    /// that has exhausted a sensible bound should suspect its own rows rather
+    /// than its luck.
+    Inconclusive,
+}
+
+/// A non-zero `x` with `matrix · x = 0`, or why this attempt found none.
 ///
 /// Wiedemann's algorithm: the scalars `u·Aᵏv` obey a linear recurrence whose
 /// minimal polynomial divides the matrix's, and `2n` of them determine it.
@@ -403,20 +430,19 @@ pub fn minimal_polynomial(field: &Field, sequence: &[BigUint]) -> Option<Vec<Big
 /// is killed by some power of `A`, and the last non-zero iterate before it
 /// dies is a kernel vector.
 ///
-/// `None` means this draw failed, not that the kernel is trivial: the
-/// recurrence found may be a proper divisor of the minimal polynomial, which
-/// happens with probability about `n/l` — negligible for a field of
-/// cryptographic size, but a caller should retry with fresh randomness
-/// rather than conclude anything. An invertible matrix also returns `None`,
-/// every time.
+/// [`Kernel::Inconclusive`] is this draw failing, and the answer is another
+/// draw; [`Kernel::NoKernel`] is about the matrix, and the answer is different
+/// rows. A caller that cannot tell them apart retries for ever on a matrix
+/// that needed more rows, or collects more rows for a matrix that needed
+/// another draw.
 pub fn kernel_vector<R: RandomSource + ?Sized>(
     matrix: &SparseMatrix,
     field: &Field,
     rng: &mut R,
-) -> Option<Vec<BigUint>> {
+) -> Kernel {
     let n = matrix.columns();
     if n == 0 {
-        return None;
+        return Kernel::NoKernel;
     }
     let projection = field.random_vector(rng, n);
     let start = field.random_vector(rng, n);
@@ -431,7 +457,7 @@ fn kernel_vector_from(
     field: &Field,
     projection: &[BigUint],
     start: &[BigUint],
-) -> Option<Vec<BigUint>> {
+) -> Kernel {
     let n = matrix.columns();
 
     // The scalar sequence u·A^k v, for k = 0 … 2n − 1.
@@ -448,12 +474,16 @@ fn kernel_vector_from(
         sequence.push(dot);
     }
 
-    let polynomial = minimal_polynomial(field, &sequence)?;
-    // A non-zero constant term describes a matrix with no eigenvalue zero:
-    // nothing in the kernel to find.
+    let Some(polynomial) = minimal_polynomial(field, &sequence) else {
+        return Kernel::Inconclusive;
+    };
+    // A non-zero constant term says zero is not a root of this draw's
+    // recurrence, so there is no kernel to walk towards.
+    // The polynomial is monic, so its last coefficient is one and the
+    // valuation is below its length.
     let valuation = polynomial.iter().take_while(|c| c.is_zero()).count();
-    if valuation == 0 || valuation == polynomial.len() {
-        return None;
+    if valuation == 0 {
+        return Kernel::NoKernel;
     }
     let shifted = &polynomial[valuation..];
 
@@ -483,14 +513,15 @@ fn kernel_vector_from(
             // annihilates the start vector, which would make the recurrence
             // it came from longer than it needed to be; the check is a guard
             // on that reasoning, not a path, so nothing exercises it.
-            return accumulated
-                .iter()
-                .any(|entry| !entry.is_zero())
-                .then_some(accumulated);
+            return if accumulated.iter().any(|entry| !entry.is_zero()) {
+                Kernel::Vector(accumulated)
+            } else {
+                Kernel::Inconclusive
+            };
         }
         accumulated = next;
     }
-    None
+    Kernel::Inconclusive
 }
 
 #[cfg(test)]
@@ -808,7 +839,7 @@ mod tests {
                 );
                 let mut solution = None;
                 for _ in 0..ATTEMPTS {
-                    if let Some(candidate) = kernel_vector(&matrix, &field, &mut rng) {
+                    if let Kernel::Vector(candidate) = kernel_vector(&matrix, &field, &mut rng) {
                         solution = Some(candidate);
                         break;
                     }
@@ -832,6 +863,46 @@ mod tests {
         assert_eq!(found, 6, "every shape was exercised");
     }
 
+    /// A matrix whose kernel is many dimensions wide still gives up a vector,
+    /// and an invertible one is told apart from a draw that failed.
+    ///
+    /// The distinction is what a caller acts on: more rows against another
+    /// draw. A rank-deficient matrix that reported bad luck would have the
+    /// caller retrying for ever.
+    #[test]
+    fn a_wide_kernel_is_found_and_an_invertible_matrix_is_named() {
+        // A shape and density near a small index-calculus matrix, with the
+        // rank cut by repeating rows.
+        const COLUMNS: usize = 62;
+        const WEIGHT: usize = 6;
+        const RANK_DEFICIT: usize = 15;
+        const DRAWS: usize = 10;
+        let field = small_field();
+        let mut rng = TestRng(SEED ^ 0x9999);
+        let mut rows = random_rows(&mut rng, COLUMNS, WEIGHT);
+        for index in 0..RANK_DEFICIT {
+            rows[COLUMNS - 1 - index] = rows[index].clone();
+        }
+        let matrix = SparseMatrix::new(COLUMNS, rows.clone()).expect("square and in range");
+        assert!(
+            dense_kernel_vector(&field, COLUMNS, &rows).is_some(),
+            "the oracle finds no kernel to look for"
+        );
+        for _ in 0..DRAWS {
+            match kernel_vector(&matrix, &field, &mut rng) {
+                Kernel::Vector(solution) => {
+                    assert!(solution.iter().any(|entry| !entry.is_zero()));
+                    assert!(matrix
+                        .multiply(&field, &solution)
+                        .iter()
+                        .all(BigUint::is_zero));
+                }
+                Kernel::NoKernel => panic!("a rank-deficient matrix reported as having no kernel"),
+                Kernel::Inconclusive => {}
+            }
+        }
+    }
+
     #[test]
     fn an_invertible_matrix_has_no_kernel_to_report() {
         // The identity, and a permutation with a sign: both invertible.
@@ -850,9 +921,10 @@ mod tests {
                 .collect();
             let matrix = SparseMatrix::new(COLUMNS, rows).expect("square and in range");
             for _ in 0..ATTEMPTS {
-                assert!(
-                    kernel_vector(&matrix, &field, &mut rng).is_none(),
-                    "an invertible matrix reported a kernel vector"
+                assert_eq!(
+                    kernel_vector(&matrix, &field, &mut rng),
+                    Kernel::NoKernel,
+                    "an invertible matrix must be named as having no kernel, not as bad luck"
                 );
             }
         }
@@ -872,7 +944,26 @@ mod tests {
             SparseMatrix::new(2, vec![Vec::new(), vec![(1, 1)]]).expect("square and in range");
         let projection = vec![BigUint::one(), BigUint::zero()];
         let start = vec![BigUint::one(), BigUint::one()];
-        assert!(kernel_vector_from(&matrix, &field, &projection, &start).is_none());
+        assert_eq!(
+            kernel_vector_from(&matrix, &field, &projection, &start),
+            Kernel::Inconclusive,
+            "a failed draw is not a statement about the matrix"
+        );
+    }
+
+    /// A matrix with no columns has no kernel vector to give: the empty
+    /// vector is not a non-zero one.
+    #[test]
+    fn a_matrix_with_no_columns_has_no_kernel() {
+        let field = small_field();
+        let mut rng = TestRng(SEED ^ 0x5555);
+        let matrix = SparseMatrix::new(0, Vec::new()).expect("empty is square");
+        assert_eq!(matrix.nonzeros(), 0);
+        assert_eq!(
+            kernel_vector(&matrix, &field, &mut rng),
+            Kernel::NoKernel,
+            "an empty matrix is settled, not unlucky"
+        );
     }
 
     #[test]
@@ -882,8 +973,9 @@ mod tests {
         let mut rng = TestRng(SEED ^ 0x4444);
         let matrix =
             SparseMatrix::new(COLUMNS, vec![Vec::new(); COLUMNS]).expect("square and in range");
-        let solution =
-            kernel_vector(&matrix, &field, &mut rng).expect("every vector is a kernel vector");
+        let Kernel::Vector(solution) = kernel_vector(&matrix, &field, &mut rng) else {
+            panic!("every vector is a kernel vector of the zero matrix");
+        };
         assert!(solution.iter().any(|entry| !entry.is_zero()));
         assert!(matrix
             .multiply(&field, &solution)

@@ -20,8 +20,12 @@ what a consumer must change, not everything that moved.
   `gfp::minimal_polynomial`. It is quadratic in the matrix dimension and
   single-threaded, which at a hundred digits is hours and past about a
   hundred and ten stops being reasonable; a blocked form, which distributes,
-  is the answer there and is not built. A draw that fails returns `None`
-  rather than a wrong answer, and the caller draws again.
+  is the answer there and is not built.
+
+  `kernel_vector` returns `gfp::Kernel`, which separates the two failures a
+  caller must answer differently: `Inconclusive` is this draw, and the answer
+  is another draw; `NoKernel` is the matrix, and the answer is different
+  rows.
 
 ### Breaking
 
