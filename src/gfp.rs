@@ -424,6 +424,16 @@ pub enum Kernel {
 
 /// A non-zero `x` with `matrix · x = 0`, or why this attempt found none.
 ///
+/// *Some* element of the kernel: when the kernel is more than a line, which
+/// of it comes back is not the caller's to choose, and a caller that wants a
+/// particular one — the logarithms, say, which are the line whose constant
+/// coordinate is not zero — must make the kernel one-dimensional before
+/// asking. A wide kernel does not fail here and does not look like a
+/// failure: it returns vectors, all of them genuine and none of them the one
+/// wanted (factoring, 2026-09-17, on a matrix of 62 columns with a
+/// 16-dimensional kernel: ten draws, ten kernel vectors, every one with zero
+/// in the coordinate that had to be scaled to one).
+///
 /// Wiedemann's algorithm: the scalars `u·Aᵏv` obey a linear recurrence whose
 /// minimal polynomial divides the matrix's, and `2n` of them determine it.
 /// Writing that polynomial as `xᵐ·g(x)` with `g(0) ≠ 0`, the vector `g(A)v`
@@ -949,6 +959,93 @@ mod tests {
             Kernel::Inconclusive,
             "a failed draw is not a statement about the matrix"
         );
+    }
+
+    /// The fixture: a real index-calculus matrix, 62 columns over
+    /// `GF(524351)`, with the kernel vector the run that produced it
+    /// verified — factoring's `src/dlog.rs`, a discrete logarithm modulo
+    /// `p = 1048703` whose answers were checked by hand.
+    ///
+    /// Constructed matrices exercise the arithmetic; this one is the shape
+    /// the module exists for, with the entry distribution a factor base
+    /// actually produces: mostly ±1, a tail of small counts, and one dense
+    /// column of large constants.
+    #[test]
+    fn the_index_calculus_fixture_is_solved() {
+        const FIXTURE: &str = include_str!("../tests/data/index_calculus_62.txt");
+        // Wiedemann's draw fails about n/l of the time; the field here is
+        // 19 bits, so a handful of draws is the sensible bound.
+        const ATTEMPTS: usize = 8;
+        let field = Field::new(BigUint::from_u64(524_351)).expect("a prime above one");
+        let mut width = 0usize;
+        let mut rows: Vec<Vec<(u32, i64)>> = Vec::new();
+        let mut expected: Vec<BigUint> = Vec::new();
+        for line in FIXTURE.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("width ") {
+                width = rest.trim().parse().expect("a width");
+            } else if let Some(rest) = line.strip_prefix("row ") {
+                let mut row = Vec::new();
+                for entry in rest.trim_matches(['[', ']']).split("), (") {
+                    let entry = entry.trim_matches(['(', ')', ' ']);
+                    let (column, coefficient) = entry.split_once(',').expect("a pair");
+                    row.push((
+                        column.trim().parse().expect("a column"),
+                        coefficient.trim().parse().expect("a coefficient"),
+                    ));
+                }
+                rows.push(row);
+            } else if let Some(rest) = line.strip_prefix("kernel ") {
+                expected = rest
+                    .trim_matches(['[', ']'])
+                    .split(',')
+                    .map(|entry| {
+                        BigUint::from_str_radix(entry.trim().trim_matches('"'), 10)
+                            .expect("a residue")
+                    })
+                    .collect();
+            }
+        }
+        assert_eq!(rows.len(), width, "one row per column");
+        assert_eq!(expected.len(), width, "one kernel entry per column");
+        let matrix = SparseMatrix::new(width, rows).expect("square and in range");
+
+        // The vector the run verified is in the kernel, as its producer said.
+        assert!(
+            matrix
+                .multiply(&field, &expected)
+                .iter()
+                .all(BigUint::is_zero),
+            "the fixture's own kernel vector is not in the kernel"
+        );
+
+        // And the solver finds that line: the kernel is one-dimensional here,
+        // so whatever comes back is a multiple of it, which is checked by
+        // cross-multiplying against the first coordinate that is not zero in
+        // both — no division, no assumption about which multiple.
+        let mut rng = TestRng(SEED ^ 0x6666);
+        let mut solution = None;
+        for _ in 0..ATTEMPTS {
+            if let Kernel::Vector(candidate) = kernel_vector(&matrix, &field, &mut rng) {
+                solution = Some(candidate);
+                break;
+            }
+        }
+        let solution = solution.expect("a kernel vector within the attempts");
+        assert!(matrix
+            .multiply(&field, &solution)
+            .iter()
+            .all(BigUint::is_zero));
+        let pivot = (0..width)
+            .find(|&i| !solution[i].is_zero() && !expected[i].is_zero())
+            .expect("the two vectors share a non-zero coordinate");
+        for index in 0..width {
+            assert_eq!(
+                field.mul(&solution[index], &expected[pivot]),
+                field.mul(&expected[index], &solution[pivot]),
+                "coordinate {index} is off the fixture's line"
+            );
+        }
     }
 
     /// A matrix with no columns has no kernel vector to give: the empty

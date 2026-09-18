@@ -59,6 +59,20 @@ other builds loaded the machine — run alone it passed 3 of 3, and
 cryptography now compares the fastest of 101 samples — and the same tests
 passed 19 of 19 on twilight (x86_64).
 
+## Fixtures from consumers
+
+`tests/data/index_calculus_62.txt` is a matrix from a real run of factoring's
+discrete logarithm — 62 columns over `GF(524351)`, the rows it hands to
+`gfp::SparseMatrix` after pruning, and the kernel vector that run verified.
+It came from factoring `7c5a5df`, whose logarithms modulo `p = 1048703` were
+checked by hand rather than against another program. rump's test reads it,
+confirms the claimed vector is in the kernel, and requires the solver to land
+on the same line.
+
+A constructed matrix exercises arithmetic; this one carries the entry
+distribution a factor base actually produces, which is what the module exists
+for.
+
 ## Hosts
 
 `scripts/host_builds.sh [--test] [REVISION] [HOST...]` fetches a pushed
