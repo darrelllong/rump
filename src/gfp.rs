@@ -961,6 +961,57 @@ mod tests {
         );
     }
 
+    /// What one matrix-vector product costs, against the shapes an
+    /// index-calculus discrete logarithm reaches.
+    ///
+    /// The product is the whole of Wiedemann: the sequence needs `2n` of
+    /// them and building the solution about `n/2` more, so the phase is
+    /// `2.5·n` products and this number times that is the linear algebra.
+    /// The vector is `columns` residues, so it leaves cache early and the
+    /// cost per nonzero is a memory cost as much as an arithmetic one.
+    #[test]
+    #[ignore = "timing probe for the sparse product at discrete-logarithm sizes; run with --ignored"]
+    fn product_throughput_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        // Column counts π(B) at the bounds Odlyzko's schedule gives for 64,
+        // 96 and a step past it, and the row weight a B-smooth factorisation
+        // carries: tens of distinct primes, not hundreds.
+        const SHAPES: [usize; 4] = [1_049, 11_481, 40_000, 94_803];
+        const WEIGHT: usize = 30;
+        const RUNS: usize = 5;
+        // A 330-bit order, the width l reaches when p is a hundred digits.
+        const ORDER_BITS: usize = 330;
+        let mut order = BigUint::one();
+        order.shl_bits(ORDER_BITS);
+        let order = order.sub(&BigUint::from_u64(1));
+        let field = Field::new(order).expect("a modulus above one");
+        let mut rng = TestRng(SEED ^ 0x7777);
+        eprintln!(
+            "{:>9} {:>12} {:>11} {:>12} {:>14}",
+            "columns", "nonzeros", "product_ms", "ns/nonzero", "phase_hours"
+        );
+        for columns in SHAPES {
+            let rows = random_rows(&mut rng, columns, WEIGHT);
+            let matrix = SparseMatrix::new(columns, rows).expect("square and in range");
+            let vector = field.random_vector(&mut rng, columns);
+            let mut best = f64::INFINITY;
+            for _ in 0..RUNS {
+                let start = Instant::now();
+                black_box(matrix.multiply(&field, &vector));
+                best = best.min(start.elapsed().as_secs_f64());
+            }
+            let nonzeros = matrix.nonzeros();
+            // 2n products for the sequence, about n/2 more for the solution.
+            let phase = best * 2.5 * columns as f64 / 3600.0;
+            eprintln!(
+                "{columns:9} {nonzeros:12} {:11.3} {:12.2} {phase:14.3}",
+                best * 1e3,
+                best / nonzeros as f64 * 1e9
+            );
+        }
+    }
+
     /// The fixture: a real index-calculus matrix, 62 columns over
     /// `GF(524351)`, with the kernel vector the run that produced it
     /// verified — factoring's `src/dlog.rs`, a discrete logarithm modulo
