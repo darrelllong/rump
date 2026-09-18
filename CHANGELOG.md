@@ -5,6 +5,24 @@ what a consumer must change, not everything that moved.
 
 ## Unreleased
 
+### Added
+
+- **`gfp`: linear algebra over a large prime field.** `gfp::SparseMatrix`
+  holds a square matrix whose entries are small integers — the `±1` ones in
+  their own lists, where a row costs an addition or a subtraction with no
+  multiplication, and the tail of larger coefficients beside them — and
+  `gfp::kernel_vector` solves `Mx = 0` by Wiedemann's algorithm over
+  `gfp::Field`. This is the system an index-calculus discrete logarithm ends
+  in, where `crate::gf2`'s packing does not apply: a vector entry is hundreds
+  of bits, not one.
+
+  The form here is scalar: one Krylov sequence, one recurrence from
+  `gfp::minimal_polynomial`. It is quadratic in the matrix dimension and
+  single-threaded, which at a hundred digits is hours and past about a
+  hundred and ten stops being reasonable; a blocked form, which distributes,
+  is the answer there and is not built. A draw that fails returns `None`
+  rather than a wrong answer, and the caller draws again.
+
 ### Breaking
 
 - **`number_theory::ln_gamma`, `regularized_incomplete_beta`,

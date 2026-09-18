@@ -94,6 +94,8 @@ pub(crate) fn available_parallelism() -> usize {
 #[path = "gf2.rs"]
 mod gf2_impl;
 mod gf2m;
+#[path = "gfp.rs"]
+mod gfp_impl;
 #[path = "lattice.rs"]
 mod lattice_impl;
 mod modular_fixed;
@@ -152,6 +154,12 @@ pub mod gf2 {
         block_lanczos_dependencies, block_lanczos_dependencies_sparse, dense_null_space,
         filter_merge, prune_singletons, FilteredMatrix, PrunedMatrix, SparseMatrix,
     };
+}
+
+/// Linear algebra over a large prime field GF(l): sparse matrices with small
+/// integer entries, and Wiedemann's algorithm.
+pub mod gfp {
+    pub use crate::gfp_impl::{kernel_vector, minimal_polynomial, Field, SparseMatrix};
 }
 
 /// Binary extension fields GF(2^m).

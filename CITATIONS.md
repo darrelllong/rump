@@ -194,6 +194,8 @@ algorithms the library implements.
 | CPython's integer formatter | the base-36 googol radix vector, `bigint.rs` tests. |
 | Python bigints | the overshoot-by-two division family, `tests/bigint_division.rs`; the rational LLL oracle, `scripts/lll_oracle.py`. |
 | Feitsma's base-2 Fermat-pseudoprime enumeration (verified by Galway) | BPSW determinism below 2⁶⁴ (also in the BPSW row above). |
+| Sparse linear algebra over GF(l) | `gfp::kernel_vector` | Wiedemann, *Solving sparse linear equations over finite fields*, IEEE Trans. Inform. Theory 32 (1986), 54–62: the scalars `u·Aᵏv` obey a linear recurrence whose minimal polynomial divides the matrix's, and `2n` of them determine it. |
+| Linear recurrence | `gfp::minimal_polynomial` | Massey, *Shift-register synthesis and BCH decoding*, IEEE Trans. Inform. Theory 15 (1969), 122–127, after Berlekamp, *Algebraic Coding Theory* (1968), §7.4; the connection polynomial reversed is the minimal polynomial. |
 
 ---
 
