@@ -43,9 +43,12 @@ const PRIME_PRODUCT: u64 = PRIME_0 * PRIME_1;
 // residues to one integer. 9·PRIME_0 mod PRIME_1 is PRIME_1 − 1.
 const NEG_PRIME_0_INVERSE_MOD_1: u64 = 9;
 
-// Linear passes need enough values per context to repay one scoped worker
-// wave. Set by the ignored phase/scaling probes; it limits workers by work
-// size in addition to the caller's hardware ceiling.
+// Linear passes (pointwise products, residue copies, clearing, CRT) need
+// enough values per context to repay one scoped worker wave, so this limits
+// workers by work size in addition to the caller's hardware ceiling. The
+// grain was measured by the ignored probes `ntt_phase_profile` and
+// `ntt_worker_scaling_timing` in `bigint.rs`; PERFORMANCE.md ("Exact NTT
+// multiplication") records the value but not the curve it was read from.
 const MIN_LINEAR_VALUES_PER_WORKER: usize = 1 << 18;
 
 // Below this length, the extra gather pass of the parallel DIF inverse costs
@@ -57,6 +60,17 @@ const DIF_INVERSE_MIN_LEN: usize = 1 << 19;
 // ladder even with four contexts. Keeping forced small-kernel tests serial
 // also stops thread launch from dominating their work.
 const PARALLEL_TRANSFORM_MIN_LEN: usize = 1 << 16;
+
+// Worker targets by transform length: each row is the longest transform it
+// serves and the target for it; a longer transform takes
+// MAX_WORKER_TARGET. Measured on deepcore (256 contexts) by
+// `ntt_worker_scaling_timing` in `bigint.rs`, recorded in PERFORMANCE.md
+// ("Exact NTT multiplication"): the fastest count was 4 at 2^16 values, 8
+// at 2^17 and 2^18, 16 from 2^19 to 2^21, 32 at 2^22 and 2^23, and 64 from
+// 2^24 to the 2^26 ceiling, where 128 and 256 contexts were both slower.
+const WORKER_TARGETS: [(usize, usize); 4] =
+    [(1 << 16, 4), (1 << 18, 8), (1 << 21, 16), (1 << 23, 32)];
+const MAX_WORKER_TARGET: usize = 64;
 
 /// Padded transform length for full-width operands, when supported.
 pub(super) fn transform_len(lhs_limbs: usize, rhs_limbs: usize) -> Option<usize> {
@@ -78,26 +92,18 @@ pub(super) fn automatic_worker_count(transform_len: usize) -> usize {
 
 /// Select a power-of-two worker count from a hard context ceiling.
 ///
-/// The measured targets grow from four workers at 2^16 values to 64 at
-/// 2^24–2^26; 128 and 256 contexts are slower there. The target is capped at
-/// `max_contexts` and rounded down to a power of two, so a smaller machine
-/// uses only what it reports.
+/// The target comes from `WORKER_TARGETS`, is capped at `max_contexts`, and
+/// is rounded down to a power of two, so a smaller machine uses only what
+/// it reports.
 pub(super) fn worker_count(transform_len: usize, max_contexts: usize) -> usize {
     debug_assert!(transform_len.is_power_of_two());
     if transform_len < PARALLEL_TRANSFORM_MIN_LEN || max_contexts <= 1 {
         return 1;
     }
-    let target = if transform_len <= 1 << 16 {
-        4
-    } else if transform_len <= 1 << 18 {
-        8
-    } else if transform_len <= 1 << 21 {
-        16
-    } else if transform_len <= 1 << 23 {
-        32
-    } else {
-        64
-    };
+    let target = WORKER_TARGETS
+        .iter()
+        .find(|&&(longest, _)| transform_len <= longest)
+        .map_or(MAX_WORKER_TARGET, |&(_, target)| target);
     let maximum = max_contexts.min(target);
     1usize << maximum.ilog2()
 }
@@ -339,7 +345,7 @@ fn reconstruct(
     debug_assert!(residues_1.len() >= convolution_len);
     let coefficients = &mut residues_1[..convolution_len];
     reconstruct_coefficients(residues_0, coefficients, workers);
-    let mut limbs = Vec::with_capacity((convolution_len + DIGITS_PER_LIMB) / 4);
+    let mut limbs = Vec::with_capacity((convolution_len + DIGITS_PER_LIMB) / DIGITS_PER_LIMB);
     let mut word = 0u64;
     let mut digit_in_word = 0usize;
     let mut carry = 0u128;
@@ -1074,6 +1080,48 @@ fn pow_mod<const MODULUS: u64>(mut base: u64, mut exponent: u64) -> u64 {
 mod tests {
     use super::*;
 
+    /// Test vectors are affine ramps `index·step + offset mod PRIME_0`.
+    /// The step and offset are arbitrary; any step in `1..PRIME_0` makes
+    /// the entries distinct for every length below the prime, since the
+    /// prime divides no product of two smaller numbers.
+    const RAMP_STEP: u64 = 1_234_567;
+    const RAMP_OFFSET: u64 = 89;
+    /// A second ramp, so the two inverse tests do not share a vector.
+    const SECOND_RAMP_STEP: u64 = 7_654_321;
+    const SECOND_RAMP_OFFSET: u64 = 123;
+
+    /// Every stage count from zero to three, then two longer transforms.
+    const ROUND_TRIP_LENS: [usize; 6] = [1, 2, 4, 8, 32, 256];
+    /// The same, plus one long enough that eight workers keep a 512-value
+    /// segment each and three stages join them.
+    const DIF_LENS: [usize; 7] = [1, 2, 4, 8, 32, 256, LONG_LEN];
+    const LONG_LEN: usize = 4096;
+    /// Context limits, including the non-powers of two 3 and 5 that must
+    /// round down to 2 and 4.
+    const CONTEXT_LIMITS: [usize; 6] = [1, 2, 3, 4, 5, 8];
+    /// The same limits without the serial reference.
+    const PARALLEL_CONTEXT_LIMITS: [usize; 5] = [2, 3, 4, 5, 8];
+    /// Worker counts for the bit-reversed input split: one, two and three
+    /// segment bits.
+    const INPUT_WORKER_COUNTS: [usize; 3] = [2, 4, 8];
+    /// A limb holding every hex digit once: all four 16-bit digits are
+    /// distinct and non-zero.
+    const NIBBLE_RAMP_LIMB: u64 = 0x0123_4567_89ab_cdef;
+    /// A top limb with its upper two digits zero, so the significant digit
+    /// count is not a multiple of `DIGITS_PER_LIMB`.
+    const HALF_LIMB: u64 = 0x1234_5678;
+    /// The most contexts the ladder's measurement host reported.
+    const RECORD_HOST_CONTEXTS: usize = 256;
+    /// The widest operand pair the ceiling admits: four digits per limb and
+    /// two equal operands need just under eight coefficients per limb.
+    const CEILING_LIMBS: usize = MAX_TRANSFORM_LEN / (2 * DIGITS_PER_LIMB);
+
+    fn ramp(len: usize, step: u64, offset: u64) -> Vec<u64> {
+        (0..len)
+            .map(|index| (index as u64 * step + offset) % PRIME_0)
+            .collect()
+    }
+
     #[test]
     fn roots_generate_the_required_power_of_two_subgroups() {
         let is_prime_by_trial_division = |candidate: u64| {
@@ -1121,10 +1169,8 @@ mod tests {
 
     #[test]
     fn transform_round_trip() {
-        for len in [1usize, 2, 4, 8, 32, 256] {
-            let original: Vec<u64> = (0..len)
-                .map(|index| (index as u64 * 1_234_567 + 89) % PRIME_0)
-                .collect();
+        for len in ROUND_TRIP_LENS {
+            let original = ramp(len, RAMP_STEP, RAMP_OFFSET);
             let mut transformed = original.clone();
             transform::<PRIME_0, ROOT_0>(&mut transformed, false, 1);
             transform::<PRIME_0, ROOT_0>(&mut transformed, true, 1);
@@ -1134,13 +1180,11 @@ mod tests {
 
     #[test]
     fn dif_inverse_matches_original_at_every_context_limit() {
-        for len in [1usize, 2, 4, 8, 32, 256, 4096] {
-            let original: Vec<u64> = (0..len)
-                .map(|index| (index as u64 * 7_654_321 + 123) % PRIME_0)
-                .collect();
+        for len in DIF_LENS {
+            let original = ramp(len, SECOND_RAMP_STEP, SECOND_RAMP_OFFSET);
             let mut spectrum = original.clone();
             transform::<PRIME_0, ROOT_0>(&mut spectrum, false, 1);
-            for contexts in [1usize, 2, 3, 4, 5, 8] {
+            for contexts in CONTEXT_LIMITS {
                 let mut transformed = spectrum.clone();
                 let mut actual = vec![0u64; len];
                 inverse_to_natural::<PRIME_0, ROOT_0>(&mut transformed, &mut actual, contexts);
@@ -1151,11 +1195,14 @@ mod tests {
 
     #[test]
     fn parallel_bit_reversed_input_matches_serial_for_partial_limbs() {
+        // One digit; a full limb; a full limb under a one-digit top; a zero
+        // limb inside and a partial top limb; and a five-limb value whose
+        // zero limbs sit between non-zero ones.
         let values = [
             BigUint::from_limbs(vec![1]),
             BigUint::from_limbs(vec![u64::MAX]),
-            BigUint::from_limbs(vec![0x0123_4567_89ab_cdef, 1]),
-            BigUint::from_limbs(vec![u64::MAX, 0, 0x1234_5678]),
+            BigUint::from_limbs(vec![NIBBLE_RAMP_LIMB, 1]),
+            BigUint::from_limbs(vec![u64::MAX, 0, HALF_LIMB]),
             BigUint::from_limbs(vec![0, u64::MAX, 7, 0, 1]),
         ];
         for value in values {
@@ -1163,7 +1210,10 @@ mod tests {
             let transform_len = (digit_len * 2).next_power_of_two();
             let mut expected = vec![0u64; transform_len];
             write_digits_bit_reversed(&value, digit_len, &mut expected, 1);
-            for workers in [2usize, 4, 8].into_iter().filter(|&w| w <= transform_len) {
+            for workers in INPUT_WORKER_COUNTS
+                .into_iter()
+                .filter(|&w| w <= transform_len)
+            {
                 let mut actual = vec![0u64; transform_len];
                 write_digits_bit_reversed(&value, digit_len, &mut actual, workers);
                 assert_eq!(actual, expected, "bit-reversed input at {workers} workers");
@@ -1173,12 +1223,10 @@ mod tests {
 
     #[test]
     fn transform_is_independent_of_context_limit() {
-        let original: Vec<u64> = (0..4096)
-            .map(|index| (index as u64 * 1_234_567 + 89) % PRIME_0)
-            .collect();
+        let original = ramp(LONG_LEN, RAMP_STEP, RAMP_OFFSET);
         let mut serial = original.clone();
         transform::<PRIME_0, ROOT_0>(&mut serial, false, 1);
-        for contexts in [2usize, 3, 4, 5, 8] {
+        for contexts in PARALLEL_CONTEXT_LIMITS {
             let mut parallel = original.clone();
             transform::<PRIME_0, ROOT_0>(&mut parallel, false, contexts);
             assert_eq!(parallel, serial, "forward transform at {contexts} contexts");
@@ -1192,28 +1240,30 @@ mod tests {
 
     #[test]
     fn transform_length_ceiling_is_exact() {
-        // Four base-2^16 digits per limb and two equal operands require just
-        // under eight transform coefficients per limb.
-        assert_eq!(transform_len(1 << 23, 1 << 23), Some(MAX_TRANSFORM_LEN));
-        assert_eq!(transform_len((1 << 23) + 1, (1 << 23) + 1), None);
+        assert_eq!(
+            transform_len(CEILING_LIMBS, CEILING_LIMBS),
+            Some(MAX_TRANSFORM_LEN)
+        );
+        assert_eq!(transform_len(CEILING_LIMBS + 1, CEILING_LIMBS + 1), None);
     }
 
     #[test]
     fn worker_count_is_hardware_bounded_and_geometry_selected() {
-        assert_eq!(worker_count(1 << 15, 256), 1);
+        let host = RECORD_HOST_CONTEXTS;
+        assert_eq!(worker_count(1 << 15, host), 1);
         assert_eq!(worker_count(1 << 16, 1), 1);
         assert_eq!(worker_count(1 << 16, 2), 2);
         assert_eq!(worker_count(1 << 16, 6), 4);
-        assert_eq!(worker_count(1 << 16, 256), 4);
-        assert_eq!(worker_count(1 << 17, 256), 8);
-        assert_eq!(worker_count(1 << 18, 256), 8);
-        assert_eq!(worker_count(1 << 19, 256), 16);
-        assert_eq!(worker_count(1 << 21, 256), 16);
-        assert_eq!(worker_count(1 << 22, 256), 32);
-        assert_eq!(worker_count(1 << 23, 256), 32);
-        assert_eq!(worker_count(1 << 24, 256), 64);
-        assert_eq!(worker_count(MAX_TRANSFORM_LEN, 256), 64);
-        for available in 1usize..=256 {
+        assert_eq!(worker_count(1 << 16, host), 4);
+        assert_eq!(worker_count(1 << 17, host), 8);
+        assert_eq!(worker_count(1 << 18, host), 8);
+        assert_eq!(worker_count(1 << 19, host), 16);
+        assert_eq!(worker_count(1 << 21, host), 16);
+        assert_eq!(worker_count(1 << 22, host), 32);
+        assert_eq!(worker_count(1 << 23, host), 32);
+        assert_eq!(worker_count(1 << 24, host), 64);
+        assert_eq!(worker_count(MAX_TRANSFORM_LEN, host), 64);
+        for available in 1usize..=host {
             let workers = worker_count(MAX_TRANSFORM_LEN, available);
             assert!(workers <= available);
             assert!(workers.is_power_of_two());

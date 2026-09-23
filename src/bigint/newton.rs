@@ -49,8 +49,14 @@ const MAX_RECIPROCAL_CORRECTIONS: u32 = 256;
 
 /// Widths at or below which the reciprocal is taken by long division.
 ///
-/// The recursion halves the width until this floor, where a single
-/// Algorithm D division of a `2k`-limb power of the base by `d` is cheap.
+/// The recursion halves the width until this floor, where one Algorithm D
+/// division of `b^{2k}` by `d`, about `k²` limb products, replaces one more
+/// Newton level of three `k`-limb products and a recursive call. The floor
+/// does not show in a division's time: on the EPYC 7452, `div_rem` of
+/// `2k` by `k` limbs at `k` = 4096, 8192, 16384 and 32768 measured 25.4,
+/// 62.8, 116 and 210 ms with the floor at 8, and the same within 1.5% at
+/// 16, 32, 64 and 128 — the levels above the floor carry the cost, and the
+/// base case is noise. 32 keeps the recursion to a handful of levels.
 const RECIPROCAL_BASE_LIMBS: usize = 32;
 
 /// `⌊b^{2k}/d⌋` for a normalized `d` of `k` limbs (top bit set), exact.
@@ -212,7 +218,77 @@ fn barrett_digit(x: &BigUint, d: &BigUint, mu: &BigUint, k: usize) -> (BigUint, 
 mod tests {
     use super::*;
 
-    /// A fixed-seed splitmix64 stream for reproducible operand shapes.
+    /// Seeds, one per test: arbitrary, fixed so a failure reproduces.
+    const RECIPROCAL_SEED: u64 = 1;
+    const SHAPES_SEED: u64 = 2;
+    const EDGES_SEED: u64 = 3;
+    const ROUTE_SEED: u64 = 4;
+    const CROSSOVER_SEED: u64 = 5;
+
+    /// Divisor widths for the exactness check: the one-limb path, the
+    /// smallest multi-limb widths, both sides of the long-division floor,
+    /// both sides of a power of two (where halving lands unevenly), two odd
+    /// widths, and one wide enough for five Newton levels.
+    const RECIPROCAL_WIDTHS: [usize; 12] = [
+        1,
+        2,
+        3,
+        RECIPROCAL_BASE_LIMBS,
+        RECIPROCAL_BASE_LIMBS + 1,
+        64,
+        65,
+        100,
+        255,
+        256,
+        257,
+        1000,
+    ];
+    /// Widths for the extremes of the normalized range: one and two Newton
+    /// levels above the long-division floor.
+    const EXTREME_WIDTHS: [usize; 2] = [40, 100];
+
+    /// `(dividend, divisor)` limb counts: the two-limb floor; one to five
+    /// divisor widths, exact and with a partial block; two ratios that are
+    /// not whole; and powers of two with one less.
+    const DIVISION_SHAPES: [(usize, usize); 12] = [
+        (2, 2),
+        (3, 2),
+        (40, 40),
+        (41, 40),
+        (80, 40),
+        (81, 40),
+        (200, 40),
+        (203, 40),
+        (300, 100),
+        (1000, 300),
+        (1024, 512),
+        (2047, 1024),
+    ];
+
+    /// Edge-case widths: a divisor and a quotient a little wider than it,
+    /// so the exact multiple spans more than one block.
+    const EDGE_DIVISOR_LIMBS: usize = 64;
+    const EDGE_QUOTIENT_LIMBS: usize = 70;
+    /// All-ones operands: a dividend of three and a half divisor widths, so
+    /// the last block is partial.
+    const ONES_DIVISOR_LIMBS: usize = 50;
+    const ONES_DIVIDEND_LIMBS: usize = 175;
+    /// The divisor `b^60`: its top limb is 1, so normalization shifts by 63.
+    const POWER_OF_TWO_DIVISOR_EXPONENT_LIMBS: usize = 60;
+
+    /// The public route test: a divisor a few limbs past the threshold and
+    /// a dividend of three divisor widths, so the block loop runs past its
+    /// first block.
+    const ROUTE_EXCESS_LIMBS: usize = 5;
+    const ROUTE_DIVIDEND_FACTOR: usize = 3;
+
+    /// Crossover probe widths: fine steps either side of the threshold,
+    /// then doublings out to the last row of the threshold's table.
+    const CROSSOVER_WIDTHS: [usize; 8] = [256, 512, 768, 1024, 2048, 4096, 16_384, 65_536];
+
+    /// A fixed-seed splitmix64 stream (Steele, Lea & Flood, *Fast Splittable
+    /// Pseudorandom Number Generators*, OOPSLA 2014) for reproducible
+    /// operand shapes.
     struct Stream(u64);
     impl Stream {
         fn next(&mut self) -> u64 {
@@ -248,8 +324,8 @@ mod tests {
 
     #[test]
     fn the_reciprocal_is_exact_at_every_width() {
-        let mut stream = Stream(1);
-        for k in [1usize, 2, 3, 32, 33, 64, 65, 100, 255, 256, 257, 1000] {
+        let mut stream = Stream(RECIPROCAL_SEED);
+        for k in RECIPROCAL_WIDTHS {
             let d = stream.limbs(k, true);
             let mu = reciprocal(&d);
             let two_k = power_of_base(2 * k);
@@ -260,7 +336,7 @@ mod tests {
             );
         }
         // The extremes of the normalized range: b^k/2 exactly, and b^k − 1.
-        for k in [40usize, 100] {
+        for k in EXTREME_WIDTHS {
             let mut half = BigUint::zero();
             half.set_bit(bit_span(k, 64) - 1);
             let mu = reciprocal(&half);
@@ -276,21 +352,8 @@ mod tests {
 
     #[test]
     fn division_agrees_with_algorithm_d_over_shapes() {
-        let mut stream = Stream(2);
-        for &(n_limbs, d_limbs) in &[
-            (2usize, 2usize),
-            (3, 2),
-            (40, 40),
-            (41, 40),
-            (80, 40),
-            (81, 40),
-            (200, 40),
-            (203, 40),
-            (300, 100),
-            (1000, 300),
-            (1024, 512),
-            (2047, 1024),
-        ] {
+        let mut stream = Stream(SHAPES_SEED);
+        for (n_limbs, d_limbs) in DIVISION_SHAPES {
             for top_bit in [true, false] {
                 let d = stream.limbs(d_limbs, top_bit);
                 let n = stream.limbs(n_limbs, top_bit);
@@ -304,10 +367,10 @@ mod tests {
 
     #[test]
     fn division_handles_the_edges() {
-        let mut stream = Stream(3);
-        let d = stream.limbs(64, true);
+        let mut stream = Stream(EDGES_SEED);
+        let d = stream.limbs(EDGE_DIVISOR_LIMBS, true);
         // An exact multiple, a multiple less one, a multiple plus one.
-        let q = stream.limbs(70, false);
+        let q = stream.limbs(EDGE_QUOTIENT_LIMBS, false);
         let exact = q.mul(&d);
         check(&exact, &d);
         check(&exact.sub(&BigUint::one()), &d);
@@ -316,12 +379,12 @@ mod tests {
         check(&d, &d);
         check(&d.mul(&d), &d);
         // A divisor of all ones and a dividend of all ones, wider.
-        let ones_d = BigUint::from_limbs(vec![u64::MAX; 50]);
-        let ones_n = BigUint::from_limbs(vec![u64::MAX; 175]);
+        let ones_d = BigUint::from_limbs(vec![u64::MAX; ONES_DIVISOR_LIMBS]);
+        let ones_n = BigUint::from_limbs(vec![u64::MAX; ONES_DIVIDEND_LIMBS]);
         check(&ones_n, &ones_d);
         // A power of two divisor, unnormalized (top limb = 1).
         let mut pow = BigUint::zero();
-        pow.set_bit(64 * 60);
+        pow.set_bit(bit_span(POWER_OF_TWO_DIVISOR_EXPONENT_LIMBS, 64));
         check(&ones_n, &pow);
     }
 
@@ -330,9 +393,12 @@ mod tests {
         // Through `BigUint::div_rem`, on operands past the threshold, against
         // the invariant q·d + r = n: whichever route the dispatch takes must
         // hold it, and the sizes here are the ones the dispatch sends here.
-        let mut stream = Stream(4);
-        let d = stream.limbs(NEWTON_DIVISION_THRESHOLD_LIMBS + 5, false);
-        let n = stream.limbs(3 * NEWTON_DIVISION_THRESHOLD_LIMBS, false);
+        let mut stream = Stream(ROUTE_SEED);
+        let d = stream.limbs(NEWTON_DIVISION_THRESHOLD_LIMBS + ROUTE_EXCESS_LIMBS, false);
+        let n = stream.limbs(
+            ROUTE_DIVIDEND_FACTOR * NEWTON_DIVISION_THRESHOLD_LIMBS,
+            false,
+        );
         let (q, r) = n.div_rem(&d);
         assert!(r < d);
         assert_eq!(q.mul(&d).add(&r), n);
@@ -342,8 +408,8 @@ mod tests {
     #[test]
     #[ignore = "timing probe for the division crossover; run with --ignored --nocapture"]
     fn newton_division_crossover_timing() {
-        let mut stream = Stream(5);
-        for k in [256usize, 512, 768, 1024, 2048, 4096, 16_384, 65_536] {
+        let mut stream = Stream(CROSSOVER_SEED);
+        for k in CROSSOVER_WIDTHS {
             let d = stream.limbs(k, false);
             let n = stream.limbs(2 * k, false);
             let started = std::time::Instant::now();

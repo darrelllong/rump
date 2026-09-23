@@ -393,10 +393,61 @@ fn mod_add(a: u128, b: u128, modulus: u128) -> u128 {
     }
 }
 
+/// Knuth's MMIX linear congruential generator (*TAOCP* vol. 2, §3.3.4):
+/// the multiplier and increment the tests walk the word with.
+#[cfg(test)]
+const MMIX_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
+#[cfg(test)]
+const MMIX_INCREMENT: u64 = 1_442_695_040_888_963_407;
+
+/// 2⁶⁴ − 59 and 2¹²⁸ − 159, the largest primes below each power, so a
+/// context built on either is a field.
+#[cfg(test)]
+const PRIME_BELOW_2_64: u64 = u64::MAX - 58;
+#[cfg(test)]
+const PRIME_BELOW_2_128: u128 = u128::MAX - 158;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::BigUint;
+
+    /// Seeds, one per test: arbitrary, fixed so a failure reproduces. The
+    /// first is the golden-ratio word, here only a seed.
+    const PRODUCT_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+    const CROSS_WIDTH_SEED: u64 = 1;
+
+    /// Random `(modulus, a, b)` triples checked against a `u128` remainder;
+    /// the count is a budget, since one triple costs a division.
+    const PRODUCT_SAMPLES: usize = 1_000;
+    /// Products checked between the word and wide contexts, on the same
+    /// footing.
+    const CROSS_WIDTH_SAMPLES: usize = 200;
+
+    /// A second generator for the cross-width test, so its stream is not
+    /// the product test's: an LCG modulo 2⁶⁴ with the full period, which
+    /// Hull & Dobell give for any odd increment and a multiplier that is 1
+    /// modulo 4 (this one is 2⁶² + 1 modulo 4). The multiplier is otherwise
+    /// arbitrary; nothing here depends on its lattice quality. The rotation
+    /// is stream shaping: the second operand is the state turned so the
+    /// pair is not a value with itself.
+    const STREAM_MULTIPLIER: u64 = 2_862_933_555_777_941_757;
+    const STREAM_INCREMENT: u64 = 3;
+    const PARTNER_ROTATION: u32 = 31;
+
+    /// Arbitrary small operands, far from the modulus.
+    const SMALL_PAIR: (u64, u64) = (12_345, 67_890);
+
+    /// 2¹⁰⁰ + 277, prime: past a word, so the wide context reduces for real.
+    const WIDE_PRIME: u128 = (1 << 100) + 277;
+    /// Arbitrary operands above a word, so the wide product's high half is
+    /// not zero.
+    const WIDE_A: u128 = (1 << 99) + 12_345;
+    const WIDE_B: u128 = (1 << 98) + 67_890;
+
+    /// Moduli for the round trip: the two smallest odd ones, F4 = 2¹⁶ + 1,
+    /// M31 = 2³¹ − 1, the largest prime below 2⁶⁴, and 2⁶⁴ − 1 itself.
+    const ROUND_TRIP_MODULI: [u64; 6] = [3, 5, 65_537, 2_147_483_647, PRIME_BELOW_2_64, u64::MAX];
 
     #[test]
     fn even_and_trivial_moduli_are_refused() {
@@ -418,16 +469,17 @@ mod tests {
 
     /// Odd moduli near the top of the word, where the sum of two residues
     /// overflows it (and, in the wide context, so does REDC's folded value),
-    /// plus small ones where nothing does. `u64::MAX - 58` is 2⁶⁴ − 59 and
-    /// `u128::MAX - 158` is 2¹²⁸ − 159, the largest primes below each power,
-    /// so a context built on them is also a field.
+    /// plus small ones where nothing does. Among them: F4 = 2¹⁶ + 1, F5 =
+    /// 2³² + 1 (composite), both neighbours of the half-way power, and the
+    /// largest prime below each power, so one modulus in each list is a
+    /// field.
     const EDGE_MODULI_64: [u64; 8] = [
         3,
         65_537,
         (1 << 32) + 1,
         (1 << 63) - 1,
         (1 << 63) + 1,
-        u64::MAX - 58,
+        PRIME_BELOW_2_64,
         u64::MAX - 2,
         u64::MAX,
     ];
@@ -438,7 +490,7 @@ mod tests {
         (1 << 64) + 1,
         (1 << 127) - 1,
         (1 << 127) + 1,
-        u128::MAX - 158,
+        PRIME_BELOW_2_128,
         u128::MAX - 2,
         u128::MAX,
         (u64::MAX as u128) << 64 | 1,
@@ -617,7 +669,7 @@ mod tests {
 
     #[test]
     fn a_round_trip_is_the_identity_across_the_range() {
-        for &modulus in &[3u64, 5, 65_537, 2_147_483_647, u64::MAX - 58, u64::MAX] {
+        for modulus in ROUND_TRIP_MODULI {
             let context = Montgomery64::new(modulus).expect("odd moduli above one");
             for &value in &[0u64, 1, 2, modulus / 2, modulus - 1, u64::MAX] {
                 let expected = value % modulus;
@@ -634,14 +686,14 @@ mod tests {
     fn multiplication_agrees_with_the_plain_ring() {
         // Deterministic pseudo-random coverage: a linear congruential walk
         // exercises the full width without a random source dependency.
-        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut state = PRODUCT_SEED;
         let mut next = || {
             state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
+                .wrapping_mul(MMIX_MULTIPLIER)
+                .wrapping_add(MMIX_INCREMENT);
             state
         };
-        for _ in 0..1_000 {
+        for _ in 0..PRODUCT_SAMPLES {
             let modulus = next() | 1;
             if modulus <= 1 {
                 continue;
@@ -663,7 +715,7 @@ mod tests {
             (0u64, 0u64),
             (1, u64::MAX - 1),
             (u64::MAX - 1, u64::MAX - 1),
-            (12_345, 67_890),
+            SMALL_PAIR,
         ] {
             let sum = context.exit(context.add(context.enter(a), context.enter(b)));
             assert_eq!(u128::from(sum), (u128::from(a) + u128::from(b)) % modulus);
@@ -680,6 +732,7 @@ mod tests {
         // 2⁶¹ − 1 is prime, so aᵖ⁻¹ ≡ 1 for a ≢ 0.
         let prime = (1u64 << 61) - 1;
         let context = Montgomery64::new(prime).expect("odd prime");
+        // The two smallest bases, F4, and the top of the range.
         for &base in &[2u64, 3, 65_537, prime - 2] {
             let result = context.exit(context.pow(context.enter(base), prime - 1));
             assert_eq!(result, 1, "Fermat failed for {base}");
@@ -688,15 +741,15 @@ mod tests {
 
     #[test]
     fn the_wide_context_agrees_with_the_word_context_inside_a_word() {
-        let modulus = u64::MAX - 58; // odd
+        let modulus = PRIME_BELOW_2_64;
         let word = Montgomery64::new(modulus).expect("odd");
         let wide = Montgomery128::new(u128::from(modulus)).expect("odd");
-        let mut state = 1u64;
-        for _ in 0..200 {
+        let mut state = CROSS_WIDTH_SEED;
+        for _ in 0..CROSS_WIDTH_SAMPLES {
             state = state
-                .wrapping_mul(2_862_933_555_777_941_757)
-                .wrapping_add(3);
-            let (a, b) = (state, state.rotate_left(31));
+                .wrapping_mul(STREAM_MULTIPLIER)
+                .wrapping_add(STREAM_INCREMENT);
+            let (a, b) = (state, state.rotate_left(PARTNER_ROTATION));
             let narrow = word.exit(word.mul(word.enter(a), word.enter(b)));
             let broad = wide.exit(wide.mul(wide.enter(u128::from(a)), wide.enter(u128::from(b))));
             assert_eq!(u128::from(narrow), broad);
@@ -705,16 +758,17 @@ mod tests {
 
     #[test]
     fn the_wide_context_is_exact_past_the_word_boundary() {
-        // A 100-bit prime: 2¹⁰⁰ + 277. Fermat again, and a product checked
-        // against schoolbook reduction through wide_mul.
-        let prime = (1u128 << 100) + 277;
+        // Fermat again, and a product checked against schoolbook reduction
+        // through wide_mul.
+        let prime = WIDE_PRIME;
         let context = Montgomery128::new(prime).expect("odd prime");
+        // The two smallest bases and one above a word.
         for &base in &[2u128, 3, (1 << 99) + 1] {
             let result = context.exit(context.pow(context.enter(base), prime - 1));
             assert_eq!(result, 1, "Fermat failed for {base} mod 2^100 + 277");
         }
-        let a = (1u128 << 99) + 12_345;
-        let b = (1u128 << 98) + 67_890;
+        let a = WIDE_A;
+        let b = WIDE_B;
         let product = context.exit(context.mul(context.enter(a), context.enter(b)));
         // Reduce the 256-bit product by folding the high half bit by bit,
         // as the context builds r², independently of REDC.
@@ -785,15 +839,22 @@ pub fn is_prime_u64(candidate: u64) -> bool {
 
 #[cfg(test)]
 mod primality_tests {
-    use super::is_prime_u64;
+    use super::{is_prime_u64, MMIX_INCREMENT, MMIX_MULTIPLIER};
+
+    /// Arbitrary, fixed so a failure reproduces.
+    const PRIMALITY_SEED: u64 = 0x1234_5678_9abc_def1;
+    /// Odd words tested: about one in 22 odd 64-bit words is prime
+    /// (`2/ln 2⁶⁴`), so the sample holds about 90 primes among the
+    /// composites, and each reference costs one BPSW test on a word.
+    const PRIMALITY_SAMPLES: usize = 2_000;
 
     #[test]
     fn agrees_with_bpsw_across_a_mixed_sample() {
-        let mut state = 0x1234_5678_9abc_def1u64;
-        for _ in 0..2_000 {
+        let mut state = PRIMALITY_SEED;
+        for _ in 0..PRIMALITY_SAMPLES {
             state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
+                .wrapping_mul(MMIX_MULTIPLIER)
+                .wrapping_add(MMIX_INCREMENT);
             let candidate = state | 1;
             let reference = rump_bpsw(candidate);
             assert_eq!(

@@ -59,6 +59,22 @@ use std::collections::BinaryHeap;
 
 use super::{set_bits, words_for, WORD};
 
+/// A purge round removes this fraction of the remaining excess, rounded
+/// up, so the singleton cascades that removal sets off cannot overshoot
+/// the target by more than one round's share. A quarter is a policy: a
+/// smaller share means more rounds, each rebuilding the components, and a
+/// larger one risks a deeper overshoot. What would settle it is the
+/// overshoot and round count measured on a sieve matrix.
+const PURGE_SHARE_DIVISOR: usize = 4;
+
+/// Base of the key a column is first queued under: its weight added to
+/// this sorts every column below any fill, in weight order, so singletons
+/// and pairs are planned first. The key only ever sorts; a stale entry is
+/// re-planned before its key reaches the cost test. Half the minimum rather
+/// than the minimum leaves headroom, so that a key can be negated or doubled
+/// without overflow should the arithmetic on keys ever grow.
+const SENTINEL_KEY_BASE: i64 = i64::MIN / 2;
+
 /// A GF(2) matrix with each row held as its ascending column indices.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SparseMatrix {
@@ -513,7 +529,10 @@ impl Filter {
                 return;
             }
             components.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-            let share = (excess - target).div_ceil(4).max(1).min(components.len());
+            let share = (excess - target)
+                .div_ceil(PURGE_SHARE_DIVISOR)
+                .max(1)
+                .min(components.len());
             let mut pending = Vec::new();
             for &(_, root) in &components[..share] {
                 for &row in &rows_of[root] {
@@ -538,11 +557,11 @@ impl Filter {
         // key a column was last queued under and `fresh` whether that key
         // is its exact current fill; a change to any member row clears
         // `fresh`, and a popped stale entry is re-planned and re-queued
-        // rather than acted on. The initial keys sort by weight far below
-        // any fill, so singletons and pairs are planned first. `queued`
-        // keeps one entry per column.
+        // rather than acted on. The initial keys sort by weight below any
+        // fill (see `SENTINEL_KEY_BASE`). `queued` keeps one entry per
+        // column.
         let cap = weight_cap.max(1);
-        let initial = |weight: u32| i64::MIN / 2 + i64::from(weight);
+        let initial = |weight: u32| SENTINEL_KEY_BASE + i64::from(weight);
         let mut last: Vec<i64> = self.occupants.iter().map(|&w| initial(w)).collect();
         let mut fresh = vec![false; columns];
         let mut queued = vec![false; columns];
@@ -701,6 +720,8 @@ mod tests {
     use super::super::dense_null_space;
     use super::*;
 
+    /// The `fmix64` finalizer of MurmurHash3 (Appleby), so the low bits of
+    /// the generator's word below are as well mixed as the high ones.
     fn mix(mut x: u64) -> u64 {
         x ^= x >> 33;
         x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
@@ -709,7 +730,9 @@ mod tests {
         x ^ (x >> 33)
     }
 
-    /// A random matrix with each entry set with probability `1/density`.
+    /// A random matrix with each entry set with probability `1/density`,
+    /// from Knuth's MMIX linear congruential generator (TAOCP vol. 2,
+    /// §3.3.4) at `seed`.
     fn random_matrix(seed: u64, rows: usize, columns: usize, density: u64) -> SparseMatrix {
         let mut state = seed;
         let mut next = move || {
@@ -741,13 +764,17 @@ mod tests {
 
     #[test]
     fn packed_and_sparse_forms_round_trip() {
-        let matrix = random_matrix(3, 40, 130, 5);
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 3;
+        /// Two full words and two bits, so the last packed word is partial.
+        const COLUMNS: usize = 2 * WORD + 2;
+        let matrix = random_matrix(SEED, 40, COLUMNS, 5);
         let packed = matrix.packed_rows();
-        assert_eq!(SparseMatrix::from_packed(&packed, 130), matrix);
-        // Bits beyond the width are not columns.
+        assert_eq!(SparseMatrix::from_packed(&packed, COLUMNS), matrix);
+        // A bit beyond the width, in the partial word, is not a column.
         let mut stray = packed.clone();
-        stray[0][2] |= 1 << 10; // column 138
-        assert_eq!(SparseMatrix::from_packed(&stray, 130), matrix);
+        stray[0][2] |= 1 << 10;
+        assert_eq!(SparseMatrix::from_packed(&stray, COLUMNS), matrix);
     }
 
     #[test]
@@ -762,9 +789,17 @@ mod tests {
         // filtered matrix, expanded through the compositions, must XOR the
         // original rows to zero. Checked across random matrices and every
         // weight cap in the practical range, including trees with depth.
-        for seed in 1..=24u64 {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEEDS: std::ops::RangeInclusive<u64> = 1..=24;
+        /// Dependencies expanded per matrix and cap; arbitrary.
+        const EXPANDED: usize = 4;
+        for seed in SEEDS {
+            // 128 rows over 96 columns, eight nonzeros a row on average:
+            // over-determined, with columns of every small weight.
             let columns = 96;
             let matrix = random_matrix(seed, 128, columns, 12);
+            // Caps: pruning alone, pairs, the two smallest trees with
+            // depth, and two wider, the last the widest these tests use.
             for cap in [1usize, 2, 3, 4, 8, 32] {
                 let filtered = filter_merge(&matrix, cap, usize::MAX);
                 for (index, row) in filtered.rows().iter().enumerate() {
@@ -775,7 +810,7 @@ mod tests {
                     );
                 }
                 let dependencies = dense_null_space(&filtered.packed_rows(), columns);
-                for dependency in dependencies.iter().take(4) {
+                for dependency in dependencies.iter().take(EXPANDED) {
                     let expanded = filtered.expand(dependency);
                     assert!(!expanded.is_empty(), "an empty dependency proves nothing");
                     assert!(
@@ -793,7 +828,12 @@ mod tests {
         // dependency, the filtered one must still hold one: merging is
         // row-space-preserving on the quotient, and pruning removes only
         // rows no dependency can use.
-        for seed in 40..=52u64 {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEEDS: std::ops::RangeInclusive<u64> = 40..=52;
+        for seed in SEEDS {
+            // 90 rows over 64 columns at about six nonzeros a row: usually
+            // over-determined, and the dense check skips the draws that
+            // are not.
             let columns = 64;
             let matrix = random_matrix(seed, 90, columns, 10);
             if dense_null_space(&matrix.packed_rows(), columns).is_empty() {
@@ -812,7 +852,11 @@ mod tests {
         // Singletons and pairs are the same under every cap, and every
         // further merge the rule admits strictly lowers rows · nonzeros,
         // so a wider cap can never hand the solver a dearer matrix.
-        for seed in 200..=212u64 {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEEDS: std::ops::RangeInclusive<u64> = 200..=212;
+        for seed in SEEDS {
+            // 1500 rows over 1200 columns at twenty nonzeros a row: wide
+            // enough that merges of every weight up to the cap occur.
             let matrix = random_matrix(seed, 1_500, 1_200, 60);
             let pairs = filter_merge(&matrix, 2, usize::MAX);
             let wide = filter_merge(&matrix, 32, usize::MAX);
@@ -836,13 +880,19 @@ mod tests {
         // minutes and fails on the suite's patience rather than silently.
         // The dense shape carries the nonzeros; the sparse shape is where
         // light columns abound and the filter must actually shrink it.
+        /// Arbitrary, fixed so a failure reproduces.
+        const DENSE_SEED: u64 = 7;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SPARSE_SEED: u64 = 11;
+        // 4600 rows over 4000 columns: twenty-five nonzeros a row in the
+        // dense shape, two and a half in the sparse.
         let columns = 4_000;
-        let dense = random_matrix(7, 4_600, columns, 160);
+        let dense = random_matrix(DENSE_SEED, 4_600, columns, 160);
         let filtered = filter_merge(&dense, 32, usize::MAX);
         if let Some(dependency) = dense_null_space(&filtered.packed_rows(), columns).first() {
             assert!(xor_of(&dense, &filtered.expand(dependency)).is_empty());
         }
-        let sparse = random_matrix(11, 4_600, columns, 1_600);
+        let sparse = random_matrix(SPARSE_SEED, 4_600, columns, 1_600);
         let filtered = filter_merge(&sparse, 32, usize::MAX);
         assert!(
             filtered.rows().len() < sparse.rows().len(),
@@ -852,8 +902,12 @@ mod tests {
 
     #[test]
     fn live_columns_track_the_filtering() {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 13;
+        // The sparse shape above: two and a half nonzeros a row, so most
+        // columns are emptied by the filter.
         let columns = 4_000;
-        let sparse = random_matrix(13, 4_600, columns, 1_600);
+        let sparse = random_matrix(SEED, 4_600, columns, 1_600);
         let filtered = filter_merge(&sparse, 32, usize::MAX);
         assert!(filtered.live_columns() <= filtered.columns());
         let mut seen = vec![false; columns];
@@ -952,9 +1006,20 @@ mod tests {
     fn purging_preserves_solvability_at_the_kept_excess() {
         // With `excess` rows kept beyond the columns, at least `excess`
         // independent dependencies remain, whatever was thrown away.
-        for seed in 300..=306u64 {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEEDS: std::ops::RangeInclusive<u64> = 300..=306;
+        /// The most excess the assertion demands be kept. Every tested
+        /// excess is below it, so the demand is the full excess each time.
+        const DEMANDED_EXCESS_CAP: usize = 60;
+        /// Dependencies expanded per matrix and excess; arbitrary.
+        const EXPANDED: usize = 3;
+        for seed in SEEDS {
+            // 260 rows over 200 columns at ten nonzeros a row: sixty rows
+            // of excess before filtering, and the excesses asked for
+            // below are well under that.
             let columns = 200;
             let matrix = random_matrix(seed, 260, columns, 20);
+            // Excesses: one dependency, a few, and many.
             for excess in [1usize, 4, 16] {
                 let filtered = filter_merge(&matrix, 32, excess);
                 let kept = filtered
@@ -962,7 +1027,7 @@ mod tests {
                     .len()
                     .saturating_sub(filtered.live_columns());
                 assert!(
-                    kept >= excess.min(60),
+                    kept >= excess.min(DEMANDED_EXCESS_CAP),
                     "seed {seed}: excess {kept} below {excess}"
                 );
                 let dependencies = dense_null_space(&filtered.packed_rows(), columns);
@@ -970,7 +1035,7 @@ mod tests {
                     dependencies.len() >= kept,
                     "seed {seed}: fewer dependencies than excess"
                 );
-                for dependency in dependencies.iter().take(3) {
+                for dependency in dependencies.iter().take(EXPANDED) {
                     assert!(xor_of(&matrix, &filtered.expand(dependency)).is_empty());
                 }
             }

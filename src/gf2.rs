@@ -465,11 +465,40 @@ impl Sparse {
 /// One block word per relation or column.
 type Block = Arc<Vec<u64>>;
 
-/// The measured minimum output folds needed to amortize one worker.
+/// The fewest output folds a retained worker is given.
 ///
-/// A fold is a short XOR gather. Below this boundary the retained worker still
-/// costs a channel round-trip and loses to the caller doing the range inline.
+/// A fold is a short XOR gather, and handing a range to a worker costs a
+/// channel round-trip each way, so the worker count is limited to give
+/// each at least this many, and a matrix too small for two runs inline.
+/// The value is a policy, a power of two large enough that the round-trip
+/// is a small fraction of the range's work; the crossover has not been
+/// measured, and a timing of one fold against one round-trip on the build
+/// hosts would fix it.
 const MINIMUM_FOLDS_PER_WORKER: usize = 4_096;
+
+/// Independent XOR accumulators in [`fold_range`]: the gathers are what the
+/// product waits on, and a single XOR chain would serialize them. Four is a
+/// policy; the count that saturates the load ports has not been measured,
+/// and the loop body names its accumulators, so changing it means changing
+/// the body too.
+const FOLD_ACCUMULATORS: usize = 4;
+
+/// Rows per spare iteration allowed beyond `relations / WIDTH`.
+///
+/// Every iteration spans at most `WIDTH` new dimensions, so a converging
+/// run takes at least `relations / WIDTH` of them, and Montgomery's
+/// expected count is `n / (N − 0.76)` for `N = 64`: over `n / N` by
+/// `0.76·n / (N·(N − 0.76))`, one iteration per 5,325 rows. The cap exists
+/// to catch a run that never drives `T` to zero, and must never cut off a
+/// converging one, so its spare grows with the matrix: one iteration per
+/// 4,096 rows is the expected excess with a third to spare, and
+/// `SPARE_ITERATIONS_FLOOR` covers the rounds a selection of fewer than
+/// `WIDTH` lanes costs on any matrix at all.
+const ROWS_PER_SPARE_ITERATION: usize = 4096;
+
+/// Spare iterations granted to every run regardless of size: one full block
+/// of rounds, plus sixteen for the lanes the last selections leave unused.
+const SPARE_ITERATIONS_FLOOR: usize = WIDTH + 16;
 
 struct FoldJob {
     lists: Arc<Lists>,
@@ -601,9 +630,7 @@ fn fold_range(lists: &Lists, start: usize, end: usize, input: &[u64]) -> Vec<u64
     let mut out = Vec::with_capacity(end - start);
     for index in start..end {
         let indices = lists.list(index);
-        // Four independent accumulators: the gathers are what the product
-        // waits on, and a single XOR chain would serialize them.
-        let mut chunks = indices.chunks_exact(4);
+        let mut chunks = indices.chunks_exact(FOLD_ACCUMULATORS);
         let (mut a, mut b, mut c, mut d) = (0u64, 0u64, 0u64, 0u64);
         for chunk in &mut chunks {
             a ^= input[chunk[0] as usize];
@@ -847,9 +874,9 @@ fn lane(block: &[u64], which: usize) -> Vec<u64> {
 ///
 /// `threads` is a ceiling on retained sparse-fold workers, not a promise to
 /// create that many. Zero and one run inline; larger requests are narrowed so
-/// every worker receives at least 4,096 output folds. Workers live only for
-/// this call, and the dependency set is bit-identical at every count for the
-/// same rows and random source.
+/// every worker receives at least `MINIMUM_FOLDS_PER_WORKER` output folds.
+/// Workers live only for this call, and the dependency set is bit-identical
+/// at every count for the same rows and random source.
 #[must_use]
 pub fn block_lanczos_dependencies<R: RandomSource + ?Sized>(
     rows: &[Vec<u64>],
@@ -954,9 +981,10 @@ fn lanczos_observed<R: RandomSource + ?Sized>(
     let mut g = [0u64; WIDTH];
     let mut mask = u64::MAX;
 
-    // One block spans up to sixty-four dimensions, so the count is bounded;
-    // the slack covers iterations where the selection takes fewer lanes.
-    let ceiling = count / WIDTH + WIDTH + 16;
+    // The iterations a run needs if every one spans a full block, plus the
+    // slack for the lanes the selection leaves out.
+    let full_blocks = count / WIDTH;
+    let ceiling = full_blocks + count / ROWS_PER_SPARE_ITERATION + SPARE_ITERATIONS_FLOOR;
     let mut iterations = 0usize;
     while any(&t0) {
         iterations += 1;
@@ -1093,8 +1121,11 @@ mod tests {
     /// Every dependency by exhaustive search over subsets — the oracle, valid
     /// only for a handful of rows, which is why the sweep below stays small.
     fn all_dependencies_by_search(rows: &[Vec<u64>], columns: usize) -> usize {
+        /// The most rows the oracle accepts: `2^12` subsets, each a few
+        /// word XORs, is a moment; every doubling doubles it.
+        const ORACLE_ROW_LIMIT: usize = 12;
         let n = rows.len();
-        assert!(n <= 12, "exhaustive oracle is exponential");
+        assert!(n <= ORACLE_ROW_LIMIT, "exhaustive oracle is exponential");
         (1u32..(1 << n))
             .filter(|mask| {
                 let set: Vec<usize> = (0..n).filter(|i| mask & (1 << i) != 0).collect();
@@ -1103,6 +1134,7 @@ mod tests {
             .count()
     }
 
+    /// Knuth's MMIX linear congruential generator (TAOCP vol. 2, §3.3.4).
     fn lcg(state: &mut u64) -> u64 {
         *state = state
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -1112,10 +1144,16 @@ mod tests {
 
     #[test]
     fn byte_sliced_small_product_matches_set_bit_multiplication() {
-        let mut state = 0x8b10_c4a7_d35e_29f1;
-        for _ in 0..64 {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x8b10_c4a7_d35e_29f1;
+        /// One random matrix per lane of the block.
+        const MATRICES: usize = WIDTH;
+        let mut state = SEED;
+        for _ in 0..MATRICES {
             let matrix: Small = std::array::from_fn(|_| lcg(&mut state));
             let product = SmallProduct::new(&matrix);
+            // Selectors: no lane, the lowest lane, every lane, both end
+            // lanes, and a random word.
             for value in [0, 1, u64::MAX, 0x8000_0000_0000_0001, lcg(&mut state)] {
                 let mut bits = value;
                 let mut expected = 0u64;
@@ -1142,8 +1180,13 @@ mod tests {
             total
         }
 
-        let mut state = 0x65f4_26b8_91de_0ca3;
-        for length in [0usize, 1, 63, 64, 257] {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x65f4_26b8_91de_0ca3;
+        let mut state = SEED;
+        // Relation counts either side of multiples of the block width:
+        // none, one, one short of the width, the width, four widths plus
+        // one.
+        for length in [0usize, 1, WIDTH - 1, WIDTH, 4 * WIDTH + 1] {
             let d: Small = std::array::from_fn(|_| lcg(&mut state));
             let e: Small = std::array::from_fn(|_| lcg(&mut state));
             let f: Small = std::array::from_fn(|_| lcg(&mut state));
@@ -1180,10 +1223,26 @@ mod tests {
 
     #[test]
     fn retained_fold_workers_match_repeated_inline_folds() {
-        let input: Arc<Vec<u64>> =
-            Arc::new((0..2_003u64).map(|value| value.rotate_left(17)).collect());
+        /// Input words; arbitrary.
+        const INPUT_WORDS: u64 = 2_003;
+        /// Output lists: more than twice `MINIMUM_FOLDS_PER_WORKER`, so at
+        /// least two workers get a range, and odd, so the ranges are
+        /// unequal.
+        const LISTS: usize = 10_003;
+        /// Workers asked for; more than the lists can use, so the pool is
+        /// narrowed to its useful prefix.
+        const WORKERS: usize = 8;
+        /// Applications of the same pool, to show the workers survive reuse.
+        const REPEATS: usize = 16;
+        // Three arbitrary affine index patterns per list, distinct in
+        // stride so the lists do not repeat.
+        let input: Arc<Vec<u64>> = Arc::new(
+            (0..INPUT_WORDS)
+                .map(|value| value.rotate_left(17))
+                .collect(),
+        );
         let lists: Arc<Vec<Vec<u32>>> = Arc::new(
-            (0..10_003usize)
+            (0..LISTS)
                 .map(|row| {
                     vec![
                         (row % input.len()) as u32,
@@ -1195,8 +1254,8 @@ mod tests {
         );
         let lists = Arc::new(super::Lists::from_lists(&lists));
         let expected = fold_range(&lists, 0, lists.len(), &input);
-        let pool = FoldPool::new(8);
-        for _ in 0..16 {
+        let pool = FoldPool::new(WORKERS);
+        for _ in 0..REPEATS {
             assert_eq!(
                 pool.mapped(Arc::clone(&lists), Arc::clone(&input)),
                 expected
@@ -1204,23 +1263,40 @@ mod tests {
         }
     }
 
-    /// Where the sparse solver's time goes at the size of a hundred-digit
-    /// matrix: a random matrix of the sieve's shape, timed, for a
-    /// profiler to look at.
+    /// Where the sparse solver's time goes on a large random matrix, timed,
+    /// for a profiler to look at. `LANCZOS_SIZE` and `LANCZOS_THREADS`
+    /// override the defaults.
     #[test]
-    #[ignore = "timing probe for the sparse solver at a sieve matrix's size"]
+    #[ignore = "timing probe for the sparse solver at a large matrix's size"]
     fn lanczos_cost_probe() {
+        /// Default rows: a round number of the order of a filtered sieve
+        /// matrix. Policy; the row count of a filtered matrix from a
+        /// hundred-digit factorization, recorded here, would fix it.
+        const PROBE_ROWS: usize = 200_000;
+        /// Nonzeros drawn per row (fewer after deduplication): a round
+        /// number of the order of a filtered sieve row. Policy, as above.
+        const PROBE_WEIGHT: usize = 100;
+        /// Default worker ceiling. The pool is narrowed to what
+        /// `MINIMUM_FOLDS_PER_WORKER` allows, so this only has to be no
+        /// smaller than the host's core count; a power of two, as policy.
+        const PROBE_THREADS: usize = 128;
+        /// Rows beyond the columns: the candidate count the iteration ends
+        /// with, the lanes of `X` and of the last `V`, so the null space is
+        /// at least as wide as one run can return.
+        const PROBE_EXCESS: usize = 2 * WIDTH;
+        /// Arbitrary, fixed so a run reproduces.
+        const SEED: u64 = 0x5eed_1234_abcd_ef01;
         let size: usize = std::env::var("LANCZOS_SIZE")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(200_000);
-        let weight: usize = 100;
+            .unwrap_or(PROBE_ROWS);
+        let weight: usize = PROBE_WEIGHT;
         let threads: usize = std::env::var("LANCZOS_THREADS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(128);
-        let mut rng = TestRng(0x5eed_1234_abcd_ef01);
-        let columns = size - 128;
+            .unwrap_or(PROBE_THREADS);
+        let mut rng = TestRng(SEED);
+        let columns = size - PROBE_EXCESS;
         let rows: Vec<Vec<u32>> = (0..size)
             .map(|_| {
                 let mut row: Vec<u32> = (0..weight)
@@ -1245,7 +1321,9 @@ mod tests {
         );
     }
 
-    /// A deterministic `RandomSource` for the tests, so a failure reproduces.
+    /// A deterministic `RandomSource` for the tests, so a failure
+    /// reproduces: Marsaglia's xorshift64 with the shift triple (13, 7, 17)
+    /// (*Xorshift RNGs*, J. Stat. Software 8 (2003), no. 14).
     struct TestRng(u64);
     impl crate::random::RandomSource for TestRng {
         fn fill_bytes(&mut self, dest: &mut [u8]) {
@@ -1278,11 +1356,16 @@ mod tests {
         // The applies split by output ranges and concatenate in order, so the
         // whole iteration -- and therefore the dependency sets -- must be
         // bit-identical at any thread count, given the same starting block.
-        // More than two fold thresholds, so the eight-worker arm necessarily
-        // uses retained workers rather than taking the inline fast path.
-        let rows = sparse_rows(8_193, 96, 8, 0x00c0_ffee);
-        let one = block_lanczos_dependencies(&rows, 96, &mut TestRng(7), 1);
-        let eight = block_lanczos_dependencies(&rows, 96, &mut TestRng(7), 8);
+        /// One past two fold thresholds, so the eight-worker arm uses two
+        /// retained workers rather than the inline path.
+        const RELATIONS: usize = 2 * super::MINIMUM_FOLDS_PER_WORKER + 1;
+        /// Arbitrary, fixed so a failure reproduces.
+        const FIXTURE_SEED: u64 = 0x00c0_ffee;
+        /// Arbitrary, fixed so a failure reproduces; the same for both arms.
+        const RNG_SEED: u64 = 7;
+        let rows = sparse_rows(RELATIONS, 96, 8, FIXTURE_SEED);
+        let one = block_lanczos_dependencies(&rows, 96, &mut TestRng(RNG_SEED), 1);
+        let eight = block_lanczos_dependencies(&rows, 96, &mut TestRng(RNG_SEED), 8);
         assert_eq!(one, eight);
     }
 
@@ -1294,11 +1377,18 @@ mod tests {
     /// cannot detect a solver that always gives up.
     #[test]
     fn block_lanczos_returns_only_genuine_dependencies() {
+        /// Arbitrary, fixed so a failure reproduces.
+        const FIXTURE_SEED: u64 = 0x1234_5678;
+        /// Arbitrary, fixed so a failure reproduces.
+        const RNG_SEED: u64 = 0xdead_beef;
+        // Shapes: rows exceed columns by at least a block, so dependencies
+        // exist, over widths of a word and a half, two words, and more than
+        // three.
         for &(relations, columns, weight) in
             &[(160usize, 96usize, 8usize), (200, 128, 10), (300, 200, 12)]
         {
-            let rows = sparse_rows(relations, columns, weight, 0x1234_5678);
-            let mut rng = TestRng(0xdead_beef);
+            let rows = sparse_rows(relations, columns, weight, FIXTURE_SEED);
+            let mut rng = TestRng(RNG_SEED);
             if let Some(deps) = block_lanczos_dependencies(&rows, columns, &mut rng, 1) {
                 assert!(!deps.is_empty(), "Some(...) must not be an empty set");
                 for dep in &deps {
@@ -1363,18 +1453,27 @@ mod tests {
     /// iteration changed, which is exactly what this test is for.
     #[test]
     fn block_lanczos_recovers_a_known_subspace_on_fixed_input() {
+        /// Arbitrary, fixed so a failure reproduces; the ranks below are
+        /// pinned to it.
+        const FIXTURE_SEED: u64 = 0x0bad_c0de;
+        /// Arbitrary, fixed so a failure reproduces; the ranks below are
+        /// pinned to it.
+        const RNG_SEED: u64 = 0x5eed_1234;
+        // Shapes: rows exceed columns by one block and by more, with the
+        // exact dimension above the block width in both, so one run cannot
+        // recover the whole space.
         for &(relations, columns, weight, expected_rank, exact_dimension) in &[
             (160usize, 96usize, 8usize, 60usize, 92usize),
             (192, 120, 9, 64, 72),
         ] {
-            let rows = sparse_rows(relations, columns, weight, 0x0bad_c0de);
+            let rows = sparse_rows(relations, columns, weight, FIXTURE_SEED);
             assert_eq!(
                 dense_null_space(&rows, columns).len(),
                 exact_dimension,
                 "the fixture's null space changed"
             );
 
-            let mut rng = TestRng(0x5eed_1234);
+            let mut rng = TestRng(RNG_SEED);
             let dependencies = block_lanczos_dependencies(&rows, columns, &mut rng, 1)
                 .expect("this fixture must converge");
             for dep in &dependencies {
@@ -1391,7 +1490,6 @@ mod tests {
         }
     }
 
-    /// Degenerate shapes are refused rather than guessed at.
     /// Montgomery's invariants, step by step, against dense arithmetic built
     /// here from the rows (`A[r][s]` is the parity of rows `r` and `s`'s
     /// common columns), not from the sparse code under test:
@@ -1405,6 +1503,27 @@ mod tests {
     ///   wider space could have been truncated to the block width.
     #[test]
     fn the_recurrence_keeps_montgomerys_invariants() {
+        /// Fixture seeds. Each also sets the width: `330 + 3·seed` columns
+        /// against 360 rows, so the excess of rows over columns runs from 27
+        /// down past zero and the null space narrows from under half a block
+        /// to nothing.
+        const SEEDS: std::ops::RangeInclusive<u64> = 1..=12;
+        /// Arbitrary, fixed so a failure reproduces; XORed with the seed so
+        /// each fixture starts from a different block.
+        const RNG_SEED_BASE: u64 = 0x9e37_79b9_7f4a_7c15;
+        /// Nonzeros per row; arbitrary.
+        const WEIGHT: usize = 10;
+        /// The recurrence (18) reaches back two blocks, so its `F` term is
+        /// first formed from real blocks at the third step.
+        const FEWEST_STEPS: usize = 3;
+        /// Null spaces at most this wide are compared with dense elimination:
+        /// half a block, so a space one run could have truncated to the
+        /// block width is never compared.
+        const COMPARABLE_DIMENSION: usize = WIDTH / 2;
+        /// Seeds whose span must be compared. These fixtures give nine, so a
+        /// solver that stops converging fails while one seed drifting out
+        /// of range does not.
+        const FEWEST_COMPARED: usize = 8;
         // (VᵀAU)[l][m] for n × 64 blocks, by definition.
         fn form(v: &[u64], a_u: &[u64]) -> Small {
             let mut out = [0u64; WIDTH];
@@ -1440,9 +1559,9 @@ mod tests {
             rank
         }
         let mut compared = 0;
-        for seed in 1..=12u64 {
+        for seed in SEEDS {
             let (relations, columns) = (360, 330 + 3 * seed as usize);
-            let rows = sparse_rows(relations, columns, 10, seed);
+            let rows = sparse_rows(relations, columns, WEIGHT, seed);
             let dense_a: Vec<Vec<usize>> = (0..relations)
                 .map(|r| {
                     (0..relations)
@@ -1468,12 +1587,12 @@ mod tests {
             let matrix = Sparse::from_packed(&rows, columns, 1);
             let found = lanczos_observed(
                 &matrix,
-                &mut TestRng(0x9e37_79b9_7f4a_7c15 ^ seed),
+                &mut TestRng(RNG_SEED_BASE ^ seed),
                 |_| true,
                 &mut |step| steps.push((step.v.to_vec(), *step.t, *step.winv, step.selected)),
             );
             assert!(
-                steps.len() > 2,
+                steps.len() >= FEWEST_STEPS,
                 "seed {seed}: only {} iterations",
                 steps.len()
             );
@@ -1504,7 +1623,7 @@ mod tests {
             }
             let null_space = dense_null_space(&rows, columns);
             if let Some(found) = found {
-                if null_space.len() < WIDTH / 2 {
+                if null_space.len() < COMPARABLE_DIMENSION {
                     let indicator = |set: &[usize]| {
                         let mut bits = vec![0u64; words_for(relations)];
                         for &r in set {
@@ -1522,12 +1641,18 @@ mod tests {
                 }
             }
         }
-        assert!(compared >= 8, "only {compared} spans compared");
+        assert!(
+            compared >= FEWEST_COMPARED,
+            "only {compared} spans compared"
+        );
     }
 
+    /// Degenerate shapes are refused rather than guessed at.
     #[test]
     fn block_lanczos_refuses_the_degenerate_shapes() {
-        let mut rng = TestRng(1);
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 1;
+        let mut rng = TestRng(SEED);
         assert!(block_lanczos_dependencies(&[], 8, &mut rng, 1).is_none());
         assert!(block_lanczos_dependencies(&[vec![0u64]], 0, &mut rng, 1).is_none());
     }
@@ -1536,12 +1661,18 @@ mod tests {
     /// and a different one is still only ever asked for genuine dependencies.
     #[test]
     fn block_lanczos_is_driven_by_the_callers_generator() {
-        let rows = sparse_rows(160, 96, 8, 0xfeed_face);
-        let first = block_lanczos_dependencies(&rows, 96, &mut TestRng(7), 1);
-        let again = block_lanczos_dependencies(&rows, 96, &mut TestRng(7), 1);
+        /// Arbitrary, fixed so a failure reproduces.
+        const FIXTURE_SEED: u64 = 0xfeed_face;
+        /// Arbitrary, fixed so a failure reproduces; used twice.
+        const RNG_SEED: u64 = 7;
+        /// Arbitrary, distinct from `RNG_SEED`.
+        const OTHER_RNG_SEED: u64 = 99;
+        let rows = sparse_rows(160, 96, 8, FIXTURE_SEED);
+        let first = block_lanczos_dependencies(&rows, 96, &mut TestRng(RNG_SEED), 1);
+        let again = block_lanczos_dependencies(&rows, 96, &mut TestRng(RNG_SEED), 1);
         assert_eq!(first, again, "the same source must give the same answer");
 
-        if let Some(deps) = block_lanczos_dependencies(&rows, 96, &mut TestRng(99), 1) {
+        if let Some(deps) = block_lanczos_dependencies(&rows, 96, &mut TestRng(OTHER_RNG_SEED), 1) {
             for dep in &deps {
                 assert!(sums_to_zero(&rows, 96, dep));
             }
@@ -1550,16 +1681,23 @@ mod tests {
 
     #[test]
     fn dense_null_space_returns_only_genuine_dependencies() {
-        let mut seed = 0x51ed_0001u64;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x51ed_0001;
+        /// Random matrices per shape; arbitrary.
+        const DRAWS: usize = 40;
+        let mut seed = SEED;
+        // Shapes: more rows than columns, square, and fewer rows than
+        // columns at exactly one word of width and just past it.
         for &(rows_n, columns) in &[
             (6usize, 4usize),
             (9, 5),
             (10, 10),
             (12, 3),
-            (5, 64),
-            (7, 70),
+            (5, WORD),
+            (7, WORD + 6),
         ] {
-            for _ in 0..40 {
+            for _ in 0..DRAWS {
+                // Each entry set with probability one half.
                 let rows: Vec<Vec<u64>> = (0..rows_n)
                     .map(|_| {
                         let set: Vec<usize> =
@@ -1583,9 +1721,16 @@ mod tests {
     /// subsets.
     #[test]
     fn dense_null_space_has_the_full_dimension() {
-        let mut seed = 0x9e37_0002u64;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x9e37_0002;
+        /// Random matrices per shape; arbitrary.
+        const DRAWS: usize = 25;
+        let mut seed = SEED;
+        // Shapes: more rows than columns, within the oracle's row limit, so
+        // the null space is non-trivial and its subsets can be counted.
         for &(rows_n, columns) in &[(5usize, 3usize), (6, 4), (8, 5), (7, 2)] {
-            for _ in 0..25 {
+            for _ in 0..DRAWS {
+                // Each entry set with probability one half.
                 let rows: Vec<Vec<u64>> = (0..rows_n)
                     .map(|_| {
                         let set: Vec<usize> =
@@ -1629,14 +1774,22 @@ mod tests {
     /// matrix, mapped back, are dependencies of the original.
     #[test]
     fn pruning_preserves_the_null_space() {
-        let mut seed = 0xfeed_0003u64;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xfeed_0003;
+        /// Random matrices per shape; arbitrary.
+        const DRAWS: usize = 30;
+        /// Each entry is set with probability one in this: sparse enough
+        /// that singleton columns occur at these widths.
+        const SPARSITY: u64 = 5;
+        let mut seed = SEED;
+        // Shapes: rows fewer than columns and more, and one wide enough
+        // that most columns are empty or singletons.
         for &(rows_n, columns) in &[(8usize, 12usize), (10, 20), (12, 9), (6, 40)] {
-            for _ in 0..30 {
-                // Sparse rows, so singletons actually occur.
+            for _ in 0..DRAWS {
                 let rows: Vec<Vec<u64>> = (0..rows_n)
                     .map(|_| {
                         let set: Vec<usize> = (0..columns)
-                            .filter(|_| lcg(&mut seed).is_multiple_of(5))
+                            .filter(|_| lcg(&mut seed).is_multiple_of(SPARSITY))
                             .collect();
                         pack(columns, &set)
                     })

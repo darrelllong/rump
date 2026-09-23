@@ -72,6 +72,19 @@ const MAX_REJECTED_DRAWS: usize = 256;
 /// after `64·bits` of them.
 const MAX_IDENTICAL_REJECTIONS: usize = 256;
 
+/// Fruitless rounds per bit of width after which [`random_probable_prime`]
+/// concludes the generator is broken. The cap scales with the width because
+/// the prime density does: the policy is that a working generator survives
+/// it with probability below `e⁻¹¹¹` at every width from 2 up, and 64 per
+/// bit is the round count that argument (in the function's doc) supports.
+const STALL_ROUNDS_PER_BIT: usize = 64;
+
+/// The cap as a multiple of the expected search length. Among the odd
+/// `bits`-bit integers about `2/(bits·ln 2)` are prime, so the expected
+/// number of rounds is `bits·ln 2 / 2`, and the cap is
+/// `2·STALL_ROUNDS_PER_BIT / ln 2 ≈ 185` times that.
+const STALL_TO_EXPECTED_ROUNDS: f64 = 2.0 * STALL_ROUNDS_PER_BIT as f64 / core::f64::consts::LN_2;
+
 /// A source of random bytes.
 ///
 /// The one-method contract every sampler here needs; implement it by filling
@@ -293,7 +306,8 @@ pub fn random_coprime_below<R: RandomSource + ?Sized>(
 /// prime number theorem the density of primes among the odd `bits`-bit
 /// candidates is about `2/(bits·ln 2)`, so the expected number of rounds
 /// is about `0.35·bits` under a generator with full-range output. The
-/// outer guard bounds fruitless rounds at `64·bits` — the cap scales with
+/// outer guard bounds fruitless rounds at `STALL_ROUNDS_PER_BIT·bits`, that
+/// is `64·bits` — the cap scales with
 /// the width, so a working generator survives it with probability about
 /// `(1 − 2/(bits·ln 2))^(64·bits) ≈ e⁻¹⁸⁵` by the asymptotic density, and
 /// below `e⁻¹¹¹` unconditionally at every width in range — and catches
@@ -337,7 +351,7 @@ pub fn random_probable_prime<R: RandomSource + ?Sized>(
     let top_mask = 0xff_u8 >> excess_bits;
     let mut last_rejected: Option<BigUint> = None;
     let mut stalled = 0usize;
-    for _ in 0..64 * bits {
+    for _ in 0..STALL_ROUNDS_PER_BIT * bits {
         rng.fill_bytes(&mut bytes);
         bytes[0] &= top_mask;
         // Force the requested bit length by setting the top significant bit,
@@ -370,9 +384,9 @@ pub fn random_probable_prime<R: RandomSource + ?Sized>(
     }
     panic!(
         "random_probable_prime found no prime in {} rounds at {bits} bits \
-         (about 185 times the expected search length): \
+         (about {STALL_TO_EXPECTED_ROUNDS:.0} times the expected search length): \
          the supplied RandomSource yields no usable entropy",
-        64 * bits
+        STALL_ROUNDS_PER_BIT * bits
     );
 }
 
@@ -384,6 +398,27 @@ mod tests {
     };
     use crate::bigint::BigUint;
     use crate::number_theory_impl::{gcd, is_probable_prime};
+
+    /// Seeds, one per test: arbitrary, fixed so a failure reproduces.
+    const BOUND_SEED: u64 = 0x00b5_e550;
+    const CONTRACT_SEED: u64 = 0x0c0f_fee0;
+    const PRIME_SEED: u64 = 0x0dea_dbee;
+
+    /// Bound bit lengths: a bound of one, a partial byte, both sides of a
+    /// limb, and a multi-limb width.
+    const BOUND_BITS: [usize; 6] = [1, 7, 63, 64, 65, 200];
+    /// Draws per bound. Each draw is checked on its own, so the count buys
+    /// repetition, not a distribution test; it keeps the widest bound cheap.
+    const DRAWS_PER_BOUND: usize = 32;
+    /// Rounds of the non-zero and coprime contracts, on the same footing.
+    const CONTRACT_ROUNDS: usize = 64;
+    /// 1 000 003 is prime and not a power of two: its bit length is 20, so
+    /// about 4.6% of draws land in `[1 000 003, 2²⁰)` and are rejected.
+    const PRIME_BOUND: u64 = 1_000_003;
+    /// 2·3·5·7·11·13, so a coprime draw must dodge six small primes.
+    const PRIMORIAL_13: u64 = 30_030;
+    /// Prime widths: one byte, one limb, a limb and a half, two limbs.
+    const PRIME_WIDTHS: [usize; 4] = [8, 64, 96, 128];
 
     /// splitmix64 — Steele, Lea & Flood, *Fast Splittable Pseudorandom Number
     /// Generators*, OOPSLA 2014: a 64-bit additive counter through a fixed
@@ -416,15 +451,15 @@ mod tests {
 
     #[test]
     fn random_below_respects_its_bound() {
-        let mut rng = SplitMix64 { state: 0x00b5_e550 };
-        for bound_bits in [1usize, 7, 63, 64, 65, 200] {
+        let mut rng = SplitMix64 { state: BOUND_SEED };
+        for bound_bits in BOUND_BITS {
             let mut bound = BigUint::zero();
             bound.set_bit(bound_bits);
             bound = bound.sub(&BigUint::one());
             if bound.is_zero() {
                 continue;
             }
-            for _ in 0..32 {
+            for _ in 0..DRAWS_PER_BOUND {
                 let draw = random_below(&mut rng, &bound).expect("non-zero bound");
                 assert!(draw < bound);
             }
@@ -434,10 +469,12 @@ mod tests {
 
     #[test]
     fn random_nonzero_and_coprime_hold_their_contracts() {
-        let mut rng = SplitMix64 { state: 0x0c0f_fee0 };
-        let bound = BigUint::from_u64(1_000_003);
-        let modulus = BigUint::from_u64(30_030); // 2·3·5·7·11·13
-        for _ in 0..64 {
+        let mut rng = SplitMix64 {
+            state: CONTRACT_SEED,
+        };
+        let bound = BigUint::from_u64(PRIME_BOUND);
+        let modulus = BigUint::from_u64(PRIMORIAL_13);
+        for _ in 0..CONTRACT_ROUNDS {
             let nz = random_nonzero_below(&mut rng, &bound).expect("bound > 1");
             assert!(!nz.is_zero() && nz < bound);
 
@@ -455,8 +492,8 @@ mod tests {
 
     #[test]
     fn random_probable_prime_hits_the_requested_width() {
-        let mut rng = SplitMix64 { state: 0x0dea_dbee };
-        for bits in [8usize, 64, 96, 128] {
+        let mut rng = SplitMix64 { state: PRIME_SEED };
+        for bits in PRIME_WIDTHS {
             let p = random_probable_prime(&mut rng, bits).expect("bits >= 2");
             assert_eq!(p.bits(), bits, "prime width");
             assert!(p.is_odd());

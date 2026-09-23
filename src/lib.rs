@@ -38,7 +38,7 @@
 //! Safety policy: `#![forbid(unsafe_code)]` crate-wide in the default build,
 //! with no exceptions. `forbid` rather than `deny` because an inner `allow`
 //! cannot lift it. The `wipe` feature relaxes the attribute to `deny(unsafe_code)`
-//! because a volatile scrub cannot be expressed in safe Rust; the two audited
+//! because a volatile scrub cannot be expressed in safe Rust; the two
 //! `unsafe` sites it admits are the scrub helper in `src/scrub.rs` and the
 //! read-back test that verifies it. `#![deny(missing_docs)]`
 //! holds every public item to a doc comment, and `MANUAL.md` carries a worked,
@@ -59,11 +59,11 @@
 //! use rump::modular::{mod_pow};
 //! use rump::number_theory::{is_probable_prime, jacobi};
 //!
-//! let p = BigUint::from_u64(1_000_000_007);
+//! let p = BigUint::from_u64(1_000_000_007); // prime
 //! assert!(is_probable_prime(&p));
 //!
 //! // Fermat: a^(p-1) ≡ 1 (mod p) for prime p.
-//! let a = BigUint::from_u64(31_337);
+//! let a = BigUint::from_u64(31_337); // arbitrary
 //! let e = p.sub(&BigUint::one());
 //! assert!(mod_pow(&a, &e, &p).is_one());
 //!

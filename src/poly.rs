@@ -309,10 +309,12 @@ fn poly_split_dense_enough(
 /// Neither is bounded by the degree, so neither is bounded by anything the
 /// caller can see from the polynomial alone.
 ///
-/// The cap is on the count, which is what has to fit in memory, not on
-/// the prime. Passing it panics rather than truncating, because a
-/// root-finder that silently returns some of the roots is worse than one
-/// that refuses.
+/// The cap is on the count — the length of the candidate vector at any
+/// level, and of the answer — not on the prime. Each candidate is a
+/// residue as wide as the modulus, so the count is what bounds memory.
+/// `2²⁰` is a policy, about a million residues; no measurement sets it.
+/// Passing it panics rather than truncating, because a root-finder that
+/// silently returns some of the roots is worse than one that refuses.
 pub const MAX_ENUMERATED_ROOTS: usize = 1 << 20;
 
 /// Panics unless a level of `current` candidates can absorb `adding` more
@@ -455,17 +457,56 @@ impl RealFactorization {
     }
 }
 
-/// Durand–Kerner iterations before the iteration is called unsettled.
+/// Durand–Kerner sweeps before the iteration is called unsettled.
 ///
-/// Convergence is quadratic once the iterates separate, and the number of
-/// steps to get there grows with the coefficient range rather than with the
-/// degree. A cap large enough not to bind costs microseconds on the degrees
-/// this is used at, and a cap that binds returns iterates that are not roots.
+/// Convergence is quadratic once the iterates separate, and the sweeps
+/// spent getting there grow with the coefficient range rather than with the
+/// degree. The policy is a cap that never binds on the inputs this serves:
+/// one that binds returns iterates that are not roots, and one that does
+/// not costs nothing, since a settled iteration stops itself. What would
+/// settle the value is a count of sweeps to separation at the degrees and
+/// coefficient ranges used, which has not been taken.
 const DURAND_KERNER_STEPS: usize = 2_000;
 
-/// A root counts as real when its imaginary part is negligible beside its own
-/// magnitude.
+/// Angle, in radians, of the first Durand–Kerner start point; the others
+/// follow `2π/d` apart.
+///
+/// The spacing keeps the start points apart whatever the offset. The
+/// offset's job is to keep every one of them off the real axis. The
+/// coefficients are real, so an iterate on the axis whose fellows are
+/// symmetric about it receives a real correction and never leaves — and
+/// with offset zero every degree starts that way, so a polynomial with no
+/// real root could never be solved. Any offset that is not a rational
+/// multiple of `π` avoids the axis at every degree; `0.4` is arbitrary.
+const DURAND_KERNER_START_ANGLE: f64 = 0.4;
+
+/// A sweep whose largest step is within this many ulps of the largest
+/// iterate ends the iteration.
+///
+/// A step of an ulp or so is rounding noise and can persist forever, so
+/// the test must allow a few. How many the iteration leaves behind once it
+/// has converged has not been measured; `4` is a policy.
+const DURAND_KERNER_SETTLED_ULPS: f64 = 4.0;
+
+/// A root counts as real when `|im|` is at most this fraction of
+/// `max(|re| + |im|, 1)`: relative to the root's own size, with a floor at
+/// one so a root near zero is not held to a vanishing tolerance.
+///
+/// `1e-9` is a policy. How large the imaginary part of a converged iterate
+/// at a real root can be depends on the factor's conditioning, and has not
+/// been measured; what would settle it is the imaginary parts the
+/// iteration reports at known real roots across the coefficient ranges
+/// used.
 const REAL_ROOT_TOLERANCE: f64 = 1e-9;
+
+/// Two bisected roots within this many ulps of each other are one root.
+///
+/// A split point that is itself a root is returned by both brackets that
+/// meet there — [`bisect_f64`] returns an end whose sign is exactly zero —
+/// and otherwise every answer is within an ulp of a true root, so genuine
+/// duplicates are within an ulp or two. `8` leaves room and is a policy;
+/// the gap two answers for one root actually show has not been measured.
+const REAL_ROOT_MERGE_ULPS: f64 = 8.0;
 
 /// Bisection steps before the loop gives up on narrowing a bracket further.
 ///
@@ -709,9 +750,8 @@ fn eval_complex(coefficients: &[f64], z: (f64, f64)) -> (f64, f64) {
 /// `None` if an iterate leaves the finite range.
 ///
 /// The starting points sit on a circle of Cauchy's radius, which contains
-/// every root, spun by an angle that is not a rational multiple of `2π` so
-/// that no two of them coincide — coincident iterates make the denominator
-/// zero and the method has nothing to divide by.
+/// every root, `2π/d` apart and turned by [`DURAND_KERNER_START_ANGLE`] so
+/// that none of them lies on the real axis.
 fn durand_kerner(coefficients: &[f64], degree: usize) -> Option<Vec<(f64, f64)>> {
     let leading = coefficients[degree];
     let monic: Vec<f64> = coefficients[..=degree]
@@ -722,7 +762,8 @@ fn durand_kerner(coefficients: &[f64], degree: usize) -> Option<Vec<(f64, f64)>>
     let radius = cauchy_bound_f64(&monic, degree);
     let mut roots: Vec<(f64, f64)> = (0..degree)
         .map(|index| {
-            let angle = 0.4 + 2.0 * core::f64::consts::PI * index as f64 / degree as f64;
+            let angle = DURAND_KERNER_START_ANGLE
+                + 2.0 * core::f64::consts::PI * index as f64 / degree as f64;
             (radius * angle.cos(), radius * angle.sin())
         })
         .collect();
@@ -755,7 +796,7 @@ fn durand_kerner(coefficients: &[f64], degree: usize) -> Option<Vec<(f64, f64)>>
             .iter()
             .map(|(re, im)| re.abs().max(im.abs()))
             .fold(0.0f64, f64::max);
-        if moved <= f64::EPSILON * scale.max(1.0) * 4.0 {
+        if moved <= f64::EPSILON * scale.max(1.0) * DURAND_KERNER_SETTLED_ULPS {
             break;
         }
     }
@@ -834,7 +875,8 @@ fn simple_real_roots(f: &PolyZ) -> Vec<f64> {
         }
     }
     roots.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
-    roots.dedup_by(|a, b| (*a - *b).abs() <= f64::EPSILON * a.abs().max(1.0) * 8.0);
+    roots
+        .dedup_by(|a, b| (*a - *b).abs() <= f64::EPSILON * a.abs().max(1.0) * REAL_ROOT_MERGE_ULPS);
     roots
 }
 
@@ -1940,8 +1982,8 @@ impl PolyZ {
     /// rather than left to exhaust memory — though only the last two are
     /// refused *before* the work, since the base level has to be found before
     /// it can be counted. That bound is on the *level*, not on the
-    /// prime: a branching root modulo a 40-bit prime is refused even though
-    /// the prime is far below `2⁶⁴`.
+    /// prime: a branching root modulo the 41-bit prime `2⁴⁰ + 15` is
+    /// refused even though the prime is far below `2⁶⁴`.
     ///
     /// `prime` must be prime; over a composite the result is unspecified.
     #[must_use]
@@ -2697,13 +2739,14 @@ impl PolyMod {
     /// below 128 coefficients (`POLY_KARATSUBA_THRESHOLD_MODP`), Karatsuba
     /// above it for shapes the measured admission rule accepts — near
     /// balance below 192 coefficients (`POLY_KARATSUBA_ANY_RATIO_MODP`), any
-    /// ratio from there, and operands dense enough throughout. The threshold is higher than the ℤ one because
-    /// the coefficients here stay bounded by the modulus rather than
-    /// growing, so a saved multiplication never becomes dear relative to
-    /// the modular additions a split adds; both constants carry their
-    /// measurements. The reduction is deferred to one per output
-    /// coefficient rather than one per partial product, which is what makes
-    /// the schoolbook path here as cheap as it is.
+    /// ratio from there, and operands dense enough throughout. The
+    /// threshold is higher than the ℤ one because the coefficients here
+    /// stay bounded by the modulus rather than growing, so a saved
+    /// multiplication never becomes dear relative to the modular additions
+    /// a split adds; both constants carry their measurements. The
+    /// reduction is deferred to one per output coefficient rather than one
+    /// per partial product, which is what makes the schoolbook path here
+    /// as cheap as it is.
     ///
     /// Unlike the ℤ case, `deg self + deg other` is only an upper bound on
     /// the degree of the product: ℤ/mℤ has zero divisors for composite `m`,
@@ -3674,9 +3717,12 @@ impl PolyMod {
         // elements x, x + 1, x + 2, …. Not the constants: for even `d` the
         // field contains 𝔽_{q²}, in which every element of 𝔽_q is a square,
         // so no constant can serve — and even `d` is the case this routine
-        // exists for. A linear element is a non-residue about half the time in every
-        // degree, so this stops almost at once; the bound keeps a
-        // pathological or mis-supplied field from looping forever.
+        // exists for. A linear element is a non-residue about half the time
+        // in every degree, so this stops almost at once. The bound keeps a
+        // mis-supplied field from looping forever: in a genuine field each
+        // try misses with probability ½, so 512 misses is 2⁻⁵¹², and the
+        // bound can only fire when the modulus is not the field it was
+        // claimed to be.
         const NON_RESIDUE_TRIES: u64 = 512;
         let minus_one = Self::new(vec![prime.sub(&BigUint::one())], &prime);
         let mut non_residue = None;
@@ -3745,6 +3791,9 @@ mod tests {
     }
 
     impl SplitMix64 {
+        /// splitmix64 (Steele, Lea & Flood, *Fast Splittable Pseudorandom
+        /// Number Generators*, OOPSLA 2014): the increment and the two
+        /// mixing multipliers are the paper's.
         fn next_u64(&mut self) -> u64 {
             self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = self.state;
@@ -3888,9 +3937,12 @@ mod tests {
         // make the halves unequal, and sizes deep enough to recurse several
         // levels. Both coefficient rings, and a modulus small enough that
         // reductions actually fire.
-        let mut rng = SplitMix64 {
-            state: 0x4b17_5aba_0001,
-        };
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x4b17_5aba_0001;
+        let mut rng = SplitMix64 { state: SEED };
+        // 2⁷ + 1: odd, and one past a power of two, so every level of the
+        // recursion splits into unequal halves.
+        const ODD_DEEP_LENGTH: usize = 129;
         let t = POLY_KARATSUBA_THRESHOLD_Z;
         let lens = [
             1usize,
@@ -3903,7 +3955,7 @@ mod tests {
             2 * t + 1,
             3 * t + 7,
             4 * t,
-            129,
+            ODD_DEEP_LENGTH,
         ];
         let modulus = BigUint::from_u64(97);
         for &la in &lens {
@@ -3973,9 +4025,11 @@ mod tests {
         // term), interior zeros (whose inner passes are skipped), and a
         // modulus of 2, where doubling annihilates every cross term and the
         // result is the Frobenius image.
-        let mut rng = SplitMix64 {
-            state: 0x5111_1ee0_0001,
-        };
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5111_1ee0_0001;
+        let mut rng = SplitMix64 { state: SEED };
+        // Characteristic 2, an odd prime, a prime whose products fit a
+        // limb, and the smallest prime above 10⁶, whose products do not.
         for &m in &[2u64, 3, 97, 1_000_003] {
             let modulus = BigUint::from_u64(m);
             for len in 1usize..24 {
@@ -4018,21 +4072,56 @@ mod tests {
         use std::hint::black_box;
         use std::time::{Duration, Instant};
 
+        // Each timed chunk is sized to about this long: a fixed small
+        // repetition count takes too few samples of a millisecond-scale
+        // kernel. A budget.
+        const CHUNK_TARGET: Duration = Duration::from_millis(20);
+        // Floor on the single run that sizes a chunk, so a timer that
+        // reports zero does not make the repetition count infinite.
+        const MIN_TIMED_SECONDS: f64 = 1e-9;
+        // At least one repetition; at most a million, which is where a
+        // kernel too quick to time at all would send the ratio.
+        const MIN_REPS: u64 = 1;
+        const MAX_REPS: u64 = 1_000_000;
+        // Interleaved chunk pairs per pass. A budget.
+        const CHUNK_PAIRS_PER_PASS: usize = 3;
+        // Passes per shape, the median reported: odd, so the median is a
+        // pass and not an average, and one disturbed pass on either side
+        // cannot move it. A policy.
+        const PASSES: usize = 5;
+        // The shorter-operand rows of the tables on
+        // `POLY_KARATSUBA_THRESHOLD_Z` and `POLY_KARATSUBA_THRESHOLD_MODP`,
+        // and the ratio columns the dispatcher can admit; the `(2s−1):s`
+        // column is drawn separately below.
+        const PROBE_SHORT_LENGTHS: [usize; 9] = [32, 64, 96, 128, 192, 256, 384, 512, 768];
+        const PROBE_RATIOS: [(usize, usize); 3] = [(1, 1), (5, 4), (3, 2)];
+        // The rows of the squaring measurements on
+        // `POLY_SQUARE_SPLIT_THRESHOLD_MODP`.
+        const PROBE_SQUARE_LENGTHS: [usize; 8] = [64, 96, 128, 192, 256, 384, 512, 768];
+        // The two modulus widths the tables' columns were measured at: the
+        // smallest prime above 10⁶, 20 bits, and 2²⁵⁵ + 235, 256 bits. A
+        // convolution modulo m divides by nothing but m, so the wide one
+        // need not be prime, and is not; the offset is arbitrary.
+        const PROBE_MODULUS_NARROW: u64 = 1_000_003;
+        const PROBE_MODULUS_WIDE_LIMBS: usize = 4;
+        const PROBE_MODULUS_WIDE_OFFSET: u64 = 235;
+        // Integer coefficients up to 2⁶¹: most of a limb. A policy.
+        const PROBE_Z_COEFFICIENT_BOUND: i64 = i64::MAX / 4;
+
         // Repetitions are calibrated, not guessed: each chunk is sized to a
-        // target duration from a measured single run, since a fixed small
-        // count takes too few samples of a millisecond-scale operation.
+        // target duration from a measured single run.
         fn calibrate(target: Duration, f: &mut dyn FnMut()) -> u32 {
             let t = Instant::now();
             f();
-            let once = t.elapsed().as_secs_f64().max(1e-9);
-            ((target.as_secs_f64() / once).ceil() as u64).clamp(1, 1_000_000) as u32
+            let once = t.elapsed().as_secs_f64().max(MIN_TIMED_SECONDS);
+            ((target.as_secs_f64() / once).ceil() as u64).clamp(MIN_REPS, MAX_REPS) as u32
         }
 
         // Paired interleaved chunks with the order alternated between
         // passes, so neither kernel systematically runs on a warmer cache.
         fn paired_saving(chunk: u32, flip: bool, a: &mut dyn FnMut(), b: &mut dyn FnMut()) -> f64 {
             let (mut ta, mut tb) = (0f64, 0f64);
-            for _ in 0..3 {
+            for _ in 0..CHUNK_PAIRS_PER_PASS {
                 if flip {
                     let t = Instant::now();
                     for _ in 0..chunk {
@@ -4061,8 +4150,8 @@ mod tests {
         }
 
         fn sweep(label: &str, a: &mut dyn FnMut(), b: &mut dyn FnMut()) {
-            let chunk = calibrate(Duration::from_millis(20), a);
-            let mut passes = [0f64; 5];
+            let chunk = calibrate(CHUNK_TARGET, a);
+            let mut passes = [0f64; PASSES];
             for (k, slot) in passes.iter_mut().enumerate() {
                 *slot = paired_saving(chunk, k % 2 == 1, a, b);
             }
@@ -4070,20 +4159,25 @@ mod tests {
             sorted.sort_by(f64::total_cmp);
             eprintln!(
                 "{label:<34} {chunk:>7} {:>+7.1}%   {:+6.1} {:+6.1} {:+6.1} {:+6.1} {:+6.1}",
-                sorted[2], passes[0], passes[1], passes[2], passes[3], passes[4]
+                sorted[PASSES / 2],
+                passes[0],
+                passes[1],
+                passes[2],
+                passes[3],
+                passes[4]
             );
         }
 
-        let mut rng = SplitMix64 {
-            state: 0x0c0f_fee0_0bad_0001,
-        };
-        let small = BigUint::from_u64(1_000_003);
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0c0f_fee0_0bad_0001;
+        let mut rng = SplitMix64 { state: SEED };
+        let small = BigUint::from_u64(PROBE_MODULUS_NARROW);
         let mut wide = BigUint::one();
-        wide.shl_bits(255);
-        let wide = wide.add(&BigUint::from_u64(235));
+        wide.shl_bits(64 * PROBE_MODULUS_WIDE_LIMBS - 1);
+        let wide = wide.add(&BigUint::from_u64(PROBE_MODULUS_WIDE_OFFSET));
         let draw_wide = |rng: &mut SplitMix64, m: &BigUint| {
             let mut v = BigUint::zero();
-            for k in 0..4 {
+            for k in 0..PROBE_MODULUS_WIDE_LIMBS {
                 let mut w = BigUint::from_u64(rng.next_u64());
                 w.shl_bits(crate::bigint::bit_span(k, 64));
                 v = v.add(&w);
@@ -4093,19 +4187,22 @@ mod tests {
 
         eprintln!("Karatsuba saving over schoolbook (positive = split wins)");
         eprintln!("{:<34} {:>7} {:>8}   passes", "shape", "reps", "median");
-        for &short in &[32usize, 64, 96, 128, 192, 256, 384, 512, 768] {
-            // Ratios the dispatcher can actually admit. Exactly 2:1 is
-            // omitted: the split point lands on the shorter operand's
-            // length, both sides bail to schoolbook, and the row would
-            // compare a kernel with itself.
-            for &(num, den) in &[(1usize, 1usize), (5, 4), (3, 2)] {
+        for &short in &PROBE_SHORT_LENGTHS {
+            // Exactly 2:1 is omitted: the split point lands on the shorter
+            // operand's length, both sides bail to schoolbook, and the row
+            // would compare a kernel with itself.
+            for &(num, den) in &PROBE_RATIOS {
                 let long = short * num / den;
                 for &(rlabel, long) in &[("", long), ("(2s-1):s", 2 * short - 1)] {
                     if !rlabel.is_empty() && num != 1 {
                         continue; // draw the lopsided shape once per size
                     }
-                    let za: Vec<BigInt> = (0..long).map(|_| rng.coeff(i64::MAX / 4)).collect();
-                    let zb: Vec<BigInt> = (0..short).map(|_| rng.coeff(i64::MAX / 4)).collect();
+                    let za: Vec<BigInt> = (0..long)
+                        .map(|_| rng.coeff(PROBE_Z_COEFFICIENT_BOUND))
+                        .collect();
+                    let zb: Vec<BigInt> = (0..short)
+                        .map(|_| rng.coeff(PROBE_Z_COEFFICIENT_BOUND))
+                        .collect();
                     let ratio = long as f64 / short as f64;
                     sweep(
                         &format!("Z    {short:>5}x{long:<5} {ratio:>4.2}"),
@@ -4143,7 +4240,7 @@ mod tests {
         eprintln!();
         eprintln!("split squaring saving over the cross-terms-once square");
         eprintln!("{:<34} {:>7} {:>8}   passes", "shape", "reps", "median");
-        for &len in &[64usize, 96, 128, 192, 256, 384, 512, 768] {
+        for &len in &PROBE_SQUARE_LENGTHS {
             for (mlabel, m) in [("20b", &small), ("256b", &wide)] {
                 let a: Vec<BigUint> = (0..len).map(|_| draw_wide(&mut rng, m)).collect();
                 sweep(
@@ -4218,15 +4315,20 @@ mod tests {
         // time. Both rings, and for the modular side several moduli, since
         // the deferred reduction makes the accumulator bound depend on the
         // modulus width.
-        let mut rng = SplitMix64 {
-            state: 0x9051_7a7e_0011,
-        };
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x9051_7a7e_0011;
+        let mut rng = SplitMix64 { state: SEED };
         let tz = POLY_KARATSUBA_THRESHOLD_Z;
         let az = super::POLY_KARATSUBA_ANY_RATIO_Z;
         let tm = POLY_KARATSUBA_THRESHOLD_MODP;
         let am = super::POLY_KARATSUBA_ANY_RATIO_MODP;
-        // Lengths just under, at, and just over each threshold, plus sizes
-        // deep enough for the density cut to have fallen well below 3/4.
+        // Lengths just under, at, and just over each threshold, plus two
+        // deep enough for the density cut to have fallen well below 3/4:
+        // both past every any-ratio size, so both rings split at every
+        // level. 300 is a multiple of no threshold; 513 = 2⁹ + 1 makes
+        // every split uneven.
+        const DEEP_LENGTH: usize = 300;
+        const DEEP_ODD_LENGTH: usize = 513;
         let lengths = [
             tz - 1,
             tz,
@@ -4240,12 +4342,15 @@ mod tests {
             am - 1,
             am,
             am + 1,
-            300,
-            513,
+            DEEP_LENGTH,
+            DEEP_ODD_LENGTH,
         ];
         // Densities as percentages, straddling 3/4 and the computed cut at
         // each size.
         let densities = [100usize, 80, 76, 75, 74, 50, 34, 32, 24, 10, 2];
+        // Characteristic 2; a prime whose products fit a limb; the largest
+        // prime below 2²⁰, whose products do not; and a 200-bit modulus,
+        // which need not be prime — the reduction only ever divides by it.
         let moduli = [
             BigUint::from_u64(2),
             BigUint::from_u64(97),
@@ -4295,8 +4400,8 @@ mod tests {
                         // one expensive corner of the sweep and adds no
                         // shape the narrower moduli have not already
                         // covered; the accumulator bound it exercises is
-                        // covered at every length below 300.
-                        if m.bits() > 64 && la >= 300 {
+                        // covered at every length below the deep ones.
+                        if m.bits() > 64 && la >= DEEP_LENGTH {
                             continue;
                         }
                         let a: Vec<BigUint> = (0..la)
@@ -4399,17 +4504,31 @@ mod tests {
         let required = |n: usize| -> f64 {
             karatsuba_products_estimate(n, n, TZ, AZ).min(n * n) as f64 / (n * n) as f64
         };
+        // `required(96)` is 6912/9216, exact in f64; the slack only turns an
+        // equality between floats into a comparison.
+        const EXACT_SLACK: f64 = 1e-9;
         assert!(
-            (required(96) - 0.75).abs() < 1e-9,
+            (required(96) - 0.75).abs() < EXACT_SLACK,
             "3/4 exactly at the threshold"
         );
+        // The cut at four times a size must be under four fifths of the cut
+        // at the size. This certifies a fall, not merely a non-rise: the
+        // neighbour-to-neighbour wobble is a few percent, and a fifth is
+        // more than that.
+        const FALL_RATIO: f64 = 0.8;
         for &(small, large) in &[(96usize, 384usize), (97, 385), (150, 1000), (191, 1537)] {
             assert!(
-                required(large) < required(small) * 0.8,
+                required(large) < required(small) * FALL_RATIO,
                 "the required density must fall with size: {small} vs {large}"
             );
         }
-        assert!(required(2048) < 0.25, "2048 must ask far less than 3/4");
+        // At 2048 the cut must be under a quarter: a third of the 3/4 asked
+        // at the threshold, so "far less" is a number.
+        const DEEP_CUT_MAX: f64 = 0.25;
+        assert!(
+            required(2048) < DEEP_CUT_MAX,
+            "2048 must ask far less than 3/4"
+        );
 
         // The dense floor must almost never bind: where it binds, a single
         // zero coefficient sends an admitted shape to schoolbook. With the
@@ -4514,7 +4633,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "every residue is a root of the zero polynomial")]
     fn roots_mod_prime_power_rejects_the_zero_polynomial() {
-        let mut rng = SplitMix64 { state: 3 };
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 3;
+        let mut rng = SplitMix64 { state: SEED };
         let _ = PolyZ::zero().roots_mod_prime_power(&BigUint::from_u64(5), 2, &mut rng);
     }
 
@@ -4525,7 +4646,9 @@ mod tests {
         // `exponent - content_valuation` would wrap without this refusal —
         // release builds have overflow checks off, so the lift would then
         // run for about 2³² levels.
-        let mut rng = SplitMix64 { state: 5 };
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 5;
+        let mut rng = SplitMix64 { state: SEED };
         let _ = PolyZ::from_i64_slice(&[9, 9]).roots_mod_prime_power(
             &BigUint::from_u64(3),
             2,
@@ -4536,12 +4659,15 @@ mod tests {
     #[test]
     #[should_panic(expected = "widen past")]
     fn roots_mod_prime_power_refuses_a_branch_too_wide_to_list() {
-        // The cap is on the level, not the prime: a 40-bit prime is far
-        // below 2⁶⁴, but x² branches at every level, so the second level
-        // would hold p candidates.
-        let mut rng = SplitMix64 { state: 7 };
+        // The cap is on the level, not the prime: 2⁴⁰ + 15 is a 41-bit
+        // prime, far below 2⁶⁴, but x² branches at every level, so the
+        // second level would hold p candidates.
+        const BRANCHING_PRIME: u64 = 1_099_511_627_791;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 7;
+        let mut rng = SplitMix64 { state: SEED };
         let _ = PolyZ::from_i64_slice(&[0, 0, 1]).roots_mod_prime_power(
-            &BigUint::from_u64(1_099_511_627_791),
+            &BigUint::from_u64(BRANCHING_PRIME),
             2,
             &mut rng,
         );
@@ -4560,30 +4686,43 @@ mod tests {
         // four simple roots at 1..4 carry it over. This is the only shape
         // that reaches the cap at the shipped constant, which is why it is
         // worth its cost.
-        let mut rng = SplitMix64 { state: 13 };
+        const LARGEST_PRIME_BELOW_CAP: u64 = 1_048_573;
+        const SIMPLE_ROOTS: i64 = 4;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 13;
+        let mut rng = SplitMix64 { state: SEED };
         let x = PolyZ::from_i64_slice(&[0, 1]);
         let mut f = x.mul(&x);
-        for c in 1..=4i64 {
+        for c in 1..=SIMPLE_ROOTS {
             f = f.mul(&PolyZ::from_i64_slice(&[-c, 1]));
         }
-        let _ = f.roots_mod_prime_power(&BigUint::from_u64(1_048_573), 2, &mut rng);
+        let _ = f.roots_mod_prime_power(&BigUint::from_u64(LARGEST_PRIME_BELOW_CAP), 2, &mut rng);
     }
 
     #[test]
     #[should_panic(expected = "widen past")]
     fn roots_mod_prime_power_refuses_an_expansion_too_wide_to_list() {
         // Content 2⁴⁰ against exponent 41: one root modulo 2 expands into
-        // 2⁴⁰ residues modulo 2⁴¹.
-        let mut rng = SplitMix64 { state: 11 };
-        let scale = BigInt::from_biguint(BigUint::from_u64(2).pow_u64(40));
+        // 2⁴⁰ residues modulo 2⁴¹, past the 2²⁰ cap.
+        const CONTENT_VALUATION: u64 = 40;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 11;
+        let mut rng = SplitMix64 { state: SEED };
+        let scale = BigInt::from_biguint(BigUint::from_u64(2).pow_u64(CONTENT_VALUATION));
         let f = PolyZ::from_i64_slice(&[1, 1]).scale(&scale);
-        let _ = f.roots_mod_prime_power(&BigUint::from_u64(2), 41, &mut rng);
+        let _ = f.roots_mod_prime_power(
+            &BigUint::from_u64(2),
+            CONTENT_VALUATION as u32 + 1,
+            &mut rng,
+        );
     }
 
     #[test]
     #[should_panic(expected = "positive exponent")]
     fn roots_mod_prime_power_rejects_a_zero_exponent() {
-        let mut rng = SplitMix64 { state: 1 };
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 1;
+        let mut rng = SplitMix64 { state: SEED };
         let _ = PolyZ::from_i64_slice(&[1, 0, 1]).roots_mod_prime_power(
             &BigUint::from_u64(7),
             0,
@@ -4594,7 +4733,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "must be a prime")]
     fn roots_mod_prime_power_rejects_a_base_below_two() {
-        let mut rng = SplitMix64 { state: 1 };
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 1;
+        let mut rng = SplitMix64 { state: SEED };
         let _ =
             PolyZ::from_i64_slice(&[1, 0, 1]).roots_mod_prime_power(&BigUint::one(), 2, &mut rng);
     }
@@ -4647,10 +4788,13 @@ mod tests {
 
     #[test]
     fn poly_z_ring_axioms_and_evaluation() {
-        let mut rng = SplitMix64 {
-            state: 0x9017_0000_0001,
-        };
-        for _ in 0..500 {
+        // Random cases drawn: a budget, not a count derived from what the
+        // generator can produce.
+        const CASES: usize = 500;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x9017_0000_0001;
+        let mut rng = SplitMix64 { state: SEED };
+        for _ in 0..CASES {
             let a = rng.poly_z(6, 20);
             let b = rng.poly_z(6, 20);
             let c = rng.poly_z(6, 20);
@@ -4682,10 +4826,13 @@ mod tests {
         let p = PolyZ::from_i64_slice(&[5, 2, 3]);
         assert_eq!(p.derivative(), PolyZ::from_i64_slice(&[2, 6]));
         // Product rule on random polynomials.
-        let mut rng = SplitMix64 {
-            state: 0xde01_0000_0007,
-        };
-        for _ in 0..200 {
+        // Random cases drawn: a budget, not a count derived from what the
+        // generator can produce.
+        const CASES: usize = 200;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xde01_0000_0007;
+        let mut rng = SplitMix64 { state: SEED };
+        for _ in 0..CASES {
             let a = rng.poly_z(5, 15);
             let b = rng.poly_z(5, 15);
             // (a·b)' = a'·b + a·b'.
@@ -4704,10 +4851,13 @@ mod tests {
 
     #[test]
     fn poly_z_pseudo_division_identity() {
-        let mut rng = SplitMix64 {
-            state: 0x9500_0000_0001,
-        };
-        for _ in 0..1000 {
+        // Random cases drawn: a budget, not a count derived from what the
+        // generator can produce.
+        const CASES: usize = 1000;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x9500_0000_0001;
+        let mut rng = SplitMix64 { state: SEED };
+        for _ in 0..CASES {
             let a = rng.poly_z(8, 12);
             let mut b = rng.poly_z(5, 12);
             if b.is_zero() {
@@ -4771,10 +4921,13 @@ mod tests {
 
     #[test]
     fn poly_z_div_rem_identity_and_agrees_with_pseudo_on_monic() {
-        let mut rng = SplitMix64 {
-            state: 0x0d1f_0000_0001,
-        };
-        for _ in 0..1000 {
+        // Random cases drawn: a budget, not a count derived from what the
+        // generator can produce.
+        const CASES: usize = 1000;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0d1f_0000_0001;
+        let mut rng = SplitMix64 { state: SEED };
+        for _ in 0..CASES {
             let a = rng.poly_z(8, 12);
             let b = rng.poly_z(5, 12);
             // When exact division exists, the identity must hold with a
@@ -4806,11 +4959,14 @@ mod tests {
     #[test]
     fn poly_mod_p_division_and_gcd() {
         let p = BigUint::from_u64(101);
-        let mut rng = SplitMix64 {
-            state: 0x4001_0000_0001,
-        };
+        // Random cases drawn: a budget, not a count derived from what the
+        // generator can produce.
+        const CASES: usize = 500;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x4001_0000_0001;
+        let mut rng = SplitMix64 { state: SEED };
         let to_mod = |poly: &PolyZ| PolyMod::from_poly_z(poly, &p);
-        for _ in 0..500 {
+        for _ in 0..CASES {
             let a = to_mod(&rng.poly_z(8, 200));
             let mut b = to_mod(&rng.poly_z(5, 200));
             if b.is_zero() {
@@ -4943,10 +5099,13 @@ mod tests {
 
     #[test]
     fn resultant_matches_rational_oracle_and_known_values() {
-        let mut rng = SplitMix64 {
-            state: 0x8e50_0000_0001,
-        };
-        for _ in 0..500 {
+        // Random cases drawn: a budget, not a count derived from what the
+        // generator can produce.
+        const CASES: usize = 500;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x8e50_0000_0001;
+        let mut rng = SplitMix64 { state: SEED };
+        for _ in 0..CASES {
             let a = rng.poly_z(5, 8);
             let b = rng.poly_z(5, 8);
             assert_eq!(
@@ -4989,10 +5148,13 @@ mod tests {
 
     #[test]
     fn resultant_multiplicativity() {
-        let mut rng = SplitMix64 {
-            state: 0x3711_0000_0001,
-        };
-        for _ in 0..300 {
+        // Random cases drawn: a budget, not a count derived from what the
+        // generator can produce.
+        const CASES: usize = 300;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x3711_0000_0001;
+        let mut rng = SplitMix64 { state: SEED };
+        for _ in 0..CASES {
             let f = rng.poly_z(4, 6);
             let g = rng.poly_z(3, 6);
             let h = rng.poly_z(3, 6);
@@ -5052,12 +5214,15 @@ mod tests {
 
     #[test]
     fn factorization_reconstructs_and_is_irreducible() {
-        let mut rng = SplitMix64 {
-            state: 0xfac0_0000_0001,
-        };
+        // Random products per prime: a budget, not a count derived from
+        // what the generator can produce.
+        const CASES_PER_PRIME: usize = 200;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xfac0_0000_0001;
+        let mut rng = SplitMix64 { state: SEED };
         for &p in &[2u64, 3, 5, 7, 11, 13] {
             let pm = BigUint::from_u64(p);
-            for _ in 0..200 {
+            for _ in 0..CASES_PER_PRIME {
                 // Build a random product of small factors with multiplicities.
                 let mut f = PolyMod::new(vec![BigUint::one()], &pm);
                 let parts = 1 + (rng.next_u64() % 3) as usize;
@@ -5172,12 +5337,15 @@ mod tests {
 
     #[test]
     fn roots_match_evaluation() {
-        let mut rng = SplitMix64 {
-            state: 0x9007_0000_0001,
-        };
+        // Random polynomials per prime: a budget, not a count derived from
+        // what the generator can produce.
+        const CASES_PER_PRIME: usize = 100;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x9007_0000_0001;
+        let mut rng = SplitMix64 { state: SEED };
         for &p in &[2u64, 3, 5, 7, 11, 13, 101] {
             let pm = BigUint::from_u64(p);
-            for _ in 0..100 {
+            for _ in 0..CASES_PER_PRIME {
                 let deg = 1 + (rng.next_u64() % 5) as usize;
                 let coeffs: Vec<BigUint> = (0..=deg)
                     .map(|_| BigUint::from_u64(rng.next_u64() % p))
@@ -5212,7 +5380,9 @@ mod tests {
         // x^2 - 1 = (x-1)(x+1) mod 7.
         let p = BigUint::from_u64(7);
         let f = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[-1, 0, 1]), &p);
-        let mut rng = SplitMix64 { state: 0x1234 };
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1234;
+        let mut rng = SplitMix64 { state: SEED };
         let factors = f.factor(&mut rng);
         assert_eq!(factors.len(), 2);
         assert_eq!(reassemble(&factors, &p), f.make_monic());
@@ -5231,7 +5401,9 @@ mod tests {
         // case that exercises it (the odd-p exponent path is never taken here).
         let p = BigUint::from_u64(2);
         let f = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&[1, 1, 1, 1, 1, 1, 1]), &p);
-        let mut rng = SplitMix64 { state: 0xfac0_0002 };
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xfac0_0002;
+        let mut rng = SplitMix64 { state: SEED };
         let mut factors = f.factor(&mut rng);
         assert_eq!(factors.len(), 2, "two cubic factors over F_2");
         for (fac, e) in &factors {
@@ -5283,10 +5455,13 @@ mod tests {
     #[test]
     fn poly_mod_p_pow_mod_matches_repeated_multiply() {
         let p = BigUint::from_u64(13);
-        let mut rng = SplitMix64 {
-            state: 0x7011_0000_0001,
-        };
-        for _ in 0..100 {
+        // Random cases drawn: a budget, not a count derived from what the
+        // generator can produce.
+        const CASES: usize = 100;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x7011_0000_0001;
+        let mut rng = SplitMix64 { state: SEED };
+        for _ in 0..CASES {
             let base = PolyMod::from_poly_z(&rng.poly_z(4, 50), &p);
             let modulus = {
                 let mut m = PolyMod::from_poly_z(&rng.poly_z(4, 50), &p);
@@ -5356,10 +5531,13 @@ mod tests {
         // every requested degree, and every digit below the top one lands in
         // the symmetric range. The second is what the expansion is *for*, and
         // it is the half a caller cannot check cheaply for itself.
-        let mut rng = SplitMix64 {
-            state: 0x0ba1_a2ce_d169,
-        };
-        for _ in 0..200 {
+        // Random cases drawn: a budget, not a count derived from what the
+        // generator can produce.
+        const CASES: usize = 200;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0ba1_a2ce_d169;
+        let mut rng = SplitMix64 { state: SEED };
+        for _ in 0..CASES {
             let n = BigInt::from_biguint(rng.biguint(4));
             let base = rng.biguint(1).add(&BigUint::from_u64(2));
             let degree = 1 + (rng.next_u64() as usize % 6);
@@ -5393,7 +5571,6 @@ mod tests {
         for base in 2u64..=12 {
             let m = BigUint::from_u64(base);
             let signed = BigInt::from_biguint(m.clone());
-            let half = BigInt::from_biguint(m.clone());
             for n in -200i64..=200 {
                 for degree in 0..=5 {
                     let value = BigInt::from_i64(n);
@@ -5409,7 +5586,6 @@ mod tests {
                             "digit out of range at n = {n}, base = {base}"
                         );
                     }
-                    let _ = &half;
                 }
             }
         }
@@ -5508,10 +5684,13 @@ mod tests {
         // The fast path against the routine it specializes, including the
         // boundary shapes: a dividend below the divisor's degree, a dividend
         // exactly at it, and the zero dividend.
-        let mut rng = SplitMix64 {
-            state: 0x5e11_0c2d_1137,
-        };
-        for _ in 0..300 {
+        // Random cases drawn: a budget, not a count derived from what the
+        // generator can produce.
+        const CASES: usize = 300;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5e11_0c2d_1137;
+        let mut rng = SplitMix64 { state: SEED };
+        for _ in 0..CASES {
             let divisor_degree = 1 + (rng.next_u64() as usize % 6);
             let f = rng.monic_z(divisor_degree, 40);
             let a = rng.poly_z(14, 40);
@@ -5538,10 +5717,13 @@ mod tests {
     fn rem_monic_is_a_ring_homomorphism() {
         // The property the product tree leans on: reducing at every level
         // gives the same answer as reducing once at the end.
-        let mut rng = SplitMix64 {
-            state: 0x1707_ab0a_7711,
-        };
-        for _ in 0..200 {
+        // Random cases drawn: a budget, not a count derived from what the
+        // generator can produce.
+        const CASES: usize = 200;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1707_ab0a_7711;
+        let mut rng = SplitMix64 { state: SEED };
+        for _ in 0..CASES {
             let degree = 1 + (rng.next_u64() as usize % 5);
             let f = rng.monic_z(degree, 30);
             let a = rng.poly_z(9, 30);
@@ -5565,9 +5747,9 @@ mod tests {
         // computation: multiply everything out over ℤ and reduce once. Sizes
         // straddle the pairing — odd counts leave a factor unpaired at some
         // level, which is where a tree gets its off-by-one.
-        let mut rng = SplitMix64 {
-            state: 0x9a3c_11de_bb05,
-        };
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x9a3c_11de_bb05;
+        let mut rng = SplitMix64 { state: SEED };
         for count in [1usize, 2, 3, 4, 5, 7, 8, 9, 16, 17] {
             let f = rng.monic_z(3, 25);
             let factors: Vec<PolyZ> = (0..count).map(|_| rng.poly_z(4, 25)).collect();
@@ -5608,12 +5790,15 @@ mod tests {
 
     #[test]
     fn homogeneous_substitution_is_the_homogenisation_evaluated() {
-        let mut rng = SplitMix64 {
-            state: 0x40e5_1c7b_022d,
-        };
+        // Random cases drawn: a budget, not a count derived from what the
+        // generator can produce.
+        const CASES: usize = 150;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x40e5_1c7b_022d;
+        let mut rng = SplitMix64 { state: SEED };
         let one = PolyZ::constant(BigInt::one());
         let x = PolyZ::from_i64_slice(&[0, 1]);
-        for _ in 0..150 {
+        for _ in 0..CASES {
             let f = rng.poly_z(6, 30);
             let a = rng.poly_z(3, 15);
             let b = rng.poly_z(3, 15);
@@ -5676,13 +5861,16 @@ mod tests {
         // polynomials in the second half exist to force the branching case:
         // a repeated root kills the derivative, which is the path that does
         // not follow from the textbook lemma.
-        let mut rng = SplitMix64 {
-            state: 0xc001_d00d_5a11,
-        };
+        // Rounds per prime power, cycling through the three shapes below,
+        // so each shape is drawn a dozen or so times. A budget.
+        const ROUNDS_PER_POWER: usize = 40;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xc001_d00d_5a11;
+        let mut rng = SplitMix64 { state: SEED };
         for &(p, e) in &[(2u64, 6u32), (3, 4), (5, 3), (7, 3), (11, 2), (13, 2)] {
             let prime = BigUint::from_u64(p);
             let power = BigUint::from_u64(p.pow(e));
-            for round in 0..40 {
+            for round in 0..ROUNDS_PER_POWER {
                 let g = rng.poly_z(3, 20);
                 let f = match round % 3 {
                     0 => g.clone(),
@@ -5728,9 +5916,9 @@ mod tests {
     fn roots_mod_prime_power_lifts_a_known_branching_root() {
         // x² modulo 3³: the lifts of the single root 0 mod 3 are the
         // multiples of 9, since 27 | x² needs 3 | x and then 3 | x/3.
-        let mut rng = SplitMix64 {
-            state: 0x2b2b_2b2b_0001,
-        };
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x2b2b_2b2b_0001;
+        let mut rng = SplitMix64 { state: SEED };
         let roots = PolyZ::from_i64_slice(&[0, 0, 1]).roots_mod_prime_power(
             &BigUint::from_u64(3),
             3,
@@ -5759,12 +5947,15 @@ mod tests {
         // A modulus wider than twice the height is the whole contract: the
         // lift then returns the original polynomial, coefficient for
         // coefficient, sign and all.
-        let mut rng = SplitMix64 {
-            state: 0x7e5e_a11f_0009,
-        };
+        // Random cases drawn: a budget, not a count derived from what the
+        // generator can produce.
+        const CASES: usize = 200;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x7e5e_a11f_0009;
+        let mut rng = SplitMix64 { state: SEED };
         let modulus = BigUint::from_u64(2).pow_u64(96);
         let half = modulus.div_rem(&BigUint::from_u64(2)).0;
-        for _ in 0..200 {
+        for _ in 0..CASES {
             let f = rng.poly_z(8, 1_000_000);
             let lifted = PolyMod::from_poly_z(&f, &modulus).symmetric_lift();
             assert_eq!(lifted, f, "the lift recovers a polynomial that fits");
@@ -5776,12 +5967,17 @@ mod tests {
 
     #[test]
     fn with_modulus_reads_the_same_representatives_wider() {
-        let mut rng = SplitMix64 {
-            state: 0x3ec0_de11_0077,
-        };
-        let narrow = BigUint::from_u64(1_000_003);
+        // Random cases drawn: a budget, not a count derived from what the
+        // generator can produce.
+        const CASES: usize = 100;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x3ec0_de11_0077;
+        let mut rng = SplitMix64 { state: SEED };
+        // The smallest prime above 10⁶; the wide modulus is its square.
+        const NARROW_MODULUS: u64 = 1_000_003;
+        let narrow = BigUint::from_u64(NARROW_MODULUS);
         let wide = narrow.mul(&narrow);
-        for _ in 0..100 {
+        for _ in 0..CASES {
             let f = PolyMod::from_poly_z(&rng.poly_z(6, 10_000), &narrow);
             let widened = f.change_modulus(&wide);
             assert_eq!(widened.modulus(), &wide);
@@ -5862,7 +6058,12 @@ mod tests {
             .rem(&field)
             .mod_pow(&order.sub(&BigUint::from_u64(2)), &field);
 
-        for _ in 0..6 {
+        // Rounds allowed. The lift is exact once the modulus exceeds twice
+        // the largest coefficient of β, 2·9413: 7⁸ is the first such power,
+        // reached after three squarings; six reach 7⁶⁴, so the panic below
+        // cannot fire on a correct lift.
+        const MAX_ROUNDS: usize = 6;
+        for _ in 0..MAX_ROUNDS {
             if current.symmetric_lift().rem_monic(&f) == PolyZ::zero() {
                 unreachable!("δ is not zero");
             }
@@ -5899,8 +6100,33 @@ mod real_root_tests {
     use super::{FactorRealError, PolyZ, RealFactorization, RealRootError};
     use crate::{BigInt, BigUint};
 
+    /// Relative slack when a root is compared to the number it should be,
+    /// and the bound on a simple root's reported forward error.
+    ///
+    /// A policy, far looser than the one ulp `real_roots` promises or the
+    /// quadratic convergence `factor_real` reaches; not derived from either
+    /// error bound. What would settle it is the error these tests actually
+    /// see, which has not been recorded.
+    const ROOT_SLACK: f64 = 1e-9;
+
+    /// Relative slack on a residual: `|f(x)|` against the factored form's
+    /// value at `x`, and `|f(r)|` at a returned root against the largest
+    /// term of the sum. A policy, on the same footing as [`ROOT_SLACK`].
+    const RESIDUAL_SLACK: f64 = 1e-9;
+
+    /// Slack on a repeated root and on its forward error. Looser than
+    /// [`ROOT_SLACK`] by a factor the tests do not derive: the root is
+    /// located in a squarefree factor where it is simple, so nothing in
+    /// the algorithm says it should be worse determined. A policy.
+    const REPEATED_ROOT_SLACK: f64 = 1e-6;
+
+    /// Relative slack between the two entry points' answers for one real
+    /// root. Ten times [`ROOT_SLACK`], since both sides carry their own
+    /// error; the factor is a policy.
+    const AGREEMENT_SLACK: f64 = 1e-8;
+
     fn close(a: f64, b: f64) -> bool {
-        (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
+        (a - b).abs() <= ROOT_SLACK * a.abs().max(b.abs()).max(1.0)
     }
 
     /// `(x−1)(x−2)(x−3)`: three simple roots, found and ordered.
@@ -5963,7 +6189,7 @@ mod real_root_tests {
             });
             let scale = exact.abs().max(1.0);
             assert!(
-                (modelled - exact).abs() <= scale * 1e-9,
+                (modelled - exact).abs() <= scale * RESIDUAL_SLACK,
                 "at x = {x} the factorization gives {modelled}, f gives {exact}"
             );
         }
@@ -5979,9 +6205,15 @@ mod real_root_tests {
         assert!(factored.conjugate_pairs.is_empty());
         assert_eq!(factored.degree(), 3);
         for (found, want) in factored.real_roots.iter().zip([1.0, 2.0, 3.0]) {
-            assert!((found.real - want).abs() < 1e-9, "{found:?} != {want}");
+            assert!(
+                (found.real - want).abs() < ROOT_SLACK,
+                "{found:?} != {want}"
+            );
             assert_eq!(found.imaginary, 0.0, "a real root has no imaginary part");
-            assert!(found.forward_error < 1e-9, "{found:?} is poorly determined");
+            assert!(
+                found.forward_error < ROOT_SLACK,
+                "{found:?} is poorly determined"
+            );
         }
         assert_factorization_reproduces(&f, &factored);
     }
@@ -6028,12 +6260,12 @@ mod real_root_tests {
         let twos = factored
             .real_roots
             .iter()
-            .filter(|r| (r.real - 2.0).abs() < 1e-6)
+            .filter(|r| (r.real - 2.0).abs() < REPEATED_ROOT_SLACK)
             .count();
         assert_eq!(twos, 3, "the triple root is emitted three times");
         for root in &factored.real_roots {
             assert!(
-                root.forward_error < 1e-6,
+                root.forward_error < REPEATED_ROOT_SLACK,
                 "a root located in its squarefree factor is well determined: {root:?}"
             );
         }
@@ -6108,7 +6340,7 @@ mod real_root_tests {
             for (a, b) in bisected.iter().zip(&factored.real_roots) {
                 let scale = a.abs().max(1.0);
                 assert!(
-                    (a - b.real).abs() <= scale * 1e-8,
+                    (a - b.real).abs() <= scale * AGREEMENT_SLACK,
                     "{a} against {} for {coefficients:?}",
                     b.real
                 );
@@ -6167,7 +6399,7 @@ mod real_root_tests {
                     .map(|(k, c)| (*c as f64).abs() * root.abs().powi(k as i32))
                     .fold(0.0, f64::max);
                 assert!(
-                    value.abs() <= 1e-9 * scale.max(1.0),
+                    value.abs() <= RESIDUAL_SLACK * scale.max(1.0),
                     "f({root}) = {value} for {coefficients:?}"
                 );
             }
@@ -6218,8 +6450,14 @@ mod field_sqrt_tests {
                 modulus_poly.is_irreducible(),
                 "the quartic for q={prime} must be irreducible"
             );
+            // Elements per field, from the seeds below. A budget.
+            const SEEDS: core::ops::Range<u64> = 1..40;
+            // More than half the seeds must yield a square: the loop skips
+            // the zero element, and a test that skipped most of its seeds
+            // would pass with nothing exercised.
+            const MIN_SQUARES: usize = 20;
             let mut squares = 0;
-            for seed in 1..40u64 {
+            for seed in SEEDS {
                 let element = PolyMod::from_poly_z(
                     &PolyZ::from_i64_slice(&[
                         (seed % prime) as i64,
@@ -6244,7 +6482,10 @@ mod field_sqrt_tests {
                 );
                 squares += 1;
             }
-            assert!(squares > 20, "too few squares exercised at q={prime}");
+            assert!(
+                squares > MIN_SQUARES,
+                "too few squares exercised at q={prime}"
+            );
         }
     }
 
@@ -6255,8 +6496,11 @@ mod field_sqrt_tests {
         // from passing on a routine that always refuses.
         let (modulus_poly, q) = field(&[1, 1, 0, 0, 1], 7);
         assert!(modulus_poly.is_irreducible());
+        // `(seed mod 7, ⌊seed/7⌋ mod 7)` walks all 49 pairs `(a, b)` of
+        // `x² + bx + a` within the first 49 seeds; the rest repeat. A budget.
+        const SEEDS: core::ops::Range<u64> = 1..60;
         let (mut squares, mut non_squares) = (0, 0);
-        for seed in 1..60u64 {
+        for seed in SEEDS {
             let element = PolyMod::from_poly_z(
                 &PolyZ::from_i64_slice(&[(seed % 7) as i64, ((seed / 7) % 7) as i64, 1, 0]),
                 &q,
@@ -6284,7 +6528,9 @@ mod field_sqrt_tests {
         assert!(modulus_poly.is_irreducible());
         let order = q.pow_u64(3);
         let exponent = order.add(&BigUint::one()).div_rem(&BigUint::from_u64(4)).0;
-        for seed in 1..30u64 {
+        // Elements compared. A budget.
+        const SEEDS: core::ops::Range<u64> = 1..30;
+        for seed in SEEDS {
             let element = PolyMod::from_poly_z(
                 &PolyZ::from_i64_slice(&[(seed % prime) as i64, ((seed * 5) % prime) as i64, 2]),
                 &q,

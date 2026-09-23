@@ -29,8 +29,9 @@ use rump::BigUint;
 
 // ─── Random operand generation ──────────────────────────────────────────────
 
-/// splitmix64, seeded per process from the OS clock so every invocation is an
-/// independent random trial.
+/// splitmix64 (Steele, Lea & Flood, *Fast Splittable Pseudorandom Number
+/// Generators*, OOPSLA 2014), seeded per process from the OS clock so every
+/// invocation is an independent random trial.
 struct SplitMix64(u64);
 
 impl SplitMix64 {
@@ -410,6 +411,8 @@ fn field_op(name: &str) -> Option<fn(&FieldPool)> {
     })
 }
 
+/// Operand widths in bits: the RSA and Diffie–Hellman modulus sizes, and
+/// 256 for the floor where a value is four words.
 const INT_SIZES: &[usize] = &[256, 1024, 2048, 4096];
 const INT_OPS: &[&str] = &[
     "add",
@@ -440,7 +443,10 @@ const INT_OPS: &[&str] = &[
     "isprime_true",
 ];
 
-/// (degree, taps) for two representative FIPS binary fields.
+/// `(degree, taps)` of two of the five FIPS 186-4 binary fields (Appendix
+/// D.1.3): B-233, reduced by `t²³³ + t⁷⁴ + 1`, and B-571, the widest, by
+/// `t⁵⁷¹ + t¹⁰ + t⁵ + t² + 1`. `gf2m.rs` tests the same polynomials for
+/// irreducibility.
 const FIELDS: &[(usize, &[usize])] = &[(233, &[74, 0]), (571, &[10, 5, 2, 0])];
 const FIELD_OPS: &[&str] = &["gf2m_mul", "gf2m_sqr", "gf2m_inv", "gf2m_pow", "gf2m_sqrt"];
 
@@ -474,12 +480,22 @@ fn all_ops() -> Vec<String> {
 
 // ─── One reading ────────────────────────────────────────────────────────────
 
+/// The calibration floor: repetitions double until one batch lasts this
+/// long. PERFORMANCE.md ("Method") records the choice: at 2 ms the timer's
+/// resolution and the loop overhead are below one part in 10⁴ of a
+/// reading.
+const CALIBRATION_FLOOR: Duration = Duration::from_millis(2);
+
+/// A safety cap on the doubling. A working op stops on the floor first:
+/// 2²⁶ repetitions of even a 1 ns op last 67 ms.
+const MAX_REPS: usize = 1 << 26;
+
 /// Repeat the op on its single random operand until the elapsed interval
-/// exceeds the 2 ms calibration floor, then print the per-op cost in ms. The whole batch uses the *same* operand,
-/// so the reading reflects that operand's data-dependent cost; the fresh draw
-/// per process is what makes the collection of readings a random sample.
+/// exceeds `CALIBRATION_FLOOR`, then print the per-op cost in ms. The whole
+/// batch uses the *same* operand, so the reading reflects that operand's
+/// data-dependent cost; the fresh draw per process is what makes the
+/// collection of readings a random sample.
 fn one_reading(bench: &mut Bench) {
-    let target = Duration::from_millis(2);
     let mut reps = 1usize;
     let ms = loop {
         let start = Instant::now();
@@ -487,7 +503,7 @@ fn one_reading(bench: &mut Bench) {
             bench.run();
         }
         let elapsed = start.elapsed();
-        if elapsed >= target || reps >= 1 << 26 {
+        if elapsed >= CALIBRATION_FLOOR || reps >= MAX_REPS {
             break elapsed.as_secs_f64() * 1e3 / reps as f64;
         }
         reps *= 2;

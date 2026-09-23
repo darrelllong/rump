@@ -87,7 +87,7 @@ Algorithm M.
 
 | Algorithm | Location | Reference |
 |---|---|---|
-| Jacobi symbol, binary reciprocity | `jacobi_binary` | *Handbook of Applied Cryptography*, Algorithm 2.149. |
+| Jacobi symbol | `jacobi` | The two engines below, by width; the test oracle is binary reciprocity, *Handbook of Applied Cryptography*, Algorithm 2.149. |
 | Jacobi symbol, Lehmer-batched state | `jacobi_lehmer`, state machine | Möller's design (as shipped in GMP: `mpn_jacobi_n`, `gen-jacobitab.c`), after Schönhage's identities. |
 | Jacobi symbol, HGCD-threaded (subquadratic) | `jacobi_hgcd` | Brent and Zimmermann, *An O(M(n) log n) algorithm for the Jacobi symbol*, ANTS-IX, LNCS 6197 (2010), 83–95; threading design Möller's (GMP's `mpn_hgcd_jacobi`); `JACOBI_HGCD_THRESHOLD_LIMBS` sits where GMP pins its `JACOBI_DC_THRESHOLD`. |
 | Kronecker symbol | `kronecker` | Cohen, *A Course in Computational Algebraic Number Theory*, Algorithm 1.4.10. |

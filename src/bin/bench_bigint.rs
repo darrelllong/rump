@@ -40,9 +40,27 @@ impl SplitMix64 {
     }
 }
 
+/// Operand widths in bits when none are given: doublings from 256 to
+/// 4096, the span of RSA and Diffie–Hellman modulus sizes.
 const DEFAULT_BITS: &[usize] = &[256, 512, 1024, 2048, 4096];
+/// Time budget per row: iterations double until one batch lasts this long
+/// or reaches `MAX_ITERS`, so a row averages over at least that much work.
 const TARGET: Duration = Duration::from_millis(200);
+/// Cap on the doubling, so a cheap kernel is reported after 2^16 calls
+/// rather than the millions the budget would demand of it.
 const MAX_ITERS: usize = 1 << 16;
+/// First batch sizes for the doubling. A product is fast enough that a
+/// batch of one is a wasted round; an exponentiation or a division is not.
+const FAST_START_ITERS: usize = 2;
+const SLOW_START_ITERS: usize = 1;
+/// Arbitrary, fixed so every run draws the same operands.
+const SEED: u64 = 0x4d4d_4d4d_4d4d_4d4d;
+/// 2¹⁶ + 1, RSA's classical public exponent: two set bits, so the ladder
+/// is sixteen squarings and one multiply, the exponent's floor.
+const F4: u64 = 65_537;
+/// Random exponent length. Exponentiation costs (exponent bits) times the
+/// kernel, so a fixed length keeps the width sweep a one-variable fit.
+const RANDOM_EXPONENT_BITS: usize = 256;
 
 #[derive(Clone, Debug)]
 struct Config {
@@ -128,8 +146,8 @@ fn run_for_bits(rng: &mut SplitMix64, bits: usize) {
         lhs >= divisor,
         "divisor must not trip the div_rem fast path"
     );
-    let e_65537 = BigUint::from_u64(65_537);
-    let exp_random = random_biguint(rng, 256);
+    let e_65537 = BigUint::from_u64(F4);
+    let exp_random = random_biguint(rng, RANDOM_EXPONENT_BITS);
     let ctx = MontgomeryContext::new(&modulus).expect("odd modulus");
 
     println!("\n### {}-bit", bits);
@@ -140,7 +158,7 @@ fn run_for_bits(rng: &mut SplitMix64, bits: usize) {
         || {
             black_box(lhs.mul(&rhs));
         },
-        2,
+        FAST_START_ITERS,
     );
     println!("| mul | {:.1} | {} |", ns, iters);
 
@@ -148,7 +166,7 @@ fn run_for_bits(rng: &mut SplitMix64, bits: usize) {
         || {
             black_box(BigUint::mod_mul(&lhs, &rhs, &modulus));
         },
-        2,
+        FAST_START_ITERS,
     );
     println!("| mod_mul (odd modulus) | {:.1} | {} |", ns, iters);
 
@@ -156,7 +174,7 @@ fn run_for_bits(rng: &mut SplitMix64, bits: usize) {
         || {
             black_box(ctx.pow(&base, &e_65537));
         },
-        1,
+        SLOW_START_ITERS,
     );
     println!("| montgomery_pow (e=65537) | {:.1} | {} |", ns, iters);
 
@@ -164,7 +182,7 @@ fn run_for_bits(rng: &mut SplitMix64, bits: usize) {
         || {
             black_box(ctx.pow(&base, &exp_random));
         },
-        1,
+        SLOW_START_ITERS,
     );
     println!("| montgomery_pow (random 256b e) | {:.1} | {} |", ns, iters);
 
@@ -172,7 +190,7 @@ fn run_for_bits(rng: &mut SplitMix64, bits: usize) {
         || {
             black_box(lhs.div_rem(&divisor));
         },
-        1,
+        SLOW_START_ITERS,
     );
     println!("| div_rem | {:.1} | {} |", ns, iters);
 
@@ -180,14 +198,14 @@ fn run_for_bits(rng: &mut SplitMix64, bits: usize) {
         || {
             black_box(lhs.rem(&divisor));
         },
-        1,
+        SLOW_START_ITERS,
     );
     println!("| rem | {:.1} | {} |", ns, iters);
 }
 
 fn main() {
     let cfg = parse_config();
-    let mut rng = SplitMix64::new(0x4d4d_4d4d_4d4d_4d4d);
+    let mut rng = SplitMix64::new(SEED);
 
     println!("# Bigint Kernel Microbenchmarks");
     println!(

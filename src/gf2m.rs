@@ -59,6 +59,23 @@
 
 use crate::bigint::BigUint;
 
+/// Bits per window of the comb multiplication, `w` in Hankerson, Menezes,
+/// Vanstone — *Guide to ECC*, Algorithm 2.36, which takes `w = 4`. The
+/// table holds `2^w` multiples of `b`, each a limb longer than `b`, and the
+/// sweep over `a` makes `64 / w` passes; widening the window doubles the
+/// table for every bit it saves from the passes, and four is where the
+/// algorithm as published sets that balance.
+const COMB_WINDOW_BITS: usize = 4;
+
+/// Entries of the comb table: one multiple `u(x)·b(x)` per `w`-bit `u`.
+const COMB_TABLE_ENTRIES: usize = 1 << COMB_WINDOW_BITS;
+
+/// Selects one window from a limb.
+const COMB_WINDOW_MASK: u64 = COMB_TABLE_ENTRIES as u64 - 1;
+
+/// Windows in a limb: the passes the sweep makes.
+const COMB_WINDOWS_PER_LIMB: usize = u64::BITS as usize / COMB_WINDOW_BITS;
+
 /// A binary extension field GF(2^m), defined by its irreducible polynomial.
 ///
 /// The degree and reduction taps are derived from the polynomial by
@@ -149,19 +166,20 @@ impl Gf2m {
 
         let a_limbs = a.limbs();
         let b_limbs = b.limbs();
-        // One spare limb per entry: u(x) has degree at most 3, so u(x)·b(x)
-        // exceeds b by at most three bits and can never overflow the extra
-        // word. That headroom is what lets the doubling below discard its
-        // final carry-out.
+        // One spare limb per entry: u(x) has degree below the window width,
+        // so u(x)·b(x) exceeds b by fewer bits than that and can never
+        // overflow the extra word. That headroom is what lets the doubling
+        // below discard its final carry-out.
         let stride = b_limbs.len() + 1;
 
-        // table[u] = u(x) · b(x) for the sixteen 4-bit patterns u, built by
-        // the recurrence 2u ↦ (u·b) · x and 2u+1 ↦ (2u·b) + b, each entry
-        // from one already written: fourteen word passes, no multiplications.
-        // table[0] stays zero and is skipped at use; table[1] is b itself.
-        let mut table = vec![0u64; 16 * stride];
+        // table[u] = u(x) · b(x) for every window pattern u, built by the
+        // recurrence 2u ↦ (u·b) · x and 2u+1 ↦ (2u·b) + b, each entry from
+        // one already written: one word pass per entry past the first two,
+        // no multiplications. table[0] stays zero and is skipped at use;
+        // table[1] is b itself.
+        let mut table = vec![0u64; COMB_TABLE_ENTRIES * stride];
         table[stride..stride + b_limbs.len()].copy_from_slice(b_limbs);
-        for u in 2..16 {
+        for u in 2..COMB_TABLE_ENTRIES {
             let (lo, hi) = table.split_at_mut(u * stride);
             let dst = &mut hi[..stride];
             if u % 2 == 0 {
@@ -183,15 +201,16 @@ impl Gf2m {
         // limb of `a`, with one word of slack. The accumulator never exceeds
         // the finished product: after window `k` it equals the product with
         // every remaining window shifted out, so it is bounded by
-        // `deg(a) + deg(b) − 4k`. Hence the four-bit shift below can never
-        // carry a bit off the top word, and dropping its final carry is safe.
+        // `deg(a) + deg(b) − w·k`. Hence the window-wide shift below can
+        // never carry a bit off the top word, and dropping its final carry
+        // is safe.
         let mut product = vec![0u64; a_limbs.len() + stride];
-        // Windows most-significant first: absorb nibble `window` of every
-        // limb of `a`, then shift the accumulator left four bits to make room
-        // for the next, which is Horner's rule in radix 2^4.
-        for window in (0..16).rev() {
+        // Windows most-significant first: absorb window `window` of every
+        // limb of `a`, then shift the accumulator left one window to make
+        // room for the next, which is Horner's rule in radix 2^w.
+        for window in (0..COMB_WINDOWS_PER_LIMB).rev() {
             for (j, &limb) in a_limbs.iter().enumerate() {
-                let u = ((limb >> (4 * window)) & 0xF) as usize;
+                let u = ((limb >> (COMB_WINDOW_BITS * window)) & COMB_WINDOW_MASK) as usize;
                 if u != 0 {
                     let entry = &table[u * stride..(u + 1) * stride];
                     for (i, &w) in entry.iter().enumerate() {
@@ -202,8 +221,8 @@ impl Gf2m {
             if window > 0 {
                 let mut carry = 0u64;
                 for limb in product.iter_mut() {
-                    let next = *limb >> 60;
-                    *limb = (*limb << 4) | carry;
+                    let next = *limb >> (u64::BITS as usize - COMB_WINDOW_BITS);
+                    *limb = (*limb << COMB_WINDOW_BITS) | carry;
                     carry = next;
                 }
             }
@@ -819,7 +838,9 @@ fn prime_divisors(mut n: usize) -> Vec<usize> {
 mod tests {
     use super::*;
 
-    // GF(2^163) irreducible polynomial: x^163 + x^7 + x^6 + x^3 + 1
+    /// GF(2^163) under x^163 + x^7 + x^6 + x^3 + 1, the degree-163 field of
+    /// FIPS 186-4 (curves B-163 and K-163); the first entry of the table in
+    /// `irreducibility_known_answers`.
     fn gf163() -> Gf2m {
         let mut p = BigUint::zero();
         p.set_bit(163);
@@ -948,6 +969,8 @@ mod tests {
         let _ = field.half_trace(&BigUint::from_u64(0b10)); // x
     }
 
+    /// splitmix64 (Steele, Lea & Flood, *Fast splittable pseudorandom
+    /// number generators*, OOPSLA 2014).
     fn splitmix(state: &mut u64) -> u64 {
         *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = *state;
@@ -969,9 +992,13 @@ mod tests {
     fn sqrt_inverts_the_frobenius_map() {
         // Squaring is a bijection in GF(2^m); sqrt must invert it exactly,
         // in both compositions, for every element.
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5157_0163;
+        /// Random elements tried; arbitrary.
+        const SAMPLES: usize = 16;
         let field = gf163();
-        let mut state = 0x5157_0163;
-        for _ in 0..16 {
+        let mut state = SEED;
+        for _ in 0..SAMPLES {
             let a = random_element(&field, &mut state);
             assert_eq!(field.sqrt(&field.square(&a)), a);
             assert_eq!(field.square(&field.sqrt(&a)), a);
@@ -991,10 +1018,14 @@ mod tests {
 
         // Fermat in GF(2^163): a^(2^m) = a for every a.
         let field = gf163();
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0fe2_2163;
+        /// Random elements tried; few, since each power is 163 squarings.
+        const SAMPLES: usize = 4;
         let mut exponent = BigUint::zero();
         exponent.set_bit(163);
-        let mut state = 0x0fe2_2163;
-        for _ in 0..4 {
+        let mut state = SEED;
+        for _ in 0..SAMPLES {
             let a = random_element(&field, &mut state);
             assert_eq!(field.pow(&a, &exponent), a);
         }
@@ -1002,9 +1033,13 @@ mod tests {
 
     #[test]
     fn div_inverts_mul() {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xd1_4143;
+        /// Random pairs tried; arbitrary.
+        const SAMPLES: usize = 8;
         let field = gf163();
-        let mut state = 0xd1_4143;
-        for _ in 0..8 {
+        let mut state = SEED;
+        for _ in 0..SAMPLES {
             let a = random_element(&field, &mut state);
             let mut b = random_element(&field, &mut state);
             if b.is_zero() {
@@ -1023,8 +1058,12 @@ mod tests {
         assert_eq!(field.trace(&BigUint::one()), 1);
         assert_eq!(field.trace(&BigUint::zero()), 0);
 
-        let mut state = 0x7ace_0163;
-        for _ in 0..12 {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x7ace_0163;
+        /// Random pairs tried; arbitrary.
+        const SAMPLES: usize = 12;
+        let mut state = SEED;
+        for _ in 0..SAMPLES {
             let a = random_element(&field, &mut state);
             let b = random_element(&field, &mut state);
             // Linearity over GF(2).
@@ -1114,10 +1153,21 @@ mod tests {
         // Sparse FIPS-style moduli, the AES byte field, and a deliberately
         // dense degree-8 modulus whose top tap gap is 1 — the case that
         // forces the word-level reduction through repeated boundary passes.
+        /// Degree of the dense modulus: one byte, so the search below is
+        /// over every polynomial of that degree.
+        const DENSE_DEGREE: usize = 8;
+        /// The leading term and the tap one below it, x^8 + x^7: a tap gap
+        /// of one, which re-raises bits above the degree inside the
+        /// boundary word on every fold.
+        const TOP_TAPS: u64 = (1 << DENSE_DEGREE) | (1 << (DENSE_DEGREE - 1));
+        /// Terms the candidate must have before the top taps are forced:
+        /// more than a pentanomial's five, so the modulus is denser than
+        /// any standard one.
+        const DENSE_TERMS: u32 = 6;
         let mut dense = None;
-        for candidate in 0x100u64..0x200 {
-            let poly = BigUint::from_u64(candidate | 0x180); // x^8 + x^7 + ...
-            if candidate.count_ones() >= 6 && Gf2m::is_irreducible(&poly) {
+        for candidate in (1u64 << DENSE_DEGREE)..(1u64 << (DENSE_DEGREE + 1)) {
+            let poly = BigUint::from_u64(candidate | TOP_TAPS);
+            if candidate.count_ones() >= DENSE_TERMS && Gf2m::is_irreducible(&poly) {
                 dense = Some(poly);
                 break;
             }
@@ -1138,9 +1188,13 @@ mod tests {
             dense,
         ];
 
-        let mut state = 0xc0b_0236;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xc0b_0236;
+        /// Random pairs tried per field; arbitrary.
+        const SAMPLES: usize = 24;
+        let mut state = SEED;
         for field in &fields {
-            for _ in 0..24 {
+            for _ in 0..SAMPLES {
                 let a = random_element(field, &mut state);
                 let b = random_element(field, &mut state);
                 assert_eq!(
@@ -1155,10 +1209,16 @@ mod tests {
 
     #[test]
     fn solve_quadratic_all_degrees() {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x50_1363;
+        /// Random elements tried in the odd-degree field; arbitrary.
+        const ODD_SAMPLES: usize = 8;
+        /// Random elements tried per even-degree field; arbitrary.
+        const EVEN_SAMPLES: usize = 16;
         // Odd degree: must agree with the half-trace on trace-zero input.
         let odd = gf163();
-        let mut state = 0x50_1363;
-        for _ in 0..8 {
+        let mut state = SEED;
+        for _ in 0..ODD_SAMPLES {
             let a = random_element(&odd, &mut state);
             let c = Gf2m::add(&odd.square(&a), &a); // Tr(c) = 0 by construction
             let z = odd.solve_quadratic(&c).expect("constructed solvable");
@@ -1171,7 +1231,7 @@ mod tests {
             gf4(),
             Gf2m::new(BigUint::from_u64(0x11B)).expect("AES field"),
         ] {
-            for _ in 0..16 {
+            for _ in 0..EVEN_SAMPLES {
                 let a = random_element(&field, &mut state);
                 let c = Gf2m::add(&field.square(&a), &a);
                 let z = field
@@ -1211,7 +1271,8 @@ mod tests {
         assert_eq!(ring.solve_quadratic(&BigUint::one()), None);
         // (x^2 + x + 1)^2 = x^4 + x^2 + 1 (0b1_0101) — even degree, reducible.
         let ring = Gf2m::new(BigUint::from_u64(0b1_0101)).expect("ring");
-        for c in 0..16u64 {
+        // Every residue of the degree-4 ring, all 2⁴ of them.
+        for c in 0..(1u64 << ring.degree()) {
             // Each call returns (the test finishing proves no hang); any Some
             // is a genuinely verified root, never a fabricated one.
             if let Some(z) = ring.solve_quadratic(&BigUint::from_u64(c)) {

@@ -1,7 +1,7 @@
 //! Volatile zeroization behind the opt-in `wipe` feature.
 //!
 //! With the feature enabled this module holds the crate's sole non-test
-//! `unsafe` exception (the other audited site is the test probe that reads a
+//! `unsafe` exception (the other site is the test probe that reads a
 //! scrubbed buffer's raw tail back; the crate root names both). Without the
 //! feature the helper is an empty inline function, every call site compiles
 //! to nothing, and the crate-wide `forbid(unsafe_code)` stands with no
@@ -54,7 +54,7 @@ use core::sync::atomic::{compiler_fence, Ordering};
 /// borrow. `write_volatile` does not run a destructor on the overwritten
 /// value; `T: Copy` means there is none to run.
 #[cfg(feature = "wipe")]
-#[allow(unsafe_code)] // the non-test audited exception to the crate-wide deny: volatile scrub
+#[allow(unsafe_code)] // the one non-test exception to the crate-wide deny: volatile scrub
 pub(crate) fn zeroize_slice<T: Copy + Default>(slice: &mut [T]) {
     for item in slice.iter_mut() {
         unsafe { ptr::write_volatile(std::ptr::from_mut::<T>(item), T::default()) };

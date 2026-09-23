@@ -54,6 +54,18 @@ what a consumer must change, not everything that moved.
 
 ### Fixed
 
+- **`number_theory::gcd`, `gcd_extended`, `mod_inverse` and `jacobi` above
+  the Half-GCD crossover could answer wrongly.** The base case of the
+  recursion applied Lehmer batches without checking where they landed, on
+  the assumption that a batch reading a 124-bit window removes about that
+  many bits. It bounds each quotient, not each remainder: a pair whose
+  leading digits certify `A = 2·B + 2` drops the smaller element to two in
+  one step, past the boundary the recursion's splice relies on. On such a
+  pair at 131,072 bits `gcd` returned 2 where the true gcd had a thousand
+  bits (the debug build stopped at an assertion instead). A batch is now
+  committed only if its result keeps both elements above the boundary, the
+  rule the guarded single divisions already obey; the pair is a test.
+
 - **`poly::PolyZ::real_roots` decides every sign exactly, and its brackets
   hold every root.** Signs came from `f64` Horner evaluation and the search
   ran a fixed 200 bisections. Both fail at wide coefficient ranges: for

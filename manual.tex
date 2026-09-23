@@ -139,6 +139,7 @@ rust-mp = "0.3"
 
 \begin{lstlisting}
 use rump::finite_field::Gf2m;
+use rump::gfp::{kernel_vector, minimal_polynomial, Field, Kernel, SparseMatrix};
 use rump::integer::WordReciprocal;
 use rump::lattice::{gauss_reduce_weighted, lll_reduce, lll_reduce_delta,
                     ReductionError};
@@ -1914,6 +1915,97 @@ assert_eq!(gauss_reduce_weighted(square, [nz(1), nz(100)]), Ok([[1, 0], [0, 1]])
 // A dependent pair is a typed error rather than a panic.
 assert_eq!(gauss_reduce_weighted([[2, 4], [1, 2]], [nz(1), nz(1)]),
            Err(ReductionError::DependentBasis));
+\end{lstlisting}
+
+\section{Linear algebra over a prime field: \code{gfp}}
+\label{sec:gfp}
+
+An index-calculus discrete logarithm ends in a homogeneous system
+$M x = 0$ over $\F_\ell$, where $\ell$ is the order of the group: the rows
+of $M$ are the exponent vectors of the relations and $x$ is the vector of
+logarithms. The entries of $M$ are small integers --- overwhelmingly
+$\pm 1$ --- while the entries of $x$ are residues hundreds of bits wide,
+and \code{gfp} is built around that asymmetry. \code{SparseMatrix::new}
+takes each row as \code{(column, coefficient)} pairs and keeps the $\pm 1$
+entries apart from the rest, so a row's product is a run of limb additions
+and subtractions reduced once at the end; the matrix must be square, since
+the solver forms powers of it.
+
+\code{kernel\_vector} is Wiedemann's algorithm (Wiedemann, \emph{Solving
+sparse linear equations over finite fields}, IEEE Trans.\ Inform.\ Theory
+32 (1986)). For random $u, v$ the scalars $a_k = u^{\mathsf T} M^k v$
+obey a linear recurrence whose minimal polynomial $f$ divides that of $M$,
+and $2n$ of them determine it (Berlekamp--Massey; \code{minimal\_polynomial}
+returns $f$ low coefficient first and monic). Writing $f = x^m g$ with
+$g(0) \ne 0$, the vector $g(M)\,v$ is killed by some power of $M$, and the
+last non-zero iterate before that is in the kernel. The result is
+\emph{some} kernel element: a caller that wants one particular line makes
+the kernel one-dimensional first.
+
+The outcome is a \code{Kernel}. \code{Vector} carries the answer.
+\code{Inconclusive} is a failed draw --- about $n/\ell$ of them are --- and
+the response is another draw. \code{NoKernel} is a statement about the
+matrix: zero is not a root of the recurrence, so no draw will find a kernel.
+Telling the two apart is what lets a caller retry the right thing.
+
+\begin{lstlisting}
+/// A deterministic source for the example. Not a CSPRNG.
+struct Draws(u64);
+
+impl RandomSource for Draws {
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for chunk in dest.chunks_mut(8) {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            let word = self.0.to_le_bytes();
+            chunk.copy_from_slice(&word[..chunk.len()]);
+        }
+    }
+}
+
+// The field GF(2^61 - 1).
+let field = Field::new(BigUint::from_u64((1 << 61) - 1)).expect("a modulus above one");
+
+// A 3 x 3 matrix whose third row is the sum of the first two, so its
+// kernel is the line through (1, 1, 1).
+let matrix = SparseMatrix::new(
+    3,
+    vec![
+        vec![(0, 1), (1, 1), (2, -2)],
+        vec![(0, 1), (1, -1)],
+        vec![(0, 2), (2, -2)],
+    ],
+)
+.expect("square, in range, no repeated column");
+assert_eq!(matrix.nonzeros(), 7);
+
+// A draw can fail with probability about n/l; this one does not.
+let mut rng = Draws(7);
+let Kernel::Vector(x) = kernel_vector(&matrix, &field, &mut rng) else {
+    panic!("the draw failed; a real caller draws again");
+};
+assert!(matrix.multiply(&field, &x).iter().all(BigUint::is_zero));
+assert_eq!(x[0], x[1]);
+assert_eq!(x[1], x[2]);
+assert!(!x[0].is_zero());
+
+// An invertible matrix is named as such, not reported as bad luck.
+let identity = SparseMatrix::new(2, vec![vec![(0, 1)], vec![(1, 1)]]).expect("valid");
+assert_eq!(kernel_vector(&identity, &field, &mut rng), Kernel::NoKernel);
+
+// The recurrence behind it: Berlekamp-Massey on the Fibonacci numbers
+// finds x^2 - x - 1, returned low coefficient first and monic.
+let mut fib = vec![BigUint::zero(), BigUint::one()];
+for i in 2..8 {
+    let next = field.add(&fib[i - 1], &fib[i - 2]);
+    fib.push(next);
+}
+let minus_one = field.sub(&BigUint::zero(), &BigUint::one());
+assert_eq!(
+    minimal_polynomial(&field, &fib),
+    Some(vec![minus_one.clone(), minus_one, BigUint::one()])
+);
 \end{lstlisting}
 
 \section{Random sampling}

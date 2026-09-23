@@ -48,9 +48,26 @@ use barrett::BARRETT_HALF_PRODUCT_MAX_LIMBS;
 // split; at 96 one gains and the other is level. Correctness does not depend
 // on the value.
 const KARATSUBA_THRESHOLD_LIMBS: usize = 96;
-// Largest long/short length ratio Karatsuba accepts; beyond it the extra
-// recursion and temporaries outweigh the saved multiplications.
+// Length ratio at which Karatsuba stops: it accepts `long < 2·short`. The
+// bound is structural, not tuned. The split is taken at half the longer
+// operand, so at `long = 2·short` the shorter operand's high half is empty
+// and the kernel degenerates to schoolbook. `should_use_unbalanced` admits
+// from the same boundary upward; the two gates partition the shapes between
+// them, which is why one constant serves both.
 const KARATSUBA_MAX_IMBALANCE: usize = 2;
+// Length ratio the balanced kernels — Toom-3, Toom-4 and the NTT — accept,
+// as `long ≤ 3/2·short`, taken in integers as `short + short / 2`.
+// Toom-3 splits at a third of the longer operand, so past this ratio the
+// shorter operand's top third is empty and the five-point evaluation is
+// spent on a two-part number. Toom-4 splits at a quarter, where the top
+// part is empty already past 4/3, and the NTT does not split at all; both
+// keep Toom-3's ceiling as policy, so one shape decision routes a pair
+// through the whole ladder. Pairs past it fall to Karatsuba below 2× and to
+// block decomposition from 2×. No measurement compares this ceiling with a
+// tighter one for Toom-4 or a looser one for the NTT.
+fn within_balanced_ratio(short: usize, long: usize) -> bool {
+    long <= short + short / 2
+}
 // Toom-3 crossover: from this many limbs in the shorter operand, the five
 // sub-multiplications of size n/3 overtake Karatsuba's three of size n/2,
 // despite the heavier evaluate/interpolate pass. `toom_crossover_timing` on
@@ -104,20 +121,18 @@ const UNBALANCED_THRESHOLD_LIMBS: usize = 256;
 // clear.
 const SQR_SCHOOLBOOK_MIN_LIMBS: usize = 8;
 // Width at or above which squaring stops splitting Karatsuba-style and
-// hands over to the multiplication ladder's Toom kernels. The ordinary
-// multiplication crossover does not carry over, because a Karatsuba square's
-// constant factor differs from a Karatsuba product's.
+// hands over to the multiplication ladder. The ordinary multiplication
+// crossover does not carry over, because a Karatsuba square's constant
+// factor differs from a Karatsuba product's.
 //
-// Karatsuba squaring against `mul_toom3_ref` on the same operands
-// (`squaring_crossover_timing`, run with `--ignored`), as the range over
-// repeated runs: +6.2 to +10.1% at 128 limbs, +12.6 to +20.3% at 160, +36
-// to +40% at 192, +3 to +6% at 256, +19 to +25% at 384, and −12 to −15% at
-// 512. The ranges are sample extremes, not bounds; the threshold rests on
-// the sign and its persistence across runs. The series is not monotone
-// because Toom-3's split lands differently on each width (192 = 3·64
-// divides exactly, 256 does not), so the threshold is the last width at
-// which squaring is consistently ahead.
-const SQR_KARATSUBA_MAX_LIMBS: usize = 448;
+// `squaring_crossover_timing` (run with `--ignored`) times Karatsuba
+// squaring against what `mul` dispatches to at the same width, on the
+// EPYC 7452 and the M4 Pro. Squaring is ahead by 29–44% at every width
+// from 128 through 768 limbs on both (768: +29.2% and +31.6%), and behind
+// from 1024 on both (1024: −5.4% and −7.0%; 1536: −2.3% and −15.6%; 4096:
+// −11.8% and −15.3%). The boundary sits at the first measured loss; the
+// widths between 768 and 1024 are unmeasured.
+const SQR_KARATSUBA_MAX_LIMBS: usize = 1024;
 
 /// Bitset of the 44 quadratic residues modulo 256, one bit per residue
 /// across four words, derived by enumeration.
@@ -131,23 +146,42 @@ const SQUARES_MOD_256: [u64; 4] = [
 /// Digit alphabet for radix rendering: `0-9` then `a-z`.
 const RADIX_DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
+/// Most digits of one radix that fit a `u64`, over the radices the
+/// classical render reaches. The power-of-two radices take the bit path,
+/// so radix 3 packs the most: 40 digits, since 3^40 < 2^64 < 3^41.
+const MAX_DIGITS_PER_LIMB: usize = 40;
+
 /// Digit count at or above which parsing dispatches to divide and conquer
 /// (`RADIX_FROM_DC_THRESHOLD_DIGITS`), and the recursion floor below which
 /// sub-problems convert classically (`RADIX_FROM_DC_BASE_DIGITS`).
-/// Per the ignored `radix_dc_crossover_timing` probe, with the 512-digit
-/// floor the ladder engine ties classical parsing at ~600 decimal digits,
-/// leads from ~1,200 (1.4×), and reaches 3× at ~40,000 digits. Correctness
-/// does not depend on either value: the recursion's hard base case is the
-/// ladder's first entry.
+///
+/// The floor is where one classical pass, quadratic in the digit count, is
+/// cheaper than a further split and its ladder multiply. Measured by
+/// `radix_dc_crossover_timing` (run with `--ignored`) on the EPYC 7452
+/// over 32 to 2048 limbs with floors of 512, 1024, 2048 and 4096 digits:
+/// 512 parses fastest at every width, by 3% at 32 limbs (5 µs) and 20% at
+/// 2048 (1.60 ms against 1.91 ms at 4096). The dispatch threshold is twice
+/// the floor, so a dispatched input splits at least once; the same run has
+/// the classical parse level with the recursion at 32 limbs (617 digits,
+/// 6 µs each) and behind it from 64 limbs (1,233 digits: 15 against 12 µs),
+/// which brackets the threshold. Correctness does not depend on either: the
+/// recursion's hard base case is the ladder's first entry.
 const RADIX_FROM_DC_THRESHOLD_DIGITS: usize = 1024;
 const RADIX_FROM_DC_BASE_DIGITS: usize = 512;
 
 /// Bit width at or above which rendering dispatches to divide and conquer
 /// (`RADIX_TO_DC_THRESHOLD_BITS`), and the recursion floor below which
-/// sub-values render classically (`RADIX_TO_DC_BASE_BITS`). Per the same
-/// probe, with the 512-bit floor the ladder render is 1.8× ahead of
-/// repeated division at 2,048 bits (~600 decimal digits), 6× at 16 kbit,
-/// and 11× at 128 kbit. Correct at any values, as above.
+/// sub-values render classically (`RADIX_TO_DC_BASE_BITS`). The same probe
+/// on the same machine: the 512-bit floor renders fastest at every width
+/// (12 µs at 32 limbs against 14–15 at the wider floors; 5.14 ms at 2048
+/// against 5.69), and the recursion beats classical rendering from the
+/// narrowest width probed, 32 limbs (12 against 23 µs), which is the
+/// threshold; below it is unmeasured. The two sides do not dispatch at the
+/// same value: 2,048 bits is about 617 decimal digits (2048·log₁₀2) and
+/// 1,024 digits about 3,400 bits, so parsing stays classical to about 1.7×
+/// the width at which rendering splits, and the probe shows why — at 32
+/// limbs the recursion already halves rendering while it only matches
+/// parsing. Correct at any values, as above.
 const RADIX_TO_DC_THRESHOLD_BITS: usize = 2048;
 const RADIX_TO_DC_BASE_BITS: usize = 512;
 
@@ -701,8 +735,8 @@ impl BigUint {
     ) -> Self {
         // The first clause is the structural base case, independent of any
         // tuning constant: with no ladder entry spanning fewer digits than
-        // the input, there is nothing to split. The second is the measured
-        // floor below which classical conversion wins.
+        // the input, there is nothing to split. The second is the floor
+        // below which conversion is classical by policy.
         if digits.len() <= chunk || digits.len() < base_digits {
             return Self::from_digits_classical(digits, radix);
         }
@@ -736,9 +770,7 @@ impl BigUint {
         }
         let mut digits = Vec::with_capacity(groups.len() * chunk);
         for (index, &group) in groups.iter().rev().enumerate() {
-            // Radix 3 packs the most digits per limb (3^40 < 2^64) among
-            // the radices that reach this path.
-            let mut buffer = [0u8; 40];
+            let mut buffer = [0u8; MAX_DIGITS_PER_LIMB];
             let mut value = group;
             for slot in buffer[..chunk].iter_mut().rev() {
                 *slot = u8::try_from(value % u64::from(radix)).expect("digit below radix");
@@ -783,7 +815,7 @@ impl BigUint {
     ) -> Vec<u8> {
         // The first clause is the structural base case — a value no wider
         // than the first ladder entry splits into nothing; the second is
-        // the measured floor below which classical division wins.
+        // the floor below which rendering is classical by policy.
         if self <= &ladder[0] || self.bits() < base_bits {
             return self.to_digits_classical(radix);
         }
@@ -1539,9 +1571,9 @@ impl BigUint {
         // has the transform ahead at every width and every ratio it measures
         // on both machines: at the worst ratio, 12.84, by 43% on the EPYC 7452
         // and 13% on the Cortex-A76, and never behind at the friendlier ones.
-        // Refusing the wasteful side used to cost the NFS square root a factor
-        // of six, since it lifts at 1.3 Mbit — 20,410 limbs, ratio 12.84.
-        short >= threshold && long <= short + short / 2
+        // The NFS square root lifts at 1.3 Mbit — 20,410 limbs, ratio 12.84 —
+        // so a gate on padding would send its widest products to Toom-4.
+        short >= threshold && within_balanced_ratio(short, long)
     }
 
     /// Exact large multiplication through two modular transforms and CRT.
@@ -1577,7 +1609,7 @@ impl BigUint {
     ///
     /// Below `SQR_SCHOOLBOOK_MIN_LIMBS` (8) this is [`Self::mul`]. From
     /// there to the Karatsuba threshold it is `sqr_schoolbook_ref`; from
-    /// there to `SQR_KARATSUBA_MAX_LIMBS` (448) it is `sqr_karatsuba_ref`.
+    /// there to `SQR_KARATSUBA_MAX_LIMBS` it is `sqr_karatsuba_ref`.
     /// Wider operands take [`Self::mul`]'s Toom kernels, or, once NTT
     /// admits them, an NTT square that needs one transform array and one
     /// forward transform per prime instead of a general product's two.
@@ -1873,9 +1905,7 @@ impl BigUint {
     fn should_use_toom3(lhs: &Self, rhs: &Self) -> bool {
         let short = lhs.limbs.len().min(rhs.limbs.len());
         let long = lhs.limbs.len().max(rhs.limbs.len());
-        // Both operands large, and close enough in length that all three parts
-        // of each carry weight (a lopsided split wastes the five-way machinery).
-        short >= TOOM3_THRESHOLD_LIMBS && long <= short + short / 2
+        short >= TOOM3_THRESHOLD_LIMBS && within_balanced_ratio(short, long)
     }
 
     /// Split into three little-endian chunks of `k` limbs — low `[0, k)`, mid
@@ -1977,7 +2007,7 @@ impl BigUint {
     fn should_use_toom4(lhs: &Self, rhs: &Self) -> bool {
         let short = lhs.limbs.len().min(rhs.limbs.len());
         let long = lhs.limbs.len().max(rhs.limbs.len());
-        short >= TOOM4_THRESHOLD_LIMBS && long <= short + short / 2
+        short >= TOOM4_THRESHOLD_LIMBS && within_balanced_ratio(short, long)
     }
 
     /// Split into four little-endian chunks of `k` limbs; the top chunk holds
@@ -3500,7 +3530,9 @@ mod tests {
     #[test]
     fn symmetric_rem_is_congruent_and_smallest() {
         // The defining properties: congruent to `rem_euclid`, and no other
-        // representative of the class is smaller in absolute value.
+        // representative of the class is smaller in absolute value. Small
+        // moduli of both parities, a prime, and a pair either side of a
+        // thousand; values over ±60 wrap the small ones several times.
         for m in [1u64, 2, 7, 8, 97, 1_000, 1_001] {
             let modulus = BigUint::from_u64(m);
             for value in -60i64..=60 {
@@ -3543,7 +3575,9 @@ mod tests {
                 check(&BigUint::from_u64(value), radix);
             }
             // At powers of the radix the logarithm is an integer and its
-            // floating-point floor can fall either way.
+            // floating-point floor can fall either way. Exponents through
+            // 39: radix 8 and above cross 2^64, radix 2 and 3 stay within a
+            // word.
             for exponent in 0..40u64 {
                 let power = base.pow_u64(exponent);
                 check(&power, radix);
@@ -3553,7 +3587,8 @@ mod tests {
                 }
             }
         }
-        // And far past anything a machine word reaches.
+        // And far past anything a machine word reaches; the exponent is
+        // arbitrary.
         check(&BigUint::from_u64(10).pow_u64(3_000), 10);
     }
 
@@ -3595,10 +3630,26 @@ mod tests {
     use super::{ModulusError, MontgomeryScratch};
     use core::num::NonZeroU64;
 
+    // Knuth's MMIX multiplier (TAOCP vol. 2, §3.3.4). With an odd increment
+    // and a multiplier that is 1 mod 4 the generator has full period 2^64;
+    // 1 is the smallest odd increment.
+    const LCG_MULTIPLIER: u64 = 6364136223846793005;
+    const LCG_INCREMENT: u64 = 1;
+
     fn lcg_next(state: &mut u64) -> u64 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        *state = state
+            .wrapping_mul(LCG_MULTIPLIER)
+            .wrapping_add(LCG_INCREMENT);
         *state
     }
+
+    // Width from which the NTT timing probes take fewer samples and rounds:
+    // one product at 65,536 limbs takes long enough that repeated draws cost
+    // more wall time than the noise they remove. The rounds are best-of
+    // counts, three below the width and two at or above it.
+    const NTT_PROBE_WIDE_WORDS: usize = 65_536;
+    const NTT_PROBE_ROUNDS: usize = 3;
+    const NTT_PROBE_ROUNDS_WIDE: usize = 2;
 
     /// Divisors that exercise every branch of the normalization: already
     /// normalized, one below a power of two, one above, the extremes, small
@@ -3623,7 +3674,10 @@ mod tests {
             u64::MAX - 1,
             u64::MAX,
         ];
-        let mut state = 0x5eed_1234_u64;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5eed_1234;
+        let mut state = SEED;
+        // Random odd words beside the corners; the count is arbitrary.
         for _ in 0..32 {
             divisors.push(lcg_next(&mut state) | 1);
         }
@@ -3635,7 +3689,9 @@ mod tests {
     /// is the independently tested oracle.
     #[test]
     fn reciprocal_agrees_with_hardware_division_on_words() {
-        let mut state = 0xabcd_ef01_u64;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xabcd_ef01;
+        let mut state = SEED;
         for divisor in reciprocal_divisor_corners() {
             let r = super::WordReciprocal::new(
                 NonZeroU64::new(divisor).expect("corner divisors are non-zero"),
@@ -3645,6 +3701,8 @@ mod tests {
             if let Some(next) = divisor.checked_add(1) {
                 values.push(next);
             }
+            // The listed edges plus 64 random words per divisor; the count
+            // is arbitrary.
             for _ in 0..64 {
                 values.push(lcg_next(&mut state));
             }
@@ -3666,11 +3724,15 @@ mod tests {
     /// limb, where the normalization's top word is the only carry.
     #[test]
     fn reciprocal_agrees_with_hardware_division_on_bignums() {
-        let mut state = 0x1357_9bdf_u64;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1357_9bdf;
+        let mut state = SEED;
         for divisor in reciprocal_divisor_corners() {
             let r = super::WordReciprocal::new(
                 NonZeroU64::new(divisor).expect("corner divisors are non-zero"),
             );
+            // One limb, small widths either side of a power of two, and a
+            // wide one; four random values each.
             for words in [1usize, 2, 3, 5, 8, 17, 64] {
                 for _ in 0..4 {
                     let value = seeded_biguint(words, &mut state);
@@ -3692,12 +3754,16 @@ mod tests {
     /// because its magnitude is not representable as a positive `i64`.
     #[test]
     fn reciprocal_rem_euclid_matches_the_signed_oracle() {
-        let mut state = 0x2468_ace0_u64;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x2468_ace0;
+        let mut state = SEED;
         for divisor in reciprocal_divisor_corners() {
             let r = super::WordReciprocal::new(
                 NonZeroU64::new(divisor).expect("corner divisors are non-zero"),
             );
             let mut values = vec![0i64, 1, -1, i64::MAX, i64::MIN];
+            // The signed edges plus 64 random words per divisor, about half
+            // of them negative; the count is arbitrary.
             for _ in 0..64 {
                 values.push(lcg_next(&mut state) as i64);
             }
@@ -3742,6 +3808,7 @@ mod tests {
         for d in [1u64, 2, u64::MAX - 1, u64::MAX] {
             let r = super::WordReciprocal::new(NonZeroU64::new(d).expect("non-zero"));
             assert_eq!(r.divisor(), d);
+            // An arbitrary dividend, fixed.
             assert_eq!(r.rem(12_345), 12_345 % d);
         }
     }
@@ -3821,8 +3888,12 @@ mod tests {
 
     #[test]
     fn float_estimates_match_reference() {
-        // Exact on values within f64's integer range.
-        let mut seed = 0xf10a_7000_0000_0001;
+        // Exact on values within f64's integer range: 2,000 random words
+        // shifted down by up to 39 bits, so widths from about 25 to 64 bits
+        // appear on both sides of the 53-bit exact range.
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xf10a_7000_0000_0001;
+        let mut seed = SEED;
         for _ in 0..2000 {
             let v = lcg_next(&mut seed) >> (lcg_next(&mut seed) % 40);
             let n = BigUint::from_u64(v);
@@ -3837,7 +3908,8 @@ mod tests {
             }
         }
         assert_eq!(BigUint::zero().to_f64_lossy(), 0.0);
-        // Powers of two land exactly, well past u64.
+        // Powers of two land exactly, from the first past u64 up to below
+        // f64's exponent limit at 2^1024.
         for bits in [64usize, 100, 200, 500, 1000] {
             let mut p = BigUint::zero();
             p.set_bit(bits);
@@ -3863,7 +3935,11 @@ mod tests {
 
     #[test]
     fn div_rem_u64_and_to_u64() {
-        let mut seed = 0xd10e_5eed_0000_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xd10e_5eed_0000_0001;
+        let mut seed = SEED;
+        // 2,000 random dividends of 1 to 20 limbs, each against a random odd
+        // word divisor.
         for _ in 0..2000 {
             let words = 1 + (lcg_next(&mut seed) % 20) as usize;
             let n = seeded_biguint(words, &mut seed);
@@ -3901,7 +3977,11 @@ mod tests {
 
     #[test]
     fn mod_neg_matches_machine_arithmetic() {
-        let mut seed = 0x6e6e_9a7e_0000_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x6e6e_9a7e_0000_0001;
+        let mut seed = SEED;
+        // 2,000 random moduli and values of every width up to a word, the
+        // value not reduced.
         for _ in 0..2000 {
             let m = (lcg_next(&mut seed) >> (lcg_next(&mut seed) % 64)).max(1);
             let a = lcg_next(&mut seed) >> (lcg_next(&mut seed) % 64);
@@ -3941,7 +4021,11 @@ mod tests {
 
     #[test]
     fn mod_add_sub_match_machine_arithmetic() {
-        let mut seed = 0x30d5_0bad_0000_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x30d5_0bad_0000_0001;
+        let mut seed = SEED;
+        // 2,000 random odd moduli of 32 to 64 bits with operands of the same
+        // range, so sums carry past a word and differences borrow.
         for _ in 0..2000 {
             let m = (lcg_next(&mut seed) >> (lcg_next(&mut seed) % 32)) | 1;
             let a = lcg_next(&mut seed) >> (lcg_next(&mut seed) % 32);
@@ -4037,6 +4121,8 @@ mod tests {
             ];
             for factor in &factors {
                 values.push(factor.clone());
+                // An arbitrary multiplier, fixed: a multiple of the factor
+                // that is not the factor itself.
                 values.push(factor.mul(&BigUint::from_u64(12_345)).rem(&n));
             }
             for value in values {
@@ -4063,7 +4149,10 @@ mod tests {
     #[test]
     fn montgomery_domain_add_sub_match_plain_arithmetic() {
         use super::MontgomeryContext;
-        let mut seed = 0x0a0d_50b7_0000_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0a0d_50b7_0000_0001;
+        let mut seed = SEED;
+        // One limb, a few, and a few dozen; 16 random pairs each.
         for &words in &[1usize, 4, 32] {
             let mut n = seeded_biguint(words, &mut seed);
             n.limbs[0] |= 1;
@@ -4105,7 +4194,11 @@ mod tests {
     #[test]
     fn barrett_matches_division_reduction() {
         use super::BarrettContext;
-        let mut seed = 0xba22_e77e_0000_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xba22_e77e_0000_0001;
+        let mut seed = SEED;
+        // Widths from one limb up by factors of four, each with an odd and
+        // an even modulus; eight random products each.
         for &words in &[1usize, 4, 16, 64] {
             for parity_even in [false, true] {
                 let mut n = seeded_biguint(words, &mut seed);
@@ -4163,7 +4256,8 @@ mod tests {
             Err(ModulusError::Zero)
         );
         // The tightest shapes for the quotient estimate: moduli at the
-        // limb-boundary edges, b^(k-1) and b^k - 1.
+        // limb-boundary edges, b^(k-1) and b^k - 1, at the two narrowest
+        // multi-limb widths and a wider one; six random residues each.
         for k in [2usize, 3, 8] {
             for n in [
                 {
@@ -4183,7 +4277,9 @@ mod tests {
                 },
             ] {
                 let ctx = BarrettContext::new(&n).expect("at least 2");
-                let mut seed2 = 0x0b0b_0b0b_0000_0001 ^ (k as u64);
+                // Arbitrary, fixed so a failure reproduces; varied by width.
+                const EDGE_SEED: u64 = 0x0b0b_0b0b_0000_0001;
+                let mut seed2 = EDGE_SEED ^ (k as u64);
                 for _ in 0..6 {
                     let a = seeded_biguint(k, &mut seed2).rem(&n);
                     let wide = a.square();
@@ -4203,7 +4299,9 @@ mod tests {
         // only timing; no value-based test can catch that.
         use super::{BarrettContext, BARRETT_HALF_PRODUCT_MAX_LIMBS};
         let cutoff = BARRETT_HALF_PRODUCT_MAX_LIMBS;
-        let mut seed = 0x5a11_b0bb_0000_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5a11_b0bb_0000_0001;
+        let mut seed = SEED;
         for k in [cutoff - 1, cutoff, cutoff + 1, cutoff + 2] {
             // Four modulus shapes at each width. The even one exercises an
             // even modulus at width and adds an independent μ; a top limb of
@@ -4227,6 +4325,8 @@ mod tests {
             for (label, n) in shapes {
                 assert_eq!(n.bits().div_ceil(64), k, "{label}: k = {k} as intended");
                 let ctx = BarrettContext::new(&n).expect("a modulus of at least 2");
+                // Two random pairs per shape; the listed edges below do the
+                // stressing.
                 for _ in 0..2 {
                     let a = seeded_biguint(k, &mut seed).rem(&n);
                     let b = seeded_biguint(k, &mut seed).rem(&n);
@@ -4258,9 +4358,12 @@ mod tests {
     #[ignore = "search for a two-correction witness; run with --ignored"]
     fn barrett_correction_search() {
         use super::BarrettContext;
-        let mut seed = 0x7777_0000_0000_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x7777_0000_0000_0001;
+        let mut seed = SEED;
         let mut seen = [0usize; 4];
         let mut witness: Option<(String, String)> = None;
+        // One to four limbs.
         for k in 1usize..=4 {
             let mut shapes: Vec<(String, BigUint)> = Vec::new();
             for d in [1u64, 3, 5, 7, 9, 17, 33, 65, 257, 1025] {
@@ -4272,6 +4375,8 @@ mod tests {
                 shapes.push((format!("b^{k}-{d}"), m.sub(&BigUint::from_u64(d))));
                 shapes.push((format!("b^{k}+{d}"), m.add(&BigUint::from_u64(d))));
             }
+            // Forty random moduli per width beside the structured ones; the
+            // count is arbitrary.
             for _ in 0..40 {
                 let mut r = seeded_biguint(k, &mut seed);
                 r.set_bit(64 * k - 1);
@@ -4286,6 +4391,8 @@ mod tests {
                 let mut top = BigUint::zero();
                 top.set_bit(128 * kk);
                 let top = top.sub(&BigUint::one());
+                // 600 draws per modulus, cycling three constructions; the
+                // count is arbitrary.
                 for _ in 0..600 {
                     let x = match seed % 3 {
                         0 => seeded_biguint(2 * kk, &mut seed).rem(&top),
@@ -4329,8 +4436,11 @@ mod tests {
         // finds 678 two-correction reductions in 168 000, and none with
         // three.
         use super::BarrettContext;
-        let mut seed = 0xc0de_1044_0000_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xc0de_1044_0000_0001;
+        let mut seed = SEED;
         let mut seen = [0usize; 3];
+        // The narrowest multi-limb widths.
         for k in 2usize..=4 {
             let mut shapes = Vec::new();
             for d in [1u64, 3, 5, 17, 257] {
@@ -4351,6 +4461,7 @@ mod tests {
                 let mut top = BigUint::zero();
                 top.set_bit(128 * width);
                 let top = top.sub(&BigUint::one());
+                // 250 draws per modulus; the count is arbitrary.
                 for step in 0..250u64 {
                     // Uniform over the accepted range, and multiples of `n`
                     // near it — the two draws the witnesses come from.
@@ -4397,7 +4508,11 @@ mod tests {
             result
         }
 
-        let mut seed = 0xba22_e77e_0000_0002;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xba22_e77e_0000_0002;
+        let mut seed = SEED;
+        // One, four and sixteen limbs, each odd and even, with a two-limb
+        // exponent.
         for &words in &[1usize, 4, 16] {
             for parity_even in [false, true] {
                 let mut n = seeded_biguint(words, &mut seed);
@@ -4431,7 +4546,9 @@ mod tests {
         // Corners the random sweep will not reach, all even moduli: the smallest
         // modulus, powers of two, a non-power-of-two even modulus, a
         // multi-limb even modulus, exponents 0 and 1, and bases far wider
-        // than the modulus.
+        // than the modulus. 2^300 + 2 is the multi-limb even modulus and
+        // 2^700 + 12,345 a base more than twice its width; the widths and
+        // the offset are arbitrary and fixed.
         let mut wide = BigUint::one();
         wide.shl_bits(300);
         let wide_even = wide.add(&BigUint::from_u64(2));
@@ -4478,7 +4595,11 @@ mod tests {
 
     #[test]
     fn sqrt_rem_matches_bisection_and_certifies() {
-        let mut seed = 0x5eed_0006_0001_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5eed_0006_0001_0001;
+        let mut seed = SEED;
+        // From one limb to past the Karatsuba threshold; six random values
+        // each.
         for &words in &[1usize, 2, 8, 32, 128] {
             for _ in 0..6 {
                 let n = seeded_biguint(words, &mut seed);
@@ -4492,8 +4613,11 @@ mod tests {
                 assert!(root.add(&BigUint::one()).square() > n, "floor certificate");
             }
         }
-        // Exact squares and their neighbours.
-        let mut seed2 = 0x0bad_cafe_0000_0007;
+        // Exact squares and their neighbours, from roots of two limbs to
+        // roots whose squares reach the Karatsuba squaring regime.
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED_SQUARES: u64 = 0x0bad_cafe_0000_0007;
+        let mut seed2 = SEED_SQUARES;
         for &words in &[2usize, 16, 64] {
             let r = seeded_biguint(words, &mut seed2);
             let square = r.square();
@@ -4510,7 +4634,11 @@ mod tests {
 
     #[test]
     fn predicates_match_machine_arithmetic() {
-        let mut seed = 0x1234_5678_0000_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1234_5678_0000_0001;
+        let mut seed = SEED;
+        // 3,000 random words shifted down by up to 39 bits, so every width
+        // from about 25 to 64 bits appears.
         for _ in 0..3000 {
             let v = lcg_next(&mut seed) >> (lcg_next(&mut seed) % 40);
             let n = BigUint::from_u64(v);
@@ -4534,6 +4662,9 @@ mod tests {
     #[test]
     fn nth_root_and_perfect_power_brute_force() {
         // Exhaustive over a small range: every n and k against direct search.
+        // Below 2,000 each listed root index has an exact power in range,
+        // 2^7 = 128 the last; the indices are the first four primes, and a
+        // composite index follows from its factors.
         for v in 1u64..2000 {
             let n = BigUint::from_u64(v);
             for k in [2u64, 3, 5, 7] {
@@ -4544,6 +4675,7 @@ mod tests {
                 assert_eq!(n.nth_root_floor(k), BigUint::from_u64(r), "root {k} of {v}");
             }
             let mut is_power = v == 1; // 1 = 1^k, below the search's floor
+                                       // Every exponent with a base-2 power inside u64 (2^63 fits).
             for k in 2u64..64 {
                 let mut m = 2u64;
                 while let Some(p) = m.checked_pow(u32::try_from(k).expect("small")) {
@@ -4564,7 +4696,11 @@ mod tests {
 
     #[test]
     fn wide_roots_and_powers() {
-        let mut seed = 0x0f0f_0f0f_5eed_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0f0f_0f0f_5eed_0001;
+        let mut seed = SEED;
+        // Bases of 8 to 40 limbs; the powers reach 168 limbs (24·7), past
+        // the Karatsuba threshold.
         for &(words, k) in &[(8usize, 3u64), (16, 5), (40, 2), (24, 7)] {
             let m = seeded_biguint(words, &mut seed);
             let power = m.pow_u64(k);
@@ -4594,13 +4730,19 @@ mod tests {
     fn sqrt_newton_vs_bisection_timing() {
         use std::hint::black_box;
         use std::time::Instant;
-        let mut seed = 0x0bad_5eed_0000_0001;
+        // Best of nine runs: the minimum sheds scheduler interference; the
+        // count is arbitrary.
+        const RUNS: usize = 9;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0bad_5eed_0000_0001;
+        let mut seed = SEED;
         eprintln!("{:>8} {:>12} {:>12}", "bits", "newton_us", "bisect_us");
+        // From 1 kbit to 64 kbit.
         for &words in &[16usize, 64, 128, 1024] {
             let n = seeded_biguint(words, &mut seed);
             let time = |f: &dyn Fn()| {
                 let mut best = f64::INFINITY;
-                for _ in 0..9 {
+                for _ in 0..RUNS {
                     let t0 = Instant::now();
                     f();
                     best = best.min(t0.elapsed().as_secs_f64() * 1e6);
@@ -4619,7 +4761,12 @@ mod tests {
 
     #[test]
     fn radix_round_trips_across_bases() {
-        let mut seed = 0x5eed_5eed_1234_5678;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5eed_5eed_1234_5678;
+        let mut seed = SEED;
+        // One limb, a few, a few dozen, and 200 limbs — 12,800 bits, above
+        // both divide-and-conquer thresholds in every radix; two random
+        // values each.
         for radix in 2u32..=36 {
             for &words in &[1usize, 5, 32, 200] {
                 for _ in 0..2 {
@@ -4651,7 +4798,11 @@ mod tests {
 
     #[test]
     fn radix_matches_std_formatting() {
-        let mut seed = 0x0123_4567_89ab_cdef;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0123_4567_89ab_cdef;
+        let mut seed = SEED;
+        // 200 random two-limb values, the widest the std formatter checks;
+        // the count is arbitrary.
         for _ in 0..200 {
             let v = u128::from(lcg_next(&mut seed)) << 64 | u128::from(lcg_next(&mut seed));
             let value = BigUint::from_u128(v);
@@ -4680,7 +4831,9 @@ mod tests {
 
     #[test]
     fn radix_divide_and_conquer_matches_classical() {
-        let mut seed = 0xfeed_beef_dead_cafe;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xfeed_beef_dead_cafe;
+        let mut seed = SEED;
         // 256 words is at least 3,169 digits in every radix here, above the
         // divide-and-conquer thresholds; the classical engines are the oracle.
         for &radix in &[3u32, 10, 36] {
@@ -4706,7 +4859,7 @@ mod tests {
                 "dispatched parse diverged at radix {radix}"
             );
         }
-        // The big-value sweep for the dispatched path.
+        // Two wider values for the dispatched decimal round trip.
         for &words in &[300usize, 500] {
             let value = seeded_biguint(words, &mut seed);
             let text = value.to_str_radix(10);
@@ -4764,17 +4917,27 @@ mod tests {
     fn radix_dc_crossover_timing() {
         use std::hint::black_box;
         use std::time::Instant;
-        let mut seed = 0x7157_ab1e_5eed_0001;
+        // Best of nine runs: the minimum sheds scheduler interference; the
+        // count is arbitrary.
+        const RUNS: usize = 9;
+        // Recursion floors to sweep: the shipped 512 and its next three
+        // doublings.
+        const FLOORS: [usize; 4] = [512, 1024, 2048, 4096];
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x7157_ab1e_5eed_0001;
+        let mut seed = SEED;
         eprintln!(
             "{:>8} {:>8} {:>12} {:>12} {:>12} {:>12}",
             "words", "digits", "to_cl_ms", "to_dc_ms", "from_cl_ms", "from_dc_ms"
         );
+        // By doublings from 2 kbit (about 617 decimal digits) to 128 kbit
+        // (about 39,000), so both dispatch thresholds fall inside the sweep.
         for &words in &[32usize, 64, 128, 256, 512, 1024, 2048] {
             let value = seeded_biguint(words, &mut seed);
             let digits = value.to_digits_classical(10);
             let time = |f: &dyn Fn()| {
                 let mut best = f64::INFINITY;
-                for _ in 0..9 {
+                for _ in 0..RUNS {
                     let t0 = Instant::now();
                     f();
                     best = best.min(t0.elapsed().as_secs_f64() * 1e3);
@@ -4796,7 +4959,7 @@ mod tests {
             // Base-case sweeps for both recursions, bypassing the dispatch
             // thresholds so the floors' own effects are visible.
             let (ladder, chunk) = BigUint::radix_power_ladder(10, digits.len());
-            let bases: Vec<f64> = [512usize, 1024, 2048, 4096]
+            let bases: Vec<f64> = FLOORS
                 .iter()
                 .map(|&b| {
                     time(&|| {
@@ -4805,7 +4968,7 @@ mod tests {
                 })
                 .collect();
             let (rladder, rchunk) = BigUint::radix_power_ladder_bits(10, value.bits());
-            let rbases: Vec<f64> = [512usize, 1024, 2048, 4096]
+            let rbases: Vec<f64> = FLOORS
                 .iter()
                 .map(|&b| {
                     time(&|| {
@@ -4822,8 +4985,12 @@ mod tests {
 
     #[test]
     fn add_into_sub_into_match_two_operand_forms() {
-        let mut seed = 0x5851_f42d_4c95_7f2d;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5851_f42d_4c95_7f2d;
+        let mut seed = SEED;
         let mut out = BigUint::zero();
+        // Zero, one and many limbs on each side, in both orders; twelve
+        // random pairs each.
         for &(wa, wb) in &[(0usize, 0usize), (1, 1), (1, 48), (48, 1), (8, 8), (48, 48)] {
             for _ in 0..12 {
                 let a = seeded_biguint(wa, &mut seed);
@@ -4853,7 +5020,9 @@ mod tests {
 
     #[test]
     fn add_into_reuses_the_buffer() {
-        let mut seed = 0x0123_4567_89ab_cdef;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0123_4567_89ab_cdef;
+        let mut seed = SEED;
         let a = seeded_biguint(32, &mut seed);
         let b = seeded_biguint(32, &mut seed);
         // The first call may grow the buffer once (the result width plus the
@@ -4861,6 +5030,7 @@ mod tests {
         let mut out = BigUint::zero();
         out.add_into(&a, &b);
         let ptr = out.limbs.as_ptr();
+        // Repeated calls; the count is arbitrary.
         for _ in 0..8 {
             out.add_into(&a, &b);
             assert_eq!(out.limbs.as_ptr(), ptr, "add_into must not reallocate");
@@ -4876,12 +5046,11 @@ mod tests {
         out.sub_into(&BigUint::from_u64(3), &BigUint::from_u64(5));
     }
 
-    /// The verification counterpart of the `wipe` feature's audited scrub
-    /// exception: reading a buffer's abandoned tail cannot be expressed in
-    /// safe Rust, so proving the shrink paths scrub it requires one raw
-    /// read-back. Confined to this test; the pointers are captured while
-    /// the limbs are live and the buffer's identity is asserted unchanged
-    /// before each read.
+    /// The `wipe` feature scrubs abandoned limbs; proving that the shrink
+    /// paths do so requires one raw read-back, because reading a buffer's
+    /// abandoned tail cannot be expressed in safe Rust. Confined to this
+    /// test; the pointers are captured while the limbs are live and the
+    /// buffer's identity is asserted unchanged before each read.
     #[test]
     #[cfg(feature = "wipe")]
     #[allow(unsafe_code)]
@@ -4937,7 +5106,9 @@ mod tests {
 
     #[test]
     fn shrinking_paths_stay_canonical_and_keep_capacity() {
-        let mut seed = 0xdead_beef_0bad_cafe;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xdead_beef_0bad_cafe;
+        let mut seed = SEED;
         let wide = seeded_biguint(8, &mut seed);
         let narrow = seeded_biguint(2, &mut seed);
         let mut x = wide.clone();
@@ -4962,7 +5133,9 @@ mod tests {
 
     #[test]
     fn clone_from_reuses_and_matches() {
-        let mut seed = 0xfeed_face_cafe_beef;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xfeed_face_cafe_beef;
+        let mut seed = SEED;
         let big = seeded_biguint(48, &mut seed);
         let small = seeded_biguint(3, &mut seed);
         let mut x = big.clone();
@@ -4986,7 +5159,9 @@ mod tests {
 
     #[test]
     fn signed_in_place_matches_case_analysis_oracle() {
-        let mut seed = 0x2545_f491_4f6c_dd1d;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut seed = SEED;
         let signed = |sign, words: usize, seed: &mut u64| {
             if words == 0 {
                 BigInt::zero()
@@ -4997,6 +5172,8 @@ mod tests {
         let mut cases: Vec<(BigInt, BigInt)> = Vec::new();
         for &sa in &[Sign::Positive, Sign::Negative] {
             for &sb in &[Sign::Positive, Sign::Negative] {
+                // Zero, one and several limbs on each side, in both orders;
+                // six random pairs per sign and width combination.
                 for &(wa, wb) in &[(0usize, 6usize), (6, 0), (0, 0), (1, 6), (6, 1), (6, 6)] {
                     for _ in 0..6 {
                         cases.push((signed(sa, wa, &mut seed), signed(sb, wb, &mut seed)));
@@ -5038,7 +5215,9 @@ mod tests {
 
     #[test]
     fn signed_arithmetic_matches_i128() {
-        let mut seed = 0x9e37_79b9_7f4a_7c15;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut seed = SEED;
         let to_bigint = |v: i64| {
             let sign = if v > 0 {
                 Sign::Positive
@@ -5056,6 +5235,7 @@ mod tests {
                 _ => i128::from(mag),
             }
         };
+        // 4,000 random 56-bit signed pairs, so sums stay within a limb.
         for _ in 0..4000 {
             let a = lcg_next(&mut seed) as i64 >> 8;
             let b = lcg_next(&mut seed) as i64 >> 8;
@@ -5075,7 +5255,9 @@ mod tests {
         // the division convention pinned: truncated toward zero, remainder
         // taking the dividend's sign — i128's own convention, so the oracle
         // is the primitive operators.
-        let mut seed = 0x517e_d00d_0000_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x517e_d00d_0000_0001;
+        let mut seed = SEED;
         let to_bigint = |v: i64| {
             let sign = if v > 0 {
                 Sign::Positive
@@ -5093,6 +5275,7 @@ mod tests {
                 _ => i128::from(mag),
             }
         };
+        // 4,000 random 30-bit signed pairs, so products fit a limb.
         for _ in 0..4000 {
             let a = lcg_next(&mut seed) as i64 >> 34;
             let b = lcg_next(&mut seed) as i64 >> 34;
@@ -5133,7 +5316,9 @@ mod tests {
         // vs handing back to the multiply ladder) — plus odd widths, which
         // make the split halves unequal, and operands with interior zeros
         // and all-ones limbs.
-        let mut seed = 0x9e37_79b9_7f4a_7c15;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut seed = SEED;
         let k = KARATSUBA_THRESHOLD_LIMBS;
         let smin = SQR_SCHOOLBOOK_MIN_LIMBS;
         let smax = SQR_KARATSUBA_MAX_LIMBS;
@@ -5154,6 +5339,7 @@ mod tests {
             smax,
             smax + 1,
         ];
+        // Four random values per width.
         for words in widths {
             for _ in 0..4 {
                 let value = seeded_biguint(words, &mut seed);
@@ -5181,7 +5367,9 @@ mod tests {
         let holed = BigUint::from_limbs(limbs);
         assert_eq!(holed.square(), holed.mul(&holed));
         // All-ones operands: the worst case for every carry chain, and for
-        // the doubling pass.
+        // the doubling pass — at one and two limbs (the general multiply),
+        // the schoolbook floor, and Karatsuba squaring either side of its
+        // threshold and at twice it.
         for words in [1usize, 2, 8, k, k + 1, 2 * k] {
             let ones = BigUint::from_limbs(vec![u64::MAX; words]);
             assert_eq!(
@@ -5196,8 +5384,19 @@ mod tests {
 
     #[test]
     fn karatsuba_dispatch_matches_schoolbook() {
-        let mut seed = 0x243f_6a88_85a3_08d3;
-        for words in [32usize, 40, 64] {
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x243f_6a88_85a3_08d3;
+        let mut seed = SEED;
+        // Six random pairs per width, either side of and at the Karatsuba
+        // crossover, so the dispatcher answers with schoolbook below it and
+        // with a split at and above it, and both must agree with schoolbook.
+        for words in [
+            KARATSUBA_THRESHOLD_LIMBS / 2,
+            KARATSUBA_THRESHOLD_LIMBS - 1,
+            KARATSUBA_THRESHOLD_LIMBS,
+            KARATSUBA_THRESHOLD_LIMBS + 1,
+            2 * KARATSUBA_THRESHOLD_LIMBS,
+        ] {
             for _ in 0..6 {
                 let lhs = seeded_biguint(words, &mut seed);
                 let rhs = seeded_biguint(words, &mut seed);
@@ -5210,7 +5409,9 @@ mod tests {
 
     #[test]
     fn toom3_matches_schoolbook_across_shapes() {
-        let mut seed = 0x1357_9bdf_2468_ace0;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1357_9bdf_2468_ace0;
+        let mut seed = SEED;
         // Exercise the Toom-3 kernel directly — including well below the
         // dispatch threshold, at sizes not divisible by three, and with heavy
         // imbalance (one operand collapsing to a single Toom part) — against
@@ -5218,6 +5419,7 @@ mod tests {
         let sizes = [
             3usize, 4, 5, 7, 8, 9, 16, 31, 33, 48, 64, 65, 96, 127, 130, 200,
         ];
+        // Three random pairs per shape.
         for &la in &sizes {
             for &lb in &sizes {
                 for _ in 0..3 {
@@ -5231,7 +5433,9 @@ mod tests {
                 }
             }
         }
-        // Full dispatch (Toom-3 for large balanced operands) and squaring.
+        // Full dispatch (Toom-3 for large balanced operands) and squaring:
+        // below, at and past the Karatsuba threshold, and past Toom-3's;
+        // four random pairs each.
         for &words in &[64usize, 96, 150, 256] {
             for _ in 0..4 {
                 let a = seeded_biguint(words, &mut seed);
@@ -5244,11 +5448,15 @@ mod tests {
 
     #[test]
     fn toom4_matches_schoolbook_across_shapes() {
-        let mut seed = 0x0f0f_1e1e_2d2d_3c3c;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0f0f_1e1e_2d2d_3c3c;
+        let mut seed = SEED;
         // The Toom-4 kernel directly: sizes not divisible by four and heavy
         // imbalance (a short operand collapsing to fewer Toom parts), against
         // the schoolbook oracle.
         let sizes = [4usize, 5, 6, 7, 9, 13, 16, 33, 64, 128, 256, 260, 384, 500];
+        // Two random pairs per shape; the schoolbook oracle at 500 limbs is
+        // the cost that caps it.
         for &la in &sizes {
             for &lb in &sizes {
                 for _ in 0..2 {
@@ -5280,8 +5488,8 @@ mod tests {
                 "{la} squared"
             );
         }
-        // Full dispatch and squaring at Toom-3 sizes, below the Toom-4
-        // threshold.
+        // Full dispatch and squaring at Toom-3 sizes, from twice its
+        // threshold to below Toom-4's; three random pairs each.
         for &words in &[256usize, 300, 512, 768] {
             for _ in 0..3 {
                 let a = seeded_biguint(words, &mut seed);
@@ -5322,7 +5530,9 @@ mod tests {
     /// 2:1 unbalanced edge and the 1.5× Toom-4 edge the lopsided shapes too.
     #[test]
     fn products_agree_with_schoolbook_at_every_dispatch_boundary() {
-        let mut seed = 0x5bd1_e995_2545_f491;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5bd1_e995_2545_f491;
+        let mut seed = SEED;
         let check = |a: &BigUint, b: &BigUint, what: &str| {
             let expected = BigUint::mul_schoolbook_ref(a, b);
             assert_eq!(a.mul(b), expected, "{what}");
@@ -5402,7 +5612,9 @@ mod tests {
     /// limb of one (the widest normalization shift).
     #[test]
     fn division_recovers_quotient_and_remainder_at_every_dispatch_boundary() {
-        let mut seed = 0x2545_f491_4f6c_dd1d;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut seed = SEED;
         let t = super::newton::NEWTON_DIVISION_THRESHOLD_LIMBS;
         for words in [1usize, 2, t - 1, t, t + 1] {
             let mut small_top = seeded_biguint(words, &mut seed).limbs().to_vec();
@@ -5440,7 +5652,9 @@ mod tests {
     /// the largest, `(n − 1)²`.
     #[test]
     fn barrett_reduces_like_division_at_its_half_product_limit() {
-        let mut seed = 0x9e37_79b9_7f4a_7c15;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut seed = SEED;
         let t = super::barrett::BARRETT_HALF_PRODUCT_MAX_LIMBS;
         for words in [t - 1, t, t + 1] {
             for (name, modulus) in boundary_patterns(words, &mut seed) {
@@ -5491,7 +5705,9 @@ mod tests {
             }
         }
         let bits = RADIX_TO_DC_THRESHOLD_BITS;
-        let mut seed = 0x0bad_5eed_0bad_5eed;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0bad_5eed_0bad_5eed;
+        let mut seed = SEED;
         for width in [bits - 1, bits, bits + 1] {
             let mut value = seeded_biguint(width.div_ceil(64), &mut seed);
             value.shr_bits(value.bits().saturating_sub(width));
@@ -5510,7 +5726,9 @@ mod tests {
 
     #[test]
     fn ntt_matches_independent_products_and_carry_extremes() {
-        let mut seed = 0x6a09_e667_f3bc_c909;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x6a09_e667_f3bc_c909;
+        let mut seed = SEED;
 
         // Force the NTT kernel far below its dispatch threshold so an error in
         // admission cannot hide it. Odd digit counts, partial top limbs, and
@@ -5525,6 +5743,7 @@ mod tests {
             (129, 193),
             (257, 384),
         ] {
+            // Three random pairs per shape.
             for _ in 0..3 {
                 let lhs = seeded_biguint(lhs_words, &mut seed);
                 let rhs = seeded_biguint(rhs_words, &mut seed);
@@ -5550,7 +5769,9 @@ mod tests {
             );
         }
 
-        // Every base-2^16 convolution coefficient and every carry is maximal.
+        // Every base-2^16 convolution coefficient and every carry is maximal,
+        // from one limb to past 512, with 129 and 513 one limb past a
+        // doubling of the transform length.
         for words in [1usize, 2, 7, 32, 129, 513] {
             let all_ones = BigUint::from_limbs(vec![u64::MAX; words]);
             assert_eq!(
@@ -5615,7 +5836,9 @@ mod tests {
 
     #[test]
     fn unbalanced_matches_schoolbook_across_shapes() {
-        let mut seed = 0x9e37_79b9_7f4a_7c15;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut seed = SEED;
         // The block-decomposition kernel directly, below its dispatch
         // threshold. 64×32 is the exact boundary the balanced admission
         // excludes; 100×32 leaves a short final digit; 129×32 a one-limb one;
@@ -5629,6 +5852,7 @@ mod tests {
             (256, 128),
             (300, 130),
         ] {
+            // Three random pairs per shape.
             for _ in 0..3 {
                 let a = seeded_biguint(la, &mut seed);
                 let b = seeded_biguint(lb, &mut seed);
@@ -5697,7 +5921,9 @@ mod tests {
         // both methods in both orders. The width order is non-monotonic so a
         // narrower modulus follows a wider one (16 → 2, 8 → 1), handing the
         // kernels an over-long buffer with stale contents.
-        let mut seed = 0x0dd5_eed0_0000_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0dd5_eed0_0000_0001;
+        let mut seed = SEED;
         let mut ws = MontgomeryScratch::new();
         for &limbs in &[16usize, 2, 3, 8, 1, 5] {
             let n = seeded_odd_modulus(limbs, &mut seed);
@@ -5706,6 +5932,8 @@ mod tests {
             let y_plain = seeded_biguint(limbs, &mut seed);
             let mut x = ctx.to_residue(&x_plain);
             let y = ctx.to_residue(&y_plain);
+            // 200 rounds, the residue walking so no two rounds share inputs;
+            // the count is arbitrary.
             for round in 0..200 {
                 // Alternate the call order so each window size follows the
                 // other's leftovers.
@@ -5781,7 +6009,7 @@ mod tests {
 
         /// Print every pass so the spread is visible, and the median. A
         /// saving smaller than the spread is noise.
-        fn report(label: &str, limbs: usize, mut passes: [f64; 5]) {
+        fn report(label: &str, limbs: usize, mut passes: [f64; PASSES]) {
             passes.sort_by(f64::total_cmp);
             eprintln!(
                 "{limbs:>6} {label} median {:+6.1}%  passes {:+5.1} {:+5.1} {:+5.1} {:+5.1} {:+5.1}",
@@ -5789,17 +6017,35 @@ mod tests {
             );
         }
 
-        let mut seed = 0x0dd5_eed0_0000_0002;
+        // Work per pass per side, in limb² units: calls fall as 1/limbs² so
+        // a pass does about the same arithmetic at every width.
+        const WORK_UNITS: usize = 2_000_000;
+        // Floor on calls per pass, so the widest moduli still get thousands
+        // of samples.
+        const MIN_CALLS: usize = 4_000;
+        // Calls per timed chunk, the alternation grain: short enough that
+        // slow drift hits both sides alike, long enough that the timer's own
+        // cost is small beside the chunk.
+        const CHUNK_CALLS: u32 = 256;
+        // At least this many chunks, so the sides alternate at all.
+        const MIN_CHUNKS: u32 = 8;
+        // Passes per comparison: a median with two on each side.
+        const PASSES: usize = 5;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0dd5_eed0_0000_0002;
+        let mut seed = SEED;
+        // One limb to 64 (4,096 bits).
         for &limbs in &[1usize, 4, 8, 32, 64] {
             let n = seeded_odd_modulus(limbs, &mut seed);
             let ctx = MontgomeryContext::new(&n).expect("odd modulus");
             let a = ctx.to_residue(&seeded_biguint(limbs, &mut seed));
             let b = ctx.to_residue(&seeded_biguint(limbs, &mut seed));
-            let chunk = 256u32;
-            let chunks = ((2_000_000 / (limbs * limbs)).max(4_000) as u32 / chunk).max(8);
+            let chunk = CHUNK_CALLS;
+            let chunks =
+                ((WORK_UNITS / (limbs * limbs)).max(MIN_CALLS) as u32 / chunk).max(MIN_CHUNKS);
 
             let mut ws = MontgomeryScratch::new();
-            let mut sqr_passes = [0f64; 5];
+            let mut sqr_passes = [0f64; PASSES];
             for pass in &mut sqr_passes {
                 *pass = paired_saving(
                     chunks,
@@ -5815,7 +6061,7 @@ mod tests {
             report("sqr", limbs, sqr_passes);
 
             let mut ws2 = MontgomeryScratch::new();
-            let mut mul_passes = [0f64; 5];
+            let mut mul_passes = [0f64; PASSES];
             for pass in &mut mul_passes {
                 *pass = paired_saving(
                     chunks,
@@ -5838,20 +6084,34 @@ mod tests {
     fn unbalanced_crossover_timing() {
         use std::hint::black_box;
         use std::time::Instant;
-        let mut seed = 0x5eed_5eed_5eed_5eed;
+        // Work per timed run in units of 64 limb products: about 12.8
+        // million limb products at every shape, so wide and narrow shapes
+        // are timed over the same arithmetic.
+        const WORK_UNITS: usize = 200_000;
+        // Floor on repetitions per run, so the widest shapes still average
+        // over more than one product.
+        const MIN_REPS: usize = 3;
+        // Best of five runs: the minimum sheds scheduler interference; the
+        // count is arbitrary.
+        const RUNS: usize = 5;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5eed_5eed_5eed_5eed;
+        let mut seed = SEED;
         eprintln!(
             "{:>6} {:>6} {:>12} {:>12}  best",
             "long", "short", "school", "unbal"
         );
+        // Short widths from a third of the Karatsuba threshold to twice the
+        // shipped unbalanced threshold, at the lopsided ratios 2, 4 and 16.
         for &short in &[32usize, 48, 64, 96, 128, 192, 256, 384, 512] {
             for &ratio in &[2usize, 4, 16] {
                 let long = short * ratio;
                 let a = seeded_biguint(long, &mut seed);
                 let b = seeded_biguint(short, &mut seed);
-                let reps = (200_000 / (long * short / 64)).max(3);
+                let reps = (WORK_UNITS / (long * short / 64)).max(MIN_REPS);
                 let time = |f: &dyn Fn() -> BigUint| {
                     let mut best = f64::INFINITY;
-                    for _ in 0..5 {
+                    for _ in 0..RUNS {
                         let t = Instant::now();
                         for _ in 0..reps {
                             black_box(f());
@@ -5879,7 +6139,10 @@ mod tests {
         // The half-product against the truncated full product: limits
         // below, at, and above each operand's
         // width, and the degenerate limit of zero.
-        let mut seed = 0x1010_7ef7_0000_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1010_7ef7_0000_0001;
+        let mut seed = SEED;
+        // One limb, unequal and equal small widths, and a few dozen limbs.
         for &(la, lb) in &[(1usize, 1usize), (2, 3), (4, 4), (8, 5), (17, 16), (32, 32)] {
             let a = seeded_biguint(la, &mut seed);
             let b = seeded_biguint(lb, &mut seed);
@@ -5944,7 +6207,7 @@ mod tests {
             (ta - tb) / ta * 100.0
         }
 
-        fn report(label: &str, w: usize, p: [f64; 5]) {
+        fn report(label: &str, w: usize, p: [f64; PASSES]) {
             let mut sorted = p;
             sorted.sort_by(f64::total_cmp);
             eprintln!(
@@ -5953,25 +6216,41 @@ mod tests {
             );
         }
 
-        let mut seed = 0x59ea_5011_0000_0001;
+        // Limb products per timed chunk (chunk · w²), so every width is
+        // timed over the same amount of arithmetic.
+        const WORK_LIMB_PRODUCTS: usize = 2_000_000;
+        // Floor on calls per chunk, so the widest operands still average
+        // over dozens of squarings.
+        const MIN_CHUNK: u32 = 50;
+        // Interleaved chunk pairs inside one sample.
+        const CHUNK_PASSES: usize = 3;
+        // Samples per comparison: a median with two on each side.
+        const PASSES: usize = 5;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x59ea_5011_0000_0001;
+        let mut seed = SEED;
         eprintln!("saving of the second kernel over the first; median then every pass");
         eprintln!(
             "{:<22} {:>5} {:>9}   passes",
             "comparison", "limbs", "median"
         );
+        // One limb to 512, dense around the two handoffs (8 and 96), and
+        // every width the `SQR_KARATSUBA_MAX_LIMBS` doc cites.
         for &w in &[
-            1usize, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 112, 127, 128, 160, 192, 256, 384, 512,
+            1usize, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 112, 127, 128, 160, 192, 256, 320, 384,
+            416, 448, 480, 512, 640, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192,
         ] {
             let v = seeded_biguint(w, &mut seed);
-            let chunk = (2_000_000 / (w * w)).max(50) as u32;
+            let chunk = (WORK_LIMB_PRODUCTS / (w * w)).max(MIN_CHUNK as usize) as u32;
 
             // The lower handoff: general schoolbook against schoolbook
-            // squaring, the pair `SQR_SCHOOLBOOK_MIN_LIMBS` sits between.
+            // squaring, the pair `SQR_SCHOOLBOOK_MIN_LIMBS` sits between;
+            // widths up to 64 are the schoolbook regime.
             if w <= 64 {
-                let mut p = [0f64; 5];
+                let mut p = [0f64; PASSES];
                 for (k, slot) in p.iter_mut().enumerate() {
                     *slot = paired_saving(
-                        3,
+                        CHUNK_PASSES,
                         chunk,
                         k % 2 == 1,
                         &mut || {
@@ -5989,10 +6268,10 @@ mod tests {
             // squaring, both forced, so the comparison is the kernels' and
             // not the dispatcher's.
             if (KARATSUBA_THRESHOLD_LIMBS / 2..=512).contains(&w) {
-                let mut p = [0f64; 5];
+                let mut p = [0f64; PASSES];
                 for (k, slot) in p.iter_mut().enumerate() {
                     *slot = paired_saving(
-                        3,
+                        CHUNK_PASSES,
                         chunk,
                         k % 2 == 1,
                         &mut || {
@@ -6010,10 +6289,10 @@ mod tests {
             // multiplication it hands over to, the comparison
             // `SQR_KARATSUBA_MAX_LIMBS` rests on.
             if w >= 64 {
-                let mut p = [0f64; 5];
+                let mut p = [0f64; PASSES];
                 for (k, slot) in p.iter_mut().enumerate() {
                     *slot = paired_saving(
-                        3,
+                        CHUNK_PASSES,
                         chunk,
                         k % 2 == 1,
                         &mut || {
@@ -6027,11 +6306,32 @@ mod tests {
                 report("karatsuba sqr vs toom3", w, p);
             }
 
+            // Karatsuba squaring against whatever `mul` dispatches to at
+            // this width: the comparison `SQR_KARATSUBA_MAX_LIMBS` rests on,
+            // since past Toom-3 the ladder changes kernel underneath it.
+            if w >= 384 {
+                let mut p = [0f64; 5];
+                for (k, slot) in p.iter_mut().enumerate() {
+                    *slot = paired_saving(
+                        CHUNK_PASSES,
+                        chunk,
+                        k % 2 == 1,
+                        &mut || {
+                            black_box(black_box(&v).mul(black_box(&v)));
+                        },
+                        &mut || {
+                            black_box(black_box(&v).sqr_karatsuba_ref());
+                        },
+                    );
+                }
+                report("karatsuba sqr vs mul", w, p);
+            }
+
             // And the public entry points, which is what a caller sees.
-            let mut p = [0f64; 5];
+            let mut p = [0f64; PASSES];
             for (k, slot) in p.iter_mut().enumerate() {
                 *slot = paired_saving(
-                    3,
+                    CHUNK_PASSES,
                     chunk,
                     k % 2 == 1,
                     &mut || {
@@ -6068,7 +6368,9 @@ mod tests {
         // resolution would otherwise show through.
         const WORK_UNITS: usize = 2_000_000;
         const MIN_REPS: usize = 200;
-        let mut seed = 0x4b41_5241_5453_5542; // "KARATSUB"
+        // Arbitrary ("KARATSUB" in ASCII), fixed so a failure reproduces.
+        const SEED: u64 = 0x4b41_5241_5453_5542;
+        let mut seed = SEED;
         eprintln!(
             "{:>6} {:>12} {:>12} {:>7}  best",
             "words", "school_us", "kara_us", "saving"
@@ -6128,7 +6430,9 @@ mod tests {
         use std::hint::black_box;
         use std::time::Instant;
         const RUNS: usize = 3;
-        let mut seed = 0x6e74_745f_7061_6421; // "ntt_pad!"
+        // Arbitrary ("ntt_pad!" in ASCII), fixed so a failure reproduces.
+        const SEED: u64 = 0x6e74_745f_7061_6421;
+        let mut seed = SEED;
         eprintln!(
             "{:>8} {:>7} {:>11} {:>11} {:>8}  best",
             "words", "ratio", "toom_us", "ntt_us", "saving"
@@ -6174,7 +6478,20 @@ mod tests {
     fn toom_crossover_timing() {
         use std::hint::black_box;
         use std::time::Instant;
-        let mut seed = 0xC0FF_EE00_1234_5678;
+        // Operand limbs per timed run (reps · words), so every width is
+        // timed over the same amount of input.
+        const WORK_LIMBS: usize = 2_000_000;
+        // Floor on repetitions per run, so the widest operands still average
+        // over a score of products.
+        const MIN_REPS: usize = 20;
+        // Independent operand pairs per width, and best-of runs per pair:
+        // the average over pairs sheds an unlucky operand, the minimum over
+        // runs sheds scheduler interference. Both counts are arbitrary.
+        const OPERANDS: usize = 4;
+        const RUNS: usize = 3;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xC0FF_EE00_1234_5678;
+        let mut seed = SEED;
         eprintln!(
             "{:>6} {:>11} {:>11} {:>11}  best",
             "words", "kara_us", "toom3_us", "toom4_us"
@@ -6184,11 +6501,8 @@ mod tests {
         for &words in &[
             96usize, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288,
         ] {
-            let reps = (2_000_000 / words).max(20);
-            // Average each kernel over several independent operand pairs, each
-            // measured as the min of three runs, to shed operand- and
-            // scheduler-specific noise.
-            let operands: Vec<(BigUint, BigUint)> = (0..4)
+            let reps = (WORK_LIMBS / words).max(MIN_REPS);
+            let operands: Vec<(BigUint, BigUint)> = (0..OPERANDS)
                 .map(|_| {
                     (
                         seeded_biguint(words, &mut seed),
@@ -6200,7 +6514,7 @@ mod tests {
                 let mut total = 0.0;
                 for (a, b) in &operands {
                     let mut best = f64::INFINITY;
-                    for _ in 0..3 {
+                    for _ in 0..RUNS {
                         black_box(f(a, b));
                         let t = Instant::now();
                         for _ in 0..reps {
@@ -6232,13 +6546,27 @@ mod tests {
         use std::hint::black_box;
         use std::time::Instant;
 
-        let mut seed = 0x510e_527f_ade6_82d1;
+        // Operand pairs per width: three below `NTT_PROBE_WIDE_WORDS`, one
+        // at or above it.
+        const SAMPLES: usize = 3;
+        const SAMPLES_WIDE: usize = 1;
+        // Operand limbs per timed run: reps fall as 1/words, clamped so a
+        // run is at least one product and at most four.
+        const REP_WORK_LIMBS: usize = 16_384;
+        const MIN_REPS: usize = 1;
+        const MAX_REPS: usize = 4;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x510e_527f_ade6_82d1;
+        let mut seed = SEED;
         let available = crate::available_parallelism();
         eprintln!("available contexts: {available}");
         eprintln!(
             "{:>7} {:>12} {:>12} {:>12} {:>12} {:>12}  best",
             "words", "toom4_us", "serial_us", "two_us", "auto_us", "square_us"
         );
+        // From 2,048 limbs to the serial threshold, 131,072: every doubling
+        // plus points between them (3/2 of the lower, 7/8 and 15/16 of the
+        // upper), so both sides of each padding step are sampled.
         let word_sizes = std::env::var("RUMP_NTT_TIMING_WORDS").map_or_else(
             |_| {
                 vec![
@@ -6257,8 +6585,13 @@ mod tests {
             },
         );
         for words in word_sizes {
-            let samples = if words < 65_536 { 3 } else { 1 };
-            let rounds = if words < 65_536 { 3 } else { 2 };
+            let wide = words >= NTT_PROBE_WIDE_WORDS;
+            let samples = if wide { SAMPLES_WIDE } else { SAMPLES };
+            let rounds = if wide {
+                NTT_PROBE_ROUNDS_WIDE
+            } else {
+                NTT_PROBE_ROUNDS
+            };
             let operands: Vec<(BigUint, BigUint)> = (0..samples)
                 .map(|_| {
                     (
@@ -6267,7 +6600,7 @@ mod tests {
                     )
                 })
                 .collect();
-            let reps = (16_384 / words).clamp(1, 4);
+            let reps = (REP_WORK_LIMBS / words).clamp(MIN_REPS, MAX_REPS);
             let time = |f: &dyn Fn(&BigUint, &BigUint) -> BigUint| {
                 let mut total = 0.0;
                 for (lhs, rhs) in &operands {
@@ -6302,8 +6635,11 @@ mod tests {
         use std::hint::black_box;
         use std::time::Instant;
 
-        let mut seed = 0xbb67_ae85_84ca_a73b;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xbb67_ae85_84ca_a73b;
+        let mut seed = SEED;
         let available = crate::available_parallelism();
+        // The parallel threshold to the serial one, by doublings.
         let word_sizes = std::env::var("RUMP_NTT_SCALING_WORDS").map_or_else(
             |_| vec![8_192usize, 16_384, 32_768, 65_536, 131_072],
             |list| {
@@ -6316,6 +6652,8 @@ mod tests {
                     .collect()
             },
         );
+        // Powers of two up to 64, the largest target `ntt::worker_count`
+        // selects.
         let worker_counts = std::env::var("RUMP_NTT_SCALING_WORKERS").map_or_else(
             |_| vec![1usize, 2, 4, 8, 16, 32, 64],
             |list| {
@@ -6356,7 +6694,11 @@ mod tests {
                 }
                 let actual = lhs.mul_ntt_with_workers_ref(&rhs, workers);
                 assert_eq!(actual, expected, "NTT product at {workers} workers");
-                let rounds = configured_rounds.unwrap_or(if words < 65_536 { 3 } else { 2 });
+                let rounds = configured_rounds.unwrap_or(if words < NTT_PROBE_WIDE_WORDS {
+                    NTT_PROBE_ROUNDS
+                } else {
+                    NTT_PROBE_ROUNDS_WIDE
+                });
                 let mut best = f64::INFINITY;
                 for _ in 0..rounds {
                     black_box(lhs.mul_ntt_with_workers_ref(&rhs, workers));
@@ -6377,7 +6719,9 @@ mod tests {
                 .parse()
                 .expect("RUMP_NTT_PROFILE_WORDS must be a limb count")
         });
-        let mut seed = 0x3c6e_f372_fe94_f82b;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x3c6e_f372_fe94_f82b;
+        let mut seed = SEED;
         let lhs = seeded_biguint(words, &mut seed);
         let rhs = seeded_biguint(words, &mut seed);
         let transform_len =
@@ -6424,7 +6768,11 @@ mod tests {
 
     #[test]
     fn shr_bits_inverts_shl_bits_and_matches_division() {
-        let mut seed = 0x6a09_e667_f3bc_c908;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x6a09_e667_f3bc_c908;
+        let mut seed = SEED;
+        // Shifts of zero, within a limb, at and across limb boundaries, and
+        // past the value; eight random values at each of four widths.
         let shifts = [0usize, 1, 7, 63, 64, 65, 127, 128, 200];
         for words in [1usize, 2, 4, 9] {
             for _ in 0..8 {
@@ -6505,7 +6853,11 @@ mod tests {
         // (high) zero bytes. The oracle is the input bytes themselves, decoded
         // by the big-endian parser: every encoder must reproduce
         // them, stripped or padded, and in either byte order.
-        let mut seed = 0x1eb1_7e50_0000_0001;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1eb1_7e50_0000_0001;
+        let mut seed = SEED;
+        // Every length from empty to five limbs plus one byte; eight random
+        // strings each, about a third with a leading zero byte.
         for byte_len in 0usize..=41 {
             for _ in 0..8 {
                 let mut bytes: Vec<u8> = (0..byte_len)
@@ -6539,6 +6891,8 @@ mod tests {
                 assert_eq!(BigUint::from_le_bytes(&reversed), value);
                 assert_eq!(BigUint::from_le_bytes(&le), value);
 
+                // Padding from an exact fit to nine bytes over, which crosses
+                // a limb boundary.
                 for width in minimal..minimal + 10 {
                     let mut padded_be = vec![0u8; width - minimal];
                     padded_be.extend_from_slice(significant);
@@ -6604,10 +6958,14 @@ mod tests {
 
     #[test]
     fn div_rem_invariant_over_limb_shapes() {
-        let mut seed = 0x243f_6a88_85a3_08d3;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x243f_6a88_85a3_08d3;
+        let mut seed = SEED;
         // Cover both division paths (one-limb Horner and multi-limb Knuth),
         // every quotient length from one limb up, and — because the leading
-        // limb is random — a spread of D1 normalization shifts.
+        // limb is random — a spread of D1 normalization shifts. Dividends of
+        // one to nine limbs, every divisor width up to them, twelve random
+        // pairs per shape.
         for dividend_words in 1..=9usize {
             for divisor_words in 1..=dividend_words {
                 for _ in 0..12 {
@@ -6660,7 +7018,12 @@ mod tests {
         // inputs. `dividend = (q + 1) * divisor - 1` is that construction: D3
         // accepts `q + 1` because it cannot see the divisor's low limbs, while
         // the true quotient is `q`, which is precisely what D6 repairs.
-        let mut seed = 0xb504_f333_f9de_6484;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xb504_f333_f9de_6484;
+        let mut seed = SEED;
+        // Three limbs is the narrowest divisor with an add-back, up to six;
+        // quotients at the small end, an arbitrary middle value, and the top
+        // of a limb.
         for divisor_words in 3..=6usize {
             for q in [1u64, 2, 12_345, u64::MAX - 1] {
                 let mut divisor = seeded_biguint(divisor_words, &mut seed);
@@ -6747,7 +7110,10 @@ mod tests {
     #[test]
     fn mod_mul_matches_montgomery_context() {
         // The one-shot path and the reusable-context path must agree.
-        let mut seed = 0x0123_4567_89ab_cdef;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0123_4567_89ab_cdef;
+        let mut seed = SEED;
+        // Widths by doubling from one limb; eight random triples each.
         for words in [1usize, 2, 4, 8, 16] {
             for _ in 0..8 {
                 let lhs = seeded_biguint(words, &mut seed);

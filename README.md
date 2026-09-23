@@ -16,68 +16,71 @@ or duplicate public paths.
 ## What it provides
 
 - **`BigUint`, `BigInt`** — unsigned and signed integers on little-endian
-  `u64` limbs. Schoolbook (Knuth's Algorithm M), Karatsuba, Toom–Cook three-
-  and four-way, and exact two-prime NTT multiplication with CRT recovery at
-  very large sizes; NTT stages use only geometry-useful execution contexts and
-  never more than the machine reports, while NTT squaring removes the duplicate
-  input transform and transform buffer. Knuth's Algorithm D division (*TAOCP*
-  vol. 2, §4.3.1) has a Horner path for single-limb divisors.
-- **`MontgomeryContext`** — a public Montgomery domain (Montgomery 1985; the
-  separated-operand-scanning shape from Koç, Acar & Kaliski, IEEE Micro 1996):
-  encode once, compute in-domain (`mul_mont`, `square_mont`, their
-  `_with_workspace` forms for loops that reuse one scratch buffer,
-  `add_mont`, `sub_mont`, `pow`, `pow_encoded`), convert at the boundary.
-  Fixed 4-bit window exponentiation. The `_with_workspace` forms remove the
-  *scratch* allocation, not every allocation: each returns an owned `BigUint`
-  and so allocates its result.
-- **Number theory** — `gcd`, `lcm`, and `gcd_extended` (Bézout
-  coefficients); the quadratic-residue symbols `jacobi` (binary reciprocity,
-  HAC Algorithm 2.149), `legendre`, and `kronecker` (Cohen Algorithm
-  1.4.10); `mod_sqrt` (the `p ≡ 3 (mod 4)` shortcut, the Tonelli–Shanks
-  descent, and Cipolla's algorithm past a measured 2-adic depth,
-  result verified by squaring); `mod_pow`, `mod_inverse`, and `crt_combine`
-  (Garner, HAC Algorithm 14.71); fixed-base Miller-Rabin
-  (`is_probable_prime`, `miller_rabin_with_bases`), the reusable
-  per-round primitive `miller_rabin_witness` for callers that bring their
-  own witness schedule, and Baillie-PSW (`is_probable_prime_bpsw`, with
-  the strong Lucas stage exposed as `is_strong_lucas_probable_prime`), the
-  general Lucas test of FIPS 186-4 Appendix C.3.3
-  (`is_lucas_probable_prime`), plus the exact deterministic AKS proof
-  algorithm (`is_prime_aks`);
-  batch inversion (`mod_inverse_batch`, Montgomery's trick);
-  rational reconstruction (`rational_reconstruct`,
-  `rational_reconstruct_bounded`) recovering the unique bounded fraction
-  from its residue; `valuation`/`remove_factor` by a squared-power
-  ladder; word-sized forms (`gcd_u64`, `mod_inverse_u64`) for callers
-  holding machine words. The integer layer adds `sqrt_rem`/`sqrt_floor`
-  (certified Newton), `nth_root_floor`, `is_square`, `is_perfect_power`,
-  `popcount`, `trailing_zeros`, and `digit_count` (written length in any
-  radix, without producing the digits).
-- **`BarrettContext`** — fixed-modulus reduction for a modulus of either
-  parity (HAC Algorithm 14.42), the complement to the odd-modulus
-  Montgomery domain, with `mod_mul`, `mod_square`, and `mod_pow` built on
-  it.
+  `u64` limbs. Multiplication climbs a measured ladder: schoolbook (Knuth's
+  Algorithm M), Karatsuba, Toom–Cook three- and four-way, and an exact
+  two-prime NTT with CRT recovery, whose stages run on as many execution
+  contexts as pay and never more than the machine reports; squaring has its
+  own kernel at every rung. Division is Knuth's Algorithm D (*TAOCP* vol. 2,
+  §4.3.1) with a Newton reciprocal above a measured width and a Horner path
+  for single-limb divisors. Also `sqrt_rem`/`sqrt_floor` (certified Newton),
+  `nth_root_floor`, `is_square`, `is_perfect_power`, radix conversion both
+  ways, and `digit_count` without producing the digits.
+- **`MontgomeryContext`, `BarrettContext`** — fixed-modulus reduction.
+  The Montgomery domain (Montgomery 1985, in the separated-operand-scanning
+  shape of Koç, Acar & Kaliski) encodes once and computes in-domain:
+  `mul_mont`, `square_mont`, their `_with_workspace` forms for loops that
+  reuse one scratch buffer, `add_mont`, `sub_mont`, windowed `pow`, and
+  `gcd_with_modulus` on an encoded residue without decoding it. Barrett
+  (HAC Algorithm 14.42) serves a modulus of either parity. `Montgomery64`
+  and `Montgomery128` are the same domain at machine width, with no heap,
+  for inner loops on one- and two-word moduli.
+- **Number theory** — `gcd`, `lcm`, `gcd_extended`; Lehmer's algorithm
+  below a measured crossover and subquadratic Half-GCD above it, the Jacobi
+  symbol riding the same quotient sequence; `mod_inverse` and its batch form
+  (Montgomery's trick); `mod_sqrt` (the `p ≡ 3 (mod 4)` shortcut,
+  Tonelli–Shanks, and Cipolla past a measured 2-adic depth) and
+  `mod_sqrt_prime_power`; `crt_combine` (Garner) and its balanced form;
+  `rational_reconstruct`; `valuation`/`remove_factor`; product and
+  remainder trees with `smooth_parts` (Bernstein's batch smoothness);
+  `primes_below` and the segmented `primes_past`. Primality: fixed-base
+  Miller–Rabin, Baillie–PSW with its strong Lucas stage exposed, the
+  FIPS 186-4 Lucas test, `is_prime_u64` (a proof within a word, by the
+  twelve bases of Sorenson & Webster), and the deterministic AKS proof.
+  Word forms — `gcd_u64`, `gcd_u128`, `mod_inverse_u64`, `mod_inverse_u128`,
+  `jacobi_u64`, `crt_combine_u64` — for callers holding machine words.
 - **`PolyZ`, `PolyMod`** — dense univariate polynomials over ℤ and 𝔽ₚ:
   exact and pseudo-division, resultant and discriminant (Bareiss),
-  squarefree/distinct-degree/Cantor–Zassenhaus factorization,
+  squarefree, distinct-degree and Cantor–Zassenhaus factorization,
   `is_irreducible`, `roots`, square roots in 𝔽_{q^d} (`sqrt_in_field`),
-  and `HenselSquareRoot`, the p-adic Newton lift of a square root in
-  ℤ[x]/(f) from q to q^k.
-- **`lll_reduce`, `lll_reduce_delta`** — integral LLL lattice basis
-  reduction (Cohen's Algorithm 2.6.3), exact integer Gram data throughout.
-
+  `HenselSquareRoot` (the p-adic Newton lift of a square root in ℤ[x]/(f)),
+  and `real_roots`, which locates every real root by bisection on exact
+  integer signs so a wide coefficient range cannot hide one.
+- **Lattices** — integral LLL (`lll_reduce`, `lll_reduce_delta`,
+  `lll_reduce_form`; Cohen's Algorithm 2.6.3, exact Gram data throughout),
+  Lagrange–Gauss reduction under a diagonal form, `bareiss_determinant`,
+  and certified enumeration: `short_vectors_form` and
+  `closest_vectors_form` return an `Enumeration` that says whether the
+  search was exhausted, stopped at its visit limit, or met a numerical
+  limit, and every returned vector is rechecked exactly.
+- **`gf2`** — linear algebra over GF(2) for sieve matrices: singleton
+  pruning, structured Gaussian elimination (`filter_merge`), a dense null
+  space, and Block Lanczos (Montgomery 1995) on a sparse matrix, its
+  matrix products spread over retained workers.
+- **`gfp`** — linear algebra over a large prime field GF(l): a sparse
+  matrix whose entries are small integers, held with its `±1` entries apart
+  so a row costs additions, and Wiedemann's algorithm for a kernel vector —
+  the system an index-calculus discrete logarithm ends in.
 - **`Gf2m`** — binary extension fields GF(2^m): XOR addition, word-level
   comb multiplication (*Guide to ECC*, Algorithm 2.36) with tap-wise
-  reduction, linear squaring (Algorithm 2.39), `pow`, `div`, extended-Euclidean
-  inversion (Algorithm 2.48), the unique `sqrt`, `trace`, quadratic solving at every
-  degree (`solve_quadratic`, with `half_trace` as the odd-degree
-  primitive), and Rabin irreducibility testing. The degree is derived from
-  the field polynomial, never supplied alongside it.
+  reduction, linear squaring, `pow`, `div`, extended-Euclidean inversion,
+  the unique `sqrt`, `trace`, quadratic solving at every degree, and Rabin
+  irreducibility testing. The degree is derived from the field polynomial,
+  never supplied alongside it.
 - **Sampling** — `random_below`, `random_nonzero_below`,
   `random_coprime_below`, and `random_probable_prime`, driven entirely by a
-  caller-supplied `RandomSource` (one method: `fill_bytes`). rump chooses no entropy
-  source; output quality is exactly source quality, so cryptographic callers
-  must supply a CSPRNG.
+  caller-supplied `RandomSource` (one method: `fill_bytes`). rump chooses no
+  entropy source; output quality is exactly source quality, so cryptographic
+  callers must supply a CSPRNG.
 
 The arithmetic and number theory are deterministic functions of their
 inputs. Adversarially hardened primality testing lives with its consumer

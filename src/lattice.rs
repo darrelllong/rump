@@ -689,20 +689,31 @@ impl Enclosure {
     }
 }
 
+/// The largest power of two [`scale_by_power_of_two`] applies in one
+/// multiplication. Both `2^1000` and `2^-1000` are normal doubles, whose
+/// exponents run from −1022 to 1023, so each step is exact; 1024 would
+/// overflow one way and go subnormal the other.
+const SCALE_STEP: i64 = 1000;
+
 /// `value · 2^exponent`, exactly while the result is a normal double; the
 /// caller rounds outward for the one step that may leave that range.
 fn scale_by_power_of_two(mut value: f64, mut exponent: i64) -> f64 {
-    let step = 1000;
-    while exponent > step {
-        value *= 2f64.powi(step as i32);
-        exponent -= step;
+    while exponent > SCALE_STEP {
+        value *= 2f64.powi(SCALE_STEP as i32);
+        exponent -= SCALE_STEP;
     }
-    while exponent < -step {
-        value *= 2f64.powi(-step as i32);
-        exponent += step;
+    while exponent < -SCALE_STEP {
+        value *= 2f64.powi(-SCALE_STEP as i32);
+        exponent += SCALE_STEP;
     }
     value * 2f64.powi(exponent as i32)
 }
+
+/// The largest coefficient magnitude the enumeration holds in a double.
+/// A double has a 53-bit significand, so `2⁵³` is the last magnitude at
+/// which every integer is exact; a range end beyond it could round in the
+/// `as i64` casts and drop a vector, so the search stops there instead.
+const EXACT_COEFFICIENT: f64 = 9_007_199_254_740_992.0;
 
 /// The top 53 bits of a nonzero magnitude: `(mantissa, exponent, exact)`
 /// with the magnitude in `[mantissa, mantissa + 1)·2^exponent`, and equal to
@@ -856,8 +867,7 @@ fn enumerate_certified(
     let mut range = vec![(0i64, -1i64); free];
     let mut start = vec![0i64; free];
     let mut index = vec![0u64; free];
-    const EXACT_COEFFICIENT: f64 = 9_007_199_254_740_992.0; // 2⁵³
-                                                            // Opens a level: its centre, and every integer the enclosures allow.
+    // Opens a level: its centre, and every integer the enclosures allow.
     let open = |level: usize,
                 x: &[i64],
                 above: &[Enclosure],
@@ -1214,19 +1224,45 @@ mod closest_vector_tests {
     /// off its span.
     #[test]
     fn the_enumeration_agrees_with_an_exhaustive_search() {
-        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+        /// Four of each of the fifteen (dimension, ambient, target)
+        /// combinations the residues of `trial` modulo 3 and 5 select.
+        const TRIALS: usize = 60;
+        /// A pivot smaller than this in the floating elimination is taken
+        /// for a rounded zero and the trial skipped; a skipped independent
+        /// basis costs a trial, a dependent one let through would panic in
+        /// the reduction. Policy: far below any pivot these small integers
+        /// produce, far above the rounding of a few operations on them.
+        const SINGULAR_PIVOT: f64 = 1e-9;
+        /// The Gram determinant is an integer, so when it is not zero it is
+        /// at least one in magnitude; one half is the midpoint.
+        const ZERO_DETERMINANT: f64 = 0.5;
+        /// Coefficient box about the least-squares centre in the exhaustive
+        /// search. The assertion fails if the box misses a vector the
+        /// enumeration finds, so the radius is checked against the
+        /// enumeration but not derived independently; the derivation would
+        /// be the Fincke–Pohst bound `|x_k − c_k| ≤ √(bound / ‖b*_k‖²)`
+        /// from the reduced basis's Gram–Schmidt norms, per trial.
+        const BOX_RADIUS: i64 = 8;
+        // Knuth's MMIX linear congruential generator (TAOCP vol. 2,
+        // §3.3.4), the high bits taken.
+        let mut state = SEED;
         let mut next = || {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
             (state >> 33) as i64
         };
-        for trial in 0..60 {
+        for trial in 0..TRIALS {
+            // Dimensions two to four, in an ambient space one larger on
+            // every fifth trial; entries in −4..=4.
             let n = 2 + (trial % 3);
             let m = if trial % 5 == 0 { n + 1 } else { n };
             let basis: Vec<Vec<BigInt>> = (0..n)
                 .map(|_| (0..m).map(|_| big(next() % 9 - 4)).collect())
                 .collect();
+            // Diagonal form entries in 1..=5, varying with the trial.
             let form: Vec<Vec<BigInt>> = (0..m)
                 .map(|i| {
                     (0..m)
@@ -1271,7 +1307,7 @@ mod closest_vector_tests {
                     .max_by(|&a, &b| mat[a][i].abs().partial_cmp(&mat[b][i].abs()).unwrap())
                     .unwrap();
                 mat.swap(i, pivot);
-                if mat[i][i].abs() < 1e-9 {
+                if mat[i][i].abs() < SINGULAR_PIVOT {
                     singular = true;
                     break;
                 }
@@ -1284,13 +1320,14 @@ mod closest_vector_tests {
                     }
                 }
             }
-            if singular || det.abs() < 0.5 {
+            if singular || det.abs() < ZERO_DETERMINANT {
                 continue;
             }
             let mut reduced = basis.clone();
             lll_reduce_form(&mut reduced, &form, 3, 4);
             let target: Vec<BigInt> = match trial % 3 {
-                // A lattice vector.
+                // A lattice vector, with coefficients in −2..=2 of the
+                // reduced basis.
                 0 => {
                     let coefficients: Vec<BigInt> = (0..n).map(|_| big(next() % 5 - 2)).collect();
                     (0..m)
@@ -1303,18 +1340,22 @@ mod closest_vector_tests {
                         })
                         .collect()
                 }
+                // A point with entries in −10..=10, in the span or (when
+                // the ambient space is larger) off it.
                 _ => (0..m).map(|_| big(next() % 21 - 10)).collect(),
             };
+            // Three times the first reduced vector's squared norm, plus
+            // four: a bound holding several lattice points about the
+            // target. The multiplier and the offset are arbitrary.
             let bound = norm(&reduced[0]).mul(&big(3)).add(&big(4));
             let found = closest(&reduced, &form, &target, &bound, usize::MAX);
-            let radius = 8i64;
+            let radius = BOX_RADIUS;
             let mut expected: Vec<Vec<BigInt>> = Vec::new();
             let count = (2 * radius + 1).pow(n as u32);
             let nearest_integer_coefficients: Vec<i64> = {
                 // Centre the box on the target's nearest lattice point by
-                // a floating least-squares fit, so a box of radius eight
-                // in coefficients holds every vector within the bound of
-                // it in these dimensions.
+                // a floating least-squares fit, so the box need only cover
+                // the vectors within the bound of that point.
                 let mut a: Vec<Vec<f64>> = (0..n)
                     .map(|i| {
                         (0..n)
@@ -1474,18 +1515,41 @@ mod short_vector_tests {
     /// form.
     #[test]
     fn the_enumeration_agrees_with_an_exhaustive_search() {
-        let mut state = 0x1234_5678_9abc_def1u64;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1234_5678_9abc_def1;
+        /// Twenty trials in each of dimensions three and four.
+        const TRIALS: usize = 40;
+        /// A pivot smaller than this in the floating elimination is taken
+        /// for a rounded zero and the trial skipped; see the closest-vector
+        /// test for the policy.
+        const SINGULAR_PIVOT: f64 = 1e-9;
+        /// The determinant of an integer matrix is an integer, so when it
+        /// is not zero it is at least one in magnitude; one half is the
+        /// midpoint.
+        const ZERO_DETERMINANT: f64 = 0.5;
+        /// Coefficient box about zero in the exhaustive search. The
+        /// assertion fails if the box misses a vector the enumeration
+        /// finds, so the radius is checked against the enumeration but not
+        /// derived independently; the derivation would be the Fincke–Pohst
+        /// bound `|x_k| ≤ √(bound / ‖b*_k‖²)` from the reduced basis's
+        /// Gram–Schmidt norms, per trial.
+        const BOX_RADIUS: i64 = 6;
+        // Knuth's MMIX linear congruential generator (TAOCP vol. 2,
+        // §3.3.4), the high bits taken.
+        let mut state = SEED;
         let mut next = || {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
             (state >> 33) as i64
         };
-        for trial in 0..40 {
+        for trial in 0..TRIALS {
+            // Square bases of dimension three or four, entries in −4..=4.
             let n = 3 + (trial % 2);
             let basis: Vec<Vec<BigInt>> = (0..n)
                 .map(|_| (0..n).map(|_| big(next() % 9 - 4)).collect())
                 .collect();
+            // Diagonal form entries in 1..=5, varying with the trial.
             let form: Vec<Vec<BigInt>> = (0..n)
                 .map(|i| {
                     (0..n)
@@ -1512,7 +1576,7 @@ mod short_vector_tests {
                         .max_by(|&a, &b| m[a][i].abs().partial_cmp(&m[b][i].abs()).unwrap())
                         .unwrap();
                     m.swap(i, pivot);
-                    if m[i][i].abs() < 1e-9 {
+                    if m[i][i].abs() < SINGULAR_PIVOT {
                         det = 0.0;
                         break;
                     }
@@ -1525,7 +1589,7 @@ mod short_vector_tests {
                         }
                     }
                 }
-                det.abs() < 0.5
+                det.abs() < ZERO_DETERMINANT
             };
             if gram_det_zero {
                 continue;
@@ -1538,12 +1602,13 @@ mod short_vector_tests {
                 }
                 total
             };
+            // Four times the first reduced vector's squared norm: every
+            // vector up to twice its length.
             let bound = norm(&reduced[0]).mul(&big(4));
             let found = short(&reduced, &form, &bound, usize::MAX);
-            // Exhaustive: coefficients in a box; the reduced basis's vectors are
-            // short, so a box of radius six around zero holds every vector of
-            // twice the shortest's length in these dimensions.
-            let radius = 6i64;
+            // Exhaustive: coefficients of the reduced basis in a box about
+            // zero.
+            let radius = BOX_RADIUS;
             let mut expected: Vec<Vec<BigInt>> = Vec::new();
             let count = (2 * radius + 1).pow(n as u32);
             for code in 0..count {
@@ -1631,10 +1696,10 @@ mod certified_enumeration_tests {
         vectors
     }
 
-    /// The audit's reproducer: under `diag(1, 2¹⁰⁰⁰)` the identity basis
-    /// has short vectors `±(1, 0)` within 1, and the closest vectors to the
-    /// origin add the origin itself. A common shift of the Gram matrix made
-    /// the entry 1 zero and the form look singular.
+    /// Under `diag(1, 2¹⁰⁰⁰)` the identity basis has short vectors `±(1, 0)`
+    /// within 1, and the closest vectors to the origin add the origin
+    /// itself. The two scales are a thousand binary orders apart, and the
+    /// small direction must survive next to the large one, in either order.
     #[test]
     fn widely_separated_scales_keep_their_small_directions() {
         let identity = vec![vec![big(1), big(0)], vec![big(0), big(1)]];
@@ -1672,7 +1737,23 @@ mod certified_enumeration_tests {
     /// basis.
     #[test]
     fn separated_scales_agree_with_exhaustive_search_and_a_change_of_basis() {
-        let mut state = 0x243f_6a88_85a3_08d3u64;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x243f_6a88_85a3_08d3;
+        /// Trials; the exponent schedule below keeps the three scales in
+        /// order for every one of them.
+        const TRIALS: usize = 24;
+        /// Trials whose basis must be independent. These fixtures give
+        /// twenty; the floor fails a sweep that skips most of them.
+        const FEWEST_CHECKED: usize = 10;
+        /// Coefficient box about zero in the exhaustive search. The
+        /// assertion fails if the box misses a vector the enumeration
+        /// finds, so the radius is checked against the enumeration but not
+        /// derived independently; the derivation would be the Fincke–Pohst
+        /// bound from the reduced basis's Gram–Schmidt norms, per trial.
+        const BOX_RADIUS: i64 = 10;
+        // Knuth's MMIX linear congruential generator (TAOCP vol. 2,
+        // §3.3.4), the high bits taken.
+        let mut state = SEED;
         let mut next = || {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
@@ -1680,10 +1761,15 @@ mod certified_enumeration_tests {
             (state >> 33) as i64
         };
         let mut checked = 0;
-        for trial in 0..24 {
+        for trial in 0..TRIALS {
+            // Three-dimensional bases with entries in −2..=2.
             let mut basis: Vec<Vec<BigInt>> = (0..3)
                 .map(|_| (0..3).map(|_| big(next() % 5 - 2)).collect())
                 .collect();
+            // Scales 2⁰, 2^(7·trial) and 2^(600 − 13·trial): over the
+            // trials the middle exponent climbs from 0 to 161 as the top
+            // one falls from 600 to 301, so the three stay in order and
+            // the gap between the upper two narrows from 600 to 140.
             let exponents = [0usize, 7 * trial, 600 - 13 * trial];
             let form = diagonal(&exponents.map(power_of_two));
             let gram: Vec<Vec<BigInt>> = basis
@@ -1694,9 +1780,10 @@ mod certified_enumeration_tests {
                 continue;
             }
             // Reduced under the form, so the vectors within twice the
-            // first basis norm have small coefficients.
+            // first vector's squared norm have small coefficients.
             lll_reduce_form(&mut basis, &form, 3, 4);
             let bound = form_product(&form, &basis[0], &basis[0]).mul(&big(2));
+            // A target on the unit-scale axis, entry in −2..=2.
             let target = vec![big(next() % 5 - 2), big(0), big(0)];
             let short = short_vectors_form(&basis, &form, &bound, usize::MAX, u64::MAX);
             let closest =
@@ -1711,7 +1798,7 @@ mod certified_enumeration_tests {
                 EnumerationOutcome::Exhausted,
                 "trial {trial}"
             );
-            let radius = 10i64;
+            let radius = BOX_RADIUS;
             let mut expected_short = Vec::new();
             let mut expected_closest = Vec::new();
             for a in -radius..=radius {
@@ -1761,7 +1848,10 @@ mod certified_enumeration_tests {
             );
             checked += 1;
         }
-        assert!(checked >= 10, "only {checked} independent bases");
+        assert!(
+            checked >= FEWEST_CHECKED,
+            "only {checked} independent bases"
+        );
     }
 
     fn bareiss_determinant_sign(gram: &[Vec<BigInt>]) -> Sign {
@@ -1772,26 +1862,35 @@ mod certified_enumeration_tests {
     /// returns is still within the bound.
     #[test]
     fn a_visit_limit_is_reported_and_its_vectors_are_within_the_bound() {
+        /// Visits allowed the short-vector search: fewer than the full
+        /// search makes, which is asserted before the limit is applied.
+        const SHORT_VISITS: u64 = 20;
+        /// Visits allowed the closest-vector search; fewer still.
+        const CLOSEST_VISITS: u64 = 5;
         let basis = vec![vec![big(7), big(0)], vec![big(3), big(1)]];
         let form = diagonal(&[big(1), big(1)]);
+        // A bound holding many vectors of this lattice of determinant 7,
+        // so the full search visits far more than the limits allow.
         let bound = big(2000);
         let full = short_vectors_form(&basis, &form, &bound, usize::MAX, u64::MAX);
         assert_eq!(full.outcome(), EnumerationOutcome::Exhausted);
-        assert!(full.visits() > 20);
-        let cut = short_vectors_form(&basis, &form, &bound, usize::MAX, 20);
+        assert!(full.visits() > SHORT_VISITS);
+        let cut = short_vectors_form(&basis, &form, &bound, usize::MAX, SHORT_VISITS);
         assert_eq!(cut.outcome(), EnumerationOutcome::VisitLimit);
-        assert_eq!(cut.visits(), 20);
+        assert_eq!(cut.visits(), SHORT_VISITS);
         assert!(cut.vectors().len() < full.vectors().len());
         for v in cut.vectors() {
             assert!(form_product(&form, v, v) <= bound);
         }
         let target = vec![big(10), big(10)];
-        let cut = closest_vectors_form(&basis, &form, &target, &bound, usize::MAX, 5);
+        let cut = closest_vectors_form(&basis, &form, &target, &bound, usize::MAX, CLOSEST_VISITS);
         assert_eq!(cut.outcome(), EnumerationOutcome::VisitLimit);
     }
 
     /// Scales beyond what doubles can span together are refused with an
-    /// explicit outcome rather than a wrong or panicking search.
+    /// explicit outcome rather than a wrong or panicking search: `2⁵⁰⁰⁰`
+    /// against 1 is 5000 binary orders, and even centred, `2^±2500` is
+    /// outside the doubles' exponent range of −1022 to 1023.
     #[test]
     fn scales_beyond_the_doubles_are_a_numerical_limit() {
         let identity = vec![vec![big(1), big(0)], vec![big(0), big(1)]];
@@ -1805,9 +1904,10 @@ mod certified_enumeration_tests {
     }
 
     /// Either side of the doubles' exponent range: scales `2²⁰⁰⁰` apart
-    /// still fit around their shared midpoint and are searched exactly,
-    /// with a target off the lattice; `2²²⁰⁰` apart they do not, and the
-    /// searches say so.
+    /// still fit around their shared midpoint, as `2^±1000` within the
+    /// range −1022 to 1023, and are searched exactly, with a target off
+    /// the lattice; `2²²⁰⁰` apart they do not, since `2^±1100` is outside
+    /// it, and the searches say so.
     #[test]
     fn the_exponent_range_is_used_to_its_limit_and_then_refused() {
         let identity = vec![vec![big(1), big(0)], vec![big(0), big(1)]];
@@ -1917,11 +2017,13 @@ mod tests {
     /// reduced basis no window is needed beyond ±2 — with `2|⟨u,v⟩| ≤ ‖u‖²`
     /// and `‖u‖ ≤ ‖v‖`, the norm of `a·u + b·v` is at least
     /// `(a² − |ab| + b²)‖u‖²`, and `a² − |ab| + b²` exceeds 1 for every
-    /// integer pair outside `{(±1,0), (0,±1), ±(1,1), ±(1,−1)}`. ±4 is taken
-    /// for margin.
+    /// integer pair outside `{(±1,0), (0,±1), ±(1,1), ±(1,−1)}`. Twice
+    /// that is taken for margin.
     fn nothing_shorter_nearby(reduced: [[i128; 2]; 2], weights: [i128; 2], best: i128) {
-        for a in -4i128..=4 {
-            for b in -4i128..=4 {
+        /// Coefficient window: twice the ±2 the argument above needs.
+        const WINDOW: i128 = 4;
+        for a in -WINDOW..=WINDOW {
+            for b in -WINDOW..=WINDOW {
                 if a == 0 && b == 0 {
                     continue;
                 }
@@ -1941,16 +2043,27 @@ mod tests {
 
     #[test]
     fn gauss_reduce_finds_the_shortest_vector_under_a_weighted_norm() {
-        let mut state = 0x1234_5678_9abc_def1u64;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1234_5678_9abc_def1;
+        /// Random bases per weight pair; arbitrary.
+        const DRAWS: usize = 200;
+        /// Entries below this: twelve bits, so the weighted norms stay far
+        /// inside `i128` under every weight pair below.
+        const ENTRY_RANGE: i128 = 4096;
+        // Knuth's MMIX multiplier (TAOCP vol. 2, §3.3.4) with increment 1,
+        // which is odd, so the period is full; the high bits taken.
+        let mut state = SEED;
         let mut next = || {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
             ((state >> 33) as i64) as i128
         };
+        // Weights: the plain norm, small ratios both coprime and not, and
+        // a heavy weight on either axis.
         for weights in [w(1, 1), w(1, 2), w(1, 7), w(3, 5), w(1, 1000), w(64, 1)] {
-            for _ in 0..200 {
+            for _ in 0..DRAWS {
                 let basis = [
-                    [next() % 4096, next() % 4096],
-                    [next() % 4096, next() % 4096],
+                    [next() % ENTRY_RANGE, next() % ENTRY_RANGE],
+                    [next() % ENTRY_RANGE, next() % ENTRY_RANGE],
                 ];
                 if det(basis) == 0 {
                     continue;
@@ -1989,14 +2102,29 @@ mod tests {
     /// handed.
     #[test]
     fn gauss_reduce_weights_encode_a_rational_skew() {
-        // A non-integer skew with a power-of-ten denominator.
-        let (p, q) = (2_113_745_839u64, 10_000_000u64); // s ≈ 211.3745839
+        /// An arbitrary non-integer skew, `s = 211.3745839`, written as a
+        /// decimal of seven places would be: the numerator over a power of
+        /// ten.
+        const SKEW_NUMERATOR: u64 = 2_113_745_839;
+        /// The power of ten under `SKEW_NUMERATOR`.
+        const SKEW_DENOMINATOR: u64 = 10_000_000;
+        /// Relative slack in comparing two float norms. Each is a handful
+        /// of rounded operations, so its relative error is a few units of
+        /// `2⁻⁵³ ≈ 1.1e-16`; this leaves four orders of magnitude to spare.
+        const FLOAT_NORM_SLACK: f64 = 1e-12;
+        /// Coefficient window for the search below: beyond the ±2 the
+        /// argument at `nothing_shorter_nearby` needs, with margin.
+        const WINDOW: i128 = 3;
+        let (p, q) = (SKEW_NUMERATOR, SKEW_DENOMINATOR);
         let s = p as f64 / q as f64;
         let float_norm = |v: [i128; 2]| {
             let a = v[0] as f64 / s.sqrt();
             let b = v[1] as f64 * s.sqrt();
             a * a + b * b
         };
+        // Bases `(N, 0), (k, 1)`: the lattice of `(a, b)` with
+        // `a ≡ k·b (mod N)`, as a sieve's root lattice is. `N` and `k`
+        // arbitrary.
         for basis in [
             [[20_003i128, 0], [12_577, 1]],
             [[65_537, 0], [4_099, 1]],
@@ -2006,12 +2134,12 @@ mod tests {
             assert_eq!(det(reduced).abs(), det(basis).abs());
             // Ordered under the metric the caller actually means.
             assert!(
-                float_norm(reduced[0]) <= float_norm(reduced[1]) * (1.0 + 1e-12),
+                float_norm(reduced[0]) <= float_norm(reduced[1]) * (1.0 + FLOAT_NORM_SLACK),
                 "out of order under the intended metric"
             );
             // And no nearby combination is shorter under that metric either.
-            for a in -3i128..=3 {
-                for b in -3i128..=3 {
+            for a in -WINDOW..=WINDOW {
+                for b in -WINDOW..=WINDOW {
                     if a == 0 && b == 0 {
                         continue;
                     }
@@ -2020,7 +2148,7 @@ mod tests {
                         a * reduced[0][1] + b * reduced[1][1],
                     ];
                     assert!(
-                        float_norm(v) >= float_norm(reduced[0]) * (1.0 - 1e-12),
+                        float_norm(v) >= float_norm(reduced[0]) * (1.0 - FLOAT_NORM_SLACK),
                         "({a},{b}) beats the answer under the intended metric"
                     );
                 }
@@ -2033,6 +2161,7 @@ mod tests {
     /// bound, so the reduced basis comes back rather than an error.
     #[test]
     fn gauss_reduce_accepts_norms_that_fill_half_the_range() {
+        // 2⁶², the per-coordinate bound `gauss_reduce_weighted` documents.
         let a = 1i128 << 62;
         let reduced = gauss_reduce_weighted([[a, a], [a, -a]], w(1, 1)).expect("norms fit");
         assert_eq!(det(reduced).abs(), 2 * a * a);
@@ -2069,7 +2198,7 @@ mod tests {
             gauss_reduce_weighted([[2, 4], [1, 2]], w(1, 1)),
             Err(ReductionError::DependentBasis)
         );
-        // Past the range: the weighted coordinate squares.
+        // Past the range: the weighted coordinate squares to 2²⁰⁰.
         let big = 1i128 << 100;
         assert_eq!(
             gauss_reduce_weighted([[big, 0], [0, 1]], w(1, 1)),
@@ -2245,7 +2374,8 @@ mod tests {
         }
     }
 
-    // Deterministic LCG for random small integer bases.
+    // Knuth's MMIX linear congruential generator (TAOCP vol. 2, §3.3.4),
+    // the high bits taken, for random small integer bases.
     struct Lcg(u64);
     impl Lcg {
         fn next(&mut self) -> u64 {
@@ -2366,11 +2496,20 @@ mod tests {
 
     #[test]
     fn lll_random_full_rank_bases_reduce_and_preserve_the_lattice() {
-        let mut rng = Lcg(0x1234_5678_9abc_def1);
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1234_5678_9abc_def1;
+        /// Random bases drawn; arbitrary.
+        const DRAWS: usize = 2000;
+        /// Draws that must be independent. These fixtures give 1994; the
+        /// floor fails a sweep that skips most of them.
+        const FEWEST_TESTED: usize = 1000;
+        let mut rng = Lcg(SEED);
         let mut tested = 0;
-        for _ in 0..2000 {
-            let n = 2 + (rng.next() % 3) as usize; // 2..=4 vectors
-            let m = n + (rng.next() % 2) as usize; // ambient ≥ n
+        for _ in 0..DRAWS {
+            // Two to four vectors, in an ambient space of the same
+            // dimension or one more, entries in −9..=9.
+            let n = 2 + (rng.next() % 3) as usize;
+            let m = n + (rng.next() % 2) as usize;
             let input: Vec<Vec<BigInt>> = (0..n)
                 .map(|_| (0..m).map(|_| BigInt::from_i64(rng.int(-9, 9))).collect())
                 .collect();
@@ -2389,7 +2528,10 @@ mod tests {
             assert_eq!(twice, basis, "not idempotent: {input:?}");
             tested += 1;
         }
-        assert!(tested > 1000, "too few non-singular draws: {tested}");
+        assert!(
+            tested > FEWEST_TESTED,
+            "too few non-singular draws: {tested}"
+        );
     }
 
     #[test]

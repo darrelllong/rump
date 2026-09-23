@@ -49,8 +49,12 @@
 use super::{PolyMod, PolyZ};
 use crate::bigint::{BarrettContext, BigInt, BigUint, Sign, NEWTON_DIVISION_THRESHOLD_LIMBS};
 
-/// Coefficients narrower than this are multiplied on the calling thread
-/// regardless of the worker budget: a thread costs more than the product.
+/// A level whose modulus is narrower than this multiplies on the calling
+/// thread regardless of the worker budget. The gate reads the modulus
+/// width, which bounds every coefficient's: below it a thread costs more
+/// than the products it would carry. `2¹⁶` is a policy; where the
+/// crossover lies has not been measured, and a timing of the threaded
+/// against the serial products across modulus widths would settle it.
 const PARALLEL_PRODUCT_MIN_BITS: usize = 1 << 16;
 
 /// Reduction modulo one fixed `q^k`, by Barrett once the modulus is wide
@@ -484,8 +488,35 @@ fn padded(coefficients: &[BigUint], degree: usize) -> Vec<BigUint> {
 mod tests {
     use super::*;
 
+    /// Where the search for a seed prime starts: the smallest prime above
+    /// 10⁶, so every field here has a modulus of about 20 bits and each
+    /// doubling of the lift doubles that.
+    const SEED_PRIME_SEARCH_START: u64 = 1_000_003;
+
+    /// The prime that search finds for `x⁴ + 5x³ + 11x² − 3x + 7`, the
+    /// polynomial the wide tests share; asserted where it is found, since
+    /// [`PROBE_BITS_DEFAULT`] is derived from it.
+    const WIDE_F_SEED_PRIME: u64 = 1_000_033;
+
     fn poly(coefficients: &[i64]) -> PolyZ {
         PolyZ::new(coefficients.iter().map(|&c| BigInt::from_i64(c)).collect())
+    }
+
+    /// `bits` random bits as an integer, one bit per step of Marsaglia's
+    /// xorshift64 (*Xorshift RNGs*, J. Stat. Software 8(14), 2003; the
+    /// 13/7/17 triple is his), so the same seed gives the same integer at
+    /// every width.
+    fn random_bits(seed: &mut u64, bits: usize) -> BigUint {
+        let mut value = BigUint::zero();
+        for bit in 0..bits {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            if *seed & 1 == 1 {
+                value.set_bit(bit);
+            }
+        }
+        value
     }
 
     /// The first prime at or above `from` modulo which `f` is irreducible,
@@ -520,8 +551,12 @@ mod tests {
         let delta = beta.mul(&beta).rem_monic(&f);
         let seed = field_root(&f, &delta, 7);
         let mut lift = HenselSquareRoot::in_field(&f, &delta, &seed).expect("a square");
+        // The lift is exact once the modulus exceeds twice the largest
+        // coefficient, 2·5: at q² = 49, after one doubling. Six reach q³²,
+        // so the `expect` below cannot fire on a correct lift.
+        const MAX_DOUBLINGS: usize = 6;
         let mut converged = None;
-        for _ in 0..6 {
+        for _ in 0..MAX_DOUBLINGS {
             let modulus = lift.modulus().clone();
             let f_mod = PolyMod::from_poly_z(&f, &modulus);
             let root = lift.root();
@@ -545,14 +580,20 @@ mod tests {
         let f = poly(&[7, -3, 11, 5, 1]);
         let beta = poly(&[-123_456_789, 987_654_321, -555_555_555, 42]);
         let delta = beta.mul(&beta).rem_monic(&f);
-        let prime = irreducible_prime(&f, 1_000_003);
+        let prime = irreducible_prime(&f, SEED_PRIME_SEARCH_START);
         let seed = field_root(&f, &delta, prime);
         let mut lift = HenselSquareRoot::in_field(&f, &delta, &seed).expect("a square");
-        for _ in 0..3 {
+        // The reciprocal is not refined on the first doubling, where it
+        // already sits at the root's level, and is refined on every one
+        // after; three is the least that refines it twice, the second time
+        // from an already refined value. The modulus reached, q⁸, is about
+        // 160 bits, past twice the 30-bit coefficients.
+        const DOUBLINGS: usize = 3;
+        for _ in 0..DOUBLINGS {
             lift.double();
         }
         let modulus = lift.modulus().clone();
-        assert_eq!(modulus, BigUint::from_u64(prime).pow_u64(8));
+        assert_eq!(modulus, BigUint::from_u64(prime).pow_u64(1 << DOUBLINGS));
         let f_mod = PolyMod::from_poly_z(&f, &modulus);
         let root = lift.root();
         let delta_mod = PolyMod::from_poly_z(&delta, &modulus).rem(&f_mod);
@@ -566,20 +607,28 @@ mod tests {
     /// division threshold before the lift is exact.
     #[test]
     fn the_wide_lift_uses_barrett_and_threads() {
+        // Width of the root's coefficients. The lift is exact once the
+        // modulus exceeds twice the largest, which from the 20-bit seed
+        // prime is its 14th doubling, 326,560 bits: 5,103 limbs against
+        // the Newton threshold's 3,072, as the assertion at the end checks.
+        const COEFFICIENT_BITS: usize = 200_000;
+        // The prepared levels run up to the first modulus of at least this
+        // width, which is the 326,560-bit level the lift ends on: every
+        // level it takes is then prepared from above, and none falls back
+        // to the division per coefficient the hint exists to avoid.
+        const HINT_BITS: usize = 300_000;
+        // Doublings before the lift is called unconverged. It needs 14,
+        // and the loop checks before each one, so 16 leaves one to spare;
+        // the assertion, not the bound, reports a failure.
+        const MAX_DOUBLINGS: usize = 16;
+        // More than one thread, so the threaded path runs. A policy.
+        const WORKERS: usize = 4;
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+
         let f = poly(&[7, -3, 11, 5, 1]);
-        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-        let mut wide = || {
-            let mut value = BigUint::zero();
-            for bit in 0..200_000usize {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
-                if seed & 1 == 1 {
-                    value.set_bit(bit);
-                }
-            }
-            value
-        };
+        let mut seed = SEED;
+        let mut wide = || random_bits(&mut seed, COEFFICIENT_BITS);
         let beta = PolyZ::new(vec![
             BigInt::from_parts(Sign::Negative, wide()),
             BigInt::from_biguint(wide()),
@@ -587,13 +636,18 @@ mod tests {
             BigInt::from_biguint(wide()),
         ]);
         let delta = beta.mul(&beta).rem_monic(&f);
-        let seed = field_root(&f, &delta, irreducible_prime(&f, 1_000_003));
+        let prime = irreducible_prime(&f, SEED_PRIME_SEARCH_START);
+        assert_eq!(
+            prime, WIDE_F_SEED_PRIME,
+            "the level widths in these tests are derived from this prime"
+        );
+        let seed = field_root(&f, &delta, prime);
         let mut lift = HenselSquareRoot::in_field(&f, &delta, &seed)
             .expect("a square")
-            .with_workers(4)
-            .with_precision_hint(300_000);
+            .with_workers(WORKERS)
+            .with_precision_hint(HINT_BITS);
         let mut converged = false;
-        for _ in 0..16 {
+        for _ in 0..MAX_DOUBLINGS {
             let candidate = lift.symmetric_lift();
             if candidate.mul(&candidate).rem_monic(&f) == delta {
                 converged = candidate == beta || candidate.add(&beta).is_zero();
@@ -623,39 +677,49 @@ mod tests {
     }
 
     /// Timing probe at wide precision: a root with coefficients of half
-    /// `RUMP_HENSEL_PROBE_BITS` (default 1,306,239) bits, levels above
-    /// 100 kbit reported. Run with `--ignored --nocapture`.
+    /// `RUMP_HENSEL_PROBE_BITS` (default [`PROBE_BITS_DEFAULT`]) bits, the
+    /// wide levels reported. Run with `--ignored --nocapture`.
     #[test]
     #[ignore = "timing probe for the lift at NFS width; run with --ignored"]
     fn lift_timing_probe() {
         use std::time::Instant;
+        // The width factoring's c105 square root lifts at: 1.3 Mbit
+        // coefficients, 20,410 limbs, the width bigint.rs's transform gate
+        // is tuned for. It is exactly the width of the lift's last level
+        // for the seed prime: ⌈2¹⁶ · log₂ 1,000,033⌉ = 1,306,239 bits.
+        const PROBE_BITS_DEFAULT: usize = 1_306_239;
+        // Bits added to half the probe width for the root's coefficients.
+        // The lift ends on the first level whose modulus exceeds twice the
+        // largest coefficient; the level below the target is 653,120 bits,
+        // one wider than half the target, so a coefficient of exactly half
+        // the width could end the lift a level early on a lucky draw. The
+        // margin puts the coefficients past that level for certain.
+        const COEFFICIENT_MARGIN_BITS: usize = 200;
+        // Levels narrower than this are not reported: the wide ones are
+        // what the probe is for, and the narrow ones would only pad the
+        // output. A policy.
+        const REPORT_MIN_BITS: usize = 100_000;
+        // Worker budgets swept: serial, and two sizes of pool. A policy.
+        const WORKER_COUNTS: [usize; 3] = [1, 4, 16];
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+
         let bits: usize = std::env::var("RUMP_HENSEL_PROBE_BITS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1_306_239);
+            .unwrap_or(PROBE_BITS_DEFAULT);
         let f = poly(&[7, -3, 11, 5, 1]);
-        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-        let mut wide = || {
-            let mut value = BigUint::zero();
-            for bit in 0..(bits / 2 + 200) {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
-                if seed & 1 == 1 {
-                    value.set_bit(bit);
-                }
-            }
-            value
-        };
+        let mut seed = SEED;
+        let mut wide = || random_bits(&mut seed, bits / 2 + COEFFICIENT_MARGIN_BITS);
         let beta = PolyZ::new((0..4).map(|_| BigInt::from_biguint(wide())).collect());
         let delta = beta.mul(&beta).rem_monic(&f);
-        let seed = field_root(&f, &delta, irreducible_prime(&f, 1_000_003));
-        for workers in [1usize, 4, 16] {
+        let seed = field_root(&f, &delta, irreducible_prime(&f, SEED_PRIME_SEARCH_START));
+        for workers in WORKER_COUNTS {
             let start = Instant::now();
             let mut lift = HenselSquareRoot::in_field(&f, &delta, &seed)
                 .expect("a square")
                 .with_workers(workers)
-                .with_precision_hint(bits + 1);
+                .with_precision_hint(bits);
             let setup = start.elapsed().as_secs_f64();
             let mut levels = 0;
             loop {
@@ -666,7 +730,7 @@ mod tests {
                 }
                 lift.double();
                 levels += 1;
-                if lift.modulus().bits() > 100_000 {
+                if lift.modulus().bits() > REPORT_MIN_BITS {
                     eprintln!(
                         "  level {} bits: {:.3}s",
                         lift.modulus().bits(),

@@ -26,13 +26,14 @@ use crate::poly::PolyMod;
 //
 // Classical Euclid does a full multiprecision division per step, and there are
 // O(bits) of them. Lehmer's refinement runs Euclid on just the aligned leading
-// digits — here a 124-bit window of each operand, not the single limb Knuth
-// describes — accumulating the 2×2 transform of every step whose quotient the
-// leading digits pin down *exactly*, then applies that one transform to the
-// full operands with a handful of multiplications. The quotient test — accept
-// `q` only when the low and high leading-digit estimates agree — certifies each
-// batched quotient equals the true one, so the outcome is bit-for-bit classical
-// Euclid. `gcd`, `gcd_extended`, and `mod_inverse` all share this engine.
+// digits — here a window of `LEADING_DIGIT_BITS` from each operand, not the
+// single limb Knuth describes — accumulating the 2×2 transform of every step
+// whose quotient the leading digits pin down *exactly*, then applies that one
+// transform to the full operands with a handful of multiplications. The
+// quotient test — accept `q` only when the low and high leading-digit
+// estimates agree — certifies each batched quotient equals the true one, so
+// the outcome is bit-for-bit classical Euclid. `gcd`, `gcd_extended`, and
+// `mod_inverse` all share this engine.
 
 /// Greatest common divisor of two machine words.
 ///
@@ -69,10 +70,22 @@ pub fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
     a
 }
 
-/// The top ≤124 bits of `limbs` starting at bit `shift`, as a non-negative
-/// `i128`. Callers pick `shift` so `value >> shift < 2^124`, keeping the result
-/// positive and leaving headroom for the transform's corrections. Clone-free:
-/// it reads the (up to) three limbs the window spans directly.
+/// Width of the leading-digit window Lehmer's transform reads from each
+/// operand. The budget is `i128`'s 127 value bits, and the widest value the
+/// transform forms is `remainder_high = remainder_low + (m01 − m00) −
+/// q·(m11 − m10)`: the product is below `2^62 · 2^64 = 2^126`
+/// (`QUOTIENT_LIMIT` times two entries inside `i64`), so the rest — a
+/// remainder below the window plus a correction below `2^63`, plus an entry
+/// difference below `2^64` — must stay under `2^126`. A 124-bit window meets
+/// `2^124 + 2^64 + 2^63 < 2^126` with a bit to spare. Wider digits certify
+/// more steps per batch, so the window is as wide as that budget allows.
+const LEADING_DIGIT_BITS: usize = 124;
+
+/// The top `LEADING_DIGIT_BITS` bits of `limbs` starting at bit `shift`, as
+/// a non-negative `i128`. Callers pick `shift` so
+/// `value >> shift < 2^LEADING_DIGIT_BITS`, keeping the result positive and
+/// leaving headroom for the transform's corrections. Clone-free: it reads
+/// the (up to) three limbs the window spans directly.
 fn leading_i128(limbs: &[u64], shift: usize) -> i128 {
     let word = shift / 64;
     let bit = shift % 64;
@@ -84,16 +97,17 @@ fn leading_i128(limbs: &[u64], shift: usize) -> i128 {
         let hi = u128::from(limbs.get(word + 2).copied().unwrap_or(0));
         (lo >> bit) | (mid << (64 - bit)) | (hi << (128 - bit))
     };
-    // The caller's `shift` guarantees `window < 2^124`, so this cast is exact.
+    // The caller's `shift` guarantees `window < 2^LEADING_DIGIT_BITS`, so the
+    // cast is exact.
     window as i128
 }
 
 /// Knuth Algorithm L on the aligned leading digits `u_hat >= v_hat` (each below
-/// 2^124): the 2×2 transform `(m00, m01, m10, m11)` collecting every Euclidean
-/// step whose quotient the leading digits determine exactly. `m01 == 0` signals
-/// that the digits pinned no step, so the caller must take one full division
-/// step. Leading digits of 124 bits, not one 64-bit limb, batch far more
-/// steps per call.
+/// `2^LEADING_DIGIT_BITS`): the 2×2 transform `(m00, m01, m10, m11)`
+/// collecting every Euclidean step whose quotient the leading digits determine
+/// exactly. `m01 == 0` signals that the digits pinned no step, so the caller
+/// must take one full division step. Digits of `LEADING_DIGIT_BITS`, not one
+/// 64-bit limb, batch far more steps per call.
 ///
 /// Signs live in the entries, so `m00·u + m01·v` and `m10·u + m11·v` reproduce
 /// the post-step operands directly, both provably non-negative.
@@ -108,6 +122,11 @@ fn lehmer_transform(
     v_hat: i128,
     mut quotients: Option<&mut QuotientLog>,
 ) -> (i128, i128, i128, i128) {
+    /// Quotients at or above this end the batch. The transform multiplies a
+    /// quotient by an entry difference below `2^64`, and that product is
+    /// allotted `2^126` of `i128`'s 127 value bits (the window and the
+    /// corrections take the rest; see `LEADING_DIGIT_BITS`), so quotients
+    /// stay below `2^62`.
     const QUOTIENT_LIMIT: i128 = 1 << 62;
     let (mut m00, mut m01, mut m10, mut m11) = (1i128, 0i128, 0i128, 1i128);
     let (mut u, mut v) = (u_hat, v_hat);
@@ -159,12 +178,21 @@ fn lehmer_transform(
 /// a positive divisor.
 ///
 /// Euclidean quotients are small: by the Gauss–Kuzmin law a quotient is 1, 2
-/// or 3 about 68% of the time. Those are found by subtraction, a few register
-/// operations where a 128-bit division is a library call.
+/// or 3 about 68% of the time. Quotients below `SUBTRACTION_QUOTIENT_LIMIT`
+/// are found by subtraction, a few register operations where a 128-bit
+/// division is a library call; the rest divide.
 #[inline]
 fn quotient_remainder(dividend: i128, divisor: i128) -> (i128, i128) {
+    /// Quotients below this are found by repeated subtraction: the three
+    /// that cover 68% of steps are tried before paying for the division,
+    /// and each further quotient covers less (`log₂(1 + 1/(q(q+2)))` of
+    /// steps) while costing every larger one another subtraction. The
+    /// choice barely shows: `gcd` at 256, 1024 and 4096 bits on the EPYC
+    /// 7452 with the cutoff at 2, 3, 4, 6 and 8 is within 2% throughout
+    /// (3.06–3.18 µs, 14.3–14.9 µs, 72.3–74.4 µs).
+    const SUBTRACTION_QUOTIENT_LIMIT: i128 = 4;
     let mut remainder = dividend;
-    for quotient in 0..4 {
+    for quotient in 0..SUBTRACTION_QUOTIENT_LIMIT {
         if remainder < divisor {
             return (quotient, remainder);
         }
@@ -174,21 +202,49 @@ fn quotient_remainder(dividend: i128, divisor: i128) -> (i128, i128) {
     (quotient, dividend - quotient * divisor)
 }
 
+/// The most Euclidean steps one Lehmer batch can take, by Lamé's theorem
+/// (Knuth, *TAOCP* vol. 2, §4.5.3, Theorem F): `n` division steps need a
+/// dividend of at least `F_{n+2}`, so digits below `2^LEADING_DIGIT_BITS`
+/// admit `n` steps only while `F_{n+2} < 2^LEADING_DIGIT_BITS`. Every step
+/// the transform certifies is an exact step of Euclid on the digit pair
+/// (the true digit quotient lies between the two agreeing estimates), so
+/// the bound applies to the batch. For 124-bit digits `F₁₈₁` is the first
+/// Fibonacci number above `2¹²⁴`, giving 178.
+const LEHMER_BATCH_MAX_STEPS: usize = lame_steps(LEADING_DIGIT_BITS);
+
+/// The largest `n` with `F_{n+2} < 2^bits`, for [`LEHMER_BATCH_MAX_STEPS`].
+const fn lame_steps(bits: usize) -> usize {
+    let limit: u128 = 1 << bits;
+    let mut previous = 1u128; // F₁
+    let mut current = 1u128; // F₂
+    let mut index = 2; // current = F_index
+    while current < limit {
+        let next = previous + current;
+        previous = current;
+        current = next;
+        index += 1;
+    }
+    // `F_index` is the first Fibonacci number at or above the limit, so
+    // `F_{index − 1}` is the largest below it: n + 2 = index − 1.
+    index - 3
+}
+
+const _: () = assert!(LEHMER_BATCH_MAX_STEPS == 178);
+
 /// The applied-quotient log of one Lehmer batch: each entry a quotient's low
 /// two bits, in application order — what the Jacobi state replays when the
-/// batch commits. Sized for the longest possible batch by Lamé's bound: a run
-/// of `k` Euclidean steps forces the leading digit up the Fibonacci sequence
-/// to at least `F_{k+2}`, and `F₁₈₁ > 2¹²⁴ > F₁₈₀`, so a 124-bit window admits
-/// at most 178 steps and can never fill 184 entries.
+/// batch commits. Sized for the longest batch Lamé's bound allows, so the
+/// full-log check in [`lehmer_transform`] fires only once no further step
+/// exists.
 struct QuotientLog {
-    q_mod_4: [u8; 184],
+    q_mod_4: [u8; LEHMER_BATCH_MAX_STEPS],
     len: usize,
 }
 
 impl QuotientLog {
     fn new() -> Self {
         Self {
-            q_mod_4: [0; 184],
+            q_mod_4: [0; LEHMER_BATCH_MAX_STEPS],
             len: 0,
         }
     }
@@ -205,10 +261,11 @@ fn replay_batch(state: &mut JacobiState, first_reduced_is_a: bool, log: &Quotien
     }
 }
 
-/// Aligned 124-bit leading digits of `a >= b`, both non-zero: the same window
-/// (top of the larger) taken from each, ready for [`lehmer_transform`].
+/// Aligned leading digits of `a >= b`, both non-zero: the same
+/// `LEADING_DIGIT_BITS`-wide window (top of the larger) taken from each,
+/// ready for [`lehmer_transform`].
 fn leading_pair(a: &BigUint, b: &BigUint) -> (i128, i128) {
-    let shift = a.bits().saturating_sub(124);
+    let shift = a.bits().saturating_sub(LEADING_DIGIT_BITS);
     (
         leading_i128(a.limbs(), shift),
         leading_i128(b.limbs(), shift),
@@ -329,6 +386,11 @@ impl LinearScratch {
     }
 }
 
+/// Limbs a [`LinearScratch`] bucket needs above its widest operand: a
+/// two-word coefficient times `x` is two limbs wider than `x`, and the sum of
+/// two such terms can carry into one more.
+const COMBINE_HEADROOM_LIMBS: usize = 3;
+
 /// Write `c0·x0 + c1·x1` into `out`, for a result the Lehmer transform
 /// guarantees is non-negative (the remainder sequence).
 fn combine_unsigned_into(
@@ -339,7 +401,7 @@ fn combine_unsigned_into(
     c1: i128,
     x1: &BigUint,
 ) {
-    let width = x0.limbs().len().max(x1.limbs().len()) + 3;
+    let width = x0.limbs().len().max(x1.limbs().len()) + COMBINE_HEADROOM_LIMBS;
     scratch.clear_to(width);
     route_term(&mut scratch.pos, &mut scratch.neg, c0, false, x0.limbs());
     route_term(&mut scratch.pos, &mut scratch.neg, c1, false, x1.limbs());
@@ -367,7 +429,7 @@ fn combine_signed_into(
         .limbs()
         .len()
         .max(x1.magnitude().limbs().len())
-        + 3;
+        + COMBINE_HEADROOM_LIMBS;
     scratch.clear_to(width);
     route_term(
         &mut scratch.pos,
@@ -441,12 +503,31 @@ fn word_euclid_row(mut r0: u64, mut r1: u64) -> (u64, i128, i128) {
 // (2-adic) route; this implementation takes the left-to-right route their
 // §1 attributes to Möller, which composes with the Half-GCD machinery below.
 
-/// The thirteen reachable `(a mod 4, b mod 4)` classes. At least one side of
-/// the pair is always odd; the denominator flag `d` is ambiguous only for
-/// `(3, 3)`, which therefore appears twice — index 7 with `d = 1`, index 12
-/// with `d = 0`. For indices 0–7 the parity of `b` implies `d = 1`; for
-/// 8–11, `d = 0`.
-const JACOBI_DECODE: [(u8, u8); 13] = [
+/// Reachable `(a mod 4, b mod 4)` classes: the twelve residue pairs with at
+/// least one odd side, plus a second `(3, 3)`, the one pair whose denominator
+/// flag is not implied by parity.
+const JACOBI_CLASSES: usize = 13;
+
+/// Index in [`JACOBI_DECODE`] of `(3, 3)` with `d = 1`.
+const JACOBI_CLASS_33_D1: u8 = 7;
+
+/// Index in [`JACOBI_DECODE`] of `(3, 3)` with `d = 0`.
+const JACOBI_CLASS_33_D0: u8 = 12;
+
+/// Jacobi states: a class and a sign bit, `(class << 1) | e`.
+const JACOBI_STATES: usize = JACOBI_CLASSES << 1;
+
+/// Transition-table entries: one per state, reduced side and quotient class,
+/// indexed `(state << 3) | (d << 2) | (q mod 4)`.
+const JACOBI_TABLE_LEN: usize = JACOBI_STATES << 3;
+
+/// The reachable `(a mod 4, b mod 4)` classes. At least one side of the pair
+/// is always odd; the denominator flag `d` is ambiguous only for `(3, 3)`,
+/// which therefore appears twice — `JACOBI_CLASS_33_D1` with `d = 1`,
+/// `JACOBI_CLASS_33_D0` with `d = 0`. For indices 0–7 the parity of `b`
+/// implies `d = 1`; for 8–11, `d = 0`. [`JacobiState::new`] relies on the
+/// first eight entries being `(i >> 1, 1 + 2·(i & 1))`.
+const JACOBI_DECODE: [(u8, u8); JACOBI_CLASSES] = [
     (0, 1),
     (0, 3),
     (1, 1),
@@ -465,10 +546,15 @@ const JACOBI_DECODE: [(u8, u8); 13] = [
 /// Index of `(a, b)` with denominator flag `d` in [`JACOBI_DECODE`].
 const fn jacobi_encode(a: u8, b: u8, d: u8) -> u8 {
     if a == 3 && b == 3 {
-        return if d == 1 { 7 } else { 12 };
+        return if d == 1 {
+            JACOBI_CLASS_33_D1
+        } else {
+            JACOBI_CLASS_33_D0
+        };
     }
+    // The last entry is the second `(3, 3)`, resolved above.
     let mut i = 0;
-    while i < 12 {
+    while i < JACOBI_CLASSES - 1 {
         let (da, db) = JACOBI_DECODE[i];
         if da == a && db == b {
             return i as u8;
@@ -478,15 +564,15 @@ const fn jacobi_encode(a: u8, b: u8, d: u8) -> u8 {
     panic!("unreachable (a, b) class: one side must be odd");
 }
 
-/// Build the 208-entry transition table from Schönhage's rules, at compile
-/// time. Entry `(state << 3) | (d << 2) | (q mod 4)` holds the successor of
+/// Build the transition table from Schönhage's rules, at compile time.
+/// Entry `(state << 3) | (d << 2) | (q mod 4)` holds the successor of
 /// `state` after one Euclidean step with quotient `q` reducing side `d`
 /// (`d = 1`: `a ← a − q·b`; `d = 0`: `b ← b − q·a`). A state is
 /// `(class << 1) | e`, the result being `(−1)^e`.
-const fn build_jacobi_table() -> [u8; 208] {
-    let mut table = [0u8; 208];
+const fn build_jacobi_table() -> [u8; JACOBI_TABLE_LEN] {
+    let mut table = [0u8; JACOBI_TABLE_LEN];
     let mut idx = 0;
-    while idx < 208 {
+    while idx < JACOBI_TABLE_LEN {
         let q = (idx & 3) as u8;
         let d = ((idx >> 2) & 1) as u8;
         let state = (idx >> 3) as u8;
@@ -495,7 +581,11 @@ const fn build_jacobi_table() -> [u8; 208] {
         let (mut a, mut b) = JACOBI_DECODE[class];
         // d is determinate only for the two (3, 3) classes; elsewhere the
         // reciprocity charge below cannot fire, so any value serves.
-        let d_old = if class == 7 { 1 } else { 0 };
+        let d_old = if class == JACOBI_CLASS_33_D1 as usize {
+            1
+        } else {
+            0
+        };
 
         // Reciprocity: exchanging the denominator costs a sign exactly when
         // both sides are ≡ 3 (mod 4).
@@ -522,7 +612,7 @@ const fn build_jacobi_table() -> [u8; 208] {
 }
 
 /// The transition table, derived from the rules above by the compiler.
-static JACOBI_TABLE: [u8; 208] = build_jacobi_table();
+static JACOBI_TABLE: [u8; JACOBI_TABLE_LEN] = build_jacobi_table();
 
 /// The five-bit Jacobi state threaded through a quotient sequence.
 #[derive(Clone, Copy)]
@@ -540,7 +630,7 @@ impl JacobiState {
     /// `q` times the other (`d = 1`: `a ← a − q·b`). `q` is the quotient as
     /// applied — after any size-guard back-off — reduced mod 4.
     fn update(&mut self, d: u8, q_mod_4: u8) {
-        debug_assert!(self.0 < 26 && d < 2 && q_mod_4 < 4);
+        debug_assert!((self.0 as usize) < JACOBI_STATES && d < 2 && q_mod_4 < 4);
         self.0 = JACOBI_TABLE[((self.0 as usize) << 3) | ((d as usize) << 2) | q_mod_4 as usize];
     }
 
@@ -559,7 +649,7 @@ impl JacobiState {
 // Euclid would apply, applies it to the full operands in a few multiplications,
 // and finds that matrix by recursing on the halves themselves — so reduction
 // costs O(M(n)·log n), where Lehmer, re-reading the leading digits after every
-// 124-bit batch, stays O(n²).
+// batch, stays O(n²).
 //
 // The difficulty is at the boundary. "These quotients are what full-width
 // Euclid would do" holds for a half-run's beginning but can fail for its last
@@ -819,30 +909,41 @@ fn sdiv_step(
 }
 
 /// Below this many limbs [`hgcd`] stops recursing and runs [`hgcd_base`]
-/// directly — the analogue of GMP's `HGCD_THRESHOLD`. Set by measurement.
+/// directly — the analogue of GMP's `HGCD_THRESHOLD`. Set by timing `gcd`
+/// on the EPYC 7452 at 196,608 / 393,216 / 786,432 bits: with the base at
+/// 16 limbs, 41.7 / 196.2 / 728.4 ms; at 64, 39.4 / 190.5 / 711.1; at 96,
+/// 38.2 / 185.6 / 704.9; at 128, 38.4 / 188.2 / 707.8; at 256, 38.1 /
+/// 188.2 / 706.1. So 96 is fastest or within 1% at every size, and 16 is
+/// 5–9% behind.
 const HGCD_BASE_LIMBS: usize = 96;
 
 /// [`hgcd`]'s workhorse below the recursion threshold — the role GMP's
 /// `hgcd2` loop plays. Reduction runs in two regimes: far from the boundary,
-/// whole Lehmer batches (the leading 124 bits certify a run of ~35 quotients,
+/// whole Lehmer batches (the leading digits certify a run of quotients,
 /// replayed against the full operands as one matrix application); near it,
 /// single guarded divisions, because a batch commits to its whole run and
 /// cannot stop at the boundary mid-way.
 ///
-/// What licenses running a batch *unguarded*: one batch advances the remainder
-/// sequence by at most its digit window, so started with both elements above
-/// `s + LEHMER_MARGIN` it physically cannot drop either to `s` bits — and
-/// everywhere above the boundary, certified quotients are Euclid's, so the
-/// batch is the same reduction the guarded steps would have taken.
+/// A batch runs unguarded, and above the boundary its certified quotients
+/// are Euclid's, so it is the same reduction the guarded steps would have
+/// taken. `LEHMER_MARGIN` decides how close to the boundary batches run.
 fn hgcd_base(
     a: &BigUint,
     b: &BigUint,
     s: usize,
     mut state: Option<&mut JacobiState>,
 ) -> (Mat2, BigUint, BigUint) {
-    /// A batch moves each element by at most the 124-bit digit window; the
-    /// slack above that covers the window's own imprecision at its last step.
-    const LEHMER_MARGIN: usize = 130;
+    /// A batch is attempted only while the smaller element is more than
+    /// this many bits above the boundary: the digit window plus six bits of
+    /// slack. This is economy, not safety — the batch's result is checked
+    /// against the boundary before it is committed, so a batch that would
+    /// cross is simply not taken — and the margin only avoids forming
+    /// batches that would be thrown away. A certified batch usually removes
+    /// about a window's worth of bits, but the certification bounds each
+    /// step's quotient, not its remainder, so a single step can drop the
+    /// smaller element to a few bits; the check, not the margin, is what
+    /// keeps the reduction inside Möller's contract. Six is policy.
+    const LEHMER_MARGIN: usize = LEADING_DIGIT_BITS + 6;
 
     let mut aa = a.clone();
     let mut bb = b.clone();
@@ -866,9 +967,17 @@ fn hgcd_base(
             // m01 == 0 means the digits pinned no quotient — the pair is too
             // lopsided for its leading windows to overlap — and division is
             // the only way forward.
-            if m01 != 0 {
+            // A batch commits to its whole run, and its last step can leave
+            // the smaller element far below where the window suggested; the
+            // guarded divisions never let an element fall below 2^s, and a
+            // batch is held to the same rule by checking its result before it
+            // is taken. Euclid's remainders decrease, so the final pair is
+            // the smallest the batch produces and checking it checks them all.
+            if m01 != 0 && {
                 combine_unsigned_into(&mut next_hi, &mut scratch, m00, hi, m01, lo);
                 combine_unsigned_into(&mut next_lo, &mut scratch, m10, hi, m11, lo);
+                pair_min_size(&next_hi, &next_lo) > s
+            } {
                 // The batch is linear, so it composes with `t` by acting on
                 // t's rows exactly as it acts on the values — with the same
                 // care for which row currently plays hi and which lo.
@@ -912,8 +1021,8 @@ fn hgcd_base(
                 continue;
             }
         }
-        // Within a batch-width of the boundary a batch could sail past it, so
-        // the last stretch goes one guarded division at a time.
+        // Near the boundary, or when a batch would cross it, the reduction
+        // goes one guarded division at a time.
         if !sdiv_step(
             &mut aa,
             &mut bb,
@@ -1092,10 +1201,13 @@ fn gcd_via_hgcd(a: &BigUint, b: &BigUint) -> BigUint {
 /// Lehmer; at or above it they ride the Half-GCD driver. The crossover sits
 /// *below* plain gcd's: Lehmer's extended form carries full-width signed
 /// cofactors through every batch, where the driver folds all cofactor work
-/// into one matrix accumulation per round. The driver ties Lehmer near 448
-/// limbs and is 2× ahead by 16384 (PERFORMANCE.md). Correctness does not
-/// depend on the value: setting it to 2 forces every size through the driver
-/// and its canonicalization.
+/// into one matrix accumulation per round. `hgcd_ext_crossover_timing`
+/// brackets the tie between 384 and 512 limbs on the M4 Pro: Lehmer 1.51 ms
+/// against the driver's 1.78 at 384, and 2.60 against 2.25 at 512, the
+/// driver's lead then widening to 10× at 4096 limbs. 512 is the first probed
+/// size at which the driver leads, and a power of two, so the driver never
+/// enters at parity. Correctness does not depend on the value: setting it to
+/// 2 forces every size through the driver and its canonicalization.
 const HGCD_EXT_THRESHOLD_LIMBS: usize = 512;
 
 /// Extended-gcd counterpart of [`gcd_via_hgcd`]: the same rounds, with the
@@ -1177,14 +1289,14 @@ fn canonicalize_bezout(a: &BigUint, b: &BigUint, g: &BigUint, s: &BigInt) -> (Bi
 }
 
 /// Greatest common divisor by Lehmer's algorithm: classical Euclid with each
-/// run of steps whose quotient the aligned leading 124-bit digits fix batched
-/// into one 2×2 transform of the full operands. Same remainder sequence as
-/// plain Euclid, with one matrix application in place of each batched run of
+/// run of steps whose quotient the aligned leading digits fix batched into one
+/// 2×2 transform of the full operands. Same remainder sequence as plain
+/// Euclid, with one matrix application in place of each batched run of
 /// divisions.
 ///
 /// Two guards keep the leading digits worth reading. A single-limb smaller
-/// operand hands off to [`gcd_u64`], below the width at which a 124-bit window
-/// says anything. Operands of unequal limb length take one ordinary division
+/// operand hands off to [`gcd_u64`], below the width at which the window says
+/// anything. Operands of unequal limb length take one ordinary division
 /// first: [`leading_pair`] windows both at the *larger* operand's top, so a
 /// length gap costs the smaller operand at least 64 bits of its window and
 /// leaves the transform certifying little or nothing, where one division
@@ -1421,7 +1533,7 @@ fn gcd_extended_lehmer(a: &BigUint, b: &BigUint) -> (BigUint, BigInt, BigInt) {
         }
         let n = r1.limbs().len();
         // A Lehmer step only when the operands share a multi-limb length and
-        // r0 >= r1, so the 124-bit leading digits are aligned and in range.
+        // r0 >= r1, so the leading digits are aligned and in range.
         if n >= 2 && r0.limbs().len() == n && r0 >= r1 {
             let (u_hat, v_hat) = leading_pair(&r0, &r1);
             let (m00, m01, m10, m11) = lehmer_transform(u_hat, v_hat, None);
@@ -1873,9 +1985,10 @@ pub fn rational_reconstruct_bounded(
 ///
 /// The bound is `⌊√((m−1)/2)⌋` taken by `sqrt_floor`'s Newton iteration,
 /// and computing it is not free relative to the walk it precedes: 0.3× the
-/// walk at 2048 bits and parity with it at 8192. Callers reconstructing many values under one modulus should
-/// compute the bound once and call [`rational_reconstruct_bounded`], which
-/// removes that term from every call after the first.
+/// walk at 2048 bits and parity with it at 8192. Callers reconstructing many
+/// values under one modulus should compute the bound once and call
+/// [`rational_reconstruct_bounded`], which removes that term from every call
+/// after the first.
 ///
 /// See [`rational_reconstruct_bounded`] for the contract and references.
 #[must_use]
@@ -2316,6 +2429,13 @@ pub fn jacobi(a: &BigUint, n: &BigUint) -> Option<i8> {
     Some(jacobi_lehmer(reduced, n.clone()))
 }
 
+/// Mask for `value mod 8`, the modulus of the supplement `(2/n)`.
+const MOD_8_MASK: u64 = 0b111;
+
+/// Mask for `value mod 4`, the modulus of quadratic reciprocity's sign rule
+/// and of the `p ≡ 3 (mod 4)` square-root shortcut.
+const MOD_4_MASK: u64 = 0b11;
+
 /// `value mod 2^k`, where `mask` is `2^k − 1` and `k ≤ 64`.
 ///
 /// Every limb above the first carries a factor of 2⁶⁴, so the residue is a
@@ -2379,8 +2499,8 @@ fn jacobi_lehmer_with_state(x: BigUint, y: BigUint, state: JacobiState) -> i8 {
                 combine_unsigned_into(&mut next_hi, &mut scratch, m00, hi, m01, lo);
                 combine_unsigned_into(&mut next_lo, &mut scratch, m10, hi, m11, lo);
                 replay_batch(&mut state, x_is_hi, &log);
-                // Parity places the results: the slot that held r₀ now holds
-                // the even-indexed remainder of the final pair.
+                // Parity places the results: the slot that held r₀ holds the
+                // even-indexed remainder of the final pair.
                 if !log.len.is_multiple_of(2) {
                     core::mem::swap(&mut next_hi, &mut next_lo);
                 }
@@ -2452,9 +2572,10 @@ const JACOBI_HGCD_THRESHOLD_LIMBS: usize = 2048;
 /// order — its base case places each Lehmer batch's results by step parity,
 /// and its guarded divisions reduce one slot in place — so each round's pair
 /// drops back into the same slots. Nothing is sorted: a swap would misdirect
-/// every later state update. Each round halves the pair, so the rounds' costs form the same
-/// geometric series as gcd's. When the pair falls below the crossover the
-/// Lehmer engine finishes mid-flight through [`jacobi_lehmer_with_state`].
+/// every later state update. Each round halves the pair, so the rounds'
+/// costs form the same geometric series as gcd's. When the pair falls below
+/// the crossover the Lehmer engine finishes mid-flight through
+/// [`jacobi_lehmer_with_state`].
 ///
 /// References: the threading design is Möller's, as realized in GMP's
 /// `mpn_hgcd_jacobi` (`hgcd_jacobi.c`); the published subquadratic symbol is
@@ -2733,7 +2854,7 @@ pub fn kronecker(a: &BigUint, n: &BigUint) -> i8 {
         if !a.is_odd() {
             return 0;
         }
-        if twos % 2 == 1 && matches!(low_bits_mod_pow2(a, 7), 3 | 5) {
+        if twos % 2 == 1 && matches!(low_bits_mod_pow2(a, MOD_8_MASK), 3 | 5) {
             sign = -sign;
         }
     }
@@ -2895,12 +3016,12 @@ fn decompose_n_minus_one(n: &BigUint) -> (BigUint, usize) {
 /// criterion makes the single exponentiation the whole answer. Otherwise,
 /// writing `p − 1 = q·2^s`, a shallow 2-adic structure runs the Tonelli–Shanks
 /// descent (Cohen, Algorithm 1.5.1), whose cost grows with `s²`; past a
-/// measured depth (`s² > 4·bits`) the dispatch switches to Cipolla's algorithm
-/// (Cipolla 1903), whose cost is flat in `s`. Both of those two need a
-/// quadratic non-residue, and each finds one by a bounded deterministic scan
-/// — expected to end within a couple of draws, since half of all residues
-/// qualify, and abandoned after 128 misses, an event of probability `2^{-128}`
-/// for a prime modulus.
+/// measured depth (`s² > CIPOLLA_THRESHOLD_FACTOR·bits`) the dispatch switches
+/// to Cipolla's algorithm (Cipolla 1903), whose cost is flat in `s`. Both of
+/// those two need a quadratic non-residue, and each finds one by a bounded
+/// deterministic scan — expected to end within a couple of draws, since half
+/// of all residues qualify, and abandoned after `NON_RESIDUE_SCAN_BOUND`
+/// misses, an event of probability `2^{-128}` for a prime modulus.
 ///
 /// The other root is `p - r`. `p = 2` and `a ≡ 0` return `a mod p` and zero
 /// respectively. Primality of `p` is the caller's contract, and the function
@@ -2953,7 +3074,7 @@ pub fn mod_sqrt(a: &BigUint, p: &BigUint) -> Option<BigUint> {
     let one = BigUint::one();
     let ctx = MontgomeryContext::new(p).expect("p is odd and non-zero");
 
-    let candidate = if low_bits_mod_pow2(p, 3) == 3 {
+    let candidate = if low_bits_mod_pow2(p, MOD_4_MASK) == 3 {
         // a^((p+1)/4): squaring it gives a^((p+1)/2) = a · a^((p-1)/2) = a
         // by Euler's criterion.
         let mut exponent = p.add(&one);
@@ -3307,19 +3428,27 @@ pub fn primes_below(bound: u64) -> Vec<u64> {
     primes
 }
 
-/// Odd integers a window of [`primes_past`] covers.
+/// Odd integers a window of [`primes_past`] covers. The window is sieved
+/// as one `bool` per odd integer, so this is a 32 KiB table, the L1 data
+/// cache of a Zen 2 core, and a window's crossings stay in cache. Measured
+/// on the EPYC 7452 over the first 200,000 primes past 2⁴⁰, with the window
+/// from 2¹² to 2¹⁸: 6.78, 5.62, 5.05, 4.80, 4.67, 4.80 and 4.74 s — flat
+/// within 3% from 2¹⁴ up, and 2¹² a third slower; past 10⁷ the same shape
+/// at 10.6 ms down to about 6.1 ms.
 const PRIME_WINDOW: u64 = 1 << 15;
 
 /// The crossing primes a window of [`primes_past`] is sieved by reach this
 /// far and no further; past it, above `2⁴⁰`, what the sieve leaves is
 /// settled by [`is_probable_prime`], a proof over the word. A window at
 /// the top of the word would otherwise want every prime to `2³²` crossed
-/// out first.
+/// out first. Policy: the cap trades the crossing table (the 82,025 primes
+/// below `2²⁰`) against one primality test per survivor above `2⁴⁰`; no
+/// probe times other caps.
 const CROSSING_PRIMES_BELOW: u64 = 1 << 20;
 
 /// The primes above `lower`, ascending, to the end of the word: the sieve
-/// of Eratosthenes over one window of `2¹⁵` odd integers at a time, each
-/// crossed out by the primes up to its square root from
+/// of Eratosthenes over one window of `PRIME_WINDOW` odd integers at a time,
+/// each crossed out by the primes up to its square root from
 /// [`primes_below`], sieved when it is reached. The segmented companion
 /// of [`primes_below`]: where that materialises every prime from two, this
 /// supplies the primes just past a cursor at a cost that does not depend
@@ -3407,29 +3536,107 @@ pub fn primes_past(lower: u64) -> impl Iterator<Item = u64> {
 }
 
 #[cfg(test)]
+mod hgcd_guard_tests {
+    use super::*;
+
+    /// A pair built so that, inside the Half-GCD base call, the leading
+    /// digits certify one step `A = 2·B + 2` that takes the pair to
+    /// `(B, 2)`: the quotient is exact, the remainder is two, and the pair
+    /// has crossed the boundary the recursion's splice relies on. The low
+    /// bits are chosen so both numbers carry a common thousand-bit factor,
+    /// which the crossed reduction must still find.
+    #[test]
+    fn a_batch_that_would_cross_the_boundary_is_not_taken() {
+        // The recursion's top-level width, the width at which its base
+        // call runs, and the low bits the base call never sees.
+        const BITS: usize = 131_072;
+        const BASE_BITS: usize = 4_096;
+        const UNSEEN: usize = BITS - BASE_BITS;
+        // The window is filled with ones below a fixed top so the certified
+        // quotient is exactly two.
+        const TOP: u128 = (1 << 122) + 12_345;
+        const FACTOR_BITS: usize = 1_000;
+
+        let shift = BASE_BITS - LEADING_DIGIT_BITS;
+        let mut b_top = BigUint::from_u128(TOP);
+        b_top.shl_bits(shift);
+        let mut ones = BigUint::one();
+        ones.shl_bits(shift);
+        let b_top = b_top.add(&ones.sub(&BigUint::one()));
+        let a_top = b_top.add(&b_top).add(&BigUint::from_u64(2));
+
+        let mut factor = BigUint::one();
+        factor.shl_bits(FACTOR_BITS - 1);
+        let factor = factor.add(&BigUint::from_u64(12_345)); // odd
+
+        let mut a = a_top.clone();
+        a.shl_bits(UNSEEN);
+        let mut b = b_top.clone();
+        b.shl_bits(UNSEEN);
+        let mut low = BigUint::one();
+        low.shl_bits(UNSEEN);
+        let low = low.sub(&BigUint::one());
+        // a: the largest multiple of the factor with those top bits.
+        let excess = a.add(&low).rem(&factor);
+        let a = a.add(&low).sub(&excess);
+        // b: the smallest multiple of the factor with those top bits.
+        let deficit = factor.sub(&b.rem(&factor)).rem(&factor);
+        let b = b.add(&deficit);
+        assert_eq!(a.bits(), BITS);
+        assert_eq!(b.bits(), BITS - 1);
+        assert!(a.rem(&factor).is_zero() && b.rem(&factor).is_zero());
+
+        let g = gcd(&a, &b);
+        assert!(
+            a.rem(&g).is_zero() && b.rem(&g).is_zero(),
+            "the answer does not divide both"
+        );
+        assert!(
+            g.rem(&factor).is_zero(),
+            "the thousand-bit common factor was lost: gcd has {} bits",
+            g.bits()
+        );
+    }
+}
+
+#[cfg(test)]
 mod prime_window_tests {
     use super::*;
+
+    /// Integers one window of [`primes_past`] spans: `PRIME_WINDOW` odd
+    /// integers, starting at the first odd integer past the cursor.
+    const WINDOW_SPAN: u64 = 2 * PRIME_WINDOW;
+
+    /// `2⁶⁴ − 59`, the largest prime below `2⁶⁴`.
+    const LARGEST_PRIME_BELOW_2_64: u64 = u64::MAX - 58;
 
     /// The primes past a cursor are the sieve's past it, every prime and
     /// no other, across window boundaries, from cursors on both sides of
     /// two and at the edges of a window.
     #[test]
     fn the_primes_past_a_cursor_are_the_sieves_past_it() {
-        let bound = 4 * 2 * PRIME_WINDOW + 11;
-        let all = primes_below(bound);
-        for lower in [
+        // Past the fourth window a cursor at zero opens, so the walk
+        // crosses window edges and stops inside the fifth.
+        const BOUND: u64 = 4 * WINDOW_SPAN + 11;
+        // Cursors either side of two and three, one inside the first
+        // window, the four around the far edge of the window a cursor at
+        // zero opens, and a prime inside the second window.
+        const CURSORS: [u64; 11] = [
             0,
             1,
             2,
             3,
             4,
             97,
-            2 * PRIME_WINDOW - 2,
-            2 * PRIME_WINDOW - 1,
-            2 * PRIME_WINDOW,
-            2 * PRIME_WINDOW + 1,
+            WINDOW_SPAN - 2,
+            WINDOW_SPAN - 1,
+            WINDOW_SPAN,
+            WINDOW_SPAN + 1,
             100_003,
-        ] {
+        ];
+        let bound = BOUND;
+        let all = primes_below(bound);
+        for lower in CURSORS {
             let expected: Vec<u64> = all.iter().copied().filter(|&p| p > lower).collect();
             let past: Vec<u64> = primes_past(lower).take_while(|&p| p < bound).collect();
             assert_eq!(past, expected, "cursor {lower}");
@@ -3443,8 +3650,20 @@ mod prime_window_tests {
     /// proof classifies it, and the primes come in order.
     #[test]
     fn the_windows_climb_past_any_table() {
-        for lower in [1u64 << 36, 1 << 44] {
-            let primes: Vec<u64> = primes_past(lower).take(40).collect();
+        // Either side of the square of the crossing primes' cap: below it
+        // the sieve settles a window alone, above it the proof does.
+        const BELOW_CAP_SQUARE: u64 = 1 << 36;
+        const ABOVE_CAP_SQUARE: u64 = 1 << 44;
+        const _: () = assert!(
+            BELOW_CAP_SQUARE < CROSSING_PRIMES_BELOW * CROSSING_PRIMES_BELOW
+                && CROSSING_PRIMES_BELOW * CROSSING_PRIMES_BELOW < ABOVE_CAP_SQUARE
+        );
+        // A run of primes past the cursor that stays inside the first
+        // window: the average gap at 2⁴⁴ is ln 2⁴⁴ ≈ 31, so forty primes
+        // span about a thousand integers of the window's 2¹⁶.
+        const PRIMES_PER_CURSOR: usize = 40;
+        for lower in [BELOW_CAP_SQUARE, ABOVE_CAP_SQUARE] {
+            let primes: Vec<u64> = primes_past(lower).take(PRIMES_PER_CURSOR).collect();
             assert!(primes.windows(2).all(|pair| pair[0] < pair[1]));
             let last = *primes.last().expect("forty primes");
             for n in lower + 1..=last {
@@ -3462,13 +3681,23 @@ mod prime_window_tests {
     /// top and no more.
     #[test]
     fn the_supply_ends_with_the_word() {
+        // A cursor whose only candidates are the top two integers, both
+        // composite: 2⁶⁴ − 2 is even and 3 divides 2⁶⁴ − 1.
+        const CURSOR_UNDER_THE_TOP: u64 = u64::MAX - 2;
+        // A cursor whose one window reaches the top of the word and holds
+        // the largest prime below 2⁶⁴, 342 integers up.
+        const CURSOR_NEAR_THE_TOP: u64 = u64::MAX - 400;
         assert_eq!(primes_past(u64::MAX).next(), None);
-        assert_eq!(primes_past(u64::MAX - 2).next(), None);
-        let near_top: Vec<u64> = primes_past(u64::MAX - 400).collect();
+        assert_eq!(primes_past(CURSOR_UNDER_THE_TOP).next(), None);
+        let near_top: Vec<u64> = primes_past(CURSOR_NEAR_THE_TOP).collect();
         assert!(near_top
             .iter()
             .all(|&p| is_probable_prime(&BigUint::from_u64(p))));
-        assert_eq!(near_top.last(), Some(&(u64::MAX - 58)), "2⁶⁴ − 59 is prime");
+        assert_eq!(
+            near_top.last(),
+            Some(&LARGEST_PRIME_BELOW_2_64),
+            "2⁶⁴ − 59 is prime"
+        );
     }
 }
 
@@ -3807,9 +4036,10 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
 /// `None` when the search itself proves `n` composite — a zero symbol
 /// exposing a factor shared with a candidate discriminant, or `n` a perfect
 /// square, for which no discriminant has symbol `-1` and which is therefore
-/// ruled out directly once three candidates have failed (Baillie and
-/// Wagstaff, §6). A zero symbol whose gcd with `n` is `n` itself carries no
-/// information (n is 5, 7, 11, …) and the search continues past it.
+/// ruled out directly once `SQUARE_CHECK_AFTER_FAILURES` candidates have
+/// failed (Baillie and Wagstaff, §6). A zero symbol whose gcd with `n` is `n`
+/// itself carries no information (n is 5, 7, 11, …) and the search continues
+/// past it.
 ///
 /// This is the one deliberately uncapped search in the crate, and its
 /// termination is a theorem: the candidates are the integers
@@ -3826,6 +4056,14 @@ fn mr_probable_prime(candidate: &BigUint, bases: &[u64]) -> bool {
 /// |D| over all odd `n < 2·10⁶` is 59, and heuristically `(D/n)` behaves
 /// like a fair coin per candidate.
 fn selfridge_discriminant(n: &BigUint) -> Option<i64> {
+    /// Failed candidates before the perfect-square test runs. Baillie and
+    /// Wagstaff (§6) supply the need for the test, not its position; this is
+    /// cost policy. The test is a `sqrt_floor` at `n`'s width, paid once by a
+    /// square and never by the non-squares that find a discriminant sooner;
+    /// a non-square fails three candidates about one time in eight, since
+    /// each has symbol `-1` about half the time. No probe times other
+    /// positions.
+    const SQUARE_CHECK_AFTER_FAILURES: u32 = 3;
     debug_assert!(n.is_odd() && !n.is_one());
     let mut d_abs: u64 = 5;
     let mut positive = true;
@@ -3847,7 +4085,7 @@ fn selfridge_discriminant(n: &BigUint) -> Option<i64> {
             _ => {}
         }
         attempts += 1;
-        if attempts == 3 {
+        if attempts == SQUARE_CHECK_AFTER_FAILURES {
             let root = n.sqrt_floor();
             if root.square() == *n {
                 return None;
@@ -4152,6 +4390,25 @@ pub fn is_probable_prime_bpsw(n: &BigUint) -> bool {
 mod tests {
     use super::*;
 
+    /// `1009 · 1013`: a semiprime whose factors both lie past the trial
+    /// sieve's primes below 1000, so it reaches every later stage.
+    const SEMIPRIME_PAST_THE_SIEVE: u64 = 1_022_117;
+
+    /// The smaller factor of [`SEMIPRIME_PAST_THE_SIEVE`].
+    const SEMIPRIME_SMALLER_FACTOR: u64 = 1_009;
+
+    /// `2⁶⁴ − 59`, the largest prime below `2⁶⁴`.
+    const LARGEST_PRIME_BELOW_2_64: u64 = u64::MAX - 58;
+
+    /// `10⁹ + 7`, a thirty-bit prime.
+    const PRIME_1E9_7: u64 = 1_000_000_007;
+
+    /// Knuth's MMIX linear congruential generator, `x ← a·x + c mod 2⁶⁴`
+    /// (TAOCP Vol. 2, 3rd ed., §3.3.4, Table 1): scattered words with no
+    /// dependency, for the word-width tests.
+    const MMIX_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
+    const MMIX_INCREMENT: u64 = 1_442_695_040_888_963_407;
+
     /// A deliberately plain oracle with no shared production code: mark each
     /// composite from its first possible prime factor onward.
     fn reference_prime_sieve(bound: usize) -> Vec<bool> {
@@ -4178,8 +4435,11 @@ mod tests {
 
     #[test]
     fn aks_matches_an_independent_sieve_through_127() {
-        let primes = reference_prime_sieve(128);
-        for value in 0u64..128 {
+        // Every value below 2⁷, where running the proof on all of them is
+        // cheap.
+        const EXHAUSTIVE_BOUND: u64 = 128;
+        let primes = reference_prime_sieve(EXHAUSTIVE_BOUND as usize);
+        for value in 0u64..EXHAUSTIVE_BOUND {
             assert_eq!(
                 is_prime_aks(&BigUint::from_u64(value)),
                 primes[value as usize],
@@ -4191,13 +4451,16 @@ mod tests {
     #[test]
     #[ignore = "parallel exhaustive AKS stress test; run explicitly in release mode"]
     fn aks_stress_matches_an_independent_sieve() {
+        // The bound when the environment sets none: past the trial sieve's
+        // 1000 by an order of magnitude.
+        const DEFAULT_INCLUSIVE_BOUND: usize = 10_000;
         let inclusive_bound = std::env::var("RUMP_AKS_STRESS_BOUND")
             .map(|value| {
                 value
                     .parse::<usize>()
                     .expect("RUMP_AKS_STRESS_BOUND must be a non-negative integer")
             })
-            .unwrap_or(10_000);
+            .unwrap_or(DEFAULT_INCLUSIVE_BOUND);
         let length = inclusive_bound
             .checked_add(1)
             .expect("stress bound must fit usize");
@@ -4234,13 +4497,23 @@ mod tests {
 
     #[test]
     fn aks_rejects_structured_composites() {
-        for value in [9u64, 25, 27, 49, 81, 121, 125, 341, 561, 645, 1_105, 1_729] {
+        // Prime powers 3², 5², 3³, 7², 3⁴, 11², 5³, which the perfect-power
+        // check must catch; the base-2 Fermat pseudoprimes 341 = 11·31 and
+        // 645 = 3·5·43; and the Carmichael numbers 561 = 3·11·17,
+        // 1105 = 5·13·17, 1729 = 7·13·19, which pass Fermat's test to every
+        // coprime base.
+        const COMPOSITES: [u64; 12] = [9, 25, 27, 49, 81, 121, 125, 341, 561, 645, 1_105, 1_729];
+        // The even prime, the next two, the Mersenne primes 2⁵ − 1 and
+        // 2⁷ − 1, the primes either side of 100, and the first four-digit
+        // prime.
+        const PRIMES: [u64; 8] = [2, 3, 5, 31, 97, 101, 127, 1_009];
+        for value in COMPOSITES {
             assert!(
                 !is_prime_aks(&BigUint::from_u64(value)),
                 "AKS accepted composite {value}"
             );
         }
-        for value in [2u64, 3, 5, 31, 97, 101, 127, 1_009] {
+        for value in PRIMES {
             assert!(
                 is_prime_aks(&BigUint::from_u64(value)),
                 "AKS rejected prime {value}"
@@ -4250,14 +4523,14 @@ mod tests {
 
     #[test]
     fn aks_rejects_after_reaching_the_polynomial_stage() {
-        // 1_022_117 = 1009 * 1013. Both factors lie above the chosen r, so
-        // neither the order search nor the complete a <= r gcd pass can
-        // expose them: rejection must come from the polynomial identity.
-        let candidate = BigUint::from_u64(1_022_117);
+        // Both factors of the semiprime lie above the chosen r, so neither
+        // the order search nor the complete a <= r gcd pass can expose
+        // them: rejection must come from the polynomial identity.
+        let candidate = BigUint::from_u64(SEMIPRIME_PAST_THE_SIEVE);
         let threshold = candidate.bits() * candidate.bits();
         let r = aks_order_modulus(&candidate, threshold);
         assert!(
-            r < 1_009,
+            r < SEMIPRIME_SMALLER_FACTOR as usize,
             "test construction needs both factors above r={r}"
         );
         for a in 2..=r {
@@ -4272,8 +4545,14 @@ mod tests {
 
     #[test]
     fn aks_order_predicate_matches_direct_orders() {
-        for n in 2u64..40 {
-            for modulus in 2usize..50 {
+        // Candidates of two to six bits against every modulus below 50,
+        // so n mod modulus is a unit, a non-unit, and one, and thresholds
+        // that the orders (at most 46) fall on both sides of.
+        const CANDIDATES: std::ops::Range<u64> = 2..40;
+        const MODULI: std::ops::Range<usize> = 2..50;
+        const THRESHOLDS: std::ops::Range<usize> = 0..12;
+        for n in CANDIDATES {
+            for modulus in MODULI {
                 let modulus_word = modulus as u64;
                 let order = if gcd_u64(n % modulus_word, modulus_word) == 1 {
                     let mut power = 1u64;
@@ -4284,7 +4563,7 @@ mod tests {
                 } else {
                     None
                 };
-                for threshold in 0usize..12 {
+                for threshold in THRESHOLDS {
                     assert_eq!(
                         aks_order_exceeds(&BigUint::from_u64(n), modulus, threshold),
                         order.is_some_and(|order| order > threshold),
@@ -4297,9 +4576,14 @@ mod tests {
 
     #[test]
     fn aks_order_search_returns_the_first_valid_modulus() {
-        for n in 2u64..40 {
+        // Candidates of two to six bits; thresholds zero, one, two, and
+        // the squares bits² the proof uses for candidates of two to five
+        // bits.
+        const CANDIDATES: std::ops::Range<u64> = 2..40;
+        const THRESHOLDS: [usize; 7] = [0, 1, 2, 4, 9, 16, 25];
+        for n in CANDIDATES {
             let n = BigUint::from_u64(n);
-            for threshold in [0usize, 1, 2, 4, 9, 16, 25] {
+            for threshold in THRESHOLDS {
                 let modulus = aks_order_modulus(&n, threshold);
                 assert!(aks_order_exceeds(&n, modulus, threshold));
                 assert!(
@@ -4312,7 +4596,10 @@ mod tests {
 
     #[test]
     fn aks_word_bounds_are_exact() {
-        for value in 1usize..1_000 {
+        // Every value below 1000: the totient oracle costs a gcd per
+        // smaller integer, half a million gcds in all.
+        const BOUND: usize = 1_000;
+        for value in 1usize..BOUND {
             let expected_phi = (1..=value)
                 .filter(|candidate| gcd_u64(*candidate as u64, value as u64) == 1)
                 .count();
@@ -4363,11 +4650,18 @@ mod tests {
 
     #[test]
     fn aks_polynomial_identity_matches_scalar_reference() {
-        for n in 2u64..=31 {
+        // Candidates through 2⁵ − 1, the reference multiplying n times per
+        // case; rings from the trivial r = 1 through r = 12, so r divides
+        // some n and is coprime to others; and a running two past n, so
+        // the constant reduces modulo n.
+        const CANDIDATES: std::ops::RangeInclusive<u64> = 2..=31;
+        const RING_ORDERS: std::ops::RangeInclusive<usize> = 1..=12;
+        const A_PAST_N: u64 = 2;
+        for n in CANDIDATES {
             let candidate = BigUint::from_u64(n);
-            for r in 1usize..=12 {
+            for r in RING_ORDERS {
                 let x_index = n as usize % r;
-                for a in 0u64..=n + 2 {
+                for a in 0u64..=n + A_PAST_N {
                     assert_eq!(
                         aks_polynomial_congruence(&candidate, r, x_index, a as usize),
                         reference_aks_polynomial_congruence(n, r, a),
@@ -4380,15 +4674,14 @@ mod tests {
 
     #[test]
     fn the_word_inverse_agrees_with_the_wide_one_at_every_width() {
-        let mut state = 0x1234_5678_9abc_def0u64;
-        let mut next = || {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            state
-        };
-        let moduli = [
-            3u64,
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1234_5678_9abc_def0;
+        /// Moduli at the word's edges: the smallest odd prime; the Fermat
+        /// prime 2¹⁶ + 1; 2³¹ − 1, a Mersenne prime; the first primes past
+        /// 2³¹, 2³², 2⁶² and 2⁶³; the largest primes below 2⁶³ and 2⁶⁴;
+        /// and the top of the word, 2⁶⁴ − 1 = 3·5·17·257·641·65537·6700417.
+        const MODULI: [u64; 10] = [
+            3,
             65_537,
             (1 << 31) - 1,
             (1 << 31) + 11,
@@ -4396,11 +4689,21 @@ mod tests {
             (1 << 62) + 135,
             (1 << 63) - 25,
             (1 << 63) + 29,
-            u64::MAX - 58,
+            LARGEST_PRIME_BELOW_2_64,
             u64::MAX,
         ];
-        for modulus in moduli {
-            for _ in 0..64 {
+        /// At the composite top of the word about half the draws share a
+        /// factor with the modulus, so this many see both outcomes often.
+        const DRAWS_PER_MODULUS: usize = 64;
+        let mut state = SEED;
+        let mut next = || {
+            state = state
+                .wrapping_mul(MMIX_MULTIPLIER)
+                .wrapping_add(MMIX_INCREMENT);
+            state
+        };
+        for modulus in MODULI {
+            for _ in 0..DRAWS_PER_MODULUS {
                 let value = next() % modulus;
                 let wide = mod_inverse(&BigUint::from_u64(value), &BigUint::from_u64(modulus))
                     .and_then(|x| x.to_u64());
@@ -4446,7 +4749,11 @@ mod tests {
 
     #[test]
     fn mod_inverse_u64_inverts_exactly_what_it_should() {
-        for modulus in [2u64, 3, 97, 65_537, 4_294_967_291] {
+        // The two smallest primes, one of two digits, the Fermat prime
+        // 2¹⁶ + 1, and 2³² − 5, the largest prime below 2³².
+        const MODULI: [u64; 5] = [2, 3, 97, 65_537, 4_294_967_291];
+        for modulus in MODULI {
+            // Units, the negation of one, and two unreduced values.
             for value in [1u64, 2, 5, modulus - 1, modulus + 1, modulus * 3 + 2] {
                 match mod_inverse_u64(value, modulus) {
                     Some(inverse) => {
@@ -4478,19 +4785,20 @@ mod tests {
     /// `u128::MAX`, with values that do and do not share a factor.
     #[test]
     fn the_double_word_inverse_agrees_with_the_wide_one_past_the_sign_bit() {
-        let mut state = 0x0fed_cba9_8765_4321u64;
-        let mut next = || {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            state
-        };
-        let moduli = [
-            1u128,
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0fed_cba9_8765_4321;
+        /// Moduli of one, two, and a two-digit prime; either side of the
+        /// word line at 2⁶⁴; the Mersenne prime 2⁸⁹ − 1; a value just past
+        /// 2¹²⁶; 2¹²⁷ − 1, the Mersenne prime just under the sign bit; the
+        /// sign bit itself; a prime past it; 3·2¹²⁶, both top bits set;
+        /// 2¹²⁸ − 159, the largest prime below 2¹²⁸; and the top of the
+        /// double word.
+        const MODULI: [u128; 13] = [
+            1,
             2,
             97,
-            u128::from(u64::MAX),
-            u128::from(u64::MAX) + 1,
+            u64::MAX as u128,
+            (u64::MAX as u128) + 1,
             (1 << 89) - 1,
             (1 << 126) + 3,
             (1 << 127) - 1,
@@ -4500,8 +4808,19 @@ mod tests {
             u128::MAX - 158,
             u128::MAX,
         ];
-        for modulus in moduli {
+        /// Scattered draws past the fixed values of each modulus.
+        const DRAWS_PER_MODULUS: usize = 48;
+        let mut state = SEED;
+        let mut next = || {
+            state = state
+                .wrapping_mul(MMIX_MULTIPLIER)
+                .wrapping_add(MMIX_INCREMENT);
+            state
+        };
+        for modulus in MODULI {
             let wide_modulus = BigUint::from_u128(modulus);
+            // Zero, the first units, a value with a factor of two and
+            // three, the negation of one, the midpoint, and one unreduced.
             let mut values = vec![
                 0u128,
                 1,
@@ -4512,7 +4831,7 @@ mod tests {
                 modulus / 2,
                 modulus.wrapping_add(1),
             ];
-            for _ in 0..48 {
+            for _ in 0..DRAWS_PER_MODULUS {
                 values.push((u128::from(next()) << 64 | u128::from(next())) % modulus);
             }
             for value in values {
@@ -4557,15 +4876,15 @@ mod tests {
     /// near `u128::MAX`.
     #[test]
     fn the_word_crt_agrees_with_the_wide_one() {
-        let mut state = 0x5555_aaaa_3333_cccc_u64;
-        let mut next = || {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            state
-        };
-        let moduli = [
-            1u64,
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5555_aaaa_3333_cccc;
+        /// Moduli paired every way: one; 2, 3, 4, 6, which share factors
+        /// among themselves; 35 = 5·7, composite and coprime to them; the
+        /// Fermat prime 2¹⁶ + 1; the first primes past 2³² and 2⁶³; the
+        /// largest prime below 2⁶⁴; and the top two words, consecutive and
+        /// so coprime, whose product nears the top of the double word.
+        const MODULI: [u64; 12] = [
+            1,
             2,
             3,
             4,
@@ -4574,13 +4893,22 @@ mod tests {
             65_537,
             (1 << 32) + 15,
             (1 << 63) + 29,
-            u64::MAX - 58,
+            LARGEST_PRIME_BELOW_2_64,
             u64::MAX - 1,
             u64::MAX,
         ];
-        for &first_modulus in &moduli {
-            for &second_modulus in &moduli {
-                for _ in 0..8 {
+        /// Residue pairs per pair of moduli, unreduced.
+        const DRAWS_PER_PAIR: usize = 8;
+        let mut state = SEED;
+        let mut next = || {
+            state = state
+                .wrapping_mul(MMIX_MULTIPLIER)
+                .wrapping_add(MMIX_INCREMENT);
+            state
+        };
+        for first_modulus in MODULI {
+            for second_modulus in MODULI {
+                for _ in 0..DRAWS_PER_PAIR {
                     let (first_residue, second_residue) = (next(), next());
                     let wide = crt_combine(&[
                         (
@@ -4746,6 +5074,11 @@ mod tests {
         assert_eq!(&positive.sub(&negative), g, "{what}: s·a + t·b = g");
     }
 
+    /// The values [`boundary_values`] returns per width.
+    const BOUNDARY_VALUES: usize = 3;
+
+    /// At `words` limbs: the top bit alone, all ones, and a random value
+    /// with the top bit set.
     fn boundary_values(words: usize, rng: &mut SplitMix64) -> Vec<(&'static str, BigUint)> {
         let top = pow2(64 * words - 1);
         let ones = mersenne(64 * words);
@@ -4761,9 +5094,9 @@ mod tests {
     /// values, a zero, and a common factor of half the width.
     #[test]
     fn gcds_are_certified_at_every_dispatch_boundary() {
-        let mut rng = SplitMix64 {
-            state: 0x7a3c_9e21_05d4_b6f8,
-        };
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x7a3c_9e21_05d4_b6f8;
+        let mut rng = SplitMix64 { state: SEED };
         for threshold in [HGCD_EXT_THRESHOLD_LIMBS, HGCD_THRESHOLD_LIMBS] {
             for words in [threshold - 1, threshold, threshold + 1] {
                 let values = boundary_values(words, &mut rng);
@@ -4807,11 +5140,20 @@ mod tests {
         // The Lehmer loop batches from two limbs; below that it runs the
         // word finish.
         const FIRST_BATCHED_LIMBS: usize = 2;
-        let mut rng = SplitMix64 {
-            state: 0x1f83_d9ab_fb41_bd6b,
-        };
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1f83_d9ab_fb41_bd6b;
+        const THRESHOLDS: [usize; 2] = [FIRST_BATCHED_LIMBS, JACOBI_HGCD_THRESHOLD_LIMBS];
+        const WIDTHS_PER_THRESHOLD: usize = 3;
+        /// One modulus per threshold, width and boundary value.
+        const MODULI: usize = THRESHOLDS.len() * WIDTHS_PER_THRESHOLD * BOUNDARY_VALUES;
+        /// A modulus is skipped when its random `x` shares a factor with
+        /// it, which for a composite `n` with a small factor is a real
+        /// fraction of draws; the seed fixes how many, and the floor keeps
+        /// the skips from hollowing out the test.
+        const CERTIFIED_FLOOR: usize = MODULI - 3;
+        let mut rng = SplitMix64 { state: SEED };
         let mut certified = 0;
-        for threshold in [FIRST_BATCHED_LIMBS, JACOBI_HGCD_THRESHOLD_LIMBS] {
+        for threshold in THRESHOLDS {
             for words in [threshold - 1, threshold, threshold + 1] {
                 for (name, base) in boundary_values(words, &mut rng) {
                     // n ≡ 3 (mod 8), same width.
@@ -4847,8 +5189,8 @@ mod tests {
             }
         }
         assert!(
-            certified >= 15,
-            "only {certified} of 18 moduli were certified"
+            certified >= CERTIFIED_FLOOR,
+            "only {certified} of {MODULI} moduli were certified"
         );
     }
 
@@ -4904,11 +5246,22 @@ mod tests {
 
     #[test]
     fn jacobi_state_machine_matches_binary() {
-        // Exhaustive small cases: every (a, odd n) with n < 200, for both the
-        // plain quotient driver and the Lehmer-batched engine.
-        for n_small in (1u64..200).step_by(2) {
+        // Exhaustive small cases: every odd n below 200 with every a below
+        // it, capped at 60, for both the plain quotient driver and the
+        // Lehmer-batched engine.
+        const SMALL_MODULUS_BOUND: u64 = 200;
+        const SMALL_TOP_CAP: u64 = 60;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0dd5_ba11_5eed_c0de;
+        /// Under a word, one word, the two limbs the Lehmer loop batches
+        /// from, four, an odd width off any limb edge, and up to 64 limbs,
+        /// all below the Half-GCD threshold so the Lehmer engine runs
+        /// throughout.
+        const WIDTHS: [usize; 8] = [16, 64, 128, 256, 777, 1024, 2048, 4096];
+        const DRAWS_PER_WIDTH: usize = 30;
+        for n_small in (1u64..SMALL_MODULUS_BOUND).step_by(2) {
             let n = BigUint::from_u64(n_small);
-            for a_small in 0..n_small.min(60) {
+            for a_small in 0..n_small.min(SMALL_TOP_CAP) {
                 let a = BigUint::from_u64(a_small);
                 let oracle = jacobi_binary_oracle(&a, &n);
                 assert_eq!(
@@ -4925,11 +5278,9 @@ mod tests {
         }
         // Random sweep across sizes, through the quotient driver and the
         // dispatched public function.
-        let mut rng = SplitMix64 {
-            state: 0x0dd5_ba11_5eed_c0de,
-        };
-        for &bits in &[16usize, 64, 128, 256, 777, 1024, 2048, 4096] {
-            for _ in 0..30 {
+        let mut rng = SplitMix64 { state: SEED };
+        for bits in WIDTHS {
+            for _ in 0..DRAWS_PER_WIDTH {
                 let mut n = draw_below(&mut rng, &pow2(bits));
                 if !n.is_odd() {
                     n = n.add(&BigUint::one());
@@ -4953,23 +5304,25 @@ mod tests {
     #[test]
     fn jacobi_state_through_hgcd_matches_binary() {
         use super::{hgcd, jacobi_lehmer_with_state, JacobiState};
-        let mut rng = SplitMix64 {
-            state: 0x7ac0_b1a5_ca55_e77e,
-        };
-        // Sizes span the batched base case (≤ 6144 bits) and the recursion
-        // above it. Each case threads the state through one hgcd call and
-        // hands the reduced pair to the Lehmer engine mid-flight — exactly
-        // the driver's composition, at sizes the dispatch threshold would
-        // never route here.
-        for &(bits, reps) in &[
-            (130usize, 60),
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x7ac0_b1a5_ca55_e77e;
+        /// Sizes and draws per size, from just past two limbs through the
+        /// batched base case (`HGCD_BASE_LIMBS`, 6144 bits) into the
+        /// recursion above it, the draws tapering as the sizes grow. Each
+        /// case threads the state through one hgcd call and hands the
+        /// reduced pair to the Lehmer engine mid-flight, the driver's own
+        /// composition, at sizes the dispatch threshold never routes here.
+        const SIZES: [(usize, usize); 7] = [
+            (130, 60),
             (500, 40),
             (1500, 30),
             (4000, 20),
             (8000, 10),
             (16000, 6),
             (40000, 3),
-        ] {
+        ];
+        let mut rng = SplitMix64 { state: SEED };
+        for (bits, reps) in SIZES {
             for _ in 0..reps {
                 // Both operands full width, satisfying hgcd's precondition
                 // #min > ⌊bits/2⌋ + 1; sorted so x < y, and y made odd, which
@@ -5000,9 +5353,22 @@ mod tests {
     #[test]
     fn jacobi_hgcd_driver_matches_lehmer() {
         use super::{jacobi_hgcd, jacobi_lehmer, JACOBI_HGCD_THRESHOLD_LIMBS};
-        let mut rng = SplitMix64 {
-            state: 0x5eed_7e57_0dd1_7e57,
-        };
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5eed_7e57_0dd1_7e57;
+        /// Limbs past the threshold, and past twice it: each round halves
+        /// the pair, and the margin keeps the halved pair at twice the
+        /// threshold clear of it, so a second round runs.
+        const ROUND_MARGIN_LIMBS: usize = 8;
+        /// Limbs past twice the threshold for the larger element of the
+        /// unbalanced pair: with the smaller at exactly the threshold
+        /// width, that puts it 28 limbs and a bit under hgcd's boundary
+        /// `s = ⌊bits/2⌋ + 1`, which is what forces the division fallback.
+        const UNBALANCED_MARGIN_LIMBS: usize = 56;
+        /// Limbs past the threshold for the close pair, so the driver runs
+        /// at all rather than handing straight to Lehmer; the pair's
+        /// difference of two is what forces the fallback.
+        const CLOSE_MARGIN_LIMBS: usize = 52;
+        let mut rng = SplitMix64 { state: SEED };
         let full_width_odd = |rng: &mut SplitMix64, limbs: usize| {
             let bits = limbs * 64;
             let mut y = draw_below(rng, &pow2(bits));
@@ -5010,12 +5376,12 @@ mod tests {
             y.set_bit(0);
             y
         };
-        // One driver round at the threshold plus a margin, two rounds at
-        // twice it (each round halves the pair). The Lehmer engine — itself
-        // pinned to the binary oracle above — is the reference.
-        for &limbs in &[
-            JACOBI_HGCD_THRESHOLD_LIMBS + 8,
-            2 * JACOBI_HGCD_THRESHOLD_LIMBS + 8,
+        // One driver round at the threshold plus the margin, two rounds
+        // at twice it. The Lehmer engine, itself pinned to the binary
+        // oracle above, is the reference.
+        for limbs in [
+            JACOBI_HGCD_THRESHOLD_LIMBS + ROUND_MARGIN_LIMBS,
+            2 * JACOBI_HGCD_THRESHOLD_LIMBS + ROUND_MARGIN_LIMBS,
         ] {
             let y = full_width_odd(&mut rng, limbs);
             let x = draw_below(&mut rng, &y);
@@ -5033,7 +5399,10 @@ mod tests {
         // Structured shapes that force the driver's division fallback: a pair
         // too unbalanced for hgcd's boundary (smaller element at or below s
         // bits), and a pair too close (difference at or below s bits).
-        let y = full_width_odd(&mut rng, 2 * JACOBI_HGCD_THRESHOLD_LIMBS + 56);
+        let y = full_width_odd(
+            &mut rng,
+            2 * JACOBI_HGCD_THRESHOLD_LIMBS + UNBALANCED_MARGIN_LIMBS,
+        );
         let mut x = draw_below(&mut rng, &pow2(JACOBI_HGCD_THRESHOLD_LIMBS * 64));
         x.set_bit(JACOBI_HGCD_THRESHOLD_LIMBS * 64 - 1);
         assert_eq!(
@@ -5041,7 +5410,7 @@ mod tests {
             jacobi_lehmer(x, y),
             "unbalanced fallback diverged"
         );
-        let y = full_width_odd(&mut rng, JACOBI_HGCD_THRESHOLD_LIMBS + 52);
+        let y = full_width_odd(&mut rng, JACOBI_HGCD_THRESHOLD_LIMBS + CLOSE_MARGIN_LIMBS);
         let x = y.sub(&BigUint::from_u64(2));
         assert_eq!(
             jacobi_hgcd(x.clone(), y.clone()),
@@ -5059,14 +5428,19 @@ mod tests {
         // The recursion hands its tail to Lehmer at half the smallest size
         // timed, so every size runs at least one round.
         const TAIL_LIMBS: usize = 128;
-        let mut rng = SplitMix64 {
-            state: 0xc0de_57a7_e0f0_a11e,
-        };
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xc0de_57a7_e0f0_a11e;
+        /// From twice the tail to eight times the threshold, dense around
+        /// the threshold where the crossover lies.
+        const SIZES_LIMBS: [usize; 9] = [256, 512, 1024, 1536, 2048, 3072, 4096, 8192, 16384];
+        /// Timings per size, the best kept.
+        const RUNS: usize = 3;
+        let mut rng = SplitMix64 { state: SEED };
         eprintln!(
             "{:>7} {:>12} {:>12}  winner",
             "limbs", "lehmer_ms", "hgcd_ms"
         );
-        for &limbs in &[256usize, 512, 1024, 1536, 2048, 3072, 4096, 8192, 16384] {
+        for limbs in SIZES_LIMBS {
             let bits = limbs * 64;
             let mut y = draw_below(&mut rng, &pow2(bits));
             y.set_bit(bits - 1);
@@ -5074,7 +5448,7 @@ mod tests {
             let x = draw_below(&mut rng, &y);
             let time = |f: &dyn Fn()| {
                 let mut best = f64::INFINITY;
-                for _ in 0..3 {
+                for _ in 0..RUNS {
                     let t0 = Instant::now();
                     f();
                     best = best.min(t0.elapsed().as_secs_f64() * 1e3);
@@ -5121,23 +5495,31 @@ mod tests {
         use super::{gcd_lehmer, gcd_via_hgcd};
         use std::hint::black_box;
         use std::time::Instant;
-        let mut rng = SplitMix64 {
-            state: 0x7a11_5eed_0dd5_ba11,
-        };
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x7a11_5eed_0dd5_ba11;
+        /// Doublings from one limb short of the base case to four times
+        /// the threshold.
+        const SIZES_LIMBS: [usize; 8] = [64, 128, 256, 512, 1024, 2048, 4096, 8192];
+        /// Limb-repetitions per timing: sizes up to the threshold repeat
+        /// to fill 2048 limbs of work, larger ones run once.
+        const WORK_LIMBS: usize = 2048;
+        /// Timings per size, the best kept.
+        const RUNS: usize = 2;
+        let mut rng = SplitMix64 { state: SEED };
         eprintln!(
             "{:>7} {:>12} {:>12}  winner",
             "limbs", "lehmer_ms", "hgcd_ms"
         );
-        for &limbs in &[64usize, 128, 256, 512, 1024, 2048, 4096, 8192] {
+        for limbs in SIZES_LIMBS {
             let bits = limbs * 64;
             let mut a = draw_below(&mut rng, &pow2(bits));
             let mut b = draw_below(&mut rng, &pow2(bits));
             a.set_bit(bits - 1);
             b.set_bit(bits - 1);
-            let reps = (2048 / limbs).max(1);
+            let reps = (WORK_LIMBS / limbs).max(1);
             let time = |f: &dyn Fn() -> BigUint| {
                 let mut best = f64::INFINITY;
-                for _ in 0..2 {
+                for _ in 0..RUNS {
                     let t0 = Instant::now();
                     for _ in 0..reps {
                         black_box(f());
@@ -5159,14 +5541,19 @@ mod tests {
         use super::{canonicalize_bezout, gcd_extended_lehmer, gcd_extended_via_hgcd};
         use std::hint::black_box;
         use std::time::Instant;
-        let mut rng = SplitMix64 {
-            state: 0xe87e_9d5a_11c0_ffee,
-        };
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xe87e_9d5a_11c0_ffee;
+        /// From the base case to 32 times the extended threshold, dense
+        /// below it where the crossover lies.
+        const SIZES_LIMBS: [usize; 7] = [128, 256, 384, 512, 1024, 4096, 16384];
+        /// Timings per size, the best kept.
+        const RUNS: usize = 2;
+        let mut rng = SplitMix64 { state: SEED };
         eprintln!(
             "{:>7} {:>12} {:>12}  winner",
             "limbs", "lehmer_ms", "hgcd_ms"
         );
-        for &limbs in &[128usize, 256, 384, 512, 1024, 4096, 16384] {
+        for limbs in SIZES_LIMBS {
             let bits = limbs * 64;
             let mut a = draw_below(&mut rng, &pow2(bits));
             let mut b = draw_below(&mut rng, &pow2(bits));
@@ -5174,7 +5561,7 @@ mod tests {
             b.set_bit(bits - 1);
             let time = |f: &dyn Fn()| {
                 let mut best = f64::INFINITY;
-                for _ in 0..2 {
+                for _ in 0..RUNS {
                     let t0 = Instant::now();
                     f();
                     best = best.min(t0.elapsed().as_secs_f64() * 1e3);
@@ -5197,14 +5584,13 @@ mod tests {
     fn hgcd_reduction_invariants() {
         use super::{abs_diff_bits, gcd_lehmer, hgcd, pair_min_size};
         use crate::bigint::BigInt;
-        let mut rng = SplitMix64 {
-            state: 0x5eed_cafe_f00d_babe,
-        };
-        let one = BigInt::from_biguint(BigUint::one());
-        // Sizes span the batched base case (≤ 6144 bits) and the recursion
-        // above it; reps taper as the sizes grow.
-        for &(bits, reps) in &[
-            (8usize, 120),
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5eed_cafe_f00d_babe;
+        /// Sizes and draws per size: sub-word pairs, a word, then through
+        /// the batched base case (`HGCD_BASE_LIMBS`, 6144 bits) into the
+        /// recursion above it, the draws tapering as the sizes grow.
+        const SIZES: [(usize, usize); 14] = [
+            (8, 120),
             (12, 120),
             (16, 120),
             (24, 120),
@@ -5218,7 +5604,10 @@ mod tests {
             (8000, 10),
             (16000, 6),
             (40000, 3),
-        ] {
+        ];
+        let mut rng = SplitMix64 { state: SEED };
+        let one = BigInt::from_biguint(BigUint::one());
+        for (bits, reps) in SIZES {
             for _ in 0..reps {
                 // Both operands full width (top bit forced), satisfying hgcd's
                 // precondition #min > ⌊bits/2⌋ + 1 — as the driver guarantees.
@@ -5294,15 +5683,20 @@ mod tests {
         // The bracket that certifies a quotient holds for leading digits of
         // any width. Narrow ones make its boundary cases (a corrected
         // remainder of exactly zero or exactly the denominator) common
-        // instead of a 2^-62 event.
+        // instead of a 2^-62 event: from two bits, the narrowest digits
+        // that hold a quotient and a remainder, to twenty, still a sixth
+        // of the production window.
         const DIGIT_BITS: std::ops::RangeInclusive<usize> = 2..=20;
         // Operands run this many bits past their window, so the discarded
         // low bits range from none to more than a word.
         const EXTRA_BITS: u64 = 80;
+        // Draws per width: at the widest digits a boundary case is a
+        // 2^-20 event per step, so thousands of pairs are what makes one
+        // likely there.
         const PAIRS_PER_WIDTH: usize = 2_000;
-        let mut rng = SplitMix64 {
-            state: 0x6c65_686d_6572_0001,
-        };
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x6c65_686d_6572_0001;
+        let mut rng = SplitMix64 { state: SEED };
         let mut steps = 0;
         for digit_bits in DIGIT_BITS {
             for _ in 0..PAIRS_PER_WIDTH {
@@ -5334,11 +5728,17 @@ mod tests {
         // floor sits a fifth below that, where a batch cut short by its
         // bounds would land.
         const MEAN_STEPS_FLOOR: usize = 29;
+        // Two limbs, where the window discards four bits; four limbs,
+        // where it discards more than a word; and 16 and 64 limbs, where
+        // the discarded part dwarfs the window.
         const OPERAND_BITS: [usize; 4] = [128, 200, 1024, 4096];
+        // A thousand batches in all: per batch the step count spreads
+        // about five either way, so the mean's noise is under a fifth of
+        // a step against a floor seven steps below it.
         const PAIRS_PER_SIZE: usize = 250;
-        let mut rng = SplitMix64 {
-            state: 0x6c65_686d_6572_0002,
-        };
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x6c65_686d_6572_0002;
+        let mut rng = SplitMix64 { state: SEED };
         let (mut steps, mut batches) = (0, 0);
         for bits in OPERAND_BITS {
             let top = pow2(bits - 1);
@@ -5357,14 +5757,24 @@ mod tests {
         );
 
         // Consecutive Fibonacci numbers: every quotient is 1, the longest run
-        // a window can hold, so the entries climb to the i64 bound.
+        // a window can hold. Each unit step moves the digits down one
+        // Fibonacci index from about F₁₈₀ (F₁₈₁ > 2¹²⁴ > F₁₈₀) while the
+        // entries climb one from F₁, and the bracket holds while the digits
+        // stay clear of the entries, so the batch runs near ninety steps,
+        // 87 for this pair; the entry bound 2⁶³ (F₉₃ passes it) would end
+        // it at 92 if the bracket did not first. The floor leaves room for
+        // the bracket's exact stopping point and sits far above the
+        // longest random batch.
+        const FIBONACCI_STEPS_FLOOR: usize = 80;
+        // Far past the window: any index from 181 up, where the window
+        // sees only leading digits, would do.
         const FIBONACCI_INDEX: usize = 3000;
         let (mut older, mut old) = (BigUint::zero(), BigUint::one());
         for _ in 0..FIBONACCI_INDEX {
             (older, old) = (old.clone(), older.add(&old));
         }
         let (u_hat, v_hat) = leading_pair(&old, &older);
-        assert!(replay_lehmer_batch(&old, &older, u_hat, v_hat) >= MEAN_STEPS_FLOOR);
+        assert!(replay_lehmer_batch(&old, &older, u_hat, v_hat) >= FIBONACCI_STEPS_FLOOR);
 
         // A quotient at 2^62 or past it ends the batch before its first step:
         // b = 2^64 + 1 and a = q·b + 1 for q on both sides of the limit.
@@ -5383,18 +5793,31 @@ mod tests {
     #[test]
     fn gcd_via_hgcd_matches_lehmer() {
         use super::{gcd_lehmer, gcd_via_hgcd};
-        let mut rng = SplitMix64 {
-            state: 0x4859_2b17_ac3f_1d05,
-        };
-        // Below HGCD_THRESHOLD_LIMBS gcd_via_hgcd hands a pair straight to
-        // gcd_lehmer; these pin that handoff. The sizes past the threshold
-        // below are the ones that run the recursion.
-        for &bits in &[
-            130usize, 200, 256, 400, 512, 777, 1024, 1500, 2048, 3000, 4096, 5000, 8192, 16000,
-            50000,
-        ] {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x4859_2b17_ac3f_1d05;
+        /// Below `HGCD_THRESHOLD_LIMBS` (131072 bits) `gcd_via_hgcd` hands
+        /// a pair straight to `gcd_lehmer`; these widths, from just past
+        /// two limbs to 50000 bits, limb multiples and odd widths mixed,
+        /// pin that handoff. The sizes past the threshold below are the
+        /// ones that run the recursion.
+        const HANDOFF_BITS: [usize; 15] = [
+            130, 200, 256, 400, 512, 777, 1024, 1500, 2048, 3000, 4096, 5000, 8192, 16000, 50000,
+        ];
+        const DRAWS_PER_HANDOFF_WIDTH: usize = 4;
+        /// Past the threshold by one limb, and by half the threshold
+        /// again: one recursion round each, entered from just above the
+        /// threshold and from well above it.
+        const PAST_THRESHOLD_BITS: [usize; 2] = [
+            super::HGCD_THRESHOLD_LIMBS * 64 + 64,
+            super::HGCD_THRESHOLD_LIMBS * 64 + super::HGCD_THRESHOLD_LIMBS * 32,
+        ];
+        const DRAWS_PER_RECURSION_WIDTH: usize = 2;
+        /// Eight limbs past each public dispatch threshold.
+        const DISPATCH_MARGIN_BITS: usize = 512;
+        let mut rng = SplitMix64 { state: SEED };
+        for bits in HANDOFF_BITS {
             let bound = pow2(bits);
-            for _ in 0..4 {
+            for _ in 0..DRAWS_PER_HANDOFF_WIDTH {
                 let a = draw_below(&mut rng, &bound);
                 let b = draw_below(&mut rng, &bound);
                 assert_eq!(
@@ -5407,11 +5830,10 @@ mod tests {
         // Past the threshold: random pairs, whose gcd is small, and pairs
         // built on a common factor of half their width, so the recursion
         // must carry a large gcd through its rounds.
-        let limb_bits = super::HGCD_THRESHOLD_LIMBS * 64;
-        for &bits in &[limb_bits + 64, limb_bits + limb_bits / 2] {
+        for bits in PAST_THRESHOLD_BITS {
             let bound = pow2(bits);
             let half = pow2(bits / 2);
-            for _ in 0..2 {
+            for _ in 0..DRAWS_PER_RECURSION_WIDTH {
                 let a = draw_below(&mut rng, &bound).add(&bound);
                 let b = draw_below(&mut rng, &bound).add(&bound);
                 assert_eq!(
@@ -5431,11 +5853,17 @@ mod tests {
                 assert!(g.bits() >= bits / 2, "the shared factor divides the gcd");
             }
         }
-        // Structured: 2^2000 against 2^2000 − 1 (coprime), and a shared factor.
-        let big = pow2(2000);
+        // Structured: a power of two against its predecessor, consecutive
+        // and so coprime, where Euclid ends in two steps, the second with a
+        // 2000-bit quotient far past any batch's bound; and the Mersenne
+        // prime 2¹²⁷⁹ − 1 times 6 and times 10, whose gcd is twice the
+        // prime.
+        const POWER_OF_TWO_BITS: usize = 2000;
+        const MERSENNE_EXPONENT: usize = 1279;
+        let big = pow2(POWER_OF_TWO_BITS);
         let odd = big.sub(&BigUint::one());
         assert_eq!(gcd_via_hgcd(&big, &odd), gcd_lehmer(&big, &odd));
-        let m = mersenne(1279);
+        let m = mersenne(MERSENNE_EXPONENT);
         let shared = m.mul(&BigUint::from_u64(6));
         let other = m.mul(&BigUint::from_u64(10));
         assert_eq!(gcd_via_hgcd(&shared, &other), gcd_lehmer(&shared, &other));
@@ -5443,7 +5871,7 @@ mod tests {
         // Above the dispatch thresholds the public functions take the
         // Half-GCD paths; large cases pin those routes against the Lehmer
         // engines they must reproduce exactly.
-        let bound = pow2(super::HGCD_THRESHOLD_LIMBS * 64 + 512);
+        let bound = pow2(super::HGCD_THRESHOLD_LIMBS * 64 + DISPATCH_MARGIN_BITS);
         let a = draw_below(&mut rng, &bound);
         let b = draw_below(&mut rng, &bound);
         assert_eq!(
@@ -5452,7 +5880,7 @@ mod tests {
             "public gcd dispatch diverged"
         );
 
-        let ext_bound = pow2(super::HGCD_EXT_THRESHOLD_LIMBS * 64 + 512);
+        let ext_bound = pow2(super::HGCD_EXT_THRESHOLD_LIMBS * 64 + DISPATCH_MARGIN_BITS);
         let p = draw_below(&mut rng, &ext_bound);
         let q = draw_below(&mut rng, &ext_bound);
         assert_eq!(
@@ -5652,22 +6080,28 @@ mod tests {
         // Euler's criterion computes it independently: a^((p-1)/2) mod p is
         // 1 for residues, p-1 for non-residues, 0 when p | a. mod_pow rides
         // the Montgomery kernels, a code path disjoint from jacobi's
-        // shift-and-reciprocity loop. The large primes are the Mersenne
-        // primes M89, M107, M127.
-        let mut rng = SplitMix64 { state: 0x3c3c_3c3c };
-        let mut primes: Vec<BigUint> = [3u64, 5, 7, 11, 13, 65_537, 2_147_483_647]
-            .iter()
-            .map(|&p| BigUint::from_u64(p))
-            .collect();
-        primes.push(mersenne(89));
-        primes.push(mersenne(107));
-        primes.push(mersenne(127));
+        // shift-and-reciprocity loop.
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x3c3c_3c3c;
+        /// The first five odd primes, the Fermat prime 2¹⁶ + 1, and the
+        /// Mersenne prime 2³¹ − 1; the Mersenne primes M89, M107 and M127
+        /// follow at two limbs.
+        const WORD_PRIMES: [u64; 7] = [3, 5, 7, 11, 13, 65_537, 2_147_483_647];
+        const MERSENNE_EXPONENTS: [usize; 3] = [89, 107, 127];
+        /// Draws per prime: at the small primes a dozen draws meet both
+        /// residues and non-residues.
+        const DRAWS_PER_PRIME: usize = 12;
+        let mut rng = SplitMix64 { state: SEED };
+        let mut primes: Vec<BigUint> = WORD_PRIMES.iter().map(|&p| BigUint::from_u64(p)).collect();
+        for exponent in MERSENNE_EXPONENTS {
+            primes.push(mersenne(exponent));
+        }
 
         for p in &primes {
             let exponent = p.sub(&BigUint::one());
             let mut half = exponent.clone();
             half.shr_bits(1);
-            for _ in 0..12 {
+            for _ in 0..DRAWS_PER_PRIME {
                 let a = draw_below(&mut rng, p);
                 let euler = mod_pow(&a, &half, p);
                 let expected = if euler.is_one() {
@@ -5685,9 +6119,15 @@ mod tests {
 
     #[test]
     fn jacobi_is_multiplicative_and_periodic() {
-        let mut rng = SplitMix64 { state: 0x5151_5151 };
-        let bound = BigUint::from_u128(1 << 80);
-        for _ in 0..40 {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5151_5151;
+        /// Moduli of up to 80 bits, two limbs, whose products reach 160
+        /// bits, three.
+        const MODULUS_BITS: u32 = 80;
+        const DRAWS: usize = 40;
+        let mut rng = SplitMix64 { state: SEED };
+        let bound = BigUint::from_u128(1 << MODULUS_BITS);
+        for _ in 0..DRAWS {
             let mut n1 = draw_below(&mut rng, &bound);
             let mut n2 = draw_below(&mut rng, &bound);
             if !n1.is_odd() {
@@ -5716,9 +6156,12 @@ mod tests {
 
     #[test]
     fn jacobi_two_supplement_follows_n_mod_8() {
-        // (2/n) = +1 for n = 1, 7 (mod 8) and -1 for n = 3, 5 (mod 8).
+        // (2/n) = +1 for n = 1, 7 (mod 8) and -1 for n = 3, 5 (mod 8),
+        // over every odd n from 3 to 199, which cycles through the four
+        // classes many times.
+        const MODULUS_BOUND: u64 = 200;
         let two = BigUint::from_u64(2);
-        for n in (3u64..200).step_by(2) {
+        for n in (3u64..MODULUS_BOUND).step_by(2) {
             let expected = match n % 8 {
                 1 | 7 => 1,
                 3 | 5 => -1,
@@ -5887,9 +6330,15 @@ mod tests {
 
     #[test]
     fn kronecker_extends_jacobi_and_is_multiplicative() {
-        let mut rng = SplitMix64 { state: 0x2718_2818 };
-        let bound = BigUint::from_u128(1 << 72);
-        for _ in 0..40 {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x2718_2818;
+        /// Arguments of up to 72 bits: a limb and a byte, so the second
+        /// limb is short.
+        const ARGUMENT_BITS: u32 = 72;
+        const DRAWS: usize = 40;
+        let mut rng = SplitMix64 { state: SEED };
+        let bound = BigUint::from_u128(1 << ARGUMENT_BITS);
+        for _ in 0..DRAWS {
             let a = draw_below(&mut rng, &bound);
             let mut n_odd = draw_below(&mut rng, &bound);
             if !n_odd.is_odd() {
@@ -5912,11 +6361,13 @@ mod tests {
 
     #[test]
     fn legendre_is_jacobi_on_primes() {
-        let p = BigUint::from_u64(1_000_000_007);
+        let p = BigUint::from_u64(PRIME_1E9_7);
+        // Zero, the first units, and a value eight below p.
         for a in [0u64, 1, 2, 3, 5, 999_999_999] {
             let a = BigUint::from_u64(a);
             assert_eq!(super::legendre(&a, &p), jacobi(&a, &p));
         }
+        // An even modulus is outside the symbol's domain.
         assert_eq!(
             super::legendre(&BigUint::one(), &BigUint::from_u64(4)),
             None
@@ -5925,12 +6376,15 @@ mod tests {
 
     #[test]
     fn mod_sqrt_roundtrips_on_squares() {
-        // Primes covering every residue class the algorithm branches on:
-        // 3 mod 4 (shortcut), 5 mod 8 (s = 2), and deep 2-adic descents —
-        // 41 and 97 (s = 3, 5) and the NTT primes 15·2^27 + 1 and
-        // 17·2^27 + 1 (s = 27). M127 exercises the shortcut at width.
-        let mut primes: Vec<BigUint> = [
-            3u64,
+        /// Primes covering every residue class the algorithm branches on,
+        /// with `p − 1 = q·2^s`: 3, 7, 11 and 2³¹ − 1 are 3 mod 4 (the
+        /// shortcut); 5 and 13 are 5 mod 8 (s = 2); 17, 41, 73 and 97
+        /// (s = 4, 3, 3, 5) and the Fermat prime 2¹⁶ + 1 (s = 16) take the
+        /// descent; the NTT primes 15·2²⁷ + 1 and 17·2²⁷ + 1 (s = 27) take
+        /// it deep. The Mersenne primes M89 and M127, 3 mod 4, run the
+        /// shortcut at two limbs.
+        const WORD_PRIMES: [u64; 13] = [
+            3,
             5,
             7,
             11,
@@ -5943,16 +6397,19 @@ mod tests {
             2_147_483_647,
             2_013_265_921,
             2_281_701_377,
-        ]
-        .iter()
-        .map(|&p| BigUint::from_u64(p))
-        .collect();
-        primes.push(mersenne(89));
-        primes.push(mersenne(127));
+        ];
+        const MERSENNE_EXPONENTS: [usize; 2] = [89, 127];
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1414_2135;
+        const DRAWS_PER_PRIME: usize = 8;
+        let mut primes: Vec<BigUint> = WORD_PRIMES.iter().map(|&p| BigUint::from_u64(p)).collect();
+        for exponent in MERSENNE_EXPONENTS {
+            primes.push(mersenne(exponent));
+        }
 
-        let mut rng = SplitMix64 { state: 0x1414_2135 };
+        let mut rng = SplitMix64 { state: SEED };
         for p in &primes {
-            for _ in 0..8 {
+            for _ in 0..DRAWS_PER_PRIME {
                 let x = draw_below(&mut rng, p);
                 let square = BigUint::mod_mul(&x, &x, p);
                 let root = super::mod_sqrt(&square, p).expect("squares have roots");
@@ -5996,9 +6453,14 @@ mod tests {
     #[test]
     fn gcd_extended_satisfies_bezout() {
         use crate::bigint::BigInt;
-        let mut rng = SplitMix64 { state: 0x0577_2156 };
-        let bound = BigUint::from_u128(1 << 96);
-        for _ in 0..60 {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0577_2156;
+        /// Operands of up to 96 bits, a limb and a half.
+        const OPERAND_BITS: u32 = 96;
+        const DRAWS: usize = 60;
+        let mut rng = SplitMix64 { state: SEED };
+        let bound = BigUint::from_u128(1 << OPERAND_BITS);
+        for _ in 0..DRAWS {
             let a = draw_below(&mut rng, &bound);
             let b = draw_below(&mut rng, &bound);
             let (g, s, t) = super::gcd_extended(&a, &b);
@@ -6037,9 +6499,11 @@ mod tests {
         // one-word pair, from a wider pair, and never with a wide operand.
         const WIDTHS: [usize; 8] = [1, 2, 63, 64, 65, 128, 200, 400];
         const PAIRS_PER_SHAPE: usize = 12;
-        let mut rng = SplitMix64 {
-            state: 0x7761_6f72_645f_7461,
-        };
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x7761_6f72_645f_7461;
+        /// The shared factor's cofactors: a shift past a limb, and three.
+        const SHARED_FACTOR_SHIFT: usize = 70;
+        let mut rng = SplitMix64 { state: SEED };
         let mut shapes: Vec<(BigUint, BigUint)> = Vec::new();
         for a_bits in WIDTHS {
             for b_bits in WIDTHS {
@@ -6058,9 +6522,13 @@ mod tests {
                 }
             }
         }
-        // A shared factor, so the word finish meets a gcd other than one.
-        let common = BigUint::from_u64(u64::MAX - 58);
-        shapes.push((common.mul(&pow2(70)), common.mul(&BigUint::from_u64(3))));
+        // A shared factor, the largest prime below 2⁶⁴, so the word finish
+        // meets a gcd other than one.
+        let common = BigUint::from_u64(LARGEST_PRIME_BELOW_2_64);
+        shapes.push((
+            common.mul(&pow2(SHARED_FACTOR_SHIFT)),
+            common.mul(&BigUint::from_u64(3)),
+        ));
         let word_max = BigUint::from_u64(u64::MAX);
         shapes.push((word_max.clone(), word_max.sub(&BigUint::one())));
         for (a, b) in &shapes {
@@ -6079,17 +6547,22 @@ mod tests {
 
     #[test]
     fn crt_combine_reconstructs_and_rejects() {
-        let mut rng = SplitMix64 { state: 0x6931_4718 };
-        // Pairwise coprime moduli, including big primes.
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x6931_4718;
+        /// Values planted below the product and recovered.
+        const DRAWS: usize = 12;
+        let mut rng = SplitMix64 { state: SEED };
+        // Pairwise coprime moduli, primes of two digits, thirty bits, and
+        // two limbs: the Mersenne primes M89 and M107.
         let moduli = [
             BigUint::from_u64(97),
-            BigUint::from_u64(1_000_000_007),
+            BigUint::from_u64(PRIME_1E9_7),
             mersenne(89),
             mersenne(107),
         ];
         let product = moduli.iter().fold(BigUint::one(), |acc, m| acc.mul(m));
 
-        for _ in 0..12 {
+        for _ in 0..DRAWS {
             let x = draw_below(&mut rng, &product);
             let congruences: Vec<(BigUint, BigUint)> =
                 moduli.iter().map(|m| (x.rem(m), m.clone())).collect();
@@ -6123,20 +6596,38 @@ mod tests {
 
     #[test]
     fn balanced_crt_matches_the_ordered_fold_at_every_thread_count() {
-        let moduli: Vec<BigUint> = super::primes_below(2_000)
+        /// The first three-digit prime; the sieve below 2000 holds 278
+        /// primes from it, more than the moduli taken.
+        const FIRST_MODULUS: u64 = 101;
+        const SIEVE_BOUND: u64 = 2_000;
+        /// An odd count, so the leaf level pairs all but one modulus and
+        /// carries that one up unpaired; its 32 pairs are fewer than the
+        /// largest thread request below the machine's parallelism, so the
+        /// clamp of workers to pairs fires.
+        const MODULI: usize = 63;
+        /// An arbitrary offset below the product; any value under the
+        /// product reconstructs.
+        const OFFSET_BELOW_PRODUCT: u64 = 123_456_789;
+        /// The serial path; one worker; two; a count that divides no
+        /// level's pair count evenly; more than the pairs; and more than
+        /// any machine reports.
+        const THREAD_COUNTS: [usize; 6] = [0, 1, 2, 7, 64, 1_000];
+        /// The thread count for the edge cases below.
+        const THREADS: usize = 8;
+        let moduli: Vec<BigUint> = super::primes_below(SIEVE_BOUND)
             .into_iter()
-            .filter(|&prime| prime >= 101)
-            .take(63)
+            .filter(|&prime| prime >= FIRST_MODULUS)
+            .take(MODULI)
             .map(BigUint::from_u64)
             .collect();
         let product = moduli.iter().fold(BigUint::one(), |acc, m| acc.mul(m));
-        let value = product.sub(&BigUint::from_u64(123_456_789));
+        let value = product.sub(&BigUint::from_u64(OFFSET_BELOW_PRODUCT));
         let congruences: Vec<(BigUint, BigUint)> = moduli
             .iter()
             .map(|modulus| (value.rem(modulus), modulus.clone()))
             .collect();
         let expected = super::crt_combine(&congruences);
-        for threads in [0usize, 1, 2, 7, 64, 1_000] {
+        for threads in THREAD_COUNTS {
             assert_eq!(
                 super::crt_combine_balanced(&congruences, threads),
                 expected,
@@ -6146,14 +6637,14 @@ mod tests {
 
         let mut reversed = congruences;
         reversed.reverse();
-        assert_eq!(super::crt_combine_balanced(&reversed, 8), Some(value));
-        assert_eq!(super::crt_combine_balanced(&[], 8), None);
+        assert_eq!(super::crt_combine_balanced(&reversed, THREADS), Some(value));
+        assert_eq!(super::crt_combine_balanced(&[], THREADS), None);
         assert_eq!(
-            super::crt_combine_balanced(&[(BigUint::from_u64(14), BigUint::from_u64(5))], 8,),
+            super::crt_combine_balanced(&[(BigUint::from_u64(14), BigUint::from_u64(5))], THREADS,),
             Some(BigUint::from_u64(4))
         );
         assert_eq!(
-            super::crt_combine_balanced(&[(BigUint::one(), BigUint::zero())], 8),
+            super::crt_combine_balanced(&[(BigUint::one(), BigUint::zero())], THREADS),
             None
         );
         assert_eq!(
@@ -6162,7 +6653,7 @@ mod tests {
                     (BigUint::one(), BigUint::from_u64(6)),
                     (BigUint::from_u64(2), BigUint::from_u64(9)),
                 ],
-                8,
+                THREADS,
             ),
             None
         );
@@ -6195,18 +6686,27 @@ mod tests {
     #[test]
     fn remainder_tree_matches_direct_reduction() {
         use super::{product_tree, remainder_tree};
-        let mut rng = SplitMix64 {
-            state: 0x73ee_0007_0000_0001,
-        };
-        for &count in &[1usize, 2, 3, 5, 8, 17, 64] {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x73ee_0007_0000_0001;
+        /// Leaf counts: a lone leaf; one pair; odd counts, which leave a
+        /// leaf unpaired at some level; complete trees of 8 and 64; and a
+        /// power of two plus one.
+        const LEAF_COUNTS: [usize; 7] = [1, 2, 3, 5, 8, 17, 64];
+        /// Leaves of four limbs against a modulus of 32: at eight leaves
+        /// the root is as wide as the modulus, past that the modulus is
+        /// narrower than the root and the tree must reduce.
+        const LEAF_BITS: usize = 256;
+        const MODULUS_BITS: usize = 2048;
+        let mut rng = SplitMix64 { state: SEED };
+        for count in LEAF_COUNTS {
             let values: Vec<BigUint> = (0..count)
                 .map(|_| {
-                    let mut v = draw_below(&mut rng, &pow2(256));
+                    let mut v = draw_below(&mut rng, &pow2(LEAF_BITS));
                     v.set_bit(0); // non-zero
                     v
                 })
                 .collect();
-            let modulus = draw_below(&mut rng, &pow2(2048));
+            let modulus = draw_below(&mut rng, &pow2(MODULUS_BITS));
             let tree = product_tree(&values);
             // The root is the product of all values.
             let mut product = BigUint::one();
@@ -6254,13 +6754,13 @@ mod tests {
 
     #[test]
     fn product_tree_accessors_describe_the_tree() {
-        let values: Vec<BigUint> = [7u64, 11, 13, 17, 19]
-            .iter()
-            .map(|&v| BigUint::from_u64(v))
-            .collect();
+        /// Five consecutive primes: an odd count, so every level but the
+        /// root rounds up.
+        const LEAVES: [u64; 5] = [7, 11, 13, 17, 19];
+        let values: Vec<BigUint> = LEAVES.iter().map(|&v| BigUint::from_u64(v)).collect();
         let tree = product_tree(&values);
         assert_eq!(tree.leaves(), values.as_slice());
-        assert_eq!(tree.len(), 5);
+        assert_eq!(tree.len(), LEAVES.len());
         assert!(!tree.is_empty());
         assert_eq!(
             *tree.root().expect("non-empty"),
@@ -6268,7 +6768,7 @@ mod tests {
         );
         // Levels run low to high, halving (rounded up) as they rise.
         let levels = tree.levels();
-        assert_eq!(levels[0].len(), 5);
+        assert_eq!(levels[0].len(), LEAVES.len());
         assert_eq!(levels.last().expect("non-empty").len(), 1);
         for pair in levels.windows(2) {
             assert_eq!(pair[1].len(), pair[0].len().div_ceil(2));
@@ -6278,8 +6778,23 @@ mod tests {
     #[test]
     fn smooth_parts_matches_trial_division() {
         use super::{primes_below, smooth_parts};
-        let primes = primes_below(50); // 2,3,5,7,11,...,47
-                                       // Trial-division oracle for the smooth part of one value.
+        /// The base: the fifteen primes below 50.
+        const BASE_BOUND: u64 = 50;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5000_7000_0000_0001;
+        /// Values of each kind: fully smooth, a smooth core times a large
+        /// prime, and random.
+        const VALUES_PER_KIND: usize = 8;
+        /// Base primes multiplied into a fully smooth value, and into a
+        /// core: six from a base whose largest is 47 stays under 2³⁴.
+        const FACTORS_PER_SMOOTH_VALUE: usize = 6;
+        const FACTORS_PER_CORE: usize = 4;
+        /// The large prime is 80 bits, past the base and past a limb; the
+        /// random values are 200 bits.
+        const LARGE_PRIME_BITS: usize = 80;
+        const RANDOM_VALUE_BITS: usize = 200;
+        let primes = primes_below(BASE_BOUND);
+        // Trial-division oracle for the smooth part of one value.
         let smooth_part_naive = |value: &BigUint| -> BigUint {
             let mut rest = value.clone();
             let mut part = BigUint::one();
@@ -6296,30 +6811,28 @@ mod tests {
             }
             part
         };
-        let mut rng = SplitMix64 {
-            state: 0x5000_7000_0000_0001,
-        };
+        let mut rng = SplitMix64 { state: SEED };
         // Mixed batch: some fully smooth (products of small primes), some
         // with a large prime factor, some coprime to the base.
         let mut values = Vec::new();
         // Fully smooth constructions.
-        for _ in 0..8 {
+        for _ in 0..VALUES_PER_KIND {
             let mut v = BigUint::one();
-            for _ in 0..6 {
+            for _ in 0..FACTORS_PER_SMOOTH_VALUE {
                 let p = primes[(rng.next_u64() as usize) % primes.len()];
                 v = v.mul(&BigUint::from_u64(p));
             }
             values.push(v);
         }
         // Smooth core times a big prime.
-        for _ in 0..8 {
+        for _ in 0..VALUES_PER_KIND {
             let mut core = BigUint::one();
-            for _ in 0..4 {
+            for _ in 0..FACTORS_PER_CORE {
                 let p = primes[(rng.next_u64() as usize) % primes.len()];
                 core = core.mul(&BigUint::from_u64(p));
             }
-            let mut big = draw_below(&mut rng, &pow2(80));
-            big.set_bit(79);
+            let mut big = draw_below(&mut rng, &pow2(LARGE_PRIME_BITS));
+            big.set_bit(LARGE_PRIME_BITS - 1);
             big.set_bit(0);
             while !is_probable_prime(&big) {
                 big = big.add(&BigUint::from_u64(2));
@@ -6327,8 +6840,8 @@ mod tests {
             values.push(core.mul(&big));
         }
         // Random values.
-        for _ in 0..8 {
-            let mut v = draw_below(&mut rng, &pow2(200));
+        for _ in 0..VALUES_PER_KIND {
+            let mut v = draw_below(&mut rng, &pow2(RANDOM_VALUE_BITS));
             v.set_bit(0);
             values.push(v);
         }
@@ -6344,6 +6857,9 @@ mod tests {
         // batching is checked against the trial-division oracle instead.
         let base = super::SmoothnessBase::new(&primes).expect("all entries >= 2");
         assert_eq!(base.primes(), &primes[..]);
+        // Batches of one; of two and three, which divide the 24 values
+        // evenly; of seven, which leaves a short last batch; and all at
+        // once.
         for size in [1usize, 2, 3, 7, values.len()] {
             let mut got = Vec::new();
             for chunk in values.chunks(size) {
@@ -6410,7 +6926,10 @@ mod tests {
     #[test]
     fn primes_below_matches_primality_test() {
         use super::{is_probable_prime, primes_below};
-        let primes = primes_below(10_000);
+        /// Ten times the trial sieve's 1000, so above 997 the comparison
+        /// is against the Miller–Rabin stage, not the sieve's own table.
+        const BOUND: u64 = 10_000;
+        let primes = primes_below(BOUND);
         let mut previous = 0u64;
         let mut set = std::collections::HashSet::new();
         for &p in &primes {
@@ -6419,7 +6938,7 @@ mod tests {
             assert!(is_probable_prime(&BigUint::from_u64(p)), "{p} is prime");
             set.insert(p);
         }
-        for n in 2u64..10_000 {
+        for n in 2u64..BOUND {
             assert_eq!(
                 set.contains(&n),
                 is_probable_prime(&BigUint::from_u64(n)),
@@ -6437,8 +6956,20 @@ mod tests {
     #[test]
     fn mod_sqrt_prime_power_exhaustive_small() {
         use super::mod_sqrt_prime_power;
-        for &p in &[2u64, 3, 5, 7, 11] {
-            let max_e = if p == 2 { 7 } else { 4 };
+        /// The first five primes: two, whose root counts run 1, 2, 4 as
+        /// the exponent passes 1, 2, 3, and the first four odd primes.
+        const PRIMES: [u64; 5] = [2, 3, 5, 7, 11];
+        /// Exponents: to 2⁷ for two, past the exponents where its root
+        /// count changes; to p⁴ for the odd primes, where the oracle's
+        /// cost of m² per modulus reaches 11⁸.
+        const MAX_EXPONENT_FOR_TWO: u32 = 7;
+        const MAX_EXPONENT_FOR_ODD: u32 = 4;
+        for p in PRIMES {
+            let max_e = if p == 2 {
+                MAX_EXPONENT_FOR_TWO
+            } else {
+                MAX_EXPONENT_FOR_ODD
+            };
             for e in 1u32..=max_e {
                 let m = p.pow(e);
                 for a in 0..m {
@@ -6457,16 +6988,20 @@ mod tests {
     #[test]
     fn mod_sqrt_prime_power_wide() {
         use super::mod_sqrt_prime_power;
-        let mut rng = SplitMix64 {
-            state: 0x5170_0007_0000_0001,
-        };
-        let mut p = draw_below(&mut rng, &pow2(128));
-        p.set_bit(127);
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5170_0007_0000_0001;
+        /// A two-limb prime cubed: a six-limb modulus, lifted from the
+        /// root modulo the prime.
+        const PRIME_BITS: usize = 128;
+        const EXPONENT: u32 = 3;
+        let mut rng = SplitMix64 { state: SEED };
+        let mut p = draw_below(&mut rng, &pow2(PRIME_BITS));
+        p.set_bit(PRIME_BITS - 1);
         p.set_bit(0);
         while !is_probable_prime(&p) {
             p = p.add(&BigUint::from_u64(2));
         }
-        let e = 3u32;
+        let e = EXPONENT;
         let modulus = p.pow_u64(u64::from(e));
         let x = draw_below(&mut rng, &modulus);
         let a = BigUint::mod_mul(&x, &x, &modulus);
@@ -6485,6 +7020,8 @@ mod tests {
     #[test]
     fn primality_tests_match_the_sieve_below_300k() {
         use super::is_probable_prime_bpsw;
+        /// Three times the 10⁵ bound of the pseudoprime tables the suite
+        /// cites, and far past the trial sieve's 1000.
         const LIMIT: usize = 300_000;
         let sieve = eratosthenes(LIMIT);
         for (n, &expected) in sieve.iter().enumerate() {
@@ -6556,10 +7093,13 @@ mod tests {
         // reference (deterministic to ψ₁₂ ≈ 3.19·10²³, Sorenson & Webster). The
         // two tests share only the trial-division screen, which the sieve
         // test above checks against an independent oracle.
-        let mut rng = SplitMix64 {
-            state: 0xb5c0_5e1f_ba11_1e50,
-        };
-        for _ in 0..4000 {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xb5c0_5e1f_ba11_1e50;
+        /// About one random word in 44 is prime (1/ln 2⁶⁴), so these draws
+        /// hold on the order of ninety primes among the composites.
+        const DRAWS: usize = 4000;
+        let mut rng = SplitMix64 { state: SEED };
+        for _ in 0..DRAWS {
             let candidate = BigUint::from_u64(rng.next_u64());
             assert_eq!(
                 is_probable_prime_bpsw(&candidate),
@@ -6573,19 +7113,24 @@ mod tests {
     fn strong_lucas_accepts_primes_and_handles_edges() {
         use super::is_strong_lucas_probable_prime;
         // Positive coverage for the standalone stage: every prime passes.
-        for p in [2u64, 3, 5, 7, 13, 101, 1009, 65_537, 4_294_967_291] {
+        /// The even prime and small odd ones, the first prime past 100
+        /// and past 1000, the Fermat prime 2¹⁶ + 1, and 2³² − 5, the
+        /// largest prime below 2³².
+        const WORD_PRIMES: [u64; 9] = [2, 3, 5, 7, 13, 101, 1009, 65_537, 4_294_967_291];
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x10c4_ea51_ed00_0001;
+        /// A four-limb prime, found with the twelve-base test.
+        const PRIME_BITS: usize = 256;
+        for p in WORD_PRIMES {
             assert!(
                 is_strong_lucas_probable_prime(&BigUint::from_u64(p)),
                 "prime {p} must pass the standalone Lucas stage"
             );
         }
         assert!(is_strong_lucas_probable_prime(&mersenne(127)));
-        // A 256-bit prime, found with the twelve-base test.
-        let mut rng = SplitMix64 {
-            state: 0x10c4_ea51_ed00_0001,
-        };
-        let mut p = draw_below(&mut rng, &pow2(256));
-        p.set_bit(255);
+        let mut rng = SplitMix64 { state: SEED };
+        let mut p = draw_below(&mut rng, &pow2(PRIME_BITS));
+        p.set_bit(PRIME_BITS - 1);
         p.set_bit(0);
         while !is_probable_prime(&p) {
             p = p.add(&BigUint::from_u64(2));
@@ -6639,18 +7184,22 @@ mod tests {
     fn lucas_c33_rejects_perfect_squares() {
         // Step 1 carries weight: against a square every Jacobi symbol is 0
         // or 1, so the step-2 search alone would never end.
-        for root in 0u64..3_000 {
+        /// Every square below nine million.
+        const ROOT_BOUND: u64 = 3_000;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5a0a_12e5_c333_0001;
+        /// A three-limb prime, whose square is six limbs.
+        const PRIME_BITS: usize = 192;
+        for root in 0u64..ROOT_BOUND {
             assert!(
                 !is_lucas_probable_prime(&BigUint::from_u64(root * root)),
                 "{root}² is a perfect square"
             );
         }
         // Squares of primes at width, where no small factor gives them away.
-        let mut rng = SplitMix64 {
-            state: 0x5a0a_12e5_c333_0001,
-        };
-        let mut prime = draw_below(&mut rng, &pow2(192));
-        prime.set_bit(191);
+        let mut rng = SplitMix64 { state: SEED };
+        let mut prime = draw_below(&mut rng, &pow2(PRIME_BITS));
+        prime.set_bit(PRIME_BITS - 1);
         prime.set_bit(0);
         while !is_probable_prime(&prime) {
             prime = prime.add(&BigUint::from_u64(2));
@@ -6736,9 +7285,12 @@ mod tests {
         // Multi-limb candidates: a prime at each width passes, a product of
         // two half-width primes fails, and random odd values agree with the
         // twelve-base Miller–Rabin test.
-        let mut rng = SplitMix64 {
-            state: 0x1ca5_c333_0000_0001,
-        };
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1ca5_c333_0000_0001;
+        /// One limb, one limb and a bit, then two, three, four and eight.
+        const WIDTHS: [usize; 6] = [64, 65, 128, 192, 256, 512];
+        const DRAWS_PER_WIDTH: usize = 40;
+        let mut rng = SplitMix64 { state: SEED };
         let prime_at = |bits: usize, rng: &mut SplitMix64| {
             let mut p = draw_below(rng, &pow2(bits));
             p.set_bit(bits - 1);
@@ -6748,11 +7300,11 @@ mod tests {
             }
             p
         };
-        for bits in [64usize, 65, 128, 192, 256, 512] {
+        for bits in WIDTHS {
             assert!(is_lucas_probable_prime(&prime_at(bits, &mut rng)));
             let semiprime = prime_at(bits / 2, &mut rng).mul(&prime_at(bits / 2, &mut rng));
             assert!(!is_lucas_probable_prime(&semiprime));
-            for _ in 0..40 {
+            for _ in 0..DRAWS_PER_WIDTH {
                 let mut candidate = draw_below(&mut rng, &pow2(bits));
                 candidate.set_bit(bits - 1);
                 candidate.set_bit(0);
@@ -6830,12 +7382,19 @@ mod tests {
     fn cipolla_agrees_with_the_descent() {
         use super::{mod_sqrt, mod_sqrt_cipolla};
         use crate::bigint::MontgomeryContext;
-        let mut rng = SplitMix64 {
-            state: 0xc1b0_11a0_0000_0001,
-        };
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xc1b0_11a0_0000_0001;
+        /// Primes `k·2^s + 1` with `s` small, `s² ≤ 4·bits`, which the
+        /// dispatch sends down the descent: the smallest s past the
+        /// shortcut, and a few more, at four to sixteen limbs.
+        const LOW_S_PRIMES: [(usize, usize); 4] = [(256, 2), (256, 5), (512, 3), (1024, 4)];
+        /// Primes with `s = bits/4`, so `s² = bits²/16` clears `4·bits` at
+        /// every width here and the dispatch sends them to Cipolla.
+        const HIGH_S_PRIMES: [(usize, usize); 3] = [(512, 128), (1024, 256), (2048, 512)];
+        let mut rng = SplitMix64 { state: SEED };
         // Low-s primes route through Tonelli–Shanks; Cipolla, called
         // directly on the same operands, must land on the same root pair.
-        for &(bits, s) in &[(256usize, 2usize), (256, 5), (512, 3), (1024, 4)] {
+        for (bits, s) in LOW_S_PRIMES {
             let p = prime_with_two_adic_valuation(bits, s, &mut rng);
             let x = draw_below(&mut rng, &p);
             let a = BigUint::mod_mul(&x, &x, &p);
@@ -6855,7 +7414,7 @@ mod tests {
         // High-s primes route through Cipolla inside the dispatch; the
         // returned root must verify, and the deepest case must be fast
         // enough for a unit test.
-        for &(bits, s) in &[(512usize, 128usize), (1024, 256), (2048, 512)] {
+        for (bits, s) in HIGH_S_PRIMES {
             let p = prime_with_two_adic_valuation(bits, s, &mut rng);
             assert!(
                 s * s > super::CIPOLLA_THRESHOLD_FACTOR * p.bits(),
@@ -6874,14 +7433,15 @@ mod tests {
             );
         }
         // Non-residues stay None regardless of the engine.
-        let p = prime_with_two_adic_valuation(512, 128, &mut rng);
+        let (bits, s) = HIGH_S_PRIMES[0];
+        let p = prime_with_two_adic_valuation(bits, s, &mut rng);
         let mut z = BigUint::from_u64(2);
         while super::jacobi(&z, &p) != Some(-1) {
             z = z.add(&BigUint::one());
         }
         assert_eq!(mod_sqrt(&z, &p), None);
         // The trivial residues, through both engines.
-        for &(bits, s) in &[(256usize, 2usize), (512, 128)] {
+        for (bits, s) in [LOW_S_PRIMES[0], HIGH_S_PRIMES[0]] {
             let p = prime_with_two_adic_valuation(bits, s, &mut rng);
             // Either square root of one is a correct answer.
             let root_of_one = mod_sqrt(&BigUint::one(), &p).expect("1 is a residue");
@@ -6903,8 +7463,10 @@ mod tests {
         use super::mod_sqrt;
         // An odd perfect square has no Jacobi non-residue, so an unbounded
         // parameter scan would never end; the bound turns it into None.
-        // 4097² (s = 13, s² > 4·bits) routes to Cipolla's scan.
-        let square = BigUint::from_u64(4097).square();
+        // The root is 2¹² + 1: its square is 25 bits with s = 13, and
+        // s² = 169 > 4·25 routes it to Cipolla's scan.
+        const ROOT: u64 = 4097;
+        let square = BigUint::from_u64(ROOT).square();
         assert_eq!(mod_sqrt(&BigUint::from_u64(4), &square), None);
     }
 
@@ -6965,19 +7527,29 @@ mod tests {
         use crate::bigint::MontgomeryContext;
         use std::hint::black_box;
         use std::time::Instant;
-        let mut rng = SplitMix64 {
-            state: 0xc1b0_11a0_dead_beef,
-        };
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0xc1b0_11a0_dead_beef;
+        /// Widths of 16, 32 and 64 limbs, where `√(4·bits)` is 64, 90
+        /// and 128.
+        const WIDTHS: [usize; 3] = [1024, 2048, 4096];
+        /// Seven values of s per width, in steps of 16 either side of
+        /// `√(4·bits)`, so the grid spans about half that centre on each
+        /// side.
+        const STEPS: std::ops::RangeInclusive<i64> = -3..=3;
+        const STEP_S: i64 = 16;
+        /// Timings per engine and prime, the best kept.
+        const RUNS: usize = 5;
+        let mut rng = SplitMix64 { state: SEED };
         // Both engines at every s, on a grid bracketing √(4·bits): the
         // crossing is read directly off the two columns.
         eprintln!(
             "{:>6} {:>6} {:>12} {:>12}",
             "bits", "s", "descent_us", "cipolla_us"
         );
-        for &bits in &[1024usize, 2048, 4096] {
+        for bits in WIDTHS {
             let center = (4.0 * bits as f64).sqrt() as usize;
-            for step in -3i64..=3 {
-                let s = usize::try_from((center as i64 + step * 16).max(2)).expect("positive");
+            for step in STEPS {
+                let s = usize::try_from((center as i64 + step * STEP_S).max(2)).expect("positive");
                 let p = prime_with_two_adic_valuation(bits, s, &mut rng);
                 let (q, s_actual) = decompose_n_minus_one(&p);
                 assert_eq!(s_actual, s, "constructed valuation");
@@ -6986,7 +7558,7 @@ mod tests {
                 let a = BigUint::mod_mul(&x, &x, &p);
                 let time = |f: &dyn Fn()| {
                     let mut best = f64::INFINITY;
-                    for _ in 0..5 {
+                    for _ in 0..RUNS {
                         let t0 = Instant::now();
                         f();
                         best = best.min(t0.elapsed().as_secs_f64() * 1e6);
@@ -7007,14 +7579,18 @@ mod tests {
     #[test]
     fn batch_inversion_matches_element_wise() {
         use super::{mod_inverse, mod_inverse_batch};
-        let mut rng = SplitMix64 {
-            state: 0x7007_ba7c_4000_0001,
-        };
-        for &bits in &[64usize, 256, 1024, 2048] {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x7007_ba7c_4000_0001;
+        /// Moduli of one limb, then four, sixteen and thirty-two.
+        const MODULUS_BITS: [usize; 4] = [64, 256, 1024, 2048];
+        /// A lone element, a pair, an odd count, and two larger batches.
+        const BATCH_SIZES: [usize; 5] = [1, 2, 3, 17, 100];
+        let mut rng = SplitMix64 { state: SEED };
+        for bits in MODULUS_BITS {
             let mut modulus = draw_below(&mut rng, &pow2(bits));
             modulus.set_bit(bits - 1);
             modulus.set_bit(0);
-            for &count in &[1usize, 2, 3, 17, 100] {
+            for count in BATCH_SIZES {
                 // All-coprime batches: retry elements until invertible.
                 let mut values = Vec::new();
                 while values.len() < count {
@@ -7072,13 +7648,31 @@ mod tests {
     #[test]
     fn valuation_and_remove_factor() {
         use super::{remove_factor, valuation};
+        /// Arbitrary, fixed so a failure reproduces.
+        const WORD_SEED: u64 = 0x0e0e_0e0e_5eed_0006;
+        /// Arbitrary, fixed so a failure reproduces.
+        const WIDE_SEED: u64 = 0x0dd5_0006_0006_0006;
+        const WORD_DRAWS: usize = 2000;
+        /// A word shifted down by up to 47 bits, so the values run from
+        /// 17 bits to a full word.
+        const MAX_SHIFT: u64 = 48;
+        /// The first five primes and a two-digit one.
+        const WORD_BASES: [u64; 6] = [2, 3, 5, 7, 11, 97];
+        /// The planted base is about 200 bits, its cofactor 150, so the
+        /// powers reach thousands of bits.
+        const BASE_BITS: usize = 200;
+        const COFACTOR_BITS: usize = 150;
+        /// Planted exponents on and off the ladder's rung boundaries:
+        /// 2^i, 2^i ± 1, and 12 and 100 between rungs.
+        const PLANTED_EXPONENTS: [usize; 12] = [1, 2, 3, 4, 7, 8, 9, 12, 31, 32, 33, 100];
+        /// A shift of twelve limbs and nine bits, so the factor of two is
+        /// counted across whole limbs and a partial one.
+        const TWO_ADIC_SHIFT: usize = 777;
         // Machine-arithmetic brute force.
-        let mut rng0 = SplitMix64 {
-            state: 0x0e0e_0e0e_5eed_0006,
-        };
-        for _ in 0..2000 {
-            let v = (rng0.next_u64() >> (rng0.next_u64() % 48)) | 1;
-            for p in [2u64, 3, 5, 7, 11, 97] {
+        let mut rng0 = SplitMix64 { state: WORD_SEED };
+        for _ in 0..WORD_DRAWS {
+            let v = (rng0.next_u64() >> (rng0.next_u64() % MAX_SHIFT)) | 1;
+            for p in WORD_BASES {
                 let mut expect_e = 0usize;
                 let mut expect_c = v;
                 while expect_c.is_multiple_of(p) {
@@ -7099,15 +7693,12 @@ mod tests {
                 );
             }
         }
-        // Planted wide valuations, including the ladder's descent edges:
-        // exponents on and off rung boundaries (2^i, 2^i ± 1, and 12).
-        let mut rng = SplitMix64 {
-            state: 0x0dd5_0006_0006_0006,
-        };
-        let p = draw_below(&mut rng, &pow2(200));
+        // Planted wide valuations, including the ladder's descent edges.
+        let mut rng = SplitMix64 { state: WIDE_SEED };
+        let p = draw_below(&mut rng, &pow2(BASE_BITS));
         let p = p.add(&BigUint::from_u64(3)); // any value ≥ 2 serves
-        for &e in &[1usize, 2, 3, 4, 7, 8, 9, 12, 31, 32, 33, 100] {
-            let mut m = draw_below(&mut rng, &pow2(150));
+        for e in PLANTED_EXPONENTS {
+            let mut m = draw_below(&mut rng, &pow2(COFACTOR_BITS));
             loop {
                 let (_, r) = m.div_rem(&p);
                 if !r.is_zero() {
@@ -7122,8 +7713,8 @@ mod tests {
         }
         // p = 2 reads the limbs directly.
         let mut v = BigUint::from_u64(0b1011);
-        v.shl_bits(777);
-        assert_eq!(remove_factor(&v, &BigUint::from_u64(2)).1, 777);
+        v.shl_bits(TWO_ADIC_SHIFT);
+        assert_eq!(remove_factor(&v, &BigUint::from_u64(2)).1, TWO_ADIC_SHIFT);
     }
 
     #[test]
@@ -7144,7 +7735,10 @@ mod tests {
         use crate::bigint::{BigInt, Sign};
         // Against a naive search: under 2·N·D < m the qualifying fraction
         // is unique, so the search finding one pins the function exactly.
-        for m_small in 3u64..=120 {
+        // Every modulus from three, the first with a non-zero bound, to
+        // 120, with the search costing m·N·D per modulus.
+        const MODULI: std::ops::RangeInclusive<u64> = 3..=120;
+        for m_small in MODULI {
             let m = BigUint::from_u64(m_small);
             let mut half = m.sub(&BigUint::one());
             half.shr1();
@@ -7197,9 +7791,11 @@ mod tests {
         use super::rational_reconstruct_bounded;
         use crate::bigint::{BigInt, Sign};
         // Every (m, N, D, x) with m ≤ 40 and 2·N·D < m, against the naive
-        // uniqueness search — the asymmetric perimeter the symmetric sweep
-        // cannot reach.
-        for m_small in 3u64..=40 {
+        // uniqueness search, the asymmetric perimeter the symmetric sweep
+        // cannot reach. The bound pairs multiply the cost by m² over the
+        // symmetric sweep, which is what caps m at 40.
+        const MODULI: std::ops::RangeInclusive<u64> = 3..=40;
+        for m_small in MODULI {
             let m = BigUint::from_u64(m_small);
             for n_bound in 0..m_small {
                 for d_bound in 0..m_small {
@@ -7259,12 +7855,17 @@ mod tests {
     fn rational_reconstruction_round_trips() {
         use super::{mod_inverse, rational_reconstruct};
         use crate::bigint::{BigInt, Sign};
-        let mut rng = SplitMix64 {
-            state: 0x5eed_f00d_ca11_ab1e,
-        };
-        for &bits in &[64usize, 256, 1024, 4096] {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x5eed_f00d_ca11_ab1e;
+        /// Moduli of one limb, then four, sixteen and sixty-four.
+        const MODULUS_BITS: [usize; 4] = [64, 256, 1024, 4096];
+        /// Planted fractions recovered per width; draws that plant no
+        /// valid fraction are not counted.
+        const ROUND_TRIPS_PER_WIDTH: usize = 6;
+        let mut rng = SplitMix64 { state: SEED };
+        for bits in MODULUS_BITS {
             let mut recovered = 0usize;
-            while recovered < 6 {
+            while recovered < ROUND_TRIPS_PER_WIDTH {
                 let m = {
                     let mut m = draw_below(&mut rng, &pow2(bits));
                     m.set_bit(bits - 1);
@@ -7332,11 +7933,15 @@ mod tests {
     #[test]
     fn rational_reconstruction_batched_matches_classical() {
         use super::{rational_reconstruct, rational_reconstruct_bounded};
-        let mut rng = SplitMix64 {
-            state: 0x0dd5_ba11_ad00_0004,
-        };
-        for &bits in &[256usize, 1024, 2048, 4096] {
-            for _ in 0..6 {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x0dd5_ba11_ad00_0004;
+        /// Moduli of four limbs, then sixteen, thirty-two and sixty-four,
+        /// all wide enough for the walk to run whole Lehmer batches.
+        const MODULUS_BITS: [usize; 4] = [256, 1024, 2048, 4096];
+        const DRAWS_PER_WIDTH: usize = 6;
+        let mut rng = SplitMix64 { state: SEED };
+        for bits in MODULUS_BITS {
+            for _ in 0..DRAWS_PER_WIDTH {
                 let mut m = draw_below(&mut rng, &pow2(bits));
                 m.set_bit(bits - 1);
                 let x = draw_below(&mut rng, &m);
@@ -7399,16 +8004,28 @@ mod tests {
     #[test]
     fn bpsw_structured_cases() {
         use super::{is_probable_prime_bpsw, is_strong_lucas_probable_prime};
+        /// Roots of the squares: 3² and 5², and 101², fall to the trial
+        /// sieve; 1009² and the square of the Fermat prime 2¹⁶ + 1 have
+        /// no factor below 1000 and reach the Selfridge search.
+        const SQUARE_ROOTS: [u64; 5] = [3, 5, 101, 1009, 65537];
+        /// Mersenne prime exponents at one and two limbs.
+        const MERSENNE_PRIME_EXPONENTS: [usize; 4] = [61, 89, 107, 127];
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1234_5678_9abc_def0;
+        /// Four, eight and sixteen limbs, whose semiprimes are twice that.
+        const PRIME_BITS: [usize; 3] = [256, 512, 1024];
         // Perfect squares: the Selfridge search rules them out directly.
-        for square_root in [3u64, 5, 101, 1009, 65537] {
+        for square_root in SQUARE_ROOTS {
             let root = BigUint::from_u64(square_root);
             assert!(!is_probable_prime_bpsw(&root.square()));
             assert!(!is_strong_lucas_probable_prime(&root.square()));
         }
         let big_root = mersenne(89); // 2^89 − 1, prime
         assert!(!is_probable_prime_bpsw(&big_root.square()));
-        // Mersenne primes and their composite neighbours at width.
-        for exponent in [61usize, 89, 107, 127] {
+        // Mersenne primes and their composite neighbours at width: M67 has
+        // a prime exponent and is composite; 2047 = 23·89 is composite,
+        // so M2047 is too.
+        for exponent in MERSENNE_PRIME_EXPONENTS {
             assert!(
                 is_probable_prime_bpsw(&mersenne(exponent)),
                 "M{exponent} is prime"
@@ -7421,10 +8038,8 @@ mod tests {
         assert!(!is_probable_prime_bpsw(&mersenne(2047)));
         // Large random primes from the crate's own generator, and their
         // pairwise products.
-        let mut rng = SplitMix64 {
-            state: 0x1234_5678_9abc_def0,
-        };
-        for bits in [256usize, 512, 1024] {
+        let mut rng = SplitMix64 { state: SEED };
+        for bits in PRIME_BITS {
             let mut p = draw_below(&mut rng, &pow2(bits));
             p.set_bit(bits - 1);
             p.set_bit(0);
@@ -7453,7 +8068,7 @@ mod tests {
         // genuine prime.
         let n341 = BigUint::from_u64(341);
         assert!(miller_rabin_witness(&n341, &BigUint::from_u64(3)));
-        let p = BigUint::from_u64(1_000_000_007);
+        let p = BigUint::from_u64(PRIME_1E9_7);
         for base in [2u64, 3, 5, 7, 11] {
             assert!(!miller_rabin_witness(&p, &BigUint::from_u64(base)));
         }
@@ -7493,8 +8108,16 @@ mod tests {
         // correctness argument; the word form must be the same function on
         // the shared domain. Dense small values catch the reciprocity and
         // supplement signs, the scattered large ones catch overflow.
-        for n in (1u64..200).step_by(2) {
-            for a in 0..200u64 {
+        /// Every odd modulus below 200 against every top argument below
+        /// 200, so the top runs below, at and above the modulus.
+        const DENSE_BOUND: u64 = 200;
+        /// Arbitrary (⌊2⁶⁴/φ⌋, the splitmix64 increment), fixed so a
+        /// failure reproduces.
+        const XORSHIFT_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+        /// Scattered full-width pairs.
+        const SCATTERED_DRAWS: usize = 2_000;
+        for n in (1u64..DENSE_BOUND).step_by(2) {
+            for a in 0..DENSE_BOUND {
                 assert_eq!(
                     jacobi_u64(a, n),
                     jacobi(&BigUint::from_u64(a), &BigUint::from_u64(n)),
@@ -7502,14 +8125,16 @@ mod tests {
                 );
             }
         }
-        let mut x = 0x9e3779b97f4a7c15u64;
+        // xorshift64 with Marsaglia's shifts 13, 7, 17 (*Xorshift RNGs*,
+        // J. Stat. Software 8 (2003)).
+        let mut x = XORSHIFT_SEED;
         let mut step = || {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
             x
         };
-        for _ in 0..2_000 {
+        for _ in 0..SCATTERED_DRAWS {
             let a = step();
             let n = step() | 1;
             assert_eq!(
@@ -7541,6 +8166,8 @@ mod tests {
 
     #[test]
     fn modular_exponentiation_small_values() {
+        // 561 is a Carmichael number, so 7⁵⁶⁰ ≡ 1 (mod 561) although 561
+        // is composite.
         let base = BigUint::from_u64(7);
         let exponent = BigUint::from_u64(560);
         let modulus = BigUint::from_u64(561);
@@ -7549,6 +8176,8 @@ mod tests {
 
     #[test]
     fn miller_rabin_rejects_composites() {
+        // The Carmichael number 561 = 3·11·17, the base-2 Fermat
+        // pseudoprime 341 = 11·31, and 221 = 13·17.
         assert!(!is_probable_prime(&BigUint::from_u64(561)));
         assert!(!is_probable_prime(&BigUint::from_u64(341)));
         assert!(!is_probable_prime(&BigUint::from_u64(221)));
@@ -7556,6 +8185,8 @@ mod tests {
 
     #[test]
     fn miller_rabin_accepts_primes() {
+        // The Fermat prime 2¹⁶ + 1, and 2⁶⁴ − 59, the largest prime below
+        // 2⁶⁴, from its big-endian bytes.
         assert!(is_probable_prime(&BigUint::from_u64(65_537)));
         assert!(is_probable_prime(&BigUint::from_be_bytes(&[
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xc5
@@ -7569,18 +8200,25 @@ mod tests {
 
     #[test]
     fn miller_rabin_rejects_all_trivial_witness_sets() {
-        // 1_022_117 = 1009 × 1013 clears the trial sieve (no prime factor
-        // ≤ 997). Each base is reduced modulo n before it is classified: one
-        // reducing to 0, 1, or n − 1 is the trivial ±1 case and testifies to
-        // nothing. A non-empty set of only such bases runs zero effective
-        // rounds, and the composite must not then be reported prime
-        // (replacing `effective_rounds > 0` with `true` fails these cases).
-        let n = BigUint::from_u64(1_022_117);
-        assert!(!miller_rabin_with_bases(&n, &[1_022_116])); // ≡ n − 1
-        assert!(!miller_rabin_with_bases(&n, &[1_022_117])); // ≡ 0
-        assert!(!miller_rabin_with_bases(&n, &[1, 1_022_116])); // 1 and n − 1
-                                                                // By contrast, a large *unreduced* base that reduces to a genuine
-                                                                // witness (u64::MAX ≡ 807_583) must still expose the composite.
+        // The semiprime clears the trial sieve. Each base is reduced modulo
+        // n before it is classified: one reducing to 0, 1, or n − 1 is the
+        // trivial ±1 case and testifies to nothing. A non-empty set of only
+        // such bases runs zero effective rounds, and the composite must not
+        // then be reported prime (replacing `effective_rounds > 0` with
+        // `true` fails these cases).
+        let n = BigUint::from_u64(SEMIPRIME_PAST_THE_SIEVE);
+        // n − 1, n itself, and one with n − 1.
+        assert!(!miller_rabin_with_bases(
+            &n,
+            &[SEMIPRIME_PAST_THE_SIEVE - 1]
+        ));
+        assert!(!miller_rabin_with_bases(&n, &[SEMIPRIME_PAST_THE_SIEVE]));
+        assert!(!miller_rabin_with_bases(
+            &n,
+            &[1, SEMIPRIME_PAST_THE_SIEVE - 1]
+        ));
+        // By contrast, a large *unreduced* base that reduces to a genuine
+        // witness (u64::MAX ≡ 807_583) must still expose the composite.
         assert!(!miller_rabin_with_bases(&n, &[u64::MAX]));
         assert!(!miller_rabin_with_bases(&n, &[2]));
         assert!(!is_probable_prime(&n));
@@ -7588,10 +8226,11 @@ mod tests {
 
     #[test]
     fn miller_rabin_wrapper_agrees_with_single_round_on_trivial_bases() {
-        // The batch wrapper and the single-round primitive
-        // share one trivial-base rule — reduce modulo n, discard {0, 1, n−1}.
-        let prime = BigUint::from_u64(1_000_000_007); // large, reaches MR
-        let composite = BigUint::from_u64(1_022_117); // 1009 × 1013, sieve-surviving
+        // The batch wrapper and the single-round primitive share one
+        // trivial-base rule: reduce modulo n, discard {0, 1, n−1}. Both
+        // candidates clear the trial sieve and reach the rounds.
+        let prime = BigUint::from_u64(PRIME_1E9_7);
+        let composite = BigUint::from_u64(SEMIPRIME_PAST_THE_SIEVE);
 
         // 0 and 1 are trivial: the single round proves nothing with them.
         assert!(!miller_rabin_witness(&prime, &BigUint::from_u64(0)));

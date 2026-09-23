@@ -430,9 +430,9 @@ pub enum Kernel {
 /// coordinate is not zero — must make the kernel one-dimensional before
 /// asking. A wide kernel does not fail here and does not look like a
 /// failure: it returns vectors, all of them genuine and none of them the one
-/// wanted (factoring, 2026-09-17, on a matrix of 62 columns with a
-/// 16-dimensional kernel: ten draws, ten kernel vectors, every one with zero
-/// in the coordinate that had to be scaled to one).
+/// wanted. On an index-calculus matrix of 62 columns with a 16-dimensional
+/// kernel, ten draws gave ten kernel vectors, every one with zero in the
+/// coordinate that had to be scaled to one.
 ///
 /// Wiedemann's algorithm: the scalars `u·Aᵏv` obey a linear recurrence whose
 /// minimal polynomial divides the matrix's, and `2n` of them determine it.
@@ -1025,7 +1025,7 @@ mod tests {
     fn the_index_calculus_fixture_is_solved() {
         const FIXTURE: &str = include_str!("../tests/data/index_calculus_62.txt");
         // Wiedemann's draw fails about n/l of the time; the field here is
-        // 19 bits, so a handful of draws is the sensible bound.
+        // 20 bits wide, so a handful of draws is the sensible bound.
         const ATTEMPTS: usize = 8;
         let field = Field::new(BigUint::from_u64(524_351)).expect("a prime above one");
         let mut width = 0usize;

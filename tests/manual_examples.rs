@@ -6,6 +6,7 @@
 
 use core::num::NonZeroU64;
 use rump::finite_field::Gf2m;
+use rump::gfp::{kernel_vector, minimal_polynomial, Field, Kernel, SparseMatrix};
 use rump::integer::WordReciprocal;
 use rump::lattice::{gauss_reduce_weighted, lll_reduce, ReductionError};
 use rump::modular::{
@@ -888,6 +889,67 @@ fn manual_lattice() {
     assert_eq!(
         gauss_reduce_weighted([[2, 4], [1, 2]], [nz(1), nz(1)]),
         Err(ReductionError::DependentBasis)
+    );
+}
+
+#[test]
+fn manual_linear_algebra_over_a_prime_field() {
+    /// A deterministic source for the example. Not a CSPRNG.
+    struct Draws(u64);
+
+    impl RandomSource for Draws {
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            for chunk in dest.chunks_mut(8) {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                let word = self.0.to_le_bytes();
+                chunk.copy_from_slice(&word[..chunk.len()]);
+            }
+        }
+    }
+
+    // The field GF(2^61 - 1).
+    let field = Field::new(BigUint::from_u64((1 << 61) - 1)).expect("a modulus above one");
+
+    // A 3 x 3 matrix whose third row is the sum of the first two, so its
+    // kernel is the line through (1, 1, 1).
+    let matrix = SparseMatrix::new(
+        3,
+        vec![
+            vec![(0, 1), (1, 1), (2, -2)],
+            vec![(0, 1), (1, -1)],
+            vec![(0, 2), (2, -2)],
+        ],
+    )
+    .expect("square, in range, no repeated column");
+    assert_eq!(matrix.nonzeros(), 7);
+
+    // A draw can fail with probability about n/l; this one does not.
+    let mut rng = Draws(7);
+    let Kernel::Vector(x) = kernel_vector(&matrix, &field, &mut rng) else {
+        panic!("the draw failed; a real caller draws again");
+    };
+    assert!(matrix.multiply(&field, &x).iter().all(BigUint::is_zero));
+    assert_eq!(x[0], x[1]);
+    assert_eq!(x[1], x[2]);
+    assert!(!x[0].is_zero());
+
+    // An invertible matrix is named as such, not reported as bad luck.
+    let identity = SparseMatrix::new(2, vec![vec![(0, 1)], vec![(1, 1)]]).expect("valid");
+    assert_eq!(kernel_vector(&identity, &field, &mut rng), Kernel::NoKernel);
+
+    // The recurrence behind it: Berlekamp-Massey on the Fibonacci numbers
+    // finds x^2 - x - 1, returned low coefficient first and monic.
+    let mut fib = vec![BigUint::zero(), BigUint::one()];
+    for i in 2..8 {
+        let next = field.add(&fib[i - 1], &fib[i - 2]);
+        fib.push(next);
+    }
+    let minus_one = field.sub(&BigUint::zero(), &BigUint::one());
+    assert_eq!(
+        minimal_polynomial(&field, &fib),
+        Some(vec![minus_one.clone(), minus_one, BigUint::one()])
     );
 }
 
