@@ -240,10 +240,11 @@ is the 2-adic valuation $v_2(a)$, \code{None} at zero.
 
 \subsection{Addition and subtraction}
 
-\code{add\_ref} / \code{sub\_ref} return new values; \code{add\_assign\_ref}
-/ \code{sub\_assign\_ref} work in place; \code{assign\_add} /
-\code{assign\_sub} are three-operand forms whose output buffer is reused
-across calls (the shape of GMP's \code{mpz\_add}). Both directions are the
+\code{add} / \code{sub} return new values; \code{+=} / \code{-=} on a
+borrowed right-hand side work in place; \code{add\_into} / \code{sub\_into}
+are three-operand forms whose output buffer is reused across calls (the
+shape of GMP's \code{mpz\_add}), and \code{Clone::clone\_from} copies a value
+into existing storage the same way. Both directions are the
 classical limb-wise carry and borrow chains. Subtraction panics on
 underflow: the type is unsigned, and a result that would be negative is a
 programming error --- use \code{BigInt} where signs can go negative.
@@ -258,16 +259,35 @@ assert_eq!(a.sub(&b), BigUint::from_u64(963));
 let mut out = BigUint::zero();
 out.add_into(&a, &b);
 assert_eq!(out, BigUint::from_u64(1_037));
+out.sub_into(&a, &b);
+assert_eq!(out, BigUint::from_u64(963));
+out.mul_into(&a, &b);
+assert_eq!(out, BigUint::from_u64(37_000));
+
+// A fold modulo the Mersenne number 2^5 - 1 = 31, in place: the bits above
+// the fifth weigh one, so they are added back.
+let mut x = BigUint::from_u64(1_000); // 1000 = 31*32 + 8
+let mut high = x.clone();
+high.shr_bits(5);
+x.keep_low_bits(5);
+x += &high;
+assert_eq!(x, BigUint::from_u64(8 + 31)); // one more fold would give 8
 \end{lstlisting}
 
 \subsection{Multiplication}
 \label{sec:mul}
 
-\code{mul\_ref} dispatches on operand size across a ladder of kernels, each
+\code{mul} dispatches on operand size across a ladder of kernels, each
 asymptotically cheaper but with a larger constant, so each engages only past
-its measured crossover. \code{square\_ref} has its own ladder
+its measured crossover. \code{square} has its own ladder
 (\S\ref{sec:squaring}), since a squaring can form each distinct cross term
-once.
+once. \code{mul\_into} is the product's three-operand form: below
+\code{KARATSUBA\_THRESHOLD\_LIMBS} the schoolbook kernel runs straight into
+the output's buffer, so a caller that keeps its outputs alive multiplies
+without allocating; \code{keep\_low\_bits} is \code{self mod 2\^{}k} in place,
+and with the in-place shifts and \code{+=} that is a Mersenne fold with no
+allocation per operation --- a test counts the allocator's calls across a
+thousand such folds and requires zero.
 
 \paragraph{Schoolbook (Knuth, Algorithm M).}
 The base case, $O(mn)$ limb products, used below
@@ -344,7 +364,7 @@ assert_eq!(b.square(), BigUint::from_u64(1_369));
 \subsection{Squaring}
 \label{sec:squaring}
 
-\code{square\_ref} is not \code{mul\_ref(a, a)}: a squaring forms each
+\code{square} is not \code{mul(a, a)}: a squaring forms each
 distinct cross term once and doubles it, so
 \begin{equation}
 a^2 \;=\; \sum_i a_i^2 \beta^{2i}
@@ -535,9 +555,9 @@ to \code{Sign::Zero}. Construct with \code{from\_biguint} (non-negative),
 \code{from\_parts}, \code{from\_i64}, or \code{from\_i128} (total over its
 range: \code{i128::MIN}'s magnitude $2^{127}$ is an ordinary
 \code{u128}); read back with \code{sign()} and
-\code{magnitude()}; \code{negated} flips the sign. \code{add\_ref} /
-\code{sub\_ref} are signed with in-place forms; \code{mul\_ref} is the full
-signed product and \code{mul\_biguint\_ref} scales by an unsigned factor;
+\code{magnitude()}; \code{negated} flips the sign. \code{add} /
+\code{sub} are signed with in-place forms; \code{mul} is the full
+signed product and \code{mul\_biguint} scales by an unsigned factor;
 \code{abs} returns the magnitude as a \code{BigUint}. \code{Ord} is
 sign-aware: negatives below zero below positives, magnitudes compared
 within a sign.
@@ -2183,7 +2203,7 @@ instead.
 \toprule
 \textbf{Call} & \textbf{Panics when} \\
 \midrule
-\code{sub\_ref} / \code{sub\_assign\_ref} & the result would be negative \\
+\code{sub} / \code{sub\_into} / \code{-=} & the result would be negative \\
 \code{div\_rem} / \code{div\_rem\_u64} / \code{rem} / \code{rem\_u64} & the divisor or modulus is zero \\
 \code{mod\_mul} / \code{mod\_pow} / \code{mod\_add} / \code{mod\_sub} / \code{mod\_neg} & the modulus is zero \\
 \code{ln\_approx} & the value is zero \\

@@ -1326,6 +1326,82 @@ impl BigUint {
         }
     }
 
+    /// `lhs · rhs`, written into `self`'s buffer.
+    ///
+    /// The three-operand product, for callers that keep one output alive
+    /// across many multiplications — a field's residues, an accumulator —
+    /// and want the product's storage to be that output's rather than a
+    /// fresh allocation each call. Below `KARATSUBA_THRESHOLD_LIMBS` in the
+    /// shorter operand the schoolbook kernel runs straight into `self`, so
+    /// once the buffer's capacity covers the product nothing is allocated;
+    /// wider operands take the ladder, whose kernels build their own
+    /// temporaries, and only the result is copied into `self`'s storage.
+    ///
+    /// Limbs the result does not cover are wiped before the buffer shrinks,
+    /// as every in-place operation here does under the `wipe` feature.
+    pub fn mul_into(&mut self, lhs: &Self, rhs: &Self) {
+        let (short, long) = if lhs.limbs.len() <= rhs.limbs.len() {
+            (lhs, rhs)
+        } else {
+            (rhs, lhs)
+        };
+        if short.is_zero() {
+            crate::scrub::zeroize_slice(self.limbs.as_mut_slice());
+            self.limbs.clear();
+            return;
+        }
+        if short.limbs.len() >= KARATSUBA_THRESHOLD_LIMBS {
+            let product = lhs.mul(rhs);
+            self.clone_from(&product);
+            return;
+        }
+        let width = short.limbs.len() + long.limbs.len();
+        if self.limbs.len() > width {
+            crate::scrub::zeroize_slice(&mut self.limbs[width..]);
+        }
+        self.limbs.resize(width, 0);
+        self.limbs.fill(0);
+        for (i, &short_limb) in short.limbs.iter().enumerate() {
+            let mut carry = 0u128;
+            for (j, &long_limb) in long.limbs.iter().enumerate() {
+                let acc = u128::from(self.limbs[i + j])
+                    + u128::from(short_limb) * u128::from(long_limb)
+                    + carry;
+                self.limbs[i + j] = low_u64(acc);
+                carry = acc >> 64;
+            }
+            // The row's carry lands one limb past the row, which the width
+            // has room for: two operands of `a` and `b` limbs multiply to at
+            // most `a + b` limbs.
+            self.limbs[i + long.limbs.len()] = low_u64(carry);
+        }
+        self.normalize();
+    }
+
+    /// Keep the low `bits` bits of `self`, in place: `self mod 2^bits`.
+    ///
+    /// The reduction step of arithmetic modulo a Mersenne number `2^k − 1`
+    /// is a shift and this mask, and a caller folding a product wants both
+    /// without allocating. Limbs the mask discards are wiped before the
+    /// buffer shrinks.
+    pub fn keep_low_bits(&mut self, bits: usize) {
+        if bits >= self.bits() {
+            return;
+        }
+        let kept = bits.div_ceil(64);
+        if kept < self.limbs.len() {
+            crate::scrub::zeroize_slice(&mut self.limbs[kept..]);
+            self.limbs.truncate(kept);
+        }
+        let partial = bits % 64;
+        if partial != 0 {
+            if let Some(top) = self.limbs.last_mut() {
+                *top &= (1u64 << partial) - 1;
+            }
+        }
+        self.normalize();
+    }
+
     /// Return `self + other`: a clone of `self` plus an in-place add.
     /// [`Self::add_into`] avoids the clone when the caller owns a
     /// destination buffer.
@@ -5378,6 +5454,84 @@ mod tests {
         }
         assert!(BigUint::zero().square().is_zero());
         assert_eq!(BigUint::one().square(), BigUint::one());
+    }
+
+    /// The into-storage product against the allocating one, on both sides
+    /// of the width where it stops running schoolbook into the buffer,
+    /// with the buffer arriving wider and narrower than the product and
+    /// with lopsided shapes.
+    #[test]
+    fn mul_into_matches_mul_at_every_shape() {
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x6d75_6c5f_696e_746f;
+        let mut seed = SEED;
+        let shapes = [
+            (1usize, 1usize),
+            (1, 7),
+            (2, 2),
+            (3, 40),
+            (KARATSUBA_THRESHOLD_LIMBS - 1, KARATSUBA_THRESHOLD_LIMBS - 1),
+            (KARATSUBA_THRESHOLD_LIMBS, KARATSUBA_THRESHOLD_LIMBS),
+            (
+                KARATSUBA_THRESHOLD_LIMBS + 1,
+                2 * KARATSUBA_THRESHOLD_LIMBS + 3,
+            ),
+            (300, 300),
+        ];
+        let mut out = BigUint::from_limbs(vec![u64::MAX; 1000]); // wider than any product
+        for (a, b) in shapes {
+            let lhs = seeded_biguint(a, &mut seed);
+            let rhs = seeded_biguint(b, &mut seed);
+            let expected = lhs.mul(&rhs);
+            out.mul_into(&lhs, &rhs);
+            assert_eq!(out, expected, "{a}x{b} limbs into a wide buffer");
+            out.mul_into(&rhs, &lhs);
+            assert_eq!(out, expected, "{b}x{a} limbs, operands swapped");
+            let mut narrow = BigUint::zero();
+            narrow.mul_into(&lhs, &rhs);
+            assert_eq!(narrow, expected, "{a}x{b} limbs into an empty buffer");
+        }
+        out.mul_into(&BigUint::zero(), &BigUint::from_u64(5));
+        assert!(out.is_zero());
+        out.mul_into(&BigUint::from_u64(5), &BigUint::zero());
+        assert!(out.is_zero());
+    }
+
+    /// `keep_low_bits` against the oracle `x − (x ≫ k) ≪ k`, at bit counts
+    /// on both sides of every limb boundary and of the value's own width.
+    #[test]
+    fn keep_low_bits_is_the_residue_modulo_a_power_of_two() {
+        // Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x6b65_6570_5f6c_6f77;
+        let mut seed = SEED;
+        let value = seeded_biguint(4, &mut seed);
+        let width = value.bits();
+        for bits in [
+            0usize,
+            1,
+            63,
+            64,
+            65,
+            127,
+            128,
+            129,
+            191,
+            width - 1,
+            width,
+            width + 1,
+            300,
+        ] {
+            let mut high = value.clone();
+            high.shr_bits(bits);
+            high.shl_bits(bits);
+            let expected = value.sub(&high);
+            let mut kept = value.clone();
+            kept.keep_low_bits(bits);
+            assert_eq!(kept, expected, "low {bits} bits of a {width}-bit value");
+        }
+        let mut zero = BigUint::zero();
+        zero.keep_low_bits(10);
+        assert!(zero.is_zero());
     }
 
     #[test]

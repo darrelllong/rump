@@ -7,6 +7,14 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **`BigUint::mul_into` and `BigUint::keep_low_bits`.** The product's
+  three-operand form — below `KARATSUBA_THRESHOLD_LIMBS` the schoolbook
+  kernel writes straight into the output's buffer — and `self mod 2^k` in
+  place. With `clone_from`, the in-place shifts and `+=`/`-=`, a caller
+  that keeps its outputs alive reduces modulo a Mersenne number with no
+  allocation per operation; `tests/allocation_free_fold.rs` counts the
+  allocator's calls across a thousand folds and requires zero.
+
 - **`gfp`: linear algebra over a large prime field.** `gfp::SparseMatrix`
   holds a square matrix whose entries are small integers — the `±1` ones in
   their own lists, where a row costs an addition or a subtraction with no

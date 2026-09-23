@@ -167,6 +167,17 @@ fn manual_biguint_arithmetic() {
     assert_eq!(out, BigUint::from_u64(1_037));
     out.sub_into(&a, &b);
     assert_eq!(out, BigUint::from_u64(963));
+    out.mul_into(&a, &b);
+    assert_eq!(out, BigUint::from_u64(37_000));
+
+    // A fold modulo the Mersenne number 2^5 - 1 = 31, in place: the bits above
+    // the fifth weigh one, so they are added back.
+    let mut x = BigUint::from_u64(1_000); // 1000 = 31·32 + 8
+    let mut high = x.clone();
+    high.shr_bits(5);
+    x.keep_low_bits(5);
+    x += &high;
+    assert_eq!(x, BigUint::from_u64(8 + 31)); // one more fold would give 8
 }
 
 #[test]

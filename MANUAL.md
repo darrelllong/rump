@@ -184,7 +184,15 @@ right-hand side work in place. `add_into` / `sub_into` are the
 three-operand forms — the result written into `self`, whose buffer is
 reused: a long-lived output allocates only until its capacity covers the
 result, then never again (the shape of GMP's `mpz_add`).
-`Clone::clone_from` likewise copies a value into existing storage.
+`Clone::clone_from` likewise copies a value into existing storage, and
+`mul_into` is the product's three-operand form: below
+`KARATSUBA_THRESHOLD_LIMBS` the schoolbook kernel runs straight into the
+output's buffer, so a caller that keeps its outputs alive multiplies without
+allocating. `keep_low_bits` is `self mod 2^k` in place. Together with the
+in-place shifts and `+=`/`-=`, that is enough to reduce modulo a Mersenne
+number `2^k − 1` by folding — the high bits weigh `2^k ≡ 1`, so they are
+added back — with no allocation per operation; a test counts the
+allocator's calls across a thousand such folds and requires zero.
 `mul` chooses its kernel by the shorter operand's limb count: schoolbook,
 Karatsuba from `KARATSUBA_THRESHOLD_LIMBS` (96 limbs, for `long < 2·short`),
 Toom-3 from `TOOM3_THRESHOLD_LIMBS` (128), Toom-4 from
@@ -226,6 +234,17 @@ out.add_into(&a, &b);
 assert_eq!(out, BigUint::from_u64(1_037));
 out.sub_into(&a, &b);
 assert_eq!(out, BigUint::from_u64(963));
+out.mul_into(&a, &b);
+assert_eq!(out, BigUint::from_u64(37_000));
+
+// A fold modulo the Mersenne number 2^5 - 1 = 31, in place: the bits above
+// the fifth weigh one, so they are added back.
+let mut x = BigUint::from_u64(1_000); // 1000 = 31·32 + 8
+let mut high = x.clone();
+high.shr_bits(5);
+x.keep_low_bits(5);
+x += &high;
+assert_eq!(x, BigUint::from_u64(8 + 31)); // one more fold would give 8
 ```
 
 ### Shifts and bit access
