@@ -25,32 +25,29 @@ rump's other ignored tests are timing probes that assert nothing. Entropy
 defines two feature modes, default and no default features, and the matrix
 runs both.
 
-Last run, 2026-09-17, on the development Mac (aarch64-apple-darwin, rustc
+Last run, 2026-09-22, on the development Mac (aarch64-apple-darwin, rustc
 1.93.1), without `--ignored`:
 
 | Repository | Revision |
 |---|---|
-| rump | `b58186e76021ad95d009a1d9da92b00a2685e5de` |
-| cryptography | `d107d1273ee825b4c5995ba23d58f7b868795a21` |
-| entropy | `7c728649d5e10a7f88c997324f8646878fa262d9` |
-| factoring | `73d99de63175559069eb535deff7d12ec05eb34d` |
+| rump | `db6a9dc` |
+| cryptography | `8001bd5` |
+| entropy | `b8975c1` (0.6.0, the revision factoring pins) |
+| factoring | `66f6619` |
 
 | Leg | Result |
 |---|---|
-| cryptography | 1707 passed, 0 failed, 21 ignored |
-| cryptography-all | 1707 passed, 0 failed, 21 ignored |
-| entropy-default | 520 passed, 0 failed, 2 ignored |
-| entropy-minimal | 140 passed, 0 failed, 1 ignored |
-| factoring | 302 passed, 0 failed, 3 ignored |
+| cryptography | 1736 passed, 0 failed, 23 ignored |
+| cryptography-all | 1736 passed, 0 failed, 23 ignored |
+| entropy-default | 519 passed, 0 failed, 2 ignored |
+| entropy-minimal | 139 passed, 0 failed, 1 ignored |
+| factoring | 320 passed, 0 failed, 3 ignored |
 | factoring-no-wipe | wipe not enabled |
 
-This is the combination in which rump's floating statistics are gone and
-`entropy::math` is their only home: factoring `73d99de` calls entropy for
-them and pins entropy 0.6.0, and entropy `7c72864` carries them with their
-references. An earlier attempt at the same combination failed the
-`entropy-minimal` leg on an entropy example that Cargo built in every
-configuration without declaring the feature it needs; entropy fixed that in
-`7c72864` and now checks each feature mode in its own release script.
+The entropy revision is pinned rather than taken from its checkout because
+factoring's own manifest pins it: against entropy's tip of the day the
+factoring leg fails to compile on an entropy API factoring has not moved to,
+which is a fact about those two crates and says nothing about rump.
 
 The ignored legs were last run on 2026-09-16 against rump
 `4218630e0e3ca9bc2937a3d8ebc2b387e8cef1eb`, where cryptography's
@@ -88,9 +85,10 @@ covered by `scripts/release_gate.sh`.
 | darby | darby | aarch64 Cortex-A76 |
 | dmz | dmz | x86_64 Intel i5-8259U |
 
-Last run, 2026-09-16, `--test` at `8df086eccfca543d026536081535d7095f7eaa3c`:
-every host built both feature modes and passed 408 tests with 0 failures —
-moore, twilight and knuth on rustc 1.95.0, darby and dmz on rustc 1.93.1.
+Last run, 2026-09-22, `--test` at `db6a9dc`: moore, twilight, baase, knuth
+(rustc 1.95.0) and dmz (rustc 1.93.1) each built both feature modes and
+passed 429 tests with 0 failures. darby was measuring benchmarks and was not
+built at that revision.
 
 ## Reported by consumers
 

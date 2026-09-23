@@ -73,7 +73,7 @@ static void run(const char *op, Pool *p) {
     else if (!strcmp(op, "mul"))     mpz_mul(p->r, p->a, p->b);
     else if (!strcmp(op, "sqr"))     mpz_mul(p->r, p->a, p->a);
     else if (!strcmp(op, "divrem"))  mpz_tdiv_qr(p->q, p->r, p->a, p->divisor);
-    else if (!strcmp(op, "modulo"))  mpz_mod(p->r, p->a, p->divisor);
+    else if (!strcmp(op, "rem"))     mpz_mod(p->r, p->a, p->divisor);
     else if (!strcmp(op, "modmul")) { mpz_mul(p->tmp, p->a, p->b); mpz_mod(p->r, p->tmp, p->modulus); }
     else if (!strcmp(op, "modpow"))  mpz_powm(p->r, p->a, p->e_rand, p->modulus);
     else if (!strcmp(op, "gcd"))     mpz_gcd(p->r, p->a, p->b);
@@ -85,7 +85,7 @@ static void run(const char *op, Pool *p) {
 }
 
 static const char *OPS[] = {"add",    "sub",    "mul",    "sqr",   "divrem",
-                            "modulo", "modmul", "modpow", "gcd",   "gcdext",
+                            "rem",    "modmul", "modpow", "gcd",   "gcdext",
                             "modinv", "jacobi", "isprime"};
 static const unsigned long SIZES[] = {256, 1024, 2048, 4096};
 

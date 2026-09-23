@@ -37,6 +37,10 @@ def parse(path):
         if not m:
             continue
         op, size = m.group(1), int(m.group(2))
+        # The GMP mirror names the remainder `modulo`; rump's harness names
+        # it `rem`. One family, one name.
+        if op == "modulo":
+            op = "rem"
         approx = "~" in line.split("|")[2]
         out.setdefault(op, {})[size] = dict(
             mean_ns=float(m.group(3)) * 1e6,  # ms -> ns
@@ -107,7 +111,7 @@ def size_label(s):
 
 INT_FAMILIES = {
     "arithmetic": ["add", "sub", "mul", "sqr"],
-    "division": ["divrem", "modulo", "modmul"],
+    "division": ["divrem", "rem", "modmul"],
     "montgomery": ["montmul", "montsqr", "montpow_e65537", "montpow_rand", "montsetup"],
     "number-theory": ["gcd", "gcdext", "modinv", "jacobi", "modpow"],
     "variable-time": ["sqrtmod", "sqrtmod_blum", "sqrtmod_descent", "isprime", "isprime_true"],
@@ -117,10 +121,10 @@ INT_FAMILIES = {
 THEORY = {
     "add": "O(n)",
     "sub": "O(n)",
-    "mul": "schoolbook → Karatsuba → Toom-3/4",
-    "sqr": "schoolbook → Karatsuba → Toom-3/4",
+    "mul": "schoolbook → Karatsuba → Toom-3 → Toom-4",
+    "sqr": "schoolbook squaring → Karatsuba squaring → the multiplication ladder",
     "divrem": "O(n²) Algorithm D",
-    "modulo": "O(n²)",
+    "rem": "O(n²)",
     "modmul": "O(n²) mul + reduce",
     "montmul": "O(n²)",
     "montsqr": "O(n²)",
@@ -131,7 +135,7 @@ THEORY = {
     "gcd": "Lehmer O(n²) → Half-GCD O(M(n)·log n)",
     "gcdext": "Lehmer O(n²) → Half-GCD O(M(n)·log n)",
     "modinv": "Lehmer O(n²) → Half-GCD O(M(n)·log n)",
-    "jacobi": "binary → Lehmer quotients → HGCD-threaded state, O(M(n) log n)",
+    "jacobi": "Lehmer quotients with a symbol state → HGCD-threaded, O(M(n) log n)",
     "sqrtmod_blum": "Tonelli–Shanks, p ≡ 3 (mod 4): the (p+1)/4 shortcut",
     "sqrtmod_descent": "Tonelli–Shanks, p ≡ 1 (mod 4): the 2-adic descent",
     "sqrtmod": "O(n³) Tonelli–Shanks (input-dependent)",
@@ -288,7 +292,7 @@ def scaling_svg(family, out, hosts):
 
 GMP_SIZES = [256, 1024, 2048, 4096]
 # Ops with a genuine GMP mpz counterpart (mirrors pilot_gmp.c).
-GMP_OPS = ["add", "sub", "mul", "sqr", "divrem", "modulo", "modmul", "modpow",
+GMP_OPS = ["add", "sub", "mul", "sqr", "divrem", "rem", "modmul", "modpow",
            "gcd", "gcdext", "modinv", "jacobi", "isprime"]
 
 

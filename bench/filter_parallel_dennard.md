@@ -1,6 +1,6 @@
 # Parallel structured filtering on real sieve matrices
 
-SUGGESTIONS §3 proposed parallel filtering after Bouillaguet & Zimmermann,
+Parallel filtering after Bouillaguet & Zimmermann was proposed for rump,
 *Parallel structured Gaussian elimination for the number field sieve*,
 Mathematical Cryptology 1 (2021), §4, to be accepted on filter-through-
 extraction cost rather than merge rate. It was implemented and measured; it

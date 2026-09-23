@@ -1,8 +1,9 @@
 # Feature modes, prepared contexts and scratch reuse on dennard
 
-What SUGGESTIONS §4 asks to measure separately: the `wipe` feature against
-the default build, a `MontgomeryScratch` kept across calls against one per
-call, and a prepared context's setup against its use.
+Three costs measured separately, because each is a choice a consumer makes:
+the `wipe` feature against the default build, a `MontgomeryScratch` kept
+across calls against one per call, and a prepared context's setup against
+its use.
 
 - Host: dennard, AMD EPYC 7452, Ubuntu 24.04.4, kernel 6.8.0-136; each
   benchmark pinned to core 7 (`taskset -c 7`) on an otherwise idle host.

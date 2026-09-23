@@ -110,32 +110,27 @@ inputs. Adversarially hardened primality testing lives with its consumer
 
 ## Benchmarks
 
-[PERFORMANCE.md](PERFORMANCE.md) is the full per-primitive report: pilot-bench
-means with confidence intervals and variable-time extrema over random operands,
-log–log scaling graphs, fitted complexity exponents, and a per-primitive
-comparison against GMP on four hosts — Apple M4, AMD EPYC 7452, Raspberry
-Pi 5, and Apple A18 Pro. Regenerate the data with
-`scripts/bench_primitives.sh` (rump and, via
-`pilot_gmp`, GMP through the same harness) and the document with
-`scripts/build_performance.sh`.
+[PERFORMANCE.md](PERFORMANCE.md) is the per-primitive report: pilot-bench
+means with confidence intervals and variable-time extrema over random
+operands, fitted complexity exponents, log–log scaling graphs, and a
+per-primitive comparison against GMP through the same harness on an Apple
+M4 Pro, an AMD EPYC 7452, a Raspberry Pi 5 and an Apple A18 Pro. The tables
+are generated from the committed data under `bench/`, and the prose quotes
+no figure a table does not carry.
 
-`cargo run --release --bin bench_bigint` reports ns/op for the core kernels.
-Headline vs GMP: `modpow` stays within **1.1–3.4×** (matched windowed
-Montgomery); the Euclid family — `gcd`, `gcd_extended`, `mod_inverse` — is
-**4–13×** and `jacobi` **2–12×**, down from **17–89×** on classical Euclid,
-after switching to **Lehmer's gcd** and a **division-free binary Jacobi**.
-`mul`/`sqr` climb schoolbook → Karatsuba → **Toom-3/Toom-4 → exact NTT**;
-the NTT is hardware-aware, bounded by reported parallelism, and retains a
-specialized one-buffer square. The **1.3–7.5×**
-that remains at crypto sizes is GMP's assembly inner loops, not the algorithm
-(on the Raspberry Pi, where that assembly edge shrinks, `mul` is only 1.3–1.9×).
-Above ~131 kbit, `gcd` dispatches to **Half-GCD** (Möller, Math. Comp. 77
-(2008); the algorithm behind GMP's `mpn_hgcd`) and goes subquadratic — see
-PERFORMANCE.md's "GCD at scale". The same transform is carried through
-the Bézout cofactors (`gcd_extended` and `mod_inverse`, above ~32 kbit)
-and the Jacobi symbol (`jacobi_hgcd` — Möller's threading design, as in
-GMP's `mpn_hgcd_jacobi`; Brent and Zimmermann's published subquadratic
-symbol reaches the same complexity by the binary route).
+How to read it: where the algorithms match — windowed Montgomery
+exponentiation, Lehmer and Half-GCD, the quotient-sequence Jacobi symbol —
+the ratio against GMP is what GMP's assembly inner loops buy, and it differs
+by machine because that edge differs. Multiplication climbs schoolbook,
+Karatsuba, Toom-3, Toom-4 and an exact two-prime NTT at measured crossovers,
+squaring keeps its own kernel to a measured width, and `gcd` goes
+subquadratic above a measured width through Half-GCD (Möller, Math. Comp.
+77 (2008)), carried through the Bézout cofactors and the Jacobi symbol.
+Every crossover in the source names the probe that set it.
+
+Regenerate the data with `scripts/bench_primitives.sh` (rump and, via
+`pilot_gmp`, GMP) and the document with `scripts/build_performance.sh`;
+`cargo run --release --bin bench_bigint` prints ns/op for the core kernels.
 
 ## Manual
 
