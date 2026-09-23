@@ -6,9 +6,10 @@
 //! (Montgomery 1985; Koç, Acar & Kaliski 1996), schoolbook, Karatsuba, and
 //! Toom–Cook and exact NTT multiplication, Lehmer's gcd (Knuth §4.5.2, Algorithm L) with
 //! subquadratic Half-GCD at scale (Möller, Math. Comp. 77 (2008)), and the
-//! Jacobi symbol by quadratic reciprocity (*Handbook of Applied Cryptography*,
-//! Algorithm 2.149). Every algorithm carries its citation at its definition,
-//! and `CITATIONS.md` collects them.
+//! Jacobi symbol carried through that same quotient sequence by a state
+//! machine (Schönhage's identities, as in GMP's `mpn_hgcd_jacobi`). Every
+//! algorithm carries its citation at its definition, and `CITATIONS.md`
+//! collects them.
 //!
 //! Around that integer core sit three layers with the same discipline:
 //! [`Gf2m`](crate::finite_field::Gf2m) for binary extension fields GF(2^m), [`PolyZ`](crate::polynomial::PolyZ)/[`PolyMod`](crate::polynomial::PolyMod) for

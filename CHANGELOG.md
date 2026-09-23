@@ -93,10 +93,11 @@ what a consumer must change, not everything that moved.
   rounding. Radix-2 stages use scoped disjoint-slice workers bounded by
   `available_parallelism`; exact-worker curves through the full 2^26 ceiling
   select size targets from 4 through 64, not a fixed machine cap, and detection
-  failure is serial. Hardware-aware M4
-  crossovers are 65,536 limbs serially, 32,768 with two useful contexts, and
-  8,192 with four or more, plus a measured padding gate because transform work
-  doubles discontinuously. Input expansion writes directly into bit-reversed
+  failure is serial. The crossovers, measured on an EPYC 7452 and an
+  M4 and set where neither machine prefers Toom-4, are 131,072 limbs on one
+  context, 32,768 with two, and 8,192 with four or more; the transform is
+  taken at every width past them, whatever the radix-2 padding costs, because
+  it wins at every measured padding ratio. Input expansion writes directly into bit-reversed
   positions in parallel disjoint segments; independent forward transforms run
   concurrently within the same budget, and large inverses use DIF with the
   dead operand buffer as natural-order output. Linear passes parallelize above

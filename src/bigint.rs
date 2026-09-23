@@ -1056,7 +1056,7 @@ impl BigUint {
     /// non-decrease certifies the answer (Cohen, *A Course in Computational
     /// Algebraic Number Theory*, Algorithm 1.7.1). Each step costs one
     /// division at the operand's width, and convergence is quadratic, so the
-    /// step count is about log₂ of the bit width: a dozen at 8,192 bits.
+    /// step count is about log₂ of the bit width.
     #[must_use]
     pub fn sqrt_rem(&self) -> (Self, Self) {
         if self.is_zero() || self.is_one() {
@@ -1218,8 +1218,8 @@ impl BigUint {
     /// 1253–1283.
     ///
     /// On odd operands the valuation filter is inert and every prime
-    /// exponent below the bit width pays a full root: 0.9 ms at 1,024 bits
-    /// and 21.9 ms at 4,096, growing roughly cubically.
+    /// exponent below the bit width pays a full root, so the cost grows
+    /// roughly as the cube of the width.
     #[must_use]
     pub fn is_perfect_power(&self) -> bool {
         if self.is_zero() || self.is_one() {
@@ -1492,10 +1492,12 @@ impl BigUint {
 
     /// Multiply two big integers, choosing the kernel by the shorter
     /// operand's length: schoolbook (Knuth's Algorithm M) by default,
-    /// Karatsuba from 32 limbs, three-way Toom–Cook from 128, four-way
-    /// Toom–Cook from 3072, and an exact number-theoretic transform from
-    /// 65,536 limbs serially, 32,768 with two execution contexts, and 8,192
-    /// with four or more. The NTT never uses more contexts than
+    /// Karatsuba from `KARATSUBA_THRESHOLD_LIMBS`, three-way Toom–Cook from
+    /// `TOOM3_THRESHOLD_LIMBS`, four-way from `TOOM4_THRESHOLD_LIMBS`, and
+    /// an exact number-theoretic transform from `NTT_SERIAL_THRESHOLD_LIMBS`
+    /// on one execution context, `NTT_TWO_WORKER_THRESHOLD_LIMBS` with two
+    /// and `NTT_PARALLEL_THRESHOLD_LIMBS` with four or more; each constant
+    /// carries the measurement that set it. The NTT never uses more contexts than
     /// [`std::thread::available_parallelism`] reports. Toom and NTT require
     /// `long ≤ 1.5·short`, Karatsuba `long < 2·short`. A lopsided pair
     /// (`long ≥ 2·short`) whose shorter operand has at least 256 limbs takes
@@ -1607,18 +1609,14 @@ impl BigUint {
     /// Square a value, exploiting the symmetry that lets a squaring form
     /// each distinct cross term once instead of twice.
     ///
-    /// Below `SQR_SCHOOLBOOK_MIN_LIMBS` (8) this is [`Self::mul`]. From
-    /// there to the Karatsuba threshold it is `sqr_schoolbook_ref`; from
-    /// there to `SQR_KARATSUBA_MAX_LIMBS` it is `sqr_karatsuba_ref`.
-    /// Wider operands take [`Self::mul`]'s Toom kernels, or, once NTT
-    /// admits them, an NTT square that needs one transform array and one
-    /// forward transform per prime instead of a general product's two.
-    ///
-    /// Against `self.mul(self)`: +12% at 8 limbs, +36% at 16, +32% at 32,
-    /// +27% at 64, +26% at 127. Against the NTT product the NTT square runs
-    /// 1.26x to 1.39x faster over 8,192 to 131,072 limbs (PERFORMANCE.md,
-    /// "NTT and the multiplication ladder"), and uses half its
-    /// transform-array storage.
+    /// Below `SQR_SCHOOLBOOK_MIN_LIMBS` this is [`Self::mul`]. From there
+    /// to `KARATSUBA_THRESHOLD_LIMBS` it is `sqr_schoolbook_ref`; from there
+    /// to `SQR_KARATSUBA_MAX_LIMBS` it is `sqr_karatsuba_ref`, whose three
+    /// sub-products are themselves squares. Wider operands take
+    /// [`Self::mul`]'s Toom kernels, or, once the NTT admits them, an NTT
+    /// square that needs one transform array and one forward transform per
+    /// prime instead of a general product's two. Each threshold carries the
+    /// measurement that set it; PERFORMANCE.md's `sqr` rows carry the cost.
     ///
     /// Montgomery residues have their own squaring
     /// ([`MontgomeryContext::square_residue`](crate::modular::MontgomeryContext::square_residue)),

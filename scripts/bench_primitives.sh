@@ -113,9 +113,9 @@ ratio = hi / lo if ns and lo > 0 else float("inf")
 # 95% CI half-width as a percent of the mean, normal (IID) approximation:
 # each reading is a fresh independent operand, so there is no autocorrelation
 # for pilot's subsession CI to correct — the plain standard error is right. A
-# heavy tail makes this wide, which is the honest statement that a finite
-# sample pins the mean of a heavy-tailed cost only loosely (and is what flags
-# such a cell approximate below).
+# heavy tail makes this wide, which is the truth of the matter: a finite
+# sample pins the mean of a heavy-tailed cost only loosely, and the width is
+# what flags such a cell approximate below.
 if len(xs) > 2 and mean_ms > 0:
     ci_pct = 100.0 * (1.96 * statistics.stdev(xs) / len(xs) ** 0.5) / mean_ms
 else:

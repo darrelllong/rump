@@ -80,7 +80,7 @@
 \title{\textbf{rump}\\[0.4ex]\large A Reference Manual for the Multiprecision
 Arithmetic Crate\\[0.4ex]\normalsize version 0.3.0}
 \author{}
-\date{August 2026}
+\date{}
 
 \begin{document}
 \maketitle
@@ -89,9 +89,10 @@ Arithmetic Crate\\[0.4ex]\normalsize version 0.3.0}
 \noindent
 \textbf{rump} is a dependency-free Rust crate of multiprecision integer
 arithmetic implemented from the literature: Knuth's Algorithm~D for division,
-Montgomery and Barrett modular reduction, Karatsuba and Toom--Cook
-multiplication, Lehmer's gcd with subquadratic Half-GCD, the Jacobi symbol by
-quadratic reciprocity, Tonelli--Shanks and Cipolla square roots, Miller--Rabin
+Montgomery and Barrett modular reduction, Karatsuba, Toom--Cook, and exact
+NTT multiplication, Newton's reciprocal for wide division, Lehmer's gcd with
+subquadratic Half-GCD, the Jacobi symbol from the Euclidean quotient sequence,
+Tonelli--Shanks and Cipolla square roots, Miller--Rabin
 and Baillie--PSW primality, binary fields $\F_{2^m}$, univariate polynomials
 over $\Z$ and $\F_p$ with factorization, and integral LLL lattice reduction.
 This manual documents every public primitive: the mathematics that defines
@@ -163,17 +164,9 @@ use rump::{BigInt, BigUint, Sign};
 use core::num::NonZeroU64;
 \end{lstlisting}
 
-This manual tracks the development tree (version 0.3.0, untagged, on
-\code{main} above the \code{v0.2.2} tag). The one breaking change since
-0.2.2 is that \code{product\_tree} returns a \code{ProductTree} and
-\code{remainder\_tree} takes one, in place of the former
-\code{Vec<Vec<BigUint>{>}}; \code{CHANGELOG.md} carries the migration note.
-Behaviours new since 0.2.1 and absent from
-earlier releases include the samplers' stall guards
-(\S\ref{sec:random}), the unbalanced multiplication kernel
-(\S\ref{sec:mul}), the public signed ring, and the word-and-size
-primitives (\code{digit\_count}, \code{from\_i128}, \code{gcd\_u64},
-\code{mod\_inverse\_u64}).
+This manual documents the crate at version 0.3.0. Where a threshold
+is named in \code{typewriter} capitals it is a constant in \code{src/}, and
+the constant is the authority for its value.
 
 \subsection{Notation}
 
@@ -212,8 +205,12 @@ $2 \le r \le 36$; \code{Display} and \code{FromStr} are the base-10 special
 case, and \code{FromStr}'s error type is the exported
 \code{ParseBigIntError}. Power-of-two radices convert by direct bit packing. The rest run
 classical word-sized conversion at small sizes and switch to
-divide-and-conquer against a ladder of squared radix powers above measured
-crossovers: to parse $n$ digits, split at the largest $r^{2^j}$ below the
+divide-and-conquer against a ladder of squared radix powers: parsing from
+\code{RADIX\_FROM\_DC\_THRESHOLD\_DIGITS} (1024 digits) and rendering from
+\code{RADIX\_TO\_DC\_THRESHOLD\_BITS} (2048 bits), each recursion
+converting classically once a sub-problem falls below its floor
+(\code{RADIX\_FROM\_DC\_BASE\_DIGITS}, \code{RADIX\_TO\_DC\_BASE\_BITS}, both
+512). To parse $n$ digits, split at the largest $r^{2^j}$ below the
 value, giving the recurrence $T(n) = 2\,T(n/2) + M(n)$, where $M$ is the
 multiplication cost --- subquadratic wherever $M$ is.
 
@@ -273,9 +270,13 @@ its measured crossover. \code{square\_ref} has its own ladder
 once.
 
 \paragraph{Schoolbook (Knuth, Algorithm M).}
-The base case, $O(mn)$ limb products, used below 32 limbs.
+The base case, $O(mn)$ limb products, used below
+\code{KARATSUBA\_THRESHOLD\_LIMBS} (96 limbs).
 
-\paragraph{Karatsuba (32 limbs and above).}
+\paragraph{Karatsuba (from \code{KARATSUBA\_THRESHOLD\_LIMBS}, 96 limbs).}
+Admitted while $\text{long} < 2 \cdot \text{short}$
+(\code{KARATSUBA\_MAX\_IMBALANCE}); at that ratio the shorter operand's high
+half is empty and the split degenerates to schoolbook.
 Split both operands at $B = \beta^{\,s}$, $a = a_1 B + a_0$,
 $b = b_1 B + b_0$. Three half-width products replace four:
 \begin{equation}
@@ -287,14 +288,19 @@ ab  &= z_2 B^2 + z_1 B + z_0,
 \end{equation}
 giving $T(n) = 3\,T(n/2) + O(n) = O(n^{\lg 3}) \approx O(n^{1.585})$.
 
-\paragraph{Toom--Cook 3 (128 limbs) and 4 (3072 limbs).}
+\paragraph{Toom--Cook 3 and 4.}
+Toom-3 engages from \code{TOOM3\_THRESHOLD\_LIMBS} (128 limbs) and Toom-4
+from \code{TOOM4\_THRESHOLD\_LIMBS} (4096 limbs).
 Split each operand into $k$ base-$B$ digits and read it as a polynomial of
 degree $k-1$; the product polynomial has degree $2k-2$ and is determined by
 its values at $2k-1$ points. Toom-3 evaluates at
 $\{0, 1, -1, 2, \infty\}$ --- five products of a third the size,
-$O(n^{\log_3 5}) \approx O(n^{1.465})$; Toom-4 at seven points,
+$O(n^{\log_3 5}) \approx O(n^{1.465})$; Toom-4 at
+$\{0, 1, -1, 2, -2, 3, \infty\}$, seven points,
 $O(n^{\log_4 7}) \approx O(n^{1.404})$. Interpolation is exact: its
-divisions by small constants leave no remainder.
+divisions by small constants leave no remainder. Both kernels, and the NTT
+below, are balanced kernels: they accept a pair only while
+$\text{long} \le \tfrac32 \cdot \text{short}$.
 
 \paragraph{Exact two-prime NTT.}
 At very large balanced sizes each limb is split into four base-$2^{16}$
@@ -304,15 +310,17 @@ $2^{26}$ transform length, so CRT recovery and the carry pass are exact; no
 floating-point rounding or probabilistic check is involved. Radix-2 stages
 run on scoped disjoint slices, use no more execution contexts than
 \code{available\_parallelism} reports, and fall back to one if detection
-fails. The measured shorter-operand crossovers are 65,536 limbs serially,
-32,768 with two useful contexts, and 8,192 with four or more, with an
-additional padding-efficiency gate because a power-of-two transform doubles
-discontinuously.
+fails. Admission is by the shorter operand's width and the worker count the
+transform will get: \code{NTT\_SERIAL\_THRESHOLD\_LIMBS} (131,072 limbs) on
+one context, \code{NTT\_TWO\_WORKER\_THRESHOLD\_LIMBS} (32,768) on two, and
+\code{NTT\_PARALLEL\_THRESHOLD\_LIMBS} (8,192) on four or more. A radix-2
+transform rounds the convolution up to a power of two, and that padding is
+not a reason to refuse: there is no gate on it.
 
-\paragraph{Unbalanced operands (256 limbs).}
+\paragraph{Unbalanced operands (from \code{UNBALANCED\_THRESHOLD\_LIMBS}, 256 limbs).}
 The balanced kernels all bound the length ratio of their operands. A
 lopsided product ($\text{long} \ge 2 \cdot \text{short}$) whose shorter
-operand is past this kernel's own measured crossover --- 256 limbs, far
+operand is past this kernel's own crossover --- 256 limbs, far
 above Karatsuba's, because each block also pays dispatch and allocation
 overhead --- is computed by block decomposition: with $k$ the shorter
 length and $B = \beta^{\,k}$,
@@ -350,16 +358,18 @@ $2a_ia_j$ term from overflowing a \code{u128} accumulator), then adds the
 diagonal; the doubling cannot overflow, since twice the upper triangle is
 at most $a^2 < \beta^{2n}$.
 
-Four regimes, each measured against the kernel it displaces: below 8 limbs
-the passes do not repay themselves and the general multiplication is used;
-from there to the Karatsuba crossover the schoolbook squaring; from there
-to 448 limbs a Karatsuba squaring, whose three sub-products are themselves
-squares, since $z_1 = (a_0+a_1)^2 - a_0^2 - a_1^2$; above 448 limbs the
-Toom kernels win until NTT admission. NTT squaring uses one transform array,
-one forward transform per prime, and pointwise self-products rather than a
-general product's duplicate input transform. On the M4 crossover host it is
-about 1.47 times faster than general NTT multiplication and uses half the
-transform-array storage.
+Four regimes, each measured against the kernel it displaces. The general
+multiplication is used below \code{SQR\_SCHOOLBOOK\_MIN\_LIMBS} (8 limbs),
+where the passes do not repay themselves. From there up to the
+Karatsuba crossover, \code{KARATSUBA\_THRESHOLD\_LIMBS}, the schoolbook
+squaring runs. From there up to \code{SQR\_KARATSUBA\_MAX\_LIMBS} (1024
+limbs) a Karatsuba squaring runs, whose three sub-products are themselves
+squares, since $z_1 = (a_0+a_1)^2 - a_0^2 - a_1^2$. From 1024 limbs the
+general ladder's Toom kernels serve, and the NTT once it admits the width.
+NTT squaring uses one
+transform array, one forward transform per prime, and pointwise
+self-products rather than a general product's duplicate input transform, so
+it holds half the transform-array storage of a general product.
 
 \subsection{Division and remainder}
 
@@ -373,7 +383,16 @@ running remainder against the top limb of the divisor,
 \beta - 1\right),
 \end{equation}
 which after the standard two-limb refinement is off by at most one, and the
-multiply-subtract step's borrow corrects that final case. \code{rem}
+multiply-subtract step's borrow corrects that final case. Algorithm~D is
+quadratic in the divisor's width; from
+\code{NEWTON\_DIVISION\_THRESHOLD\_LIMBS} (3072 divisor limbs) the quotient
+is instead $\lfloor n \cdot \mu / \beta^{2k} \rfloor$ for the reciprocal
+$\mu = \lfloor \beta^{2k} / d \rfloor$ computed by Newton's iteration
+$x \mapsto x(2 - dx)$, which doubles its correct limbs at every step, $O(M(k))$
+in all; the reciprocal is made exact by a final check
+$d\mu \le \beta^{2k} < d(\mu + 1)$ (Brent and Zimmermann, \S4.2.2), and the
+quotient by a short correction. A one-limb divisor is Horner's recurrence
+in base $\beta$. \code{rem}
 keeps only the remainder; \code{div\_rem\_u64} and \code{rem\_u64} divide by
 a machine word with no heap-allocated divisor. \code{mod\_mul},
 \code{mod\_add}, \code{mod\_sub}, and \code{mod\_neg} are the one-shot
@@ -565,7 +584,8 @@ assert_eq!(minus_three.rem_euclid(&BigUint::from_u64(11)), BigUint::from_u64(8))
 
 \code{BarrettContext} is the fixed-modulus reduction context for a modulus of
 \emph{either parity} --- the complement to \code{MontgomeryContext}, which
-requires an odd one. \code{BarrettContext::new(n)} returns \code{None} for
+requires an odd one. \code{BarrettContext::new(n)} returns
+\code{Err(ModulusError::Zero)} or \code{Err(ModulusError::One)} for
 $n < 2$; otherwise it pays one division to precompute, for a $k$-limb
 modulus,
 \begin{equation}
@@ -583,7 +603,8 @@ Algorithm~14.42):
 q - 2 \;\le\; \hat q \;\le\; q \;=\; \left\lfloor \frac{x}{n} \right\rfloor,
 \end{equation}
 so $x - \hat q\,n$ lies in $[0, 3n)$ and at most two conditional
-subtractions finish the reduction.
+subtractions finish the reduction. An $x \ge \beta^{2k}$ falls back to the
+division the context exists to avoid.
 
 \code{mod\_mul}, \code{mod\_square}, and \code{mod\_pow} are built on
 \code{reduce}. \code{mod\_pow} is left-to-right binary exponentiation
@@ -612,8 +633,9 @@ The \emph{Montgomery representative} of $x$ is
 \bar{x} \;=\; xR \bmod n .
 \end{equation}
 
-\code{MontgomeryContext::new(n)} returns \code{None} for even or zero $n$;
-otherwise it precomputes $R^2 \bmod n$ (for encoding) and the word-level
+\code{MontgomeryContext::new(n)} refuses a zero modulus with
+\code{Err(ModulusError::Zero)} and an even one with
+\code{Err(ModulusError::Even)}; otherwise it precomputes $R^2 \bmod n$ (for encoding) and the word-level
 constant (Duss\'e and Kaliski, EUROCRYPT~'90)
 \begin{equation}
 n_0' \;=\; -\,n_0^{-1} \bmod \beta ,
@@ -652,9 +674,7 @@ residues it did not make.
 
 The opacity is the point. A domain value must be encoded, reduced, and bound
 to one context, and none of those can be stated in a signature that takes a
-bare integer --- the earlier API took \code{BigUint} and could only check in
-debug builds, so a release build accepted an unencoded or unreduced operand
-and returned a wrong answer. The type carries all three instead. Where the
+bare integer. The type carries all three instead. Where the
 relationship cannot be checked at compile time, two contexts both built at run
 time, it is checked at run time and the operations return
 \code{Result<\_, ContextMismatch>}.
@@ -663,15 +683,12 @@ time, it is checked at run time and the operations return
 internally. For loops where the product \emph{is} the loop, every domain
 operation has a \code{\_with} form taking an opaque
 \code{MontgomeryScratch}, threading one caller-owned buffer through a
-sequence instead of allocating per multiply --- measured per-operation at
-about 43\% for a 64-bit modulus, roughly 25--33\% at 256 bits, and roughly
-20\% at 512, falling to 2--3\% at 2048 bits and to the edge of measurement
-($\sim$1\%) at 4096; the in-tree \code{mont\_workspace\_timing} probe
-reproduces the numbers, printing its per-pass spread. The exponentiation
+sequence instead of allocating per multiply. The exponentiation
 ladder has two engines, chosen by exponent width: above 64 bits, left-to-right
-$k$-ary with a fixed 4-bit window table held in the domain
-(HAC Algorithm~14.82), seeded from the top window; at 64 bits or fewer
-(e.g.\ the F4 public exponent 65\,537), right-to-left binary
+$k$-ary with a fixed window of \code{WINDOW} $= 4$ bits
+(\code{src/bigint/montgomery.rs}) over a sixteen-entry power table held in
+the domain (HAC Algorithm~14.82), seeded from the top window; at 64 bits or
+fewer (e.g.\ the F4 public exponent 65\,537), right-to-left binary
 square-and-multiply, which skips the window-table setup that would dominate
 so short a ladder.
 
@@ -873,12 +890,21 @@ M \;=\; \begin{pmatrix} q & 1 \\ 1 & 0 \end{pmatrix}_{\!k}
 \end{equation}
 and the batch is certified against both endpoints of the leading-word
 interval before being replayed once, at full width, as a single
-$2 \times 2$ matrix--vector application (four scalar-by-bignum products)
---- roughly 35 quotients per 124-bit window. At very large sizes ($\sim$131\,kbit, measured) \code{gcd}
-switches to the subquadratic Half-GCD (M\"oller 2008): recursively compute
-the transform that reduces the top halves, splice it onto the full
-operands, and recurse, for
-$T(n) = O\!\left(M(n) \log n\right)$ where $M$ is the multiplication cost.
+$2 \times 2$ matrix--vector application (four scalar-by-bignum products).
+The window is \code{LEADING\_DIGIT\_BITS} $= 124$ bits wide, as wide as
+the \code{i128} transform arithmetic allows, and Lam\'e's bound caps a batch
+at \code{LEHMER\_BATCH\_MAX\_STEPS} $= 178$ quotients. From
+\code{HGCD\_THRESHOLD\_LIMBS} (2048 limbs in the smaller operand)
+\code{gcd} switches to the subquadratic Half-GCD (M\"oller 2008):
+recursively compute the transform that reduces the top halves, splice it
+onto the full operands, and recurse, for
+$T(n) = O\!\left(M(n) \log n\right)$ where $M$ is the multiplication cost;
+the recursion bottoms out in Lehmer batches below \code{HGCD\_BASE\_LIMBS}
+(96 limbs). \code{gcd\_extended} crosses over lower, at
+\code{HGCD\_EXT\_THRESHOLD\_LIMBS} (512 limbs), because Lehmer's extended
+form carries full-width cofactors through every batch; above it the driver's
+B\'ezout pair is canonicalized so the triple returned is the classical one,
+$s$ the representative of least absolute value modulo $b/g$.
 
 \begin{lstlisting}
 let a = BigUint::from_u64(240);
@@ -914,17 +940,22 @@ For an odd prime $p$ the Legendre symbol is
 the congruence being Euler's criterion. The Jacobi symbol extends it
 multiplicatively to odd $n = \prod p_i^{e_i}$ as
 $\jac{a}{n} = \prod \jac{a}{p_i}^{e_i}$; \code{jacobi(a, n)} computes it
-without factoring $n$, by quadratic reciprocity (HAC Algorithm~2.149):
-for odd coprime $a, n$,
+without factoring $n$, from the Euclidean quotient sequence of
+$(a \bmod n,\, n)$. Quadratic reciprocity and the supplement for 2,
 \begin{equation}
 \jac{a}{n}\jac{n}{a} = (-1)^{\frac{a-1}{2}\cdot\frac{n-1}{2}},
 \qquad
 \jac{2}{n} = (-1)^{\frac{n^2-1}{8}},
 \end{equation}
-alternating reductions $a \bmod n$ with extractions of 2 until the
-arguments collapse. (The arguments are unsigned, so the reduction never
-produces a negative top argument and the $\jac{-1}{n}$ supplement is never
-needed.) It returns \code{None} for even $n$, where the symbol
+together with periodicity in the top argument, make each Euclidean step
+$x = qy + r$ a change of sign that depends only on $q$ and on $x, y \bmod 4$,
+so a small state machine replaying the applied quotients carries the symbol
+while the remainders shrink (Sch\"onhage's identities, in the form of
+M\"oller's design as realized in GMP's \code{mpn\_hgcd\_jacobi}). The
+quotient sequence runs on Lehmer batches, and on machine words once both
+remainders fit one; from \code{JACOBI\_HGCD\_THRESHOLD\_LIMBS} (2048 limbs)
+the state threads through the Half-GCD recursion and the symbol costs
+$O(M(n) \log n)$, as \code{gcd} does. It returns \code{None} for even $n$, where the symbol
 is undefined; \code{legendre} is the same computation under its
 prime-modulus name; \code{kronecker} extends to every modulus through
 $\jac{a}{2} = 0$ for even $a$ and $(-1)^{(a^2-1)/8}$ for odd, with
@@ -1012,7 +1043,7 @@ for (inv, v) in inverses.iter().zip(&values) {
 \subsection{Square roots rem a prime}
 \label{sec:sqrtmod}
 
-\code{sqrt\_mod(a, p)} returns a square root of $a$ rem an odd prime
+\code{mod\_sqrt(a, p)} returns a square root of $a$ rem an odd prime
 $p$, or \code{None} for a non-residue. Write $p - 1 = 2^s q$ with $q$ odd.
 Three engines serve the call, chosen by the 2-adic depth $s$.
 
@@ -1027,8 +1058,10 @@ r^2 \;=\; a^{(p+1)/2} \;=\; a \cdot a^{(p-1)/2} \;=\; a,
 the last step by Euler's criterion.
 
 \paragraph{Tonelli--Shanks.} For deeper $s$, initialize with a
-non-residue $z$ (found by testing $\jac{z}{p} = -1$; $(p-1)/2$ of the
-non-zero residues qualify):
+non-residue $z$ (found by a deterministic scan testing $\jac{z}{p} = -1$;
+$(p-1)/2$ of the non-zero residues qualify, and the scan is abandoned after
+\code{NON\_RESIDUE\_SCAN\_BOUND} $= 128$ misses, which no prime modulus
+reaches with probability above $2^{-128}$):
 \begin{equation}
 M = s,\quad c = z^q,\quad t = a^q,\quad r = a^{(q+1)/2} \pmod{p}.
 \end{equation}
@@ -1042,9 +1075,10 @@ r \leftarrow r b .
 Each pass strictly reduces $M$, so at most $s$ passes run; when $t = 1$,
 $r^2 = a$.
 
-\paragraph{Cipolla.} When the 2-adic depth $s$ is large the descent's
-$O(s^2)$ multiplications dominate, and the implementation dispatches to
-Cipolla's algorithm: find $t$ with $\jac{t^2 - a}{p} = -1$, work in
+\paragraph{Cipolla.} When the 2-adic depth is large --- $s^2 >
+\code{CIPOLLA\_THRESHOLD\_FACTOR} \cdot \lceil \lg p \rceil$, with the factor
+$4$ --- the descent's $O(s^2)$ multiplications dominate, and the
+implementation dispatches to Cipolla's algorithm: find $t$ with $\jac{t^2 - a}{p} = -1$, work in
 $\F_{p^2} = \F_p(\omega)$ with $\omega^2 = t^2 - a$, and compute
 \begin{equation}
 r \;=\; (t + \omega)^{(p+1)/2},
@@ -1054,7 +1088,7 @@ by squaring before returning it, so on a composite modulus --- for which
 the internal reasoning is unsound --- the answer is either \code{None} or
 a genuine square root rem that composite, never a silently wrong value.
 \code{None} is \emph{not} a compositeness certificate, and \code{Some} is
-not a primality one: $\code{sqrt\_mod}(1, 15)$ returns \code{Some(1)}.
+not a primality one: $\code{mod\_sqrt}(1, 15)$ returns \code{Some(1)}.
 
 \begin{lstlisting}
 let p = BigUint::from_u64(41);
@@ -1065,7 +1099,7 @@ assert_eq!(mod_sqrt(&BigUint::from_u64(3), &p), None); // non-residue
 
 \subsection{Square roots rem a prime power}
 
-\code{sqrt\_mod\_prime\_power(a, p, e)} returns \emph{every} square root of
+\code{mod\_sqrt\_prime\_power(a, p, e)} returns \emph{every} square root of
 $a$ rem $p^e$, ascending, empty for a non-residue. For odd $p$ and
 $p \nmid a$, a root mod $p$ lifts uniquely along Hensel's construction:
 given $r_k^2 \equiv a \pmod{p^k}$,
@@ -1286,13 +1320,16 @@ least three quarters of the bases are witnesses, so $k$ random rounds err
 with probability at most $4^{-k}$. \code{miller\_rabin\_witness(n, a)} is the
 single-round primitive: \code{true} means $a$ proves $n$ composite.
 
-\code{is\_probable\_prime} runs trial division by small primes, then
-Miller--Rabin over twelve fixed small-prime bases (2 through 37) --- a
+\code{is\_probable\_prime} runs trial division by the 168 primes below
+1000, then Miller--Rabin over the twelve fixed bases of \code{MR\_BASES},
+the primes 2 through 37 --- a
 deterministic proof below $\psi_{12} \approx 3.19 \times 10^{23}$
 (exactly $318\,665\,857\,834\,031\,151\,167\,461$: Sorenson and Webster
 2017; the often-quoted $3.317 \times 10^{24}$ is $\psi_{13}$ and requires
-a thirteenth base) and a strong probable-prime test above.
-\code{is\_probable\_prime\_with\_bases} takes an
+a thirteenth base) and a strong probable-prime test above. The same
+twelve bases, run in a word-width Montgomery domain, make
+\code{is\_prime\_u64} a deterministic test of every \code{u64}.
+\code{miller\_rabin\_with\_bases} takes an
 explicit base set after the same unconditional sieve; each base is reduced
 rem the candidate, trivial residues $\{0, 1, n-1\}$ are discarded, and
 a set with no effective round proves nothing and reports composite. Fixed
@@ -1448,11 +1485,13 @@ modulus panics on the first non-invertible pivot.
 \subsection{Arithmetic over $\Z$}
 
 \code{add}/\code{sub}/\code{mul} (the coefficient convolution: schoolbook
-below 96 coefficients, Karatsuba above, with two further clauses. The
+below \code{POLY\_KARATSUBA\_THRESHOLD\_Z} (96 coefficients), Karatsuba
+above, with two further clauses. The
 crossover is measured over operand \emph{ratios}, not balanced pairs
 alone, because a split at half the longer operand saves almost nothing
-when the shorter one barely reaches past it --- so between 96 and 128
-coefficients only near-balanced pairs split, and above 128 every ratio
+when the shorter one barely reaches past it --- so between 96 and
+\code{POLY\_KARATSUBA\_ANY\_RATIO\_Z} (128 coefficients) only pairs within
+the ratio $5:4$ split, and from 128 every ratio
 does. And the split is refused to an operand too \emph{sparse} to pay for
 it, since the schoolbook pass skips a zero coefficient's whole inner loop
 and the split's sums destroy that saving; the density a pair must reach is
@@ -1793,8 +1832,23 @@ invisible to it, and two nearby simple roots cannot be told from one double
 root at \code{f64} precision. The squarefree decomposition
 $f = s_1 s_2^2 s_3^3 \cdots$, obtained by repeated exact gcd with $f'$, makes
 each $s_k$ squarefree, so its real roots are simple and bracketing finds all
-of them; each is then emitted $k$ times. Floating point only \emph{locates}
-roots whose count is already known.
+of them; each is then emitted $k$ times.
+
+Each squarefree factor is bracketed and bisected. The real roots of its
+derivative, found by the same procedure recursively, split the line into
+intervals on which the factor is monotone, so each holds at most one root
+(\code{simple\_real\_roots}). The outer ends are Cauchy's bound
+$1 + \max_i |c_i / c_d|$, rounded outward at every step --- each ratio an
+exact integer ceiling, the sum stepped one \code{f64} up --- so the bracket
+can only be too wide (\code{cauchy\_bound}). Every sign the bisection
+consults is decided exactly: an \code{f64} is a dyadic rational
+$m \cdot 2^{e}$, so $2^{kd} f(m 2^{e})$ with $k = \max(0, -e)$ is an
+integer that \code{BigInt} sums without rounding (\code{sign\_at}). The
+bracket is therefore a genuine sign change at every step, and
+\code{bisect\_f64} runs until the midpoint meets an endpoint --- the end of
+the format's resolution, not of a step budget --- returning a value one
+\code{f64} from a true root. Floating point carries only the split points
+and the answer; every decision is made in $\Z$.
 
 An empty \code{Ok} is an answer --- no real roots, the ordinary case for even
 degree. The refusals are distinct: \code{ZeroPolynomial}, where every real
@@ -1893,9 +1947,13 @@ one --- the arithmetic is exact, the form only as faithful as $p/q$, and the
 denominator is paid for out of range, since norms grow as the square of the
 weights. Within the form given there is no accuracy cliff, which is the
 difference from a floating-point metric that loses the ordering once the
-weighted coordinates pass $2^{53}$. It panics on a dependent pair, a
-non-positive weight, or arithmetic past \code{i128}; the rounding step needs
-twice the norm, so the working bound is that norms fit $2^{126}$.
+weighted coordinates pass $2^{53}$. A dependent pair is
+\code{Err(ReductionError::DependentBasis)} and arithmetic past \code{i128}
+is \code{Err(ReductionError::OutOfRange)}; the weights are
+\code{NonZeroU64}, so a non-positive weight cannot be written. The rounding
+step forms $2\langle u, v\rangle + \lVert u \rVert^2$, so every weighted
+squared norm $S$ the reduction visits needs $3S \le \code{i128::MAX}$,
+that is $S \le (2^{127} - 1)/3 \approx 2^{125.4}$.
 
 \begin{lstlisting}
 // Weights are NonZeroU64, so a non-positive weight cannot be written.
@@ -2116,8 +2174,9 @@ assert!(is_probable_prime(&prime));
 
 The unsigned types treat impossible requests as programming errors, not
 recoverable conditions. Fallible \emph{mathematics} --- a missing inverse,
-a non-residue, an even Montgomery modulus, non-coprime CRT moduli ---
-returns \code{Option} instead.
+a non-residue, an even Montgomery modulus, non-coprime CRT moduli, a
+residue from another context --- returns \code{Option} or \code{Result}
+instead.
 
 \begin{center}
 \begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.42\textwidth}>{\raggedright\arraybackslash}p{0.52\textwidth}@{}}
@@ -2131,13 +2190,12 @@ returns \code{Option} instead.
 \code{digit\_count} & the radix is below 2 \\
 \code{mod\_inverse\_u64} & the modulus is zero \\
 \code{nth\_root\_floor} & $k = 0$ \\
-\code{sqrt\_mod\_prime\_power} & $e = 0$ or $p < 2$ \\
+\code{mod\_sqrt\_prime\_power} & $e = 0$ or $p < 2$ \\
 \code{valuation} / \code{remove\_factor} & $n = 0$ or $p < 2$ \\
 \code{remainder\_tree} & a leaf is zero \\
 \code{rational\_reconstruct\_bounded} & $2ND \ge m$ (the uniqueness contract) \\
 \code{to\_be\_bytes\_padded} / \code{to\_le\_bytes\_padded} & the value exceeds the requested width \\
 \code{from\_str\_radix} / \code{to\_str\_radix} & the radix is outside $[2, 36]$ \\
-\code{mul\_mont} / \code{square\_mont} / their \code{\_with\_workspace} forms / \code{pow\_encoded} & an operand \emph{wider} than the modulus, in every build; an unreduced operand of the modulus's width trips a debug assert only (\S\ref{sec:montgomery}) \\
 \code{Gf2m::half\_trace} & the field degree is even \\
 \code{Gf2m::trace} & a reducible modulus makes the Frobenius sum leave GF(2) \\
 \code{PolyZ} / \code{PolyMod} division & the divisor is the zero polynomial \\
@@ -2148,7 +2206,7 @@ returns \code{Option} instead.
 \code{factor} / \code{roots} & the supplied \code{RandomSource} makes no progress (the equal-degree splitter's stall guard) \\
 \code{rem\_monic} / \code{product\_mod\_monic} & the divisor is zero or is not monic \\
 \code{balanced\_base\_expansion} & the base is below 2 \\
-\code{roots\_mod\_prime\_power} & a zero exponent, a base below 2, a polynomial that is zero or has every coefficient divisible by $p^e$, or a lift wider than \code{MAX\_ROOT\_LEVEL} \\
+\code{roots\_mod\_prime\_power} & a zero exponent, a base below 2, a polynomial that is zero or has every coefficient divisible by $p^e$, or a lift level or answer wider than \code{MAX\_ENUMERATED\_ROOTS} ($2^{20}$ candidates) \\
 \code{lll\_reduce} / \code{lll\_reduce\_delta} & dependent rows, ragged or zero-length rows; the \code{\_delta} form also on $\delta \notin (\tfrac14, 1)$ or a zero denominator \\
 samplers (\S\ref{sec:random}) & the generator trips a stall guard (see \S\ref{sec:random} for what each guard can and cannot detect) \\
 \bottomrule
@@ -2166,9 +2224,19 @@ samplers (\S\ref{sec:random}) & the generator trips a stall guard (see \S\ref{se
 \item S.~R. Duss\'e and B.~S. Kaliski, \emph{A cryptographic library for
   the Motorola DSP56000}, EUROCRYPT '90 --- the word-level $n_0'$.
 \item A.~J. Menezes, P.~C. van Oorschot, S.~A. Vanstone, \emph{Handbook of
-  Applied Cryptography} --- Algorithms 2.149, 4.44, 14.42, 14.82.
+  Applied Cryptography} --- Algorithms 14.42, 14.82; \S3.5.1.
 \item N.~M\"oller, \emph{On Sch\"onhage's algorithm and subquadratic
-  integer GCD computation}, Math.\ Comp.\ 77 (2008).
+  integer GCD computation}, Math.\ Comp.\ 77 (2008); the Jacobi threading
+  as realized in GMP's \code{mpn\_hgcd\_jacobi}.
+\item R.~P. Brent and P. Zimmermann, \emph{Modern Computer Arithmetic},
+  Cambridge, 2010 --- \S4.2.2 (Newton's reciprocal), \S2.4 (Barrett's
+  division).
+\item R.~P. Brent and P. Zimmermann, \emph{An $O(M(n) \log n)$ algorithm
+  for the Jacobi symbol}, ANTS-IX, LNCS 6197 (2010).
+\item N. M\"oller and T. Granlund, \emph{Improved division by invariant
+  integers}, IEEE Trans.\ Computers 60 (2011) --- Algorithm 4.
+\item J. Sorenson and J. Webster, \emph{Strong pseudoprimes to twelve prime
+  bases}, Math.\ Comp.\ 86 (2017).
 \item H. Cohen, \emph{A Course in Computational Algebraic Number Theory}
   --- Algorithms 1.7.1, 2.6.3; \S3.3--3.4.
 \item R. Baillie and S.~S. Wagstaff, \emph{Lucas pseudoprimes},

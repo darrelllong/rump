@@ -1156,8 +1156,10 @@ fn hgcd(a: &BigUint, b: &BigUint, mut state: Option<&mut JacobiState>) -> (Mat2,
 
 /// Below this many limbs in the smaller operand, gcd runs on Lehmer; at or
 /// above it, on the Half-GCD driver — and the driver hands its own tail back
-/// to Lehmer at the same line. The two tie at 2048 limbs; Half-GCD leads
-/// 1.3× at 4096 and 1.7× at 8192 (PERFORMANCE.md, "GCD at scale").
+/// to Lehmer at the same line. `hgcd_crossover_timing` (run with
+/// `--ignored`) has the two level at 2048 limbs and the driver ahead above
+/// it; PERFORMANCE.md's "GCD at scale" carries the family's cost across the
+/// crossover.
 /// Correctness does not depend on the value: setting it to 2 forces every
 /// size through the recursion.
 const HGCD_THRESHOLD_LIMBS: usize = 2048;
@@ -1984,8 +1986,7 @@ pub fn rational_reconstruct_bounded(
 /// modulus (CRT-lifted linear algebra, p-adic lifting).
 ///
 /// The bound is `⌊√((m−1)/2)⌋` taken by `sqrt_floor`'s Newton iteration,
-/// and computing it is not free relative to the walk it precedes: 0.3× the
-/// walk at 2048 bits and parity with it at 8192. Callers reconstructing many
+/// a cost of the same order as the walk it precedes. Callers reconstructing many
 /// values under one modulus should compute the bound once and call
 /// [`rational_reconstruct_bounded`], which removes that term from every call
 /// after the first.
@@ -2196,10 +2197,8 @@ fn mod_sqrt_cipolla(a: &BigUint, p: &BigUint, ctx: &MontgomeryContext) -> Option
 /// cost the per-element inversions the trick exists to avoid. The empty
 /// batch inverts to the empty vector.
 ///
-/// The gain approaches the ratio of one inversion to three
-/// multiplications: at 2048 bits, 1.5× at a batch of two, 3.3× at a
-/// hundred, levelling near 3.4×, since the Lehmer inversion costs about
-/// ten multiplications.
+/// The gain grows with the batch and approaches the ratio of one inversion
+/// to three multiplications.
 ///
 /// A modulus of zero yields `None` (nothing is invertible in no ring); a
 /// modulus of one yields the trivial ring's answer, zero for every

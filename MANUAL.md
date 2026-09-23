@@ -1,6 +1,6 @@
 # MANUAL
 
-This manual documents every public API in the crate, organized by task. Every
+This manual documents the crate's public API, organized by task. Every
 code block below is replicated verbatim in `tests/manual_examples.rs`, so the
 examples are compiled and asserted on every `cargo test` — the manual cannot
 drift from the code.
@@ -50,9 +50,9 @@ memory keeps its contents, and `Debug` prints every limb. The opt-in `wipe`
 cargo feature restores the drop-time scrub as cheap defense in depth — every
 `BigUint` volatile-wipes its live limbs on drop, the in-place shrink paths
 wipe the limbs they abandon, the exponentiation ladder and Montgomery
-workspaces wipe on exit, and the samplers wipe drawn bytes — with the old
-caveats unchanged: spare capacity and buffers freed on reallocation are not
-wiped, and nothing becomes constant-time. Constant-time operation is out of
+workspaces wipe on exit, and the samplers wipe drawn bytes — with two
+caveats: spare capacity and buffers freed on reallocation are not wiped, and
+nothing becomes constant-time. Constant-time operation is out of
 scope either way, left to a consumer that handles key material.
 
 ## BigUint
@@ -106,8 +106,8 @@ iteration, certified by the first non-decrease — and `sqrt_floor` is its
 root half. `nth_root_floor(k)` generalizes to any k ≥ 1 (panics at k = 0).
 `is_square` answers by residue filters and one certified root;
 `is_perfect_power` checks one certified root per prime exponent up to the
-bit length (on odd operands every prime exponent pays a full root — about
-22 ms at 4096 bits). `pow_u64` raises to a machine-word exponent by binary
+bit length (the 2-adic valuation is a filter that is inert on odd operands,
+where every prime exponent below the bit width pays a full root). `pow_u64` raises to a machine-word exponent by binary
 exponentiation — the helper the root routines certify against. `popcount`
 counts set bits; `trailing_zeros` is the 2-adic valuation, `None` for
 zero.
@@ -143,8 +143,10 @@ literals — the `FromStr` error type is the exported `ParseBigIntError`),
 and the `{:x}`/`{:o}`/`{:b}` format traits are not implemented
 — hexadecimal and binary come from `to_str_radix`. Power-of-two radices
 convert by direct bit packing; the rest run classical word-sized
-conversion at small sizes and divide-and-conquer against a ladder of
-squared radix powers above the measured crossovers.
+conversion below the crossovers and divide-and-conquer against a ladder of
+squared radix powers from them: `RADIX_FROM_DC_THRESHOLD_DIGITS` (1024
+digits) for parsing and `RADIX_TO_DC_THRESHOLD_BITS` (2048 bits) for
+rendering.
 
 ```rust
 let n = BigUint::from_str_radix("deadbeef", 16).expect("valid hex");
@@ -183,9 +185,22 @@ three-operand forms — the result written into `self`, whose buffer is
 reused: a long-lived output allocates only until its capacity covers the
 result, then never again (the shape of GMP's `mpz_add`).
 `Clone::clone_from` likewise copies a value into existing storage.
-`square` squares, retaining specialized schoolbook/Karatsuba kernels and a
-one-buffer exact NTT square at very large sizes; NTT execution never uses more
-contexts than the machine reports. `sqrt_floor` is the integer square root
+`mul` chooses its kernel by the shorter operand's limb count: schoolbook,
+Karatsuba from `KARATSUBA_THRESHOLD_LIMBS` (96 limbs, for `long < 2·short`),
+Toom-3 from `TOOM3_THRESHOLD_LIMBS` (128), Toom-4 from
+`TOOM4_THRESHOLD_LIMBS` (4096), and an exact number-theoretic transform from
+`NTT_SERIAL_THRESHOLD_LIMBS` (131,072) on one execution context,
+`NTT_TWO_WORKER_THRESHOLD_LIMBS` (32,768) with two, and
+`NTT_PARALLEL_THRESHOLD_LIMBS` (8,192) with four or more — Toom and the NTT
+for `long ≤ 1.5·short`, and no gate refuses a width for how the transform
+pads it. The NTT never uses more contexts than the machine reports. A
+lopsided pair (`long ≥ 2·short`) whose shorter operand has at least
+`UNBALANCED_THRESHOLD_LIMBS` (256) limbs is cut into balanced blocks.
+`square` runs its own schoolbook kernel from `SQR_SCHOOLBOOK_MIN_LIMBS` (8
+limbs) to the Karatsuba threshold and Karatsuba squaring from there up to
+`SQR_KARATSUBA_MAX_LIMBS` (1024), then hands over to the multiplication
+ladder, taking a one-buffer exact NTT square where the NTT admits the width.
+`sqrt_floor` is the integer square root
 (largest `r` with `r² ≤ self`). Subtraction panics on underflow — the type is
 unsigned; use
 [`BigInt`](#signed-integers-bigint-and-sign) when signs can go negative.
@@ -242,7 +257,9 @@ assert_eq!(x, BigUint::from_u64(0b0110));
 
 ### Division and reduction
 
-`div_rem` returns quotient and remainder (Knuth Algorithm D under the hood);
+`div_rem` returns quotient and remainder — Knuth's Algorithm D, and Newton's
+reciprocal for a divisor of at least `NEWTON_DIVISION_THRESHOLD_LIMBS` (3072
+limbs);
 `rem` keeps only the remainder; `rem_u64` reduces by a machine word;
 `mod_mul`, `mod_add`, `mod_sub`, and `mod_neg` are the one-shot modular
 operations, taking operands of any size and returning a result in
@@ -353,8 +370,9 @@ zero below positives), so `<`, `.max()`, and `slice::sort` all apply.
 Arithmetic never does: rump does not overload `+` or `*`, so every
 multiprecision operation is an explicit method call (`add`, `mul`,
 `negated`, …) and therefore visible in the code that pays for it. Values move
-without copying; `Clone` duplicates the limbs;
-live limbs on drop as defense in depth (see the scope note above).
+without copying; `Clone` duplicates the limbs; and under the `wipe` feature
+every `BigUint` wipes its live limbs on drop as defense in depth (see the
+scope note above).
 
 A complete example — a bubble sort of signed integers, written exactly as it
 would be for any ordered type:
@@ -398,7 +416,8 @@ oblivious to whether an element fits in one word or a hundred.
 — the complement to `MontgomeryContext`, which requires an odd modulus. One
 division precomputes `μ`; `reduce` then costs two multiplications
 (HAC Algorithm 14.42), with `mod_mul`, `mod_square`, and `mod_pow` built
-on it. `None` for a modulus below 2.
+on it. `Err(ModulusError::Zero)` or `Err(ModulusError::One)` for a modulus
+below 2.
 
 ```rust
 let even = BigUint::from_u64(1_000);
@@ -442,11 +461,9 @@ and the operations return `Result<_, ContextMismatch>`.
 
 For loops where the product *is* the loop, every domain operation has a
 `_with` form taking a `MontgomeryScratch`, which threads one caller-owned
-buffer through a sequence instead of allocating per multiply — measured
-per-operation at about 43% for a 64-bit modulus, roughly 25–33% at 256 bits,
-and ~20% at 512, falling to 2–3% at 2048 bits and to the edge of measurement
-(~1%) at 4096 (the in-tree `mont_workspace_timing` probe reproduces the
-numbers with its per-pass spread printed).
+buffer through a sequence instead of allocating per multiply; the saving is
+the allocation, so it is a larger share of a narrow modulus's multiply than
+of a wide one's (PERFORMANCE.md carries the `_scratch` rows).
 
 ```rust
 let p = BigUint::from_u64(97);
@@ -508,8 +525,8 @@ A `Gf2m` is a binary extension field defined by its irreducible polynomial,
 encoded as a `BigUint` bit pattern (bit `i` = coefficient of `xⁱ`). The
 degree is derived from the polynomial — `new` returns `None` for constants,
 and irreducibility is the caller's contract. `add` is an associated function
-(XOR needs no modulus); `mul`, `square`, `inverse`, and `half_trace` are
-methods, along with `pow`, `div`, `sqrt` (unique — squaring is a bijection),
+(XOR needs no modulus); `mul`, `square`, and `inverse` are methods, along
+with `pow`, `div`, `sqrt` (unique — squaring is a bijection),
 `trace`, `half_trace` (the odd-degree primitive), and `solve_quadratic`,
 which solves `z² + z = c` at every degree and returns `None` exactly when
 `Tr(c) = 1`. Multiplication is comb-based over words (*Guide to ECC*,
@@ -581,8 +598,10 @@ assert!(Gf2m::is_irreducible(&BigUint::from_u64(0x11B)));
 ### Divisibility
 
 `gcd` and `lcm` by Euclid — `gcd`, `gcd_extended`, and `mod_inverse` share a
-Lehmer-accelerated engine, and `gcd` switches to subquadratic Half-GCD above
-~131 kbit; `gcd_extended` returns the Bézout triple `(g, s, t)` with
+Lehmer-accelerated engine and switch to subquadratic Half-GCD by the smaller
+operand's limb count, `gcd` from `HGCD_THRESHOLD_LIMBS` (2048 limbs) and
+`gcd_extended` and `mod_inverse` from `HGCD_EXT_THRESHOLD_LIMBS` (512);
+`gcd_extended` returns the Bézout triple `(g, s, t)` with
 `g = a·s + b·t`. `gcd_u64` is the word-sized form — single-word Euclid, the
 base case the wide `gcd` falls to, public so callers holding machine words
 (sieve coordinates, residues, small cofactors) skip the heap entirely.
@@ -608,7 +627,11 @@ assert_eq!(gcd_u64(0, 7), 7); // gcd(0, b) = b
 
 ### Quadratic-residue symbols
 
-`jacobi(a, n)` for odd `n` (`None` otherwise); `legendre` is the same value
+`jacobi(a, n)` for odd `n` (`None` otherwise) runs the Euclidean quotient
+sequence with Lehmer batching at every size, a symbol state machine
+replaying each applied quotient; from `JACOBI_HGCD_THRESHOLD_LIMBS` (2048
+limbs in the smaller operand) the state threads through the Half-GCD
+recursion and the symbol is subquadratic. `legendre` is the same value
 under its prime-modulus name; `kronecker` extends to every modulus,
 including even and zero.
 
@@ -628,7 +651,8 @@ assert_eq!(kronecker(&BigUint::one(), &BigUint::zero()), 1); // (1/0) = 1
 
 ### Modular arithmetic
 
-`mod_pow` for any non-zero modulus (Montgomery when odd), `mod_inverse`
+`mod_pow` for any non-zero modulus (Montgomery when odd, Barrett when even),
+`mod_inverse`
 (`None` when the gcd exceeds one; `mod_inverse_u64` and `mod_inverse_u128`
 are its word- and double-word companions, each total over its type), `mod_sqrt` by Tonelli–Shanks with a
 dispatch to Cipolla's algorithm where the prime's 2-adic depth makes the
@@ -737,8 +761,7 @@ answer unique. `None` means no fraction within the bounds reduces to `x`.
 This is the recovery step of CRT-lifted and p-adic computation: compute
 with residues, then read the rational answer back. When reconstructing
 many values under one modulus, compute the bound once and use the bounded
-form — the symmetric wrapper recomputes a square root that costs more
-than the reconstruction itself at large sizes.
+form — the symmetric wrapper takes an integer square root on every call.
 
 ```rust
 // 22/7 survives reduction mod 1009 and comes back intact.
@@ -919,7 +942,10 @@ assert_eq!(residues, vec![
 ### Primality
 
 `is_probable_prime` runs trial division plus Miller-Rabin over the twelve
-fixed small-prime bases; `miller_rabin_with_bases` takes an explicit
+fixed small-prime bases. `is_prime_u64` decides a machine word outright by
+the same twelve prime bases, which Sorenson & Webster proved sufficient
+below 2⁶⁴, in a word-width Montgomery domain with no allocation.
+`miller_rabin_with_bases` takes an explicit
 base set (after the same unconditional small-prime sieve, so it is a
 probable-prime predicate, not a way to run Miller-Rabin with exactly those
 bases and nothing else); `miller_rabin_witness` is the single-round
@@ -1210,10 +1236,18 @@ matters because a bisection sees a root only where the polynomial changes
 sign, so an even-multiplicity root is invisible to it, and two nearby simple
 roots are indistinguishable from one double root at `f64` precision.
 
+Location is bisection between the derivative's real roots inside an
+outward-rounded Cauchy bound, and every sign the bisection reads is the exact
+sign of the integer polynomial at a dyadic point (`cauchy_bound`, `sign_at`,
+and `bisect_f64` in `src/poly.rs`): a bracket is a true sign change, each
+root returned is within a float of a true root, and a wide coefficient range
+cannot hide a root behind floating-point cancellation.
+
 An empty `Ok` means no real roots, which is the ordinary answer for an
 even-degree polynomial. The two refusals are distinct: `RealRootError::ZeroPolynomial`
 (every real number is a root) and `RealRootError::CoefficientOutOfRange` (a
-coefficient does not fit `f64`, so the polynomial cannot be evaluated at all).
+coefficient does not fit `f64`; the search is exact, but its brackets and its
+answer live in `f64`).
 
 ```rust
 // (x−1)(x−2)(x−3)
@@ -1469,7 +1503,7 @@ recoverable conditions:
 | `PolyZ::roots_mod_prime_power` | the exponent is zero, the base is below 2, the polynomial is zero or has every coefficient divisible by `pᵉ` (every residue is then a root), or the lift would exceed `MAX_ENUMERATED_ROOTS` candidates at some level or in its answer |
 | `lll_reduce` / `lll_reduce_delta` | dependent, ragged, or zero-length rows; the `_delta` form also on `δ ∉ (1/4, 1)` or a zero denominator |
 | `to_be_bytes_padded` / `to_le_bytes_padded` | the value needs more than the requested byte length |
-| `MontgomeryContext::mul_mont` / `square_mont` / their `_with_workspace` forms / `pow_encoded` | given an operand not reduced below the modulus — the shared in-domain contract, asserted in debug builds; in release a grossly over-width operand trips the internal bounds check. `encode` and `decode` instead reduce any representative and never panic on width |
+| `MontgomeryContext` operations | never on operand width: `encode`, `decode`, and the one-shot forms reduce any representative, and a `MontgomeryResidue` is reduced by construction; a residue from another context is `Err(ContextMismatch)`, not a panic |
 | `random_below` / `random_nonzero_below` / `random_coprime_below` / `random_probable_prime` | the generator trips a stall guard — see Random sampling above for what each guard can and cannot detect |
 
 Fallible mathematics — a missing inverse, a non-residue, an even Montgomery
