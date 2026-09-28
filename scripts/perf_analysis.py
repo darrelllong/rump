@@ -251,9 +251,9 @@ def scaling_svg(family, out, hosts):
         s.append(f'<text x="{ML-8}" y="{y+4:.1f}" font-size="11" fill="#6F675C" '
                  f'text-anchor="end">{lbl}</text>')
     # series.
-    # Per host: solid, dashed, dotted, dash-dot, one distinct pattern for each
-    # of up to four hosts.
-    dash = {0: "", 1: "5,3", 2: "1,3", 3: "5,3,1,3"}  # per host
+    # Per host: solid, dashed, dotted, dash-dot, dash-dot-dot, one distinct
+    # pattern for each of up to five hosts.
+    dash = {0: "", 1: "5,3", 2: "1,3", 3: "5,3,1,3", 4: "8,3,1,3,1,3"}  # per host
     for oi, op in enumerate(ops):
         col = PALETTE[oi % len(PALETTE)]
         for (o, host, hi, pts) in series:

@@ -6,6 +6,11 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 PA="python3 scripts/perf_analysis.py"
+# GB10: NVIDIA GB10 (paris), one Cortex-X925 core; pilot-bench f01eec4.
+GB10=bench/primitives_paris.md
+GB10_HEAVY_EXT=bench/heavy_extended_paris.md
+GB10_GMP=bench/gmp_paris.md
+# The hosts below were measured with pilot-bench builds before f01eec4.
 # M4: Apple M4 Pro, the development Mac.
 M4=bench/primitives_dyson.md
 M4_HEAVY_EXT=bench/heavy_extended_dyson.md
@@ -21,9 +26,12 @@ PI_GMP=bench/gmp_darby.md
 # A18: Apple A18 Pro, an iPhone-class core; primitives and GMP only.
 A18=bench/primitives_verne.md
 A18_GMP=bench/gmp_verne.md
-# The gcd-family sweep, 8 kbit to 1 Mbit, and its GMP counterpart.
-GCD_SCALE=bench/gcd_scaling_dennard.md
-GMP_GCD_SCALE=bench/gmp_gcd_scaling_dennard.md
+# The gcd-family sweep, 8 kbit to 1 Mbit, and its GMP counterpart, on the GB10;
+# the EPYC's sweep (pilot-bench before f01eec4) is kept beside it.
+GCD_SCALE=bench/gcd_scaling_paris.md
+GMP_GCD_SCALE=bench/gmp_gcd_scaling_paris.md
+EPYC_GCD_SCALE=bench/gcd_scaling_dennard.md
+EPYC_GMP_GCD_SCALE=bench/gmp_gcd_scaling_dennard.md
 OUT=PERFORMANCE.md
 
 # Refuse to build the document on data that contradicts itself: a reported mean
@@ -43,13 +51,13 @@ fi
 
 # Regenerate the scaling SVGs too, so they never drift from the tables.
 for fam in arithmetic division montgomery number-theory; do
-    $PA plot "$fam" "assets/scaling-$fam.svg" "M4=$M4" "EPYC=$EPYC" "Pi=$PI" "A18=$A18" >/dev/null
+    $PA plot "$fam" "assets/scaling-$fam.svg" "GB10=$GB10" "M4=$M4" "EPYC=$EPYC" "Pi=$PI" "A18=$A18" >/dev/null
 done
 # The variable-time figure carries every host's extended heavy-tail record
 # alongside the primitives sizes, so each curve runs as far as its host's
 # record does, and the conditioned square-root rows appear as their own series.
 $PA plot variable-time assets/scaling-variable-time.svg \
-    "M4=$M4,$M4_HEAVY_EXT" "EPYC=$EPYC,$EPYC_HEAVY_EXT" \
+    "GB10=$GB10,$GB10_HEAVY_EXT" "M4=$M4,$M4_HEAVY_EXT" "EPYC=$EPYC,$EPYC_HEAVY_EXT" \
     "Pi=$PI,$PI_HEAVY_EXT" "A18=$A18" >/dev/null
 $PA plot gcd-at-scale assets/scaling-gcd-at-scale.svg \
     "rump=$GCD_SCALE" "GMP=$GMP_GCD_SCALE" >/dev/null
@@ -178,12 +186,45 @@ rows by proportion.
 All measurements are single-threaded. The hosts, and the files each host's
 columns are built from:
 
-| label | machine | primitives | GMP | extended heavy tail |
-|---|---|---|---|---|
-| **M4** | Apple M4 Pro (the development Mac) | `bench/primitives_dyson.md` | `bench/gmp_dyson.md` | `bench/heavy_extended_dyson.md` |
-| **EPYC** | AMD EPYC 7452 | `bench/primitives_dennard.md` | `bench/gmp_dennard.md` | `bench/heavy_extended_dennard.md` |
-| **Pi** | Raspberry Pi 5 (Cortex-A76) | `bench/primitives_darby.md` | `bench/gmp_darby.md` | `bench/heavy_extended_darby.md` |
-| **A18** | Apple A18 Pro, an iPhone-class core | `bench/primitives_verne.md` | `bench/gmp_verne.md` | — |
+| label | machine | pilot-bench | primitives | GMP | extended heavy tail |
+|---|---|---|---|---|---|
+| **GB10** | NVIDIA GB10, one Cortex-X925 core (paris) | f01eec4 | `bench/primitives_paris.md` | `bench/gmp_paris.md` | `bench/heavy_extended_paris.md` |
+| **M4** | Apple M4 Pro (the development Mac) | before f01eec4 | `bench/primitives_dyson.md` | `bench/gmp_dyson.md` | `bench/heavy_extended_dyson.md` |
+| **EPYC** | AMD EPYC 7452 | before f01eec4 | `bench/primitives_dennard.md` | `bench/gmp_dennard.md` | `bench/heavy_extended_dennard.md` |
+| **Pi** | Raspberry Pi 5 (Cortex-A76) | before f01eec4 | `bench/primitives_darby.md` | `bench/gmp_darby.md` | `bench/heavy_extended_darby.md` |
+| **A18** | Apple A18 Pro, an iPhone-class core | before f01eec4 | `bench/primitives_verne.md` | `bench/gmp_verne.md` | — |
+
+The GB10 columns, the GB10 sweep under *GCD at scale*, and the extrema table
+were measured on 2026-09-28 on paris: an NVIDIA GB10 (ten Arm Cortex-X925
+cores at up to 3.9 GHz and ten Cortex-A725 cores), Ubuntu 24.04.5, Linux
+7.0.0-1019-nvidia, frequency governor `performance`. Every session ran on one
+Cortex-X925 core (`taskset -c 9`), one session at a time, with nothing else
+running but idle services. `pilot_mp` was built by rustc 1.95.0 (`--release`)
+from rump 686cfcd, `pilot_gmp` by gcc 13.3.0 (`-O2`) against Ubuntu's GMP
+6.3.0, and the sessions were driven by pilot-bench f01eec4 with the preset,
+session limits and reduction described above.
+
+The other hosts' columns were measured with pilot-bench builds before f01eec4,
+which located change-points with E-Divisive with Medians. That detector
+reports change-points in readings that have none (pilot-bench's changelog
+gives the rates), and Pilot does not use the readings before the last
+change-point when it decides whether a session has converged, so sessions
+could run longer than they needed to. The reduction here computes every
+figure from all the readings a session saved, so those columns are
+whole-sample statistics as well; what the older Pilot changed is when a
+session stopped, and so the reading count `n`.
+
+On the GB10 every session met pilot-bench's convergence criterion except
+these, which stopped at their session limit: `isprime` at every size for both
+libraries, `sqrtmod` from 2048 bits, `sqrtmod_blum`, `sqrtmod_descent` and
+`isprime_true` at 4096 bits, every row of the extended heavy-tail record, and
+rump's `gcd` at 1 Mbit (a 30 s limit).
+
+`scripts/bench_primitives.sh` declares its performance index as type 0, an
+ordinary value, since a time per operation is not a rate. The GB10 sessions
+were run with it declared as type 1; f01eec4 does not store the mean method
+a type selects and analyses a type-1 index exactly as type 0, so those
+sessions are the ones the script now specifies.
 
 GMP numbers come from `pilot_gmp`, a C mirror of `pilot_mp` linked against the
 host's libgmp and driven through the same pilot-bench harness: the same operand
@@ -211,7 +252,7 @@ exponent is unreliable — read their extrema instead.
 
 MD
 
-$PA fit "M4=$M4" "EPYC=$EPYC" "Pi=$PI" "A18=$A18"
+$PA fit "GB10=$GB10" "M4=$M4" "EPYC=$EPYC" "Pi=$PI" "A18=$A18"
 
 cat <<'MD'
 
@@ -219,12 +260,12 @@ cat <<'MD'
 
 Mean cost per operation, one row per method and host, one column per size.
 Read down a column to compare hosts on one method; read across a row for the
-method's growth. The four hosts show the same shapes at different heights; the
-scaling graphs after the table plot all four.
+method's growth. The five hosts show the same shapes at different heights; the
+scaling graphs after the table plot all five.
 
 MD
 
-$PA means "M4=$M4" "EPYC=$EPYC" "Pi=$PI" "A18=$A18"
+$PA means "GB10=$GB10" "M4=$M4" "EPYC=$EPYC" "Pi=$PI" "A18=$A18"
 
 cat <<'MD'
 
@@ -279,6 +320,14 @@ mean parity. `isprime` is omitted here — its heavy-tailed mean makes the ratio
 meaningless (see Extrema). rump's Montgomery domain, `mod_sqrt`, and GF(2^m)
 have no `mpz` counterpart and so cannot appear in the comparison; their costs
 are in the tables above.
+
+### GB10
+
+MD
+
+$PA compare "$GB10" "$GB10_GMP" | grep -v '`isprime`'
+
+cat <<'MD'
 
 ### M4
 
@@ -342,8 +391,8 @@ read against that grouping:
 - **Why the ratios differ by host.** The assembly edge is not the same on
   every core, because how far hand-scheduled assembly outruns compiled Rust
   depends on the pipeline it runs on. The same operation therefore shows a
-  different ratio on each host, and the four tables are four measurements
-  of the same code against four assembly targets, not four opinions about
+  different ratio on each host, and the five tables are five measurements
+  of the same code against five assembly targets, not five opinions about
   the algorithm.
 
 ## NTT and the ladder
@@ -375,7 +424,7 @@ and their output is not reproduced here.
 
 The tables above stop at 64 limbs, where the whole family runs its Lehmer
 engine. This section sweeps the family from 8 kbit to 1 Mbit (128 to 16,384
-limbs) on the EPYC, against GMP on the same host, and every one of the four
+limbs) on the GB10, against GMP on the same host, and every one of the four
 changes algorithm inside that range. `gcd` dispatches to Half-GCD at 2048 limbs
 (Möller, *On Schönhage's algorithm and subquadratic integer gcd computation*,
 Math. Comp. 77 (2008)), computing the reduction matrix from the operands' top
@@ -416,9 +465,22 @@ cat <<'MD'
 
 ![gcd at scale](assets/scaling-gcd-at-scale.svg)
 
+The same sweep on the EPYC, measured with pilot-bench before f01eec4
+(`bench/gcd_scaling_dennard.md`, `bench/gmp_gcd_scaling_dennard.md`):
+
+MD
+
+$PA fit "rump=$EPYC_GCD_SCALE" "GMP=$EPYC_GMP_GCD_SCALE"
+
+echo
+
+$PA compare --by-size "$EPYC_GCD_SCALE" "$EPYC_GMP_GCD_SCALE"
+
+cat <<'MD'
+
 ## Extrema — the variable-time signal
 
-Ranked by `max/min` spread on the M4, over the primitives sizes and the
+Ranked by `max/min` spread on the GB10, over the primitives sizes and the
 extended heavy-tail record. A spread near 1.0 is data-independent; a large
 spread means the primitive's cost depends on its input, which is why rump is
 explicitly variable-time and must not be used where timing may not leak
@@ -456,8 +518,8 @@ rows and states their range.
 MD
 
 EXTREMA_MERGED="$(mktemp)"
-cat "$M4" "$M4_HEAVY_EXT" > "$EXTREMA_MERGED"
-$PA extrema "M4=$EXTREMA_MERGED"
+cat "$GB10" "$GB10_HEAVY_EXT" > "$EXTREMA_MERGED"
+$PA extrema "GB10=$EXTREMA_MERGED"
 rm -f "$EXTREMA_MERGED"
 
 cat <<'MD'
@@ -470,15 +532,24 @@ cat <<'MD'
 cargo build --release --bin pilot_mp
 bash scripts/bench_gmp.sh                      # builds pilot_gmp (needs libgmp)
 
-# rump column, and the GMP column through the same harness, per host:
-PILOT_PRESET=normal bash scripts/bench_primitives.sh > bench/primitives_<host>.md
+# rump column, and the GMP column through the same harness, per host, each
+# pinned to one core (on the GB10, Cortex-X925 core 9):
+PILOT_PRESET=normal taskset -c 9 bash scripts/bench_primitives.sh > bench/primitives_<host>.md
 PILOT_MP_BIN=target/bench_gmp/pilot_gmp \
-  PILOT_PRESET=normal bash scripts/bench_primitives.sh > bench/gmp_<host>.md
+  PILOT_PRESET=normal taskset -c 9 bash scripts/bench_primitives.sh > bench/gmp_<host>.md
+
+# the extended heavy-tail record: one row per op and size, under this header
+{ echo "# Heavy-tailed operations, extended sizes (<label>)"; echo
+  echo "| Operation | mean ms/op | ±95% CI | min ns | p50 ns | p99 ns | max ns | max/min | n |"
+  echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
+  for op in isprime sqrtmod; do for n in 5120 6144 7168 8192; do
+    taskset -c 9 bash scripts/bench_primitives.sh ${op}_$n
+  done; done; } > bench/heavy_extended_<host>.md
 
 # the GCD-at-scale sweep (8 kbit – 1 Mbit):
-bash scripts/bench_gcd_scaling.sh > bench/gcd_scaling_<host>.md
+taskset -c 9 bash scripts/bench_gcd_scaling.sh > bench/gcd_scaling_<host>.md
 PILOT_MP_BIN=target/bench_gmp/pilot_gmp \
-  bash scripts/bench_gcd_scaling.sh > bench/gmp_gcd_scaling_<host>.md
+  taskset -c 9 bash scripts/bench_gcd_scaling.sh > bench/gmp_gcd_scaling_<host>.md
 
 # check the data before building on it (the build runs this itself):
 python3 scripts/check_bench_consistency.py --strict bench/*.md
@@ -487,11 +558,11 @@ python3 scripts/check_bench_consistency.py --strict bench/*.md
 bash scripts/build_performance.sh
 
 # or drive the pieces directly:
-python3 scripts/perf_analysis.py fit     M4=… EPYC=… Pi=…
-python3 scripts/perf_analysis.py means   M4=… EPYC=… Pi=…
+python3 scripts/perf_analysis.py fit     GB10=… M4=… EPYC=… Pi=…
+python3 scripts/perf_analysis.py means   GB10=… M4=… EPYC=… Pi=…
 python3 scripts/perf_analysis.py compare bench/primitives_<h>.md bench/gmp_<h>.md
-python3 scripts/perf_analysis.py extrema M4=…
-python3 scripts/perf_analysis.py plot    <family> assets/scaling-<family>.svg M4=… EPYC=… Pi=…
+python3 scripts/perf_analysis.py extrema GB10=…
+python3 scripts/perf_analysis.py plot    <family> assets/scaling-<family>.svg GB10=… M4=… EPYC=… Pi=…
 ```
 MD
 } > "$OUT"

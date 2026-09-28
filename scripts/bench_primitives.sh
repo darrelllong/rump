@@ -17,6 +17,9 @@
 #   PILOT_PRESET     pilot-bench preset (default normal)
 #   PILOT_MP_SESSION session-limit seconds per op (default 30)
 #   PILOT_MP_HEAVY_SESSION  session for sqrtmod/isprime (default 120)
+#   PILOT_MP_RAW_DIR keep each session's pilot-bench output in <dir>/<op>,
+#                    with its exit status in <dir>/<op>/pilot_exit_status
+#                    (0 = converged, 13 = session limit); default: discarded
 #
 # Sample size is left to pilot-bench's own convergence: it collects readings
 # until the mean's CI meets the preset. The per-op session limit (-s) is an
@@ -61,8 +64,8 @@ trap 'rm -rf "$WORK"' EXIT
 # see the reduction below).
 measure() {
     local op=$1
-    local out="$WORK/$op"
-    local session="$SESSION"
+    local out="${PILOT_MP_RAW_DIR:-$WORK}/$op"
+    local session="$SESSION" status
     case "$op" in
         sqrtmod_* | isprime_*) session="$HEAVY_SESSION" ;;
     esac
@@ -70,7 +73,9 @@ measure() {
     # Exit 13 = hit the session limit; that is a clean stop with readings
     # written, so it is not an error here.
     "$BENCH" run_program --preset "$PILOT_PRESET" -s "$session" -o "$out" \
-        --pi "${op},ms/op,0,1,1" -- "$MP" "$op" >/dev/null 2>&1 || true
+        --pi "${op},ms/op,0,0,1" -- "$MP" "$op" >/dev/null 2>&1 \
+        && status=0 || status=$?
+    [[ -d "$out" ]] && echo "$status" > "$out/pilot_exit_status"
     python3 - "$op" "$out/readings.csv" <<'PY'
 import sys, statistics
 op, readings_path = sys.argv[1], sys.argv[2]
@@ -101,8 +106,9 @@ q = lambda p: ns[min(len(ns) - 1, int((len(ns) - 1) * p))] if ns else float("nan
 # segment" mean (workload.cc, refresh_analytical_result) built to strip warmup
 # from a warmup-then-steady-state process. Our heavy-tailed ops are i.i.d.
 # mixtures — runs of microsecond rejections punctured by rare enormous readings
-# — which that detector misreads as regime changes and drops, producing a
-# figure that need not lie within the sample's own range. There is no warmup to
+# — which the detector of pilot-bench builds before f01eec4 (E-Divisive with
+# Medians) misread as regime changes and dropped, producing a figure that need
+# not lie within the sample's own range. There is no warmup to
 # eliminate here — every reading is a fresh random operand — so the whole-sample
 # mean is the correct estimator.
 mean_ms = statistics.fmean(xs)

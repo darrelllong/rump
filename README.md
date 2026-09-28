@@ -113,10 +113,12 @@ inputs. Adversarially hardened primality testing lives with its consumer
 [PERFORMANCE.md](PERFORMANCE.md) is the per-primitive report: pilot-bench
 means with confidence intervals and variable-time extrema over random
 operands, fitted complexity exponents, log–log scaling graphs, and a
-per-primitive comparison against GMP through the same harness on an Apple
-M4 Pro, an AMD EPYC 7452, a Raspberry Pi 5 and an Apple A18 Pro. The tables
-are generated from the committed data under `bench/`, and the prose quotes
-no figure a table does not carry.
+per-primitive comparison against GMP through the same harness on an NVIDIA
+GB10 (one Cortex-X925 core), an Apple M4 Pro, an AMD EPYC 7452, a Raspberry
+Pi 5 and an Apple A18 Pro. The GB10 results were measured with pilot-bench
+f01eec4, the others with earlier pilot-bench builds. The tables are generated
+from the committed data under `bench/`, and the prose quotes no figure a
+table does not carry.
 
 How to read it: where the algorithms match — windowed Montgomery
 exponentiation, Lehmer and Half-GCD, the quotient-sequence Jacobi symbol —

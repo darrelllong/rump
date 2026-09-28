@@ -105,12 +105,45 @@ rows by proportion.
 All measurements are single-threaded. The hosts, and the files each host's
 columns are built from:
 
-| label | machine | primitives | GMP | extended heavy tail |
-|---|---|---|---|---|
-| **M4** | Apple M4 Pro (the development Mac) | `bench/primitives_dyson.md` | `bench/gmp_dyson.md` | `bench/heavy_extended_dyson.md` |
-| **EPYC** | AMD EPYC 7452 | `bench/primitives_dennard.md` | `bench/gmp_dennard.md` | `bench/heavy_extended_dennard.md` |
-| **Pi** | Raspberry Pi 5 (Cortex-A76) | `bench/primitives_darby.md` | `bench/gmp_darby.md` | `bench/heavy_extended_darby.md` |
-| **A18** | Apple A18 Pro, an iPhone-class core | `bench/primitives_verne.md` | `bench/gmp_verne.md` | — |
+| label | machine | pilot-bench | primitives | GMP | extended heavy tail |
+|---|---|---|---|---|---|
+| **GB10** | NVIDIA GB10, one Cortex-X925 core (paris) | f01eec4 | `bench/primitives_paris.md` | `bench/gmp_paris.md` | `bench/heavy_extended_paris.md` |
+| **M4** | Apple M4 Pro (the development Mac) | before f01eec4 | `bench/primitives_dyson.md` | `bench/gmp_dyson.md` | `bench/heavy_extended_dyson.md` |
+| **EPYC** | AMD EPYC 7452 | before f01eec4 | `bench/primitives_dennard.md` | `bench/gmp_dennard.md` | `bench/heavy_extended_dennard.md` |
+| **Pi** | Raspberry Pi 5 (Cortex-A76) | before f01eec4 | `bench/primitives_darby.md` | `bench/gmp_darby.md` | `bench/heavy_extended_darby.md` |
+| **A18** | Apple A18 Pro, an iPhone-class core | before f01eec4 | `bench/primitives_verne.md` | `bench/gmp_verne.md` | — |
+
+The GB10 columns, the GB10 sweep under *GCD at scale*, and the extrema table
+were measured on 2026-09-28 on paris: an NVIDIA GB10 (ten Arm Cortex-X925
+cores at up to 3.9 GHz and ten Cortex-A725 cores), Ubuntu 24.04.5, Linux
+7.0.0-1019-nvidia, frequency governor `performance`. Every session ran on one
+Cortex-X925 core (`taskset -c 9`), one session at a time, with nothing else
+running but idle services. `pilot_mp` was built by rustc 1.95.0 (`--release`)
+from rump 686cfcd, `pilot_gmp` by gcc 13.3.0 (`-O2`) against Ubuntu's GMP
+6.3.0, and the sessions were driven by pilot-bench f01eec4 with the preset,
+session limits and reduction described above.
+
+The other hosts' columns were measured with pilot-bench builds before f01eec4,
+which located change-points with E-Divisive with Medians. That detector
+reports change-points in readings that have none (pilot-bench's changelog
+gives the rates), and Pilot does not use the readings before the last
+change-point when it decides whether a session has converged, so sessions
+could run longer than they needed to. The reduction here computes every
+figure from all the readings a session saved, so those columns are
+whole-sample statistics as well; what the older Pilot changed is when a
+session stopped, and so the reading count `n`.
+
+On the GB10 every session met pilot-bench's convergence criterion except
+these, which stopped at their session limit: `isprime` at every size for both
+libraries, `sqrtmod` from 2048 bits, `sqrtmod_blum`, `sqrtmod_descent` and
+`isprime_true` at 4096 bits, every row of the extended heavy-tail record, and
+rump's `gcd` at 1 Mbit (a 30 s limit).
+
+`scripts/bench_primitives.sh` declares its performance index as type 0, an
+ordinary value, since a time per operation is not a rate. The GB10 sessions
+were run with it declared as type 1; f01eec4 does not store the mean method
+a type selects and analyses a type-1 index exactly as type 0, so those
+sessions are the ones the script now specifies.
 
 GMP numbers come from `pilot_gmp`, a C mirror of `pilot_mp` linked against the
 host's libgmp and driven through the same pilot-bench harness: the same operand
@@ -136,56 +169,60 @@ kernels the sizes fall in are given under each family in *Cost by method*.
 expensive population, so a finite sample estimates it loosely and their fitted
 exponent is unreliable — read their extrema instead.
 
-| Method | Complexity | M4 α | EPYC α | Pi α | A18 α |
-|---|---|---|---|---|---|
-| `add` | O(n) | 0.87 | 0.70 | 0.82 | 0.78 |
-| `sub` | O(n) | 0.77 | 0.61 | 0.68 | 0.94 |
-| `mul` | schoolbook → Karatsuba → Toom-3 → Toom-4 | 1.72 | 1.61 | 1.80 | 1.91 |
-| `sqr` | schoolbook squaring → Karatsuba squaring → the multiplication ladder | 1.49 | 1.34 | 1.54 | 1.83 |
-| `divrem` | O(n²) Algorithm D | 1.14 | 1.06 | 1.14 | 1.02 |
-| `rem` | O(n²) | 1.13 | 1.02 | 1.14 | 1.02 |
-| `modmul` | O(n²) mul + reduce | 1.47 | 1.42 | 1.51 | 1.43 |
-| `montmul` | O(n²) | 1.63 | 1.57 | 1.65 | 1.51 |
-| `montsqr` | O(n²) | 1.53 | 1.47 | 1.62 | 1.58 |
-| `montpow_e65537` | O(n²) (17-bit exponent) | 1.64 | 1.63 | 1.78 | 1.66 |
-| `montpow_rand` | O(e·n²), e = 256 | 1.70 | 1.72 | 1.87 | 1.74 |
-| `montsetup` | O(n²) (one division) | 1.32 | 1.27 | 1.43 | 1.20 |
-| `gcd` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.12 | 1.15 | 1.18 | 1.15 |
-| `gcdext` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.17 | 1.21 | 1.28 | 1.00 |
-| `modinv` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.15 | 1.18 | 1.22 | 0.97 |
-| `jacobi` | Lehmer quotients with a symbol state → HGCD-threaded, O(M(n) log n) | 1.08 | 1.13 | 1.18 | 1.39 |
-| `modpow` | O(e·n²), e = 256 | 1.64 | 1.71 | 1.82 | 1.72 |
-| `sqrtmod` | O(n³) Tonelli–Shanks (input-dependent) | 2.51 | 2.54 | 2.67 | 2.57 |
-| `sqrtmod_blum` | Tonelli–Shanks, p ≡ 3 (mod 4): the (p+1)/4 shortcut | 2.52 | 2.56 | 2.70 | – |
-| `sqrtmod_descent` | Tonelli–Shanks, p ≡ 1 (mod 4): the 2-adic descent | 2.52 | 2.58 | 2.72 | – |
-| `isprime` | mixture on random operands (input-dependent) | 2.44 | 2.39 | 2.54 | 2.78 |
-| `isprime_true` | twelve Miller–Rabin rounds: O(n·M(n)) | 2.52 | 2.58 | 2.73 | 2.63 |
+| Method | Complexity | GB10 α | M4 α | EPYC α | Pi α | A18 α |
+|---|---|---|---|---|---|---|
+| `add` | O(n) | 0.85 | 0.87 | 0.70 | 0.82 | 0.78 |
+| `sub` | O(n) | 0.65 | 0.77 | 0.61 | 0.68 | 0.94 |
+| `mul` | schoolbook → Karatsuba → Toom-3 → Toom-4 | 1.75 | 1.72 | 1.61 | 1.80 | 1.91 |
+| `sqr` | schoolbook squaring → Karatsuba squaring → the multiplication ladder | 1.48 | 1.49 | 1.34 | 1.54 | 1.83 |
+| `divrem` | O(n²) Algorithm D | 1.16 | 1.14 | 1.06 | 1.14 | 1.02 |
+| `rem` | O(n²) | 1.15 | 1.13 | 1.02 | 1.14 | 1.02 |
+| `modmul` | O(n²) mul + reduce | 1.50 | 1.47 | 1.42 | 1.51 | 1.43 |
+| `montmul` | O(n²) | 1.70 | 1.63 | 1.57 | 1.65 | 1.51 |
+| `montsqr` | O(n²) | 1.58 | 1.53 | 1.47 | 1.62 | 1.58 |
+| `montpow_e65537` | O(n²) (17-bit exponent) | 1.77 | 1.64 | 1.63 | 1.78 | 1.66 |
+| `montpow_rand` | O(e·n²), e = 256 | 1.84 | 1.70 | 1.72 | 1.87 | 1.74 |
+| `montsetup` | O(n²) (one division) | 1.38 | 1.32 | 1.27 | 1.43 | 1.20 |
+| `gcd` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.17 | 1.12 | 1.15 | 1.18 | 1.15 |
+| `gcdext` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.25 | 1.17 | 1.21 | 1.28 | 1.00 |
+| `modinv` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.22 | 1.15 | 1.18 | 1.22 | 0.97 |
+| `jacobi` | Lehmer quotients with a symbol state → HGCD-threaded, O(M(n) log n) | 1.16 | 1.08 | 1.13 | 1.18 | 1.39 |
+| `modpow` | O(e·n²), e = 256 | 1.83 | 1.64 | 1.71 | 1.82 | 1.72 |
+| `sqrtmod` | O(n³) Tonelli–Shanks (input-dependent) | 2.71 | 2.51 | 2.54 | 2.67 | 2.57 |
+| `sqrtmod_blum` | Tonelli–Shanks, p ≡ 3 (mod 4): the (p+1)/4 shortcut | 2.68 | 2.52 | 2.56 | 2.70 | – |
+| `sqrtmod_descent` | Tonelli–Shanks, p ≡ 1 (mod 4): the 2-adic descent | 2.71 | 2.52 | 2.58 | 2.72 | – |
+| `isprime` | mixture on random operands (input-dependent) | 2.47 | 2.44 | 2.39 | 2.54 | 2.78 |
+| `isprime_true` | twelve Miller–Rabin rounds: O(n·M(n)) | 2.68 | 2.52 | 2.58 | 2.73 | 2.63 |
 
 ## Cost by method
 
 Mean cost per operation, one row per method and host, one column per size.
 Read down a column to compare hosts on one method; read across a row for the
-method's growth. The four hosts show the same shapes at different heights; the
-scaling graphs after the table plot all four.
+method's growth. The five hosts show the same shapes at different heights; the
+scaling graphs after the table plot all five.
 
 
 **Arithmetic** — mean per operation
 
 | Method | host | 256b | 1024b | 2048b | 4096b |
 |---|---|---:|---:|---:|---:|
-| `add` | M4 | 3.96 ns | 10.8 ns | 20.8 ns | 46 ns |
+| `add` | GB10 | 4.91 ns | 13.4 ns | 26.4 ns | 53.2 ns |
+|  | M4 | 3.96 ns | 10.8 ns | 20.8 ns | 46 ns |
 |  | EPYC | 10.3 ns | 21.8 ns | 36.3 ns | 74.5 ns |
 |  | Pi | 15.6 ns | 40.6 ns | 82.2 ns | 150 ns |
 |  | A18 | 8.31 ns | 18 ns | 38.2 ns | 73.1 ns |
-| `sub` | M4 | 5.41 ns | 13.4 ns | 24 ns | 46.3 ns |
+| `sub` | GB10 | 7.49 ns | 16.1 ns | 26 ns | 46.4 ns |
+|  | M4 | 5.41 ns | 13.4 ns | 24 ns | 46.3 ns |
 |  | EPYC | 14.5 ns | 28.2 ns | 45.7 ns | 80.9 ns |
 |  | Pi | 22.6 ns | 49.1 ns | 82.9 ns | 151 ns |
 |  | A18 | 7.05 ns | 22.3 ns | 47.2 ns | 95.2 ns |
-| `mul` | M4 | 23.3 ns | 182 ns | 666 ns | 2.91 µs |
+| `mul` | GB10 | 25.6 ns | 199 ns | 799 ns | 3.37 µs |
+|  | M4 | 23.3 ns | 182 ns | 666 ns | 2.91 µs |
 |  | EPYC | 55.9 ns | 389 ns | 1.32 µs | 5.09 µs |
 |  | Pi | 81 ns | 791 ns | 3.04 µs | 12.1 µs |
 |  | A18 | 37.7 ns | 279 ns | 1.91 µs | 6.97 µs |
-| `sqr` | M4 | 23.5 ns | 119 ns | 378 ns | 1.59 µs |
+| `sqr` | GB10 | 26.2 ns | 124 ns | 427 ns | 1.69 µs |
+|  | M4 | 23.5 ns | 119 ns | 378 ns | 1.59 µs |
 |  | EPYC | 60.7 ns | 231 ns | 709 ns | 2.67 µs |
 |  | Pi | 82.9 ns | 451 ns | 1.62 µs | 6.22 µs |
 |  | A18 | 45.5 ns | 289 ns | 1.95 µs | 6.84 µs |
@@ -194,15 +231,18 @@ scaling graphs after the table plot all four.
 
 | Method | host | 256b | 1024b | 2048b | 4096b |
 |---|---|---:|---:|---:|---:|
-| `divrem` | M4 | 83.2 ns | 307 ns | 715 ns | 2.08 µs |
+| `divrem` | GB10 | 91.2 ns | 360 ns | 807 ns | 2.39 µs |
+|  | M4 | 83.2 ns | 307 ns | 715 ns | 2.08 µs |
 |  | EPYC | 149 ns | 461 ns | 1.02 µs | 3 µs |
 |  | Pi | 243 ns | 800 ns | 2.02 µs | 6.12 µs |
 |  | A18 | 164 ns | 432 ns | 1.09 µs | 2.87 µs |
-| `rem` | M4 | 84.7 ns | 321 ns | 709 ns | 2.1 µs |
+| `rem` | GB10 | 92.5 ns | 362 ns | 811 ns | 2.41 µs |
+|  | M4 | 84.7 ns | 321 ns | 709 ns | 2.1 µs |
 |  | EPYC | 163 ns | 474 ns | 1.02 µs | 3 µs |
 |  | Pi | 247 ns | 844 ns | 2.04 µs | 6.1 µs |
 |  | A18 | 164 ns | 427 ns | 1.07 µs | 2.9 µs |
-| `modmul` | M4 | 159 ns | 909 ns | 2.75 µs | 9.97 µs |
+| `modmul` | GB10 | 175 ns | 1.02 µs | 3.22 µs | 11.6 µs |
+|  | M4 | 159 ns | 909 ns | 2.75 µs | 9.97 µs |
 |  | EPYC | 280 ns | 1.45 µs | 4.32 µs | 15.2 µs |
 |  | Pi | 475 ns | 2.83 µs | 9.15 µs | 32.9 µs |
 |  | A18 | 326 ns | 1.21 µs | 4.96 µs | 17.3 µs |
@@ -211,23 +251,28 @@ scaling graphs after the table plot all four.
 
 | Method | host | 256b | 1024b | 2048b | 4096b |
 |---|---|---:|---:|---:|---:|
-| `montmul` | M4 | 58.9 ns | 402 ns | 1.35 µs | 5.84 µs |
+| `montmul` | GB10 | 60 ns | 402 ns | 1.64 µs | 6.86 µs |
+|  | M4 | 58.9 ns | 402 ns | 1.35 µs | 5.84 µs |
 |  | EPYC | 127 ns | 721 ns | 2.61 µs | 10.2 µs |
 |  | Pi | 246 ns | 1.65 µs | 6.25 µs | 24.4 µs |
 |  | A18 | 124 ns | 558 ns | 2.1 µs | 8.73 µs |
-| `montsqr` | M4 | 61.1 ns | 341 ns | 1.08 µs | 4.52 µs |
+| `montsqr` | GB10 | 62.6 ns | 339 ns | 1.27 µs | 5.17 µs |
+|  | M4 | 61.1 ns | 341 ns | 1.08 µs | 4.52 µs |
 |  | EPYC | 129 ns | 624 ns | 2.07 µs | 7.99 µs |
 |  | Pi | 205 ns | 1.33 µs | 4.82 µs | 18.7 µs |
 |  | A18 | 107 ns | 571 ns | 2.12 µs | 8.86 µs |
-| `montpow_e65537` | M4 | 855 ns | 5.88 µs | 19.9 µs | 85.6 µs |
+| `montpow_e65537` | GB10 | 720 ns | 6.11 µs | 24 µs | 99.4 µs |
+|  | M4 | 855 ns | 5.88 µs | 19.9 µs | 85.6 µs |
 |  | EPYC | 1.58 µs | 11.3 µs | 39.1 µs | 152 µs |
 |  | Pi | 2.48 µs | 30.8 µs | 92.6 µs | 360 µs |
 |  | A18 | 1.24 µs | 9 µs | 31.9 µs | 127 µs |
-| `montpow_rand` | M4 | 13.1 µs | 102 µs | 356 µs | 1.57 ms |
+| `montpow_rand` | GB10 | 10.8 µs | 108 µs | 432 µs | 1.81 ms |
+|  | M4 | 13.1 µs | 102 µs | 356 µs | 1.57 ms |
 |  | EPYC | 22.7 µs | 194 µs | 704 µs | 2.74 ms |
 |  | Pi | 41.3 µs | 450 µs | 1.69 ms | 7.63 ms |
 |  | A18 | 17.6 µs | 149 µs | 561 µs | 2.24 ms |
-| `montsetup` | M4 | 241 ns | 1.04 µs | 2.9 µs | 9.95 µs |
+| `montsetup` | GB10 | 245 ns | 1.12 µs | 3.36 µs | 11.9 µs |
+|  | M4 | 241 ns | 1.04 µs | 2.9 µs | 9.95 µs |
 |  | EPYC | 431 ns | 1.63 µs | 4.55 µs | 15.6 µs |
 |  | Pi | 663 ns | 3.09 µs | 9.81 µs | 36.6 µs |
 |  | A18 | 503 ns | 1.5 µs | 4.49 µs | 14.5 µs |
@@ -236,23 +281,28 @@ scaling graphs after the table plot all four.
 
 | Method | host | 256b | 1024b | 2048b | 4096b |
 |---|---|---:|---:|---:|---:|
-| `gcd` | M4 | 1.09 µs | 4.27 µs | 9.56 µs | 25 µs |
+| `gcd` | GB10 | 1.03 µs | 4.49 µs | 10.5 µs | 27.2 µs |
+|  | M4 | 1.09 µs | 4.27 µs | 9.56 µs | 25 µs |
 |  | EPYC | 2.41 µs | 10.6 µs | 23.6 µs | 59.4 µs |
 |  | Pi | 3.69 µs | 17.3 µs | 39.8 µs | 100 µs |
 |  | A18 | 3.02 µs | 14.2 µs | 33.5 µs | 72.3 µs |
-| `gcdext` | M4 | 2 µs | 7.77 µs | 18.3 µs | 54.6 µs |
+| `gcdext` | GB10 | 1.66 µs | 7.52 µs | 18.7 µs | 55.3 µs |
+|  | M4 | 2 µs | 7.77 µs | 18.3 µs | 54.6 µs |
 |  | EPYC | 3.84 µs | 17.4 µs | 41.1 µs | 116 µs |
 |  | Pi | 5.64 µs | 27.2 µs | 75.8 µs | 193 µs |
 |  | A18 | 9.55 µs | 32.3 µs | 67 µs | 158 µs |
-| `modinv` | M4 | 1.55 µs | 6.07 µs | 13.9 µs | 40.1 µs |
+| `modinv` | GB10 | 1.37 µs | 6.09 µs | 14.8 µs | 42 µs |
+|  | M4 | 1.55 µs | 6.07 µs | 13.9 µs | 40.1 µs |
 |  | EPYC | 3.22 µs | 14.4 µs | 32.7 µs | 88.6 µs |
 |  | Pi | 4.89 µs | 22.5 µs | 54.4 µs | 149 µs |
 |  | A18 | 7.89 µs | 22.3 µs | 52.3 µs | 118 µs |
-| `jacobi` | M4 | 1.36 µs | 5.17 µs | 11.4 µs | 28.3 µs |
+| `jacobi` | GB10 | 1.26 µs | 5.51 µs | 12.6 µs | 31.7 µs |
+|  | M4 | 1.36 µs | 5.17 µs | 11.4 µs | 28.3 µs |
 |  | EPYC | 2.86 µs | 12.4 µs | 27.2 µs | 66.8 µs |
 |  | Pi | 4.32 µs | 20.1 µs | 46.7 µs | 117 µs |
 |  | A18 | 1.89 µs | 11.3 µs | 38.2 µs | 83.7 µs |
-| `modpow` | M4 | 15.7 µs~ | 107 µs | 361 µs | 1.6 ms |
+| `modpow` | GB10 | 11.1 µs | 109 µs | 434 µs | 1.82 ms |
+|  | M4 | 15.7 µs~ | 107 µs | 361 µs | 1.6 ms |
 |  | EPYC | 23.3 µs | 197 µs | 708 µs | 2.77 ms |
 |  | Pi | 41.9 µs | 454 µs | 1.7 ms | 6.57 ms |
 |  | A18 | 18.7 µs | 146 µs | 586 µs | 2.26 ms |
@@ -261,21 +311,26 @@ scaling graphs after the table plot all four.
 
 | Method | host | 256b | 1024b | 2048b | 4096b |
 |---|---|---:|---:|---:|---:|
-| `sqrtmod` | M4 | 15.6 µs | 428 µs | 2.99 ms~ | – |
+| `sqrtmod` | GB10 | 12.5 µs | 441 µs | 3.7 ms~ | – |
+|  | M4 | 15.6 µs | 428 µs | 2.99 ms~ | – |
 |  | EPYC | 26.7 µs | 814 µs | 5.42 ms~ | – |
 |  | Pi | 51.6 µs | 1.95 ms | 13.5 ms~ | – |
 |  | A18 | 24.8 µs~ | 524 µs~ | 3.88 ms~ | 32.3 ms~ |
-| `sqrtmod_blum` | M4 | 14.9 µs | 412 µs | 2.95 ms | – |
+| `sqrtmod_blum` | GB10 | 12.5 µs | 430 µs | 3.42 ms | – |
+|  | M4 | 14.9 µs | 412 µs | 2.95 ms | – |
 |  | EPYC | 26.5 µs | 798 µs | 5.6 ms | – |
 |  | Pi | 47 µs | 1.82 ms | 13.2 ms | – |
-| `sqrtmod_descent` | M4 | 44.5 µs | 1.26 ms | 8.73 ms | – |
+| `sqrtmod_descent` | GB10 | 35 µs | 1.3 ms | 10.2 ms | – |
+|  | M4 | 44.5 µs | 1.26 ms | 8.73 ms | – |
 |  | EPYC | 76.2 µs | 2.39 ms | 16.8 ms | – |
 |  | Pi | 134 µs | 5.38 ms | 39.3 ms | – |
-| `isprime` | M4 | 2.15 µs~ | 40.1 µs | 244 µs | 2.04 ms |
+| `isprime` | GB10 | 2.43 µs | 46.1 µs | 322 µs | 2.38 ms |
+|  | M4 | 2.15 µs~ | 40.1 µs | 244 µs | 2.04 ms |
 |  | EPYC | 4.5 µs | 90.3 µs~ | 509 µs | 3.61 ms |
 |  | Pi | 7.57 µs | 196 µs | 1.23 ms | 9.16 ms |
 |  | A18 | 1.24 µs~ | 38.5 µs~ | 439 µs~ | 2.54 ms~ |
-| `isprime_true` | M4 | 182 µs | 4.97 ms | 35.5 ms | – |
+| `isprime_true` | GB10 | 149 µs | 5.25 ms | 40.9 ms | – |
+|  | M4 | 182 µs | 4.97 ms | 35.5 ms | – |
 |  | EPYC | 306 µs | 9.5 ms | 67.1 ms | – |
 |  | Pi | 529 µs | 21.6 ms | 157 ms | – |
 |  | A18 | 260 µs | 8.22 ms | 47.4 ms | 413 ms~ |
@@ -331,6 +386,23 @@ mean parity. `isprime` is omitted here — its heavy-tailed mean makes the ratio
 meaningless (see Extrema). rump's Montgomery domain, `mod_sqrt`, and GF(2^m)
 have no `mpz` counterpart and so cannot appear in the comparison; their costs
 are in the tables above.
+
+### GB10
+
+| Method | 256b | 1024b | 2048b | 4096b |
+|---|---|---|---|---|
+| `add` | 4.91 ns / 3.35 ns / 1.5× | 13.4 ns / 5.04 ns / 2.7× | 26.4 ns / 7.84 ns / 3.4× | 53.2 ns / 14.9 ns / 3.6× |
+| `sub` | 7.49 ns / 5.55 ns / 1.3× | 16.1 ns / 6.83 ns / 2.4× | 26 ns / 9.97 ns / 2.6× | 46.4 ns / 17.2 ns / 2.7× |
+| `mul` | 25.6 ns / 13.1 ns / 2.0× | 199 ns / 106 ns / 1.9× | 799 ns / 326 ns / 2.4× | 3.37 µs / 1 µs / 3.4× |
+| `sqr` | 26.2 ns / 11.4 ns / 2.3× | 124 ns / 69.7 ns / 1.8× | 427 ns / 218 ns / 2.0× | 1.69 µs / 687 ns / 2.5× |
+| `divrem` | 91.2 ns / 17.5 ns / 5.2× | 360 ns / 87.3 ns / 4.1× | 807 ns / 228 ns / 3.5× | 2.39 µs / 683 ns / 3.5× |
+| `rem` | 92.5 ns / 19.9 ns / 4.6× | 362 ns / 90.5 ns / 4.0× | 811 ns / 231 ns / 3.5× | 2.41 µs / 691 ns / 3.5× |
+| `modmul` | 175 ns / 57.9 ns / 3.0× | 1.02 µs / 334 ns / 3.0× | 3.22 µs / 1.01 µs / 3.2× | 11.6 µs / 3.05 µs / 3.8× |
+| `modpow` | 11.1 µs / 8.03 µs / 1.4× | 109 µs / 56.9 µs / 1.9× | 434 µs / 210 µs / 2.1× | 1.82 ms / 681 µs / 2.7× |
+| `gcd` | 1.03 µs / 477 ns / 2.2× | 4.49 µs / 2.32 µs / 1.9× | 10.5 µs / 5.16 µs / 2.0× | 27.2 µs / 12.1 µs / 2.3× |
+| `gcdext` | 1.66 µs / 627 ns / 2.6× | 7.52 µs / 2.76 µs / 2.7× | 18.7 µs / 6.45 µs / 2.9× | 55.3 µs / 16.9 µs / 3.3× |
+| `modinv` | 1.37 µs / 595 ns / 2.3× | 6.09 µs / 2.57 µs / 2.4× | 14.8 µs / 5.88 µs / 2.5× | 42 µs / 14.9 µs / 2.8× |
+| `jacobi` | 1.26 µs / 502 ns / 2.5× | 5.51 µs / 2.35 µs / 2.3× | 12.6 µs / 5.21 µs / 2.4× | 31.7 µs / 12.2 µs / 2.6× |
 
 ### M4
 
@@ -430,8 +502,8 @@ read against that grouping:
 - **Why the ratios differ by host.** The assembly edge is not the same on
   every core, because how far hand-scheduled assembly outruns compiled Rust
   depends on the pipeline it runs on. The same operation therefore shows a
-  different ratio on each host, and the four tables are four measurements
-  of the same code against four assembly targets, not four opinions about
+  different ratio on each host, and the five tables are five measurements
+  of the same code against five assembly targets, not five opinions about
   the algorithm.
 
 ## NTT and the ladder
@@ -463,7 +535,7 @@ and their output is not reproduced here.
 
 The tables above stop at 64 limbs, where the whole family runs its Lehmer
 engine. This section sweeps the family from 8 kbit to 1 Mbit (128 to 16,384
-limbs) on the EPYC, against GMP on the same host, and every one of the four
+limbs) on the GB10, against GMP on the same host, and every one of the four
 changes algorithm inside that range. `gcd` dispatches to Half-GCD at 2048 limbs
 (Möller, *On Schönhage's algorithm and subquadratic integer gcd computation*,
 Math. Comp. 77 (2008)), computing the reduction matrix from the operands' top
@@ -488,14 +560,37 @@ loops.
 
 | Method | Complexity | rump α | GMP α |
 |---|---|---|---|
-| `gcd` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.82 | 1.48 |
-| `gcdext` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.71 | 1.48 |
-| `modinv` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.76 | 1.49 |
-| `jacobi` | Lehmer quotients with a symbol state → HGCD-threaded, O(M(n) log n) | 1.82 | 1.48 |
+| `gcd` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.85 | 1.51 |
+| `gcdext` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.73 | 1.52 |
+| `modinv` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.78 | 1.53 |
+| `jacobi` | Lehmer quotients with a symbol state → HGCD-threaded, O(M(n) log n) | 1.85 | 1.51 |
 
 Rows are bit widths; each cell is rump time / GMP time / ratio. Read down each
 column across its crossover row (`gcd` and `jacobi` at 128 kbit, `gcdext` and
 `modinv` at 32 kbit) to see the change of algorithm.
+
+| bits | `gcd` | `gcdext` | `modinv` | `jacobi` |
+|---|---|---|---|---|
+| 8kb | 81.7 µs / 31 µs / 2.6× | 193 µs / 49.4 µs / 3.9× | 138 µs / 42.9 µs / 3.2× | 90.3 µs / 31.2 µs / 2.9× |
+| 16kb | 284 µs / 89.9 µs / 3.2× | 751 µs / 157 µs / 4.8× | 529 µs / 137 µs / 3.9× | 298 µs / 90 µs / 3.3× |
+| 32kb | 1.06 ms / 276 µs / 3.9× | 2.58 ms / 433 µs / 6.0× | 1.99 ms / 371 µs / 5.4× | 1.1 ms / 280 µs / 3.9× |
+| 64kb | 3.91 ms / 844 µs / 4.6× | 7.83 ms / 1.35 ms / 5.8× | 5.73 ms / 1.16 ms / 4.9× | 3.98 ms / 845 µs / 4.7× |
+| 128kb | 11.6 ms / 2.46 ms / 4.7× | 24.8 ms / 3.96 ms / 6.3× | 16.8 ms / 3.46 ms / 4.9× | 11.8 ms / 2.47 ms / 4.8× |
+| 256kb | 47.6 ms / 6.72 ms / 7.1× | 82.2 ms / 11 ms / 7.5× | 69.8 ms / 9.79 ms / 7.1× | 51.9 ms / 6.72 ms / 7.7× |
+| 512kb | 186 ms / 18 ms / 10.3× | 293 ms / 30 ms / 9.8× | 259 ms / 27.3 ms / 9.5× | 200 ms / 18 ms / 11.1× |
+| 1024kb | 638 ms / 44.7 ms / 14.3× | 938 ms / 75.8 ms / 12.4× | 841 ms / 70 ms / 12.0× | 695 ms / 45.2 ms / 15.4× |
+
+![gcd at scale](assets/scaling-gcd-at-scale.svg)
+
+The same sweep on the EPYC, measured with pilot-bench before f01eec4
+(`bench/gcd_scaling_dennard.md`, `bench/gmp_gcd_scaling_dennard.md`):
+
+| Method | Complexity | rump α | GMP α |
+|---|---|---|---|
+| `gcd` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.82 | 1.48 |
+| `gcdext` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.71 | 1.48 |
+| `modinv` | Lehmer O(n²) → Half-GCD O(M(n)·log n) | 1.76 | 1.49 |
+| `jacobi` | Lehmer quotients with a symbol state → HGCD-threaded, O(M(n) log n) | 1.82 | 1.48 |
 
 | bits | `gcd` | `gcdext` | `modinv` | `jacobi` |
 |---|---|---|---|---|
@@ -508,11 +603,9 @@ column across its crossover row (`gcd` and `jacobi` at 128 kbit, `gcdext` and
 | 512kb | 311 ms / 35.7 ms / 8.7× | 471 ms / 57.3 ms / 8.2× | 423 ms / 51.4 ms / 8.2× | 337 ms / 35.8 ms / 9.4× |
 | 1024kb | 1.03 s / 93.8 ms / 11.0× | 1.44 s / 150 ms / 9.6× | 1.33 s / 137 ms / 9.7× | 1.07 s / 94.4 ms / 11.3× |
 
-![gcd at scale](assets/scaling-gcd-at-scale.svg)
-
 ## Extrema — the variable-time signal
 
-Ranked by `max/min` spread on the M4, over the primitives sizes and the
+Ranked by `max/min` spread on the GB10, over the primitives sizes and the
 extended heavy-tail record. A spread near 1.0 is data-independent; a large
 spread means the primitive's cost depends on its input, which is why rump is
 explicitly variable-time and must not be used where timing may not leak
@@ -549,25 +642,19 @@ rows and states their range.
 
 | Operation | size | min | p50 | p99 | max | max/min |
 |---|---|---:|---:|---:|---:|---:|
-| `isprime` | 256 | 17 ns | 25.9 ns | 16 µs | 185 µs | 10,832 |
-|  | 1024 | 38.2 ns | 80.3 ns | 430 µs | 5.02 ms | 131,420 |
-|  | 2048 | 67.8 ns | 132 ns | 3.06 ms | 35.8 ms | 528,250 |
-|  | 4096 | 132 ns | 230 ns | 24.5 ms | 293 ms | 2,220,957 |
-|  | 5120 | 162 ns | 321 ns | 49.7 ms | 598 ms | 3,698,950 |
-|  | 6144 | 199 ns | 510 ns | 85.4 ms | 1.02 s | 5,138,168 |
-|  | 7168 | 232 ns | 380 ns | 138 ms | 1.64 s | 7,060,475 |
-|  | 8192 | 268 ns | 668 ns | 208 ms | 265 ms | 989,257 |
-| `sqrtmod` | 256 | 1.15 µs | 1.7 µs | 50.3 µs | 137 µs | 119.3 |
-|  | 1024 | 4.72 µs | 405 µs | 1.29 ms | 3.92 ms | 829.9 |
-|  | 2048 | 10.6 µs | 17.3 µs | 8.94 ms | 9.06 ms | 850.7 |
-| `gf2m_mul` | 233 | 345 ns | 368 ns | 428 ns | 4.87 µs | 14.1 |
-|  | 571 | 708 ns | 785 ns | 2.02 µs | 4.53 µs | 6.4 |
-| `modpow` | 256 | 13 µs | 13.6 µs | 48.2 µs | 134 µs | 10.3 |
-|  | 1024 | 101 µs | 105 µs | 129 µs | 131 µs | 1.3 |
-|  | 2048 | 349 µs | 361 µs | 367 µs | 368 µs | 1.1 |
-|  | 4096 | 1.52 ms | 1.6 ms | 1.67 ms | 1.67 ms | 1.1 |
+| `isprime` | 256 | 14.2 ns | 31.8 ns | 18.6 µs | 151 µs | 10,669 |
+|  | 1024 | 40.3 ns | 130 ns | 463 µs | 5.37 ms | 133,034 |
+|  | 2048 | 81.3 ns | 325 ns | 3.52 ms | 41.2 ms | 507,067 |
+|  | 4096 | 182 ns | 353 ns | 28.2 ms | 336 ms | 1,844,313 |
+|  | 5120 | 223 ns | 458 ns | 55.6 ms | 55.9 ms | 250,407 |
+|  | 6144 | 281 ns | 514 ns | 96.9 ms | 1.16 s | 4,126,541 |
+|  | 7168 | 356 ns | 1.34 µs | 155 ms | 158 ms | 444,228 |
+|  | 8192 | 410 ns | 1.54 µs | 232 ms | 237 ms | 578,565 |
+| `sqrtmod` | 256 | 1.11 µs | 1.48 µs | 36.1 µs | 38.6 µs | 34.8 |
+|  | 1024 | 5.11 µs | 428 µs | 1.31 ms | 1.33 ms | 259.5 |
+|  | 2048 | 12.1 µs | 3.41 ms | 10.3 ms | 10.3 ms | 853.0 |
 
-The remaining 97 rows — every other operation and size — span **1.0–7.8×**: their cost is set by operand width, not operand value. On rows costing only a few nanoseconds (`add`/`sub` at 256 bits) the spread measures timer and scheduler granularity, not operand dependence.
+The remaining 103 rows — every other operation and size — span **1.0–1.4×**: their cost is set by operand width, not operand value. On rows costing only a few nanoseconds (`add`/`sub` at 256 bits) the spread measures timer and scheduler granularity, not operand dependence.
 
 ![variable-time scaling](assets/scaling-variable-time.svg)
 
@@ -577,15 +664,24 @@ The remaining 97 rows — every other operation and size — span **1.0–7.8×*
 cargo build --release --bin pilot_mp
 bash scripts/bench_gmp.sh                      # builds pilot_gmp (needs libgmp)
 
-# rump column, and the GMP column through the same harness, per host:
-PILOT_PRESET=normal bash scripts/bench_primitives.sh > bench/primitives_<host>.md
+# rump column, and the GMP column through the same harness, per host, each
+# pinned to one core (on the GB10, Cortex-X925 core 9):
+PILOT_PRESET=normal taskset -c 9 bash scripts/bench_primitives.sh > bench/primitives_<host>.md
 PILOT_MP_BIN=target/bench_gmp/pilot_gmp \
-  PILOT_PRESET=normal bash scripts/bench_primitives.sh > bench/gmp_<host>.md
+  PILOT_PRESET=normal taskset -c 9 bash scripts/bench_primitives.sh > bench/gmp_<host>.md
+
+# the extended heavy-tail record: one row per op and size, under this header
+{ echo "# Heavy-tailed operations, extended sizes (<label>)"; echo
+  echo "| Operation | mean ms/op | ±95% CI | min ns | p50 ns | p99 ns | max ns | max/min | n |"
+  echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
+  for op in isprime sqrtmod; do for n in 5120 6144 7168 8192; do
+    taskset -c 9 bash scripts/bench_primitives.sh ${op}_$n
+  done; done; } > bench/heavy_extended_<host>.md
 
 # the GCD-at-scale sweep (8 kbit – 1 Mbit):
-bash scripts/bench_gcd_scaling.sh > bench/gcd_scaling_<host>.md
+taskset -c 9 bash scripts/bench_gcd_scaling.sh > bench/gcd_scaling_<host>.md
 PILOT_MP_BIN=target/bench_gmp/pilot_gmp \
-  bash scripts/bench_gcd_scaling.sh > bench/gmp_gcd_scaling_<host>.md
+  taskset -c 9 bash scripts/bench_gcd_scaling.sh > bench/gmp_gcd_scaling_<host>.md
 
 # check the data before building on it (the build runs this itself):
 python3 scripts/check_bench_consistency.py --strict bench/*.md
@@ -594,9 +690,9 @@ python3 scripts/check_bench_consistency.py --strict bench/*.md
 bash scripts/build_performance.sh
 
 # or drive the pieces directly:
-python3 scripts/perf_analysis.py fit     M4=… EPYC=… Pi=…
-python3 scripts/perf_analysis.py means   M4=… EPYC=… Pi=…
+python3 scripts/perf_analysis.py fit     GB10=… M4=… EPYC=… Pi=…
+python3 scripts/perf_analysis.py means   GB10=… M4=… EPYC=… Pi=…
 python3 scripts/perf_analysis.py compare bench/primitives_<h>.md bench/gmp_<h>.md
-python3 scripts/perf_analysis.py extrema M4=…
-python3 scripts/perf_analysis.py plot    <family> assets/scaling-<family>.svg M4=… EPYC=… Pi=…
+python3 scripts/perf_analysis.py extrema GB10=…
+python3 scripts/perf_analysis.py plot    <family> assets/scaling-<family>.svg GB10=… M4=… EPYC=… Pi=…
 ```

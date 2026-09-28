@@ -12,8 +12,8 @@ its use.
 - Source: rump 4218630 with the `barrettsetup`, `barrettmul`,
   `montmul_scratch` and `montsqr_scratch` rows added to `pilot_mp`.
 - Measurement: `scripts/bench_primitives.sh <op>_<bits>` per row (pilot-bench
-  0f3cb4f, preset `normal`, 30 s sessions, 120 s for `isprime_true`); columns
-  as in the primitives tables.
+  0f3cb4f, a build before f01eec4, preset `normal`, 30 s sessions, 120 s for
+  `isprime_true`); columns as in the primitives tables.
 
 ## wipe against default
 
