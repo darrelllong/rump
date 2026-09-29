@@ -20,7 +20,9 @@
 //! is arithmetic *in* the field GF(2^m); here GF(2) is the field the linear
 //! algebra happens over.
 
-use std::sync::{mpsc, Arc};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
+use std::thread::Thread;
 
 use crate::random::RandomSource;
 
@@ -406,17 +408,6 @@ impl Lists {
     }
 }
 
-/// The bounds of at most `parts` runs of `0..len`, as long as each other.
-fn even_cuts(len: usize, parts: usize) -> Vec<usize> {
-    let parts = parts.clamp(1, len.max(1));
-    let per = len.div_ceil(parts).max(1);
-    let mut cuts: Vec<usize> = (0..len).step_by(per).collect();
-    if len > 0 {
-        cuts.push(len);
-    }
-    cuts
-}
-
 /// The relation matrix `M`, held once by rows and once by columns.
 ///
 /// Both orientations are needed every iteration — `A = MᵀM` is two products —
@@ -427,8 +418,12 @@ struct Sparse {
     by_relation: Arc<Lists>,
     /// For each column, the relations that set it.
     by_column: Arc<Lists>,
-    /// Workers retained for the whole Lanczos recurrence, so no `A·x` spawns
-    /// threads.
+    /// The bounds of the runs of relations a pass is taken in, each of
+    /// about as many entries, and of the runs of columns.
+    relation_runs: Arc<Vec<usize>>,
+    column_runs: Arc<Vec<usize>>,
+    /// Threads kept for the whole Lanczos recurrence, so no `A·x` spawns
+    /// any.
     folds: FoldPool,
 }
 
@@ -478,10 +473,20 @@ impl Sparse {
             }
         }
         let useful = (by_relation.len().max(columns) / MINIMUM_FOLDS_PER_WORKER).max(1);
+        let threads = threads.min(crate::parallel::budget()).min(useful).max(1);
+        let by_relation = Lists::from_lists(&by_relation);
+        let by_column = Lists::from_lists(&by_column);
+        let runs = if threads == 1 {
+            1
+        } else {
+            threads * RUNS_PER_THREAD
+        };
         Self {
-            by_relation: Arc::new(Lists::from_lists(&by_relation)),
-            by_column: Arc::new(Lists::from_lists(&by_column)),
-            folds: FoldPool::new(threads.min(crate::parallel::budget()).min(useful).max(1)),
+            relation_runs: Arc::new(by_relation.cuts(runs)),
+            column_runs: Arc::new(by_column.cuts(runs)),
+            by_relation: Arc::new(by_relation),
+            by_column: Arc::new(by_column),
+            folds: FoldPool::new(threads),
         }
     }
 
@@ -493,90 +498,116 @@ impl Sparse {
         self.by_column.len()
     }
 
-    /// `M·x`: a block over the relations becomes one over the columns.
-    fn forward(&self, x: &Block) -> Block {
-        Arc::new(
-            self.folds
-                .mapped(Arc::clone(&self.by_column), Arc::clone(x)),
-        )
+    /// `M·x` into `image`: a block over the relations becomes one over the
+    /// columns.
+    fn forward(&self, x: &Arc<Block>, image: &Arc<Block>) {
+        self.folds
+            .fold(&self.by_column, &self.column_runs, x, image);
     }
 
-    /// `Mᵀ·y`: a block over the columns becomes one over the relations.
-    fn backward(&self, y: &Block) -> Block {
-        Arc::new(
-            self.folds
-                .mapped(Arc::clone(&self.by_relation), Arc::clone(y)),
-        )
+    /// `Mᵀ·y` into `out`: a block over the columns becomes one over the
+    /// relations.
+    fn backward(&self, y: &Arc<Block>, out: &Arc<Block>) {
+        self.folds
+            .fold(&self.by_relation, &self.relation_runs, y, out);
     }
 
     /// `A·x` with `A = MᵀM`, the symmetric operator the iteration runs on.
-    fn apply(&self, x: &Block) -> Block {
-        self.backward(&self.forward(x))
+    fn apply(&self, x: &Arc<Block>) -> Arc<Block> {
+        let image = Block::zeroed(self.columns());
+        let out = Block::zeroed(self.relations());
+        self.forward(x, &image);
+        self.backward(&image, &out);
+        out
     }
 
-    /// `A·v`, and with it the three inner products an iteration takes of
-    /// `V`: `VᵀAV`, `(AV)ᵀAV` and `VᵀQ`.
+    /// `A·v` into `av`, by way of `M·v` into `image`, and with it the three
+    /// inner products an iteration takes of `V`: `VᵀAV`, `(AV)ᵀAV` and
+    /// `VᵀQ`.
     ///
-    /// Each is a sum over the relations, so the worker that folds a range
-    /// of `A·v` takes the range's share of all three while the words are in
-    /// its cache, and the shares are XORed. Taken apart, on one thread, the
+    /// Each is a sum over the relations, so the thread that folds a run of
+    /// `A·v` takes the run's share of all three while the words are in its
+    /// cache, and the shares are XORed. Taken apart, on one thread, the
     /// three cost more than the two products they follow.
-    fn apply_with_products(&self, v: &Block, q: &Block) -> (Block, Products) {
-        let image = self.forward(v);
-        let (lists, v, q) = (Arc::clone(&self.by_relation), Arc::clone(v), Arc::clone(q));
-        let cuts = lists.cuts(self.folds.useful(lists.len()));
-        let parts = self.folds.ranges(cuts, move |start, end| {
-            let av = fold_range(&lists, start, end, &image);
-            let products = Products {
-                t: dot(&v[start..end], &av),
-                squared: dot(&av, &av),
-                projection: dot(&v[start..end], &q[start..end]),
+    fn apply_with_products(
+        &self,
+        v: &Arc<Block>,
+        q: &Arc<Block>,
+        image: &Arc<Block>,
+        av: &Arc<Block>,
+    ) -> Products {
+        self.forward(v, image);
+        let shares: Arc<Vec<Mutex<Products>>> = Arc::new(
+            (0..self.folds.threads())
+                .map(|_| Mutex::default())
+                .collect(),
+        );
+        let (lists, runs) = (
+            Arc::clone(&self.by_relation),
+            Arc::clone(&self.relation_runs),
+        );
+        let (v, q) = (Arc::clone(v), Arc::clone(q));
+        let (image, av) = (Arc::clone(image), Arc::clone(av));
+        let next = AtomicUsize::new(0);
+        let made = Arc::clone(&shares);
+        self.folds.pass(move |thread| {
+            let (mut t, mut squared, mut projection) = (Dot::new(), Dot::new(), Dot::new());
+            while let Some((start, end)) = run(&runs, &next) {
+                let folded = fold_range(&lists, start, end, &image);
+                for ((&folded, v), q) in folded
+                    .iter()
+                    .zip(v.range(start, end))
+                    .zip(q.range(start, end))
+                {
+                    t.add(v, folded);
+                    squared.add(folded, folded);
+                    projection.add(v, q);
+                }
+                av.write(start, &folded);
+            }
+            let share = Products {
+                t: t.product(),
+                squared: squared.product(),
+                projection: projection.product(),
             };
-            (av, products)
+            *made[thread].lock().unwrap_or_else(PoisonError::into_inner) = share;
         });
-        let mut av = Vec::with_capacity(self.relations());
         let mut products = Products::default();
-        for (range, share) in parts {
-            av.extend(range);
-            products.add(&share);
+        for share in shares.iter() {
+            products.add(&share.lock().unwrap_or_else(PoisonError::into_inner));
         }
-        (Arc::new(av), products)
+        products
     }
 
-    /// Equations (20) and (18) in one pass over the relations: `X + V·P`,
-    /// and the next `V`.
+    /// Equations (20) and (18) in one pass over the relations: `X + V·P`
+    /// into `x`, where it stood, and the next `V` into `next`.
     fn step(
         &self,
-        x: &Block,
-        projected: Small,
-        av: &Block,
-        mask: u64,
-        terms: [(&Block, Small); 3],
-    ) -> (Block, Block) {
-        let (x, av) = (Arc::clone(x), Arc::clone(av));
-        let [(v0, d), (v1, e), (v2, f)] = terms.map(|(v, p)| (Arc::clone(v), p));
-        let cuts = even_cuts(self.relations(), self.folds.useful(self.relations()));
-        let parts = self.folds.ranges(cuts, move |start, end| {
-            let mut solution = x[start..end].to_vec();
-            xor_mul_block_into(&mut solution, &v0[start..end], &projected);
-            let next = recurrence(
-                &av[start..end],
-                mask,
-                [
-                    (&v0[start..end], &d),
-                    (&v1[start..end], &e),
-                    (&v2[start..end], &f),
-                ],
-            );
-            (solution, next)
+        x: &Arc<Block>,
+        projected: &Small,
+        av: &Arc<Block>,
+        terms: [&Arc<Block>; 3],
+        advance: Recurrence,
+        next: &Arc<Block>,
+    ) {
+        let runs = Arc::clone(&self.relation_runs);
+        let (x, av, next) = (Arc::clone(x), Arc::clone(av), Arc::clone(next));
+        let [v0, v1, v2] = terms.map(Arc::clone);
+        let solve = SmallProduct::new(projected);
+        let taken = AtomicUsize::new(0);
+        self.folds.pass(move |_| {
+            while let Some((start, end)) = run(&runs, &taken) {
+                let words = av
+                    .range(start, end)
+                    .zip(v0.range(start, end))
+                    .zip(v1.range(start, end))
+                    .zip(v2.range(start, end));
+                for (index, (((av, v0), v1), v2)) in (start..end).zip(words) {
+                    x.set(index, x.word(index) ^ solve.apply(v0));
+                    next.set(index, advance.apply(av, v0, v1, v2));
+                }
+            }
         });
-        let mut solution = Vec::with_capacity(self.relations());
-        let mut next = Vec::with_capacity(self.relations());
-        for (solved, advanced) in parts {
-            solution.extend(solved);
-            next.extend(advanced);
-        }
-        (Arc::new(solution), Arc::new(next))
     }
 }
 
@@ -611,18 +642,86 @@ impl Products {
 }
 
 /// One block word per relation or column.
-type Block = Arc<Vec<u64>>;
-
-/// The fewest output folds a retained worker is given.
 ///
-/// A fold is a short XOR gather, and handing a range to a worker costs a
-/// channel round-trip each way, so the worker count is limited to give
-/// each at least this many, and a matrix too small for two runs inline.
-/// The value is a policy, a power of two large enough that the round-trip
-/// is a small fraction of the range's work; the crossover has not been
-/// measured, and a timing of one fold against one round-trip on the build
-/// hosts would fix it.
+/// The words are atomic so that the threads of a pass write one block
+/// between them, each its runs, where the next pass reads it: a block
+/// gathered on the calling thread from the ranges the workers had made was a
+/// third of an iteration. No word is written by two threads, none is read
+/// in the pass that writes it but by its writer, and a pass has ended
+/// before the next begins, so the ordering is relaxed.
+struct Block(Vec<AtomicU64>);
+
+impl Block {
+    fn zeroed(len: usize) -> Arc<Self> {
+        Self::of((0..len).map(|_| 0))
+    }
+
+    fn of(words: impl Iterator<Item = u64>) -> Arc<Self> {
+        Arc::new(Self(words.map(AtomicU64::new).collect()))
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn word(&self, index: usize) -> u64 {
+        self.0[index].load(Ordering::Relaxed)
+    }
+
+    fn set(&self, index: usize, word: u64) {
+        self.0[index].store(word, Ordering::Relaxed);
+    }
+
+    /// The words from `start` up to `end`.
+    fn range(&self, start: usize, end: usize) -> impl Iterator<Item = u64> + '_ {
+        self.0[start..end]
+            .iter()
+            .map(|word| word.load(Ordering::Relaxed))
+    }
+
+    /// Every word.
+    fn words(&self) -> impl Iterator<Item = u64> + '_ {
+        self.range(0, self.len())
+    }
+
+    /// `words` written from `start` on.
+    fn write(&self, start: usize, words: &[u64]) {
+        for (slot, &word) in self.0[start..start + words.len()].iter().zip(words) {
+            slot.store(word, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The run `taken` counts to, of those `bounds` bounds, which is then
+/// taken; none once they all are.
+fn run(bounds: &[usize], taken: &AtomicUsize) -> Option<(usize, usize)> {
+    let run = taken.fetch_add(1, Ordering::Relaxed);
+    Some((*bounds.get(run)?, *bounds.get(run + 1)?))
+}
+
+/// The fewest output folds a thread of the pool is kept for.
+///
+/// A fold is a short XOR gather, and a pass wakes every thread of the pool,
+/// so the pool is limited to give each at least this many, and a matrix too
+/// small for two runs on the caller's thread alone. The value is a policy,
+/// a power of two large enough that the waking is a small fraction of the
+/// work; the crossover has not been measured, and a timing of one fold
+/// against one waking on the build hosts would fix it.
 const MINIMUM_FOLDS_PER_WORKER: usize = 4_096;
+
+/// The runs a pass is cut into for each thread of the pool. The threads
+/// take the runs from one count, so a thread that started late, or shares
+/// its core, takes fewer, and the pass waits for the last run and not for
+/// the slowest thread's share. Measured on the matrix of a 120-digit sieve,
+/// 673 757 rows, on two EPYC 7452 and 128 threads: an iteration was 12.8 ms
+/// at one run a thread, 11.3 at eight and 12.0 at thirty-two.
+const RUNS_PER_THREAD: usize = 8;
+
+/// The workers each thread wakes as a pass begins: the caller the first of
+/// them, and each of those the ones after it, so the last of 128 is woken
+/// fourth in a chain and not last of 128 by the caller. On the same matrix
+/// an iteration was 11.3 ms at four and 11.7 at sixteen.
+const WAKES: usize = 4;
 
 /// Independent XOR accumulators in [`fold_range`]: the gathers are what the
 /// product waits on, and a single XOR chain would serialize them. Four is a
@@ -648,132 +747,182 @@ const ROWS_PER_SPARE_ITERATION: usize = 4096;
 /// of rounds, plus sixteen for the lanes the last selections leave unused.
 const SPARE_ITERATIONS_FLOOR: usize = WIDTH + 16;
 
-/// One range's work, and the sending of what it made.
-type FoldJob = Box<dyn FnOnce() + Send>;
+/// What a pass has each thread of the pool do, given the thread's number
+/// among them.
+type Pass = Arc<dyn Fn(usize) + Send + Sync>;
 
-enum FoldMessage {
-    Run(FoldJob),
-    Stop,
+/// What the threads of a pool share.
+struct Shared {
+    /// The pass in hand.
+    pass: RwLock<Option<Pass>>,
+    /// The passes begun. A worker runs the pass in hand when this has
+    /// moved on from the last it ran.
+    begun: AtomicU64,
+    /// The workers that have not finished the pass in hand.
+    running: AtomicUsize,
+    /// Set for the workers to return.
+    stopping: AtomicBool,
+    /// The thread that waits for the pass in hand.
+    caller: Mutex<Option<Thread>>,
+    /// The workers, for one to wake those after it.
+    workers: OnceLock<Vec<Thread>>,
+    /// What a worker's pass panicked with, for the caller to resume.
+    panic: Mutex<Option<Box<dyn std::any::Any + Send>>>,
 }
 
-/// Fixed workers for the lifetime of one sparse solve.
+impl Shared {
+    /// A worker's life: each pass as it begins, until the pool stops.
+    fn work(&self, number: usize) {
+        let mut ran = 0;
+        loop {
+            let begun = self.begun.load(Ordering::Acquire);
+            if begun == ran {
+                std::thread::park();
+                continue;
+            }
+            ran = begun;
+            let workers = self.workers.get().expect("the workers are named first");
+            for worker in workers.iter().skip(WAKES * (number + 1)).take(WAKES) {
+                worker.unpark();
+            }
+            if self.stopping.load(Ordering::Acquire) {
+                return;
+            }
+            let pass = self
+                .pass
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if let Some(pass) = pass {
+                let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pass(number)));
+                if let Err(payload) = ended {
+                    self.panic
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get_or_insert(payload);
+                }
+            }
+            if self.running.fetch_sub(1, Ordering::AcqRel) == 1 {
+                let caller = self.caller.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(caller) = caller.as_ref() {
+                    caller.unpark();
+                }
+            }
+        }
+    }
+}
+
+/// Threads kept for the lifetime of one sparse solve, the caller's among
+/// them.
 ///
-/// Each worker has its own channel, so dispatch needs neither a shared queue
-/// lock nor work stealing. A pass over the relations or the columns divides
-/// one ordered range among the useful prefix of workers and gathers by range
-/// start. The result is bit-identical to the inline pass; only its schedule
-/// changes.
+/// A pass is one closure that every thread runs, each taking runs of the
+/// pass from a count they share until none is left. The workers sleep
+/// between passes and are woken down a tree, [`WAKES`] by each. What a pass
+/// makes it writes where it belongs, a word to a run's thread, so the result
+/// is the result of the pass on one thread; only its schedule changes.
 struct FoldPool {
-    senders: Vec<mpsc::Sender<FoldMessage>>,
+    shared: Arc<Shared>,
     handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl FoldPool {
-    fn new(workers: usize) -> Self {
-        if workers <= 1 {
-            return Self {
-                senders: Vec::new(),
-                handles: Vec::new(),
-            };
-        }
-        let mut senders = Vec::with_capacity(workers);
-        let mut handles = Vec::with_capacity(workers);
-        for _ in 0..workers {
-            let (sender, receiver) = mpsc::channel();
-            senders.push(sender);
-            handles.push(std::thread::spawn(move || {
-                while let Ok(message) = receiver.recv() {
-                    match message {
-                        FoldMessage::Run(job) => job(),
-                        FoldMessage::Stop => break,
-                    }
-                }
-            }));
-        }
-        Self { senders, handles }
+    /// A pool of `threads` threads: the caller's, and a worker for each of
+    /// the rest.
+    fn new(threads: usize) -> Self {
+        let shared = Arc::new(Shared {
+            pass: RwLock::new(None),
+            begun: AtomicU64::new(0),
+            running: AtomicUsize::new(0),
+            stopping: AtomicBool::new(false),
+            caller: Mutex::new(None),
+            workers: OnceLock::new(),
+            panic: Mutex::new(None),
+        });
+        let handles: Vec<_> = (0..threads.saturating_sub(1))
+            .map(|number| {
+                let shared = Arc::clone(&shared);
+                std::thread::spawn(move || shared.work(number))
+            })
+            .collect();
+        let workers = handles.iter().map(|handle| handle.thread().clone());
+        shared
+            .workers
+            .set(workers.collect())
+            .expect("the workers are named once");
+        Self { shared, handles }
     }
 
-    /// The threads a pass may run on: the pool's, or the caller's one.
-    fn workers(&self) -> usize {
-        self.senders.len().max(1)
+    /// The threads a pass runs on, the caller's among them.
+    fn threads(&self) -> usize {
+        self.handles.len() + 1
     }
 
-    /// The workers a pass over `len` outputs is worth: the pool's, narrowed
-    /// so that each has at least `MINIMUM_FOLDS_PER_WORKER` of them.
-    fn useful(&self, len: usize) -> usize {
-        let useful = (len / MINIMUM_FOLDS_PER_WORKER).max(1);
-        self.workers().min(useful)
+    /// `pass` on every thread of the pool, each given its number, the
+    /// caller's the last. A panic in it is resumed here once every thread
+    /// has left it.
+    fn pass(&self, pass: impl Fn(usize) + Send + Sync + 'static) {
+        let workers = self.handles.len();
+        if workers == 0 {
+            return pass(0);
+        }
+        let pass: Pass = Arc::new(pass);
+        let shared = &self.shared;
+        *shared.pass.write().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&pass));
+        *shared.caller.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(std::thread::current());
+        shared.running.store(workers, Ordering::Release);
+        shared.begun.fetch_add(1, Ordering::Release);
+        for handle in self.handles.iter().take(WAKES) {
+            handle.thread().unpark();
+        }
+        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pass(workers)));
+        while shared.running.load(Ordering::Acquire) != 0 {
+            std::thread::park();
+        }
+        *shared.pass.write().unwrap_or_else(PoisonError::into_inner) = None;
+        if let Err(payload) = ended {
+            std::panic::resume_unwind(payload);
+        }
+        let panicked = shared
+            .panic
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(payload) = panicked {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     /// One output word per index list: the XOR-fold of `input` at those
-    /// indices, split across workers when each gets enough folds to pay.
+    /// indices, written to `output`, the lists taken in the runs `runs`
+    /// bounds.
     ///
-    /// Each output word is an independent fold, so the split is by output
-    /// ranges and the gather is in range order: the result is identical to
-    /// the inline fold whatever the worker count. The ranges hold about as
-    /// many indices as each other, not as many lists.
-    fn mapped(&self, lists: Arc<Lists>, input: Block) -> Vec<u64> {
-        let len = lists.len();
-        let cuts = lists.cuts(self.useful(len));
-        let parts = self.ranges(cuts, move |start, end| {
-            fold_range(&lists, start, end, &input)
+    /// Each output word is an independent fold, so the result is the
+    /// inline fold's whatever the threads and whichever took each run.
+    fn fold(
+        &self,
+        lists: &Arc<Lists>,
+        runs: &Arc<Vec<usize>>,
+        input: &Arc<Block>,
+        output: &Arc<Block>,
+    ) {
+        let (lists, runs) = (Arc::clone(lists), Arc::clone(runs));
+        let (input, output) = (Arc::clone(input), Arc::clone(output));
+        let taken = AtomicUsize::new(0);
+        self.pass(move |_| {
+            while let Some((start, end)) = run(&runs, &taken) {
+                output.write(start, &fold_range(&lists, start, end, &input));
+            }
         });
-        let mut output = Vec::with_capacity(len);
-        for part in parts {
-            output.extend(part);
-        }
-        output
-    }
-
-    /// `work(start, end)` over the ranges `cuts` bounds, in their order: on
-    /// the calling thread when there is one range or none, and a range a
-    /// worker otherwise. `cuts` climbs, and bounds no more ranges than the
-    /// pool has workers.
-    ///
-    /// A worker's panic is caught where it happens and resumed here.
-    fn ranges<T, W>(&self, cuts: Vec<usize>, work: W) -> Vec<T>
-    where
-        T: Send + 'static,
-        W: Fn(usize, usize) -> T + Send + Sync + 'static,
-    {
-        if cuts.len() <= 2 {
-            let (start, end) = (cuts.first().copied(), cuts.last().copied());
-            return vec![work(start.unwrap_or(0), end.unwrap_or(0))];
-        }
-
-        let work = Arc::new(work);
-        let (reply, replies) = mpsc::channel();
-        let jobs = cuts.len() - 1;
-        for (worker, bounds) in cuts.windows(2).enumerate() {
-            let (start, end) = (bounds[0], bounds[1]);
-            let (work, reply) = (Arc::clone(&work), reply.clone());
-            self.senders[worker]
-                .send(FoldMessage::Run(Box::new(move || {
-                    let made =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(start, end)));
-                    let _ = reply.send((start, made));
-                })))
-                .expect("a retained fold worker exited early");
-        }
-        drop(reply);
-
-        let mut gathered: Vec<(usize, std::thread::Result<T>)> = replies.iter().collect();
-        assert_eq!(gathered.len(), jobs, "every range's job returns once");
-        gathered.sort_unstable_by_key(|&(start, _)| start);
-        gathered
-            .into_iter()
-            .map(|(_, made)| match made {
-                Ok(made) => made,
-                Err(payload) => std::panic::resume_unwind(payload),
-            })
-            .collect()
     }
 }
 
 impl Drop for FoldPool {
     fn drop(&mut self) {
-        for sender in &self.senders {
-            let _ = sender.send(FoldMessage::Stop);
+        self.shared.stopping.store(true, Ordering::Release);
+        self.shared.begun.fetch_add(1, Ordering::Release);
+        for handle in &self.handles {
+            handle.thread().unpark();
         }
         for handle in self.handles.drain(..) {
             if let Err(payload) = handle.join() {
@@ -785,56 +934,70 @@ impl Drop for FoldPool {
     }
 }
 
-fn fold_range(lists: &Lists, start: usize, end: usize, input: &[u64]) -> Vec<u64> {
+fn fold_range(lists: &Lists, start: usize, end: usize, input: &Block) -> Vec<u64> {
     let mut out = Vec::with_capacity(end - start);
     for index in start..end {
         let indices = lists.list(index);
         let mut chunks = indices.chunks_exact(FOLD_ACCUMULATORS);
         let (mut a, mut b, mut c, mut d) = (0u64, 0u64, 0u64, 0u64);
         for chunk in &mut chunks {
-            a ^= input[chunk[0] as usize];
-            b ^= input[chunk[1] as usize];
-            c ^= input[chunk[2] as usize];
-            d ^= input[chunk[3] as usize];
+            a ^= input.word(chunk[0] as usize);
+            b ^= input.word(chunk[1] as usize);
+            c ^= input.word(chunk[2] as usize);
+            d ^= input.word(chunk[3] as usize);
         }
         let mut total = a ^ b ^ c ^ d;
         for &index in chunks.remainder() {
-            total ^= input[index as usize];
+            total ^= input.word(index as usize);
         }
         out.push(total);
     }
     out
 }
 
-/// `leftᵀ · right` for two blocks: the `64 × 64` matrix of inner products.
-fn dot(left: &[u64], right: &[u64]) -> Small {
-    // Eight tables, one per byte of the left word: entry `e` of table `b`
-    // accumulates the right words whose left word has byte `b` equal to
-    // `e`. Eight table updates per word, against a loop over the word's
-    // set bits — thirty-two on average — and the tables then combine into
-    // the sixty-four lanes in a fixed sixteen thousand operations. Each
-    // Lanczos iteration takes three dot products over the whole block.
-    let mut tables = [[0u64; 256]; 8];
-    for (a, b) in left.iter().zip(right.iter()) {
-        let mut word = *a;
-        for table in &mut tables {
-            table[(word & 0xff) as usize] ^= *b;
-            word >>= 8;
+/// `leftᵀ · right` for two blocks, the `64 × 64` matrix of inner products,
+/// taken a word of each at a time.
+///
+/// Eight tables, one per byte of the left word: entry `e` of table `b`
+/// accumulates the right words whose left word has byte `b` equal to `e`.
+/// Eight table updates per word, against a loop over the word's set bits —
+/// thirty-two on average — and the tables then combine into the sixty-four
+/// lanes in a fixed sixteen thousand operations. Each Lanczos iteration
+/// takes three dot products over the whole block.
+struct Dot {
+    tables: Box<[[u64; 256]; 8]>,
+}
+
+impl Dot {
+    fn new() -> Self {
+        Self {
+            tables: Box::new([[0; 256]; 8]),
         }
     }
-    let mut out = [0u64; WIDTH];
-    for (byte, table) in tables.iter().enumerate() {
-        for bit in 0..8 {
-            let mut lane = 0u64;
-            for (entry, &value) in table.iter().enumerate() {
-                if (entry >> bit) & 1 == 1 {
-                    lane ^= value;
+
+    /// A word of the left block and the word of the right beside it.
+    fn add(&mut self, mut left: u64, right: u64) {
+        for table in self.tables.iter_mut() {
+            table[(left & 0xff) as usize] ^= right;
+            left >>= 8;
+        }
+    }
+
+    fn product(&self) -> Small {
+        let mut out = [0u64; WIDTH];
+        for (byte, table) in self.tables.iter().enumerate() {
+            for bit in 0..8 {
+                let mut lane = 0u64;
+                for (entry, &value) in table.iter().enumerate() {
+                    if (entry >> bit) & 1 == 1 {
+                        lane ^= value;
+                    }
                 }
+                out[byte * 8 + bit] = lane;
             }
-            out[byte * 8 + bit] = lane;
         }
+        out
     }
-    out
 }
 
 /// `P·Q` for two `64 × 64` matrices.
@@ -890,34 +1053,31 @@ impl SmallProduct {
     }
 }
 
-/// `acc ^= V·P`, without materializing the intermediate block.
-fn xor_mul_block_into(acc: &mut [u64], v: &[u64], p: &Small) {
-    debug_assert_eq!(acc.len(), v.len());
-    let product = SmallProduct::new(p);
-    for (slot, &value) in acc.iter_mut().zip(v) {
-        *slot ^= product.apply(value);
-    }
-}
-
-/// Equation (18), fused into one pass over the four blocks.
+/// Equation (18), a word of each of the four blocks at a time.
 ///
 /// The matrices are tiny and fixed for the whole pass, so their byte tables
-/// are built once and each output word is combined in place, with no
-/// temporary blocks.
-fn recurrence(av: &[u64], mask: u64, terms: [(&[u64], &Small); 3]) -> Vec<u64> {
-    let [(v0, d), (v1, e), (v2, f)] = terms;
-    debug_assert_eq!(av.len(), v0.len());
-    debug_assert_eq!(av.len(), v1.len());
-    debug_assert_eq!(av.len(), v2.len());
-    let d = SmallProduct::new(d);
-    let e = SmallProduct::new(e);
-    let f = SmallProduct::new(f);
-    av.iter()
-        .zip(v0)
-        .zip(v1)
-        .zip(v2)
-        .map(|(((&av, &v0), &v1), &v2)| (av & mask) ^ d.apply(v0) ^ e.apply(v1) ^ f.apply(v2))
-        .collect()
+/// are built once for it.
+struct Recurrence {
+    mask: u64,
+    d: SmallProduct,
+    e: SmallProduct,
+    f: SmallProduct,
+}
+
+impl Recurrence {
+    fn new(mask: u64, d: &Small, e: &Small, f: &Small) -> Self {
+        Self {
+            mask,
+            d: SmallProduct::new(d),
+            e: SmallProduct::new(e),
+            f: SmallProduct::new(f),
+        }
+    }
+
+    /// The word of `Vᵢ₊₁` from those of `AVᵢ`, `Vᵢ`, `Vᵢ₋₁` and `Vᵢ₋₂`.
+    fn apply(&self, av: u64, v0: u64, v1: u64, v2: u64) -> u64 {
+        (av & self.mask) ^ self.d.apply(v0) ^ self.e.apply(v1) ^ self.f.apply(v2)
+    }
 }
 
 /// `P + I`.
@@ -1014,9 +1174,9 @@ fn any(block: &[u64]) -> bool {
 }
 
 /// Lane `which` of a block, as a packed bit vector.
-fn lane(block: &[u64], which: usize) -> Vec<u64> {
+fn lane(block: &Block, which: usize) -> Vec<u64> {
     let mut out = vec![0u64; block.len().div_ceil(WIDTH)];
-    for (index, word) in block.iter().enumerate() {
+    for (index, word) in block.words().enumerate() {
         if word >> which & 1 == 1 {
             out[index / WIDTH] |= 1u64 << (index % WIDTH);
         }
@@ -1104,7 +1264,7 @@ fn lanczos<R: RandomSource + ?Sized>(
 /// One iteration's state as the tests read it: `Vᵢ`, `Tᵢ`, `Winvᵢ` and `Sᵢ`.
 #[cfg_attr(not(test), allow(dead_code))]
 struct LanczosStep<'a> {
-    v: &'a [u64],
+    v: &'a Block,
     t: &'a Small,
     winv: &'a Small,
     selected: u64,
@@ -1128,13 +1288,18 @@ fn lanczos_observed<R: RandomSource + ?Sized>(
     };
 
     // X starts as Y and accumulates the solution; Q = V[0] = A·Y never moves.
-    let mut x: Block = Arc::new((0..count).map(|_| draw()).collect());
+    let x = Block::of((0..count).map(|_| draw()));
     let q = matrix.apply(&x);
 
-    let mut v0 = q.clone();
-    let mut v1 = Arc::new(vec![0u64; count]);
-    let mut v2 = Arc::new(vec![0u64; count]);
-    let (mut av0, mut products) = matrix.apply_with_products(&v0, &q);
+    // The blocks are made once and written over: `next` takes V[i+1] and
+    // is then V[i], and the block V[i-2] leaves is the next `next`.
+    let mut v0 = Block::of(q.words());
+    let mut v1 = Block::zeroed(count);
+    let mut v2 = Block::zeroed(count);
+    let mut next = Block::zeroed(count);
+    let image = Block::zeroed(matrix.columns());
+    let av0 = Block::zeroed(count);
+    let mut products = matrix.apply_with_products(&v0, &q, &image, &av0);
     let mut t0 = products.t;
     let mut t1 = [0u64; WIDTH];
     let (mut w1i, mut w2i) = ([0u64; WIDTH], [0u64; WIDTH]);
@@ -1158,7 +1323,7 @@ fn lanczos_observed<R: RandomSource + ?Sized>(
         // is non-zero there the iteration has stalled without spanning it,
         // and Montgomery's guarantee is gone.
         let stranded = !(next_mask | previous);
-        if stranded != 0 && v1.iter().any(|word| word & stranded != 0) {
+        if stranded != 0 && v1.words().any(|word| word & stranded != 0) {
             return None;
         }
         let w0i = next_w0i;
@@ -1205,12 +1370,14 @@ fn lanczos_observed<R: RandomSource + ?Sized>(
         plus_identity(&mut d);
 
         // (18) V[i+1] = A V[i] S[i]S[i]ᵀ + V[i] D + V[i-1] E + V[i-2] F.
-        let (solution, next) =
-            matrix.step(&x, projected, &av0, mask, [(&v0, d), (&v1, e), (&v2, f)]);
-        x = solution;
+        let advance = Recurrence::new(mask, &d, &e, &f);
+        matrix.step(&x, &projected, &av0, [&v0, &v1, &v2], advance, &next);
 
-        v2 = std::mem::replace(&mut v1, std::mem::replace(&mut v0, next));
-        (av0, products) = matrix.apply_with_products(&v0, &q);
+        next = std::mem::replace(
+            &mut v2,
+            std::mem::replace(&mut v1, std::mem::replace(&mut v0, next)),
+        );
+        products = matrix.apply_with_products(&v0, &q, &image, &av0);
         w2i = w1i;
         w1i = w0i;
         t1 = t0;
@@ -1221,7 +1388,11 @@ fn lanczos_observed<R: RandomSource + ?Sized>(
     // vector can be orthogonal to itself. So take the 128 candidates that came
     // out — the columns of X and of the last V — and ask a small elimination
     // which of their combinations M actually annihilates.
-    let images = [matrix.forward(&x), matrix.forward(&v0)];
+    let images = [&x, &v0].map(|block| {
+        let image = Block::zeroed(matrix.columns());
+        matrix.forward(block, &image);
+        image
+    });
     let candidates: Vec<Vec<u64>> = (0..2 * WIDTH)
         .map(|index| lane(&images[index / WIDTH], index % WIDTH))
         .collect();
@@ -1231,7 +1402,7 @@ fn lanczos_observed<R: RandomSource + ?Sized>(
     // over every relation it holds, so they share the solve's workers.
     let combinations = dense_null_space(&candidates, matrix.columns());
     let found: Vec<Vec<usize>> =
-        crate::parallel::map_ordered(&combinations, matrix.folds.workers(), |_, combination| {
+        crate::parallel::map_ordered(&combinations, matrix.folds.threads(), |_, combination| {
             let mut vector = vec![0u64; count.div_ceil(WIDTH)];
             for &index in combination {
                 xor_into(&mut vector, &lane(&sources[index / WIDTH], index % WIDTH));
@@ -1251,8 +1422,8 @@ fn lanczos_observed<R: RandomSource + ?Sized>(
 mod tests {
     use super::{
         block_lanczos_dependencies, borrow_two, dense_null_space, fold_range, lanczos_observed,
-        prune_singletons, recurrence, words_for, xor_mul_block_into, FoldPool, Small, SmallProduct,
-        Sparse, WIDTH, WORD,
+        prune_singletons, words_for, Block, FoldPool, Recurrence, Small, SmallProduct, Sparse,
+        WIDTH, WORD,
     };
     use std::sync::Arc;
 
@@ -1330,7 +1501,7 @@ mod tests {
     }
 
     #[test]
-    fn fused_block_operations_match_the_scalar_equations() {
+    fn the_recurrence_of_a_word_matches_the_scalar_equation() {
         fn scalar(value: u64, matrix: &Small) -> u64 {
             let mut bits = value;
             let mut total = 0u64;
@@ -1344,85 +1515,84 @@ mod tests {
 
         /// Arbitrary, fixed so a failure reproduces.
         const SEED: u64 = 0x65f4_26b8_91de_0ca3;
+        /// Words tried; arbitrary.
+        const WORDS: usize = 4 * WIDTH + 1;
         let mut state = SEED;
-        // Relation counts either side of multiples of the block width:
-        // none, one, one short of the width, the width, four widths plus
-        // one.
-        for length in [0usize, 1, WIDTH - 1, WIDTH, 4 * WIDTH + 1] {
-            let d: Small = std::array::from_fn(|_| lcg(&mut state));
-            let e: Small = std::array::from_fn(|_| lcg(&mut state));
-            let f: Small = std::array::from_fn(|_| lcg(&mut state));
-            let av: Vec<u64> = (0..length).map(|_| lcg(&mut state)).collect();
-            let v0: Vec<u64> = (0..length).map(|_| lcg(&mut state)).collect();
-            let v1: Vec<u64> = (0..length).map(|_| lcg(&mut state)).collect();
-            let v2: Vec<u64> = (0..length).map(|_| lcg(&mut state)).collect();
-            let mask = lcg(&mut state);
-
-            let expected: Vec<u64> = av
-                .iter()
-                .zip(&v0)
-                .zip(&v1)
-                .zip(&v2)
-                .map(|(((&a, &b), &c), &g)| {
-                    (a & mask) ^ scalar(b, &d) ^ scalar(c, &e) ^ scalar(g, &f)
-                })
-                .collect();
+        let d: Small = std::array::from_fn(|_| lcg(&mut state));
+        let e: Small = std::array::from_fn(|_| lcg(&mut state));
+        let f: Small = std::array::from_fn(|_| lcg(&mut state));
+        let mask = lcg(&mut state);
+        let advance = Recurrence::new(mask, &d, &e, &f);
+        for _ in 0..WORDS {
+            let [av, v0, v1, v2]: [u64; 4] = std::array::from_fn(|_| lcg(&mut state));
             assert_eq!(
-                recurrence(&av, mask, [(&v0, &d), (&v1, &e), (&v2, &f)]),
-                expected
+                advance.apply(av, v0, v1, v2),
+                (av & mask) ^ scalar(v0, &d) ^ scalar(v1, &e) ^ scalar(v2, &f)
             );
-
-            let mut accumulated: Vec<u64> = (0..length).map(|_| lcg(&mut state)).collect();
-            let expected_accumulated: Vec<u64> = accumulated
-                .iter()
-                .zip(&v0)
-                .map(|(&a, &b)| a ^ scalar(b, &d))
-                .collect();
-            xor_mul_block_into(&mut accumulated, &v0, &d);
-            assert_eq!(accumulated, expected_accumulated);
         }
     }
 
     #[test]
-    fn retained_fold_workers_match_repeated_inline_folds() {
+    fn kept_threads_fold_as_one_thread_folds_pass_after_pass() {
         /// Input words; arbitrary.
         const INPUT_WORDS: u64 = 2_003;
-        /// Output lists: more than twice `MINIMUM_FOLDS_PER_WORKER`, so at
-        /// least two workers get a range, and odd, so the ranges are
-        /// unequal.
+        /// Output lists; odd, so the runs are unequal.
         const LISTS: usize = 10_003;
-        /// Workers asked for; more than the lists can use, so the pool is
-        /// narrowed to its useful prefix.
-        const WORKERS: usize = 8;
-        /// Applications of the same pool, to show the workers survive reuse.
+        /// Threads of the pool, and the runs their pass is cut into: more
+        /// runs than threads, so a thread takes several.
+        const THREADS: usize = 8;
+        const RUNS: usize = 3 * THREADS + 1;
+        /// Passes of the same pool, to show the threads survive reuse.
         const REPEATS: usize = 16;
         // Three arbitrary affine index patterns per list, distinct in
         // stride so the lists do not repeat.
-        let input: Arc<Vec<u64>> = Arc::new(
-            (0..INPUT_WORDS)
-                .map(|value| value.rotate_left(17))
-                .collect(),
-        );
-        let lists: Arc<Vec<Vec<u32>>> = Arc::new(
-            (0..LISTS)
-                .map(|row| {
-                    vec![
-                        (row % input.len()) as u32,
-                        ((row * 17 + 3) % input.len()) as u32,
-                        ((row * 101 + 29) % input.len()) as u32,
-                    ]
-                })
-                .collect::<Vec<_>>(),
-        );
+        let input = Block::of((0..INPUT_WORDS).map(|value| value.rotate_left(17)));
+        let lists: Vec<Vec<u32>> = (0..LISTS)
+            .map(|row| {
+                vec![
+                    (row % input.len()) as u32,
+                    ((row * 17 + 3) % input.len()) as u32,
+                    ((row * 101 + 29) % input.len()) as u32,
+                ]
+            })
+            .collect();
         let lists = Arc::new(super::Lists::from_lists(&lists));
+        let runs = Arc::new(lists.cuts(RUNS));
         let expected = fold_range(&lists, 0, lists.len(), &input);
-        let pool = FoldPool::new(WORKERS);
+        let pool = FoldPool::new(THREADS);
+        assert_eq!(pool.threads(), THREADS);
         for _ in 0..REPEATS {
-            assert_eq!(
-                pool.mapped(Arc::clone(&lists), Arc::clone(&input)),
-                expected
-            );
+            let output = Block::zeroed(lists.len());
+            pool.fold(&lists, &runs, &input, &output);
+            assert_eq!(output.words().collect::<Vec<_>>(), expected);
         }
+    }
+
+    /// A pass that panics on one thread panics on the caller's, once the
+    /// others have left it, and the pool runs the next.
+    #[test]
+    fn a_pass_that_panics_is_resumed_on_the_caller() {
+        /// Threads of the pool; arbitrary, more than [`super::WAKES`] so
+        /// that workers wake workers.
+        const THREADS: usize = 9;
+        /// The thread that panics: a worker, and not one the caller wakes.
+        const PANICS: usize = 6;
+        let pool = FoldPool::new(THREADS);
+        let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&ran);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.pass(move |thread| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                assert_ne!(thread, PANICS, "the pass panics on this thread");
+            });
+        }));
+        assert!(caught.is_err());
+        assert_eq!(ran.load(std::sync::atomic::Ordering::Relaxed), THREADS);
+        let counted = Arc::clone(&ran);
+        pool.pass(move |_| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+        assert_eq!(ran.load(std::sync::atomic::Ordering::Relaxed), 2 * THREADS);
     }
 
     /// Lists as a sieve's columns are: the first few hold most of the
@@ -1434,15 +1604,15 @@ mod tests {
         const INPUT_WORDS: usize = 2_003;
         /// Lists enough for eight workers at `MINIMUM_FOLDS_PER_WORKER`.
         const LISTS: usize = 8 * super::MINIMUM_FOLDS_PER_WORKER;
+        /// Runs asked for: eight threads' worth.
+        const RUNS: usize = WORKERS * super::RUNS_PER_THREAD;
         /// The heavy lists, and how long each is: together four fifths of
         /// the indices, in a hundredth of a run of even length.
         const HEAVY: usize = 40;
         const HEAVY_LENGTH: usize = 4 * LISTS / HEAVY;
         const WORKERS: usize = 8;
-        let input: Arc<Vec<u64>> = Arc::new(
-            (0..INPUT_WORDS as u64)
-                .map(|value| value.wrapping_mul(0x9e37_79b9_7f4a_7c15))
-                .collect(),
+        let input = Block::of(
+            (0..INPUT_WORDS as u64).map(|value| value.wrapping_mul(0x9e37_79b9_7f4a_7c15)),
         );
         let lists: Vec<Vec<u32>> = (0..LISTS)
             .map(|list| {
@@ -1476,16 +1646,12 @@ mod tests {
                 "a run of {held} indices of {total}"
             );
         }
-        assert_eq!(super::even_cuts(10, 4), [0, 3, 6, 9, 10]);
-        assert_eq!(super::even_cuts(0, 4), [0usize; 0]);
-        assert_eq!(super::even_cuts(3, 8), [0, 1, 2, 3]);
 
         let expected = fold_range(&lists, 0, lists.len(), &input);
         let pool = FoldPool::new(WORKERS);
-        assert_eq!(
-            pool.mapped(Arc::clone(&lists), Arc::clone(&input)),
-            expected
-        );
+        let output = Block::zeroed(lists.len());
+        pool.fold(&lists, &Arc::new(lists.cuts(RUNS)), &input, &output);
+        assert_eq!(output.words().collect::<Vec<_>>(), expected);
     }
 
     /// Where the sparse solver's time goes on a large random matrix, timed,
@@ -1865,7 +2031,9 @@ mod tests {
                 &matrix,
                 &mut TestRng(RNG_SEED_BASE ^ seed),
                 |_| true,
-                &mut |step| steps.push((step.v.to_vec(), *step.t, *step.winv, step.selected)),
+                &mut |step| {
+                    steps.push((step.v.words().collect(), *step.t, *step.winv, step.selected));
+                },
             );
             assert!(
                 steps.len() >= FEWEST_STEPS,

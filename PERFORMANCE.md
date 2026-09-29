@@ -647,6 +647,41 @@ the calling thread, and in each pass 0.9 to 1.3 ms handing the ranges to
 ranges' own time is 2.7 and 3.3 ms in the two products, 5.6 and 7.0 ns a
 gather from a block of 5.4 MB.
 
+### Blocks written in place
+
+The ranges a pass made were gathered into a block by the calling thread,
+6.1 ms of an iteration's 17.2, and a pass waited for its slowest range.
+The blocks are words the threads write in place, each pass cut into eight
+runs a thread that the threads take from one count, the caller among them,
+and the workers woken down a tree. The same matrix, the same 10 653
+iterations:
+
+| an iteration, ms | ranges gathered | blocks written in place |
+|---|---:|---:|
+| `M·x` | 6.2 | 4.9 |
+| `Mᵀ·` that and the inner products | 6.5 | 4.4 |
+| the solution and the recurrence | 4.1 | 1.8 |
+| the rest | 0.4 | 0.2 |
+| | 17.2 | 11.3 |
+| the solve, s | 183 | 120 |
+
+What an iteration waits for now is the machine's caches, and not its
+cores:
+
+| threads | an iteration, ms | `M·x`, ms | its threads' time, ms |
+|---:|---:|---:|---:|
+| 32 | 13.6 | 5.8 | 175 |
+| 64 | 11.4 | 5.0 | 295 |
+| 128 | 11.3 | 4.9 | 506 |
+
+`M·x` is 60.2 million gathers from a block of 5.4 MB, which no core's own
+cache holds and every pass writes anew. The machine makes 10 to 12 thousand
+million of them a second on 32 threads, on 64 and on 128.
+
+Tried there and not kept: workers that spin before they sleep, for 300 µs
+and for 1 ms, 11.6 and 11.5 ms an iteration. The last thread of a pass
+begins 0.7 ms in where it began 1.5, and the pass is as long.
+
 ## Filtering a sieve's matrix
 
 `filter_merge` on factoring's relations for RSA-120, 6 826 195 rows by

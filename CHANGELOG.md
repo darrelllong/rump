@@ -145,6 +145,13 @@ what a consumer must change, not everything that moved.
 
 ### Changed
 
+- **Block Lanczos writes its blocks in place.** The threads of a pass
+  write their runs of a block where the next pass reads them, and take the
+  runs from one count, the caller with them; the workers are woken down a
+  tree. The calling thread gathered every block from the ranges its workers
+  sent it, a third of an iteration. On the matrix of a 120-digit sieve the
+  solve is 120 s where it was 183. The dependencies are the same.
+
 - **Block Lanczos numbers the columns that are set.** A matrix from
   `filter_merge` keeps its width, with every column eliminated left empty,
   and the solver folded an empty list and made a word of `M·x` for each:
