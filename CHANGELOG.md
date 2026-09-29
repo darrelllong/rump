@@ -145,6 +145,13 @@ what a consumer must change, not everything that moved.
 
 ### Changed
 
+- **`filter_merge` plans its merges ahead on the budget's threads.** The
+  trees of the stale columns next in the queue are planned side by side,
+  and a plan is used if no row of its column has changed by its turn. The
+  matrix is the same at any budget. On the relations of a 120-digit sieve
+  the merge is 35 s where it was 74, and `filter_merge` 52 s where it was
+  92.
+
 - **`filter_merge` keeps its cliques from round to round, and queues only
   the columns it would merge.** Clique removal found the components again
   every round, from every column and every row, and the merge queued every

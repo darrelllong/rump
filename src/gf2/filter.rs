@@ -72,6 +72,22 @@ const PURGE_SHARE_DIVISOR: usize = 4;
 /// In [`Cliques`], the row after a component's last.
 const LAST: u32 = u32::MAX;
 
+/// The entries of the merge's queue read past a stale column for others to
+/// plan with it. A span too short makes batches too small to pay for their
+/// threads, and one too long is overtaken: a column touched inside the span
+/// already read is planned alone when its turn comes. Measured on the
+/// relations of a 120-digit sieve, two EPYC 7452, the merge took 37.4 s at
+/// 2 048 with 8 threads a batch, 34.7 at 4 096 and 34.8 at 8 192 with 16,
+/// 36.6 at 16 384 with 32, and 74.0 planning every column alone. At 8 192
+/// one plan in forty was of a column overtaken; at 65 536, one in seven.
+const PLANS_AHEAD: usize = 8_192;
+
+/// The plans a thread of a batch should have to itself. On the same
+/// relations the 517 batches of a merge, 6 500 plans each, took 4.8 s on 16
+/// threads, 4.0 on 32, 4.8 on 64 and 7.5 on 128: about two hundred plans a
+/// thread.
+const PLANS_PER_WORKER: usize = 256;
+
 /// Base of the key a column is first queued under: its weight added to
 /// this sorts every column below any fill, in weight order, so singletons
 /// and pairs are planned first. The key only ever sorts; a stale entry is
@@ -439,6 +455,128 @@ impl Cliques {
     }
 }
 
+/// The columns waiting to be merged, cheapest first, and what is known of
+/// their fills.
+///
+/// A min-heap keyed by fill with lazy re-evaluation: a change to any row
+/// that holds a column makes what is known of its fill stale, and a stale
+/// entry popped is planned and queued again under its exact fill rather
+/// than acted on. The keys columns start under sort by weight below any
+/// fill (see [`SENTINEL_KEY_BASE`]).
+struct Queue {
+    /// The heaviest column the merge takes.
+    cap: usize,
+    /// The key each column was last queued under.
+    last: Vec<i64>,
+    /// Whether that key is the column's exact fill.
+    fresh: Vec<bool>,
+    /// Whether the column has an entry in the heap; it has at most one.
+    queued: Vec<bool>,
+    /// The fills planned ahead of their columns' turns.
+    ahead: Vec<i64>,
+    /// Whether a column's fill planned ahead is its exact fill.
+    known: Vec<bool>,
+    /// The last entry read in looking ahead.
+    horizon: Option<(i64, u32)>,
+    heap: BinaryHeap<Reverse<(i64, u32)>>,
+}
+
+impl Queue {
+    /// Every column of `occupants` the merge takes, under its weight.
+    fn new(occupants: &[u32], cap: usize) -> Self {
+        let columns = occupants.len();
+        let mut queue = Self {
+            cap,
+            last: occupants
+                .iter()
+                .map(|&weight| SENTINEL_KEY_BASE + i64::from(weight))
+                .collect(),
+            fresh: vec![false; columns],
+            queued: vec![false; columns],
+            ahead: vec![0; columns],
+            known: vec![false; columns],
+            horizon: None,
+            heap: BinaryHeap::new(),
+        };
+        for (column, &weight) in occupants.iter().enumerate() {
+            if queue.merges(weight) {
+                queue
+                    .heap
+                    .push(Reverse((queue.last[column], column as u32)));
+                queue.queued[column] = true;
+            }
+        }
+        queue
+    }
+
+    /// Whether the merge takes a column of `weight`.
+    fn merges(&self, weight: u32) -> bool {
+        weight != 0 && weight as usize <= self.cap
+    }
+
+    /// Whether `key` is the exact fill of `column`.
+    fn exact(&self, key: i64, column: u32) -> bool {
+        self.fresh[column as usize] && self.last[column as usize] == key
+    }
+
+    /// A row that holds `column`, now of `weight`, has changed: what is
+    /// known of its fill is stale, and if the merge takes its weight it is
+    /// queued to be planned again. A column of another weight would be
+    /// dropped when its turn came, and every change of a column's weight
+    /// touches it, so it is queued when it comes to one: most of the
+    /// columns a merge touches are heavier than the cap.
+    fn touch(&mut self, column: u32, weight: u32) {
+        let c = column as usize;
+        self.fresh[c] = false;
+        self.known[c] = false;
+        if self.merges(weight) && !self.queued[c] {
+            self.queued[c] = true;
+            self.heap.push(Reverse((self.last[c], column)));
+        }
+    }
+
+    /// The cheapest entry, taken from the queue.
+    fn pop(&mut self) -> Option<(i64, u32)> {
+        let Reverse((key, column)) = self.heap.pop()?;
+        self.queued[column as usize] = false;
+        Some((key, column))
+    }
+
+    /// `column` queued under `fill`, its exact fill.
+    fn plan(&mut self, column: u32, fill: i64) {
+        let c = column as usize;
+        self.last[c] = fill;
+        self.fresh[c] = true;
+        self.known[c] = false;
+        self.queued[c] = true;
+        self.heap.push(Reverse((fill, column)));
+    }
+
+    /// The stale columns among the next [`PLANS_AHEAD`] entries that the
+    /// merge takes and whose fills are not known, if nothing has been read
+    /// as far as `entry`. The entries stay queued.
+    fn stale_ahead(&mut self, entry: (i64, u32), occupants: &[u32]) -> Vec<u32> {
+        if self.horizon.is_some_and(|horizon| entry <= horizon) {
+            return Vec::new();
+        }
+        let mut read = Vec::with_capacity(PLANS_AHEAD);
+        let mut stale = Vec::new();
+        while read.len() < PLANS_AHEAD {
+            let Some(Reverse((key, column))) = self.heap.pop() else {
+                break;
+            };
+            let known = self.known[column as usize] || self.exact(key, column);
+            if self.merges(occupants[column as usize]) && !known {
+                stale.push(column);
+            }
+            read.push(Reverse((key, column)));
+        }
+        self.horizon = read.last().map(|&Reverse(last)| last);
+        self.heap.extend(read);
+        stale
+    }
+}
+
 /// The working state of one filtering run: rows, their compositions, and
 /// the column incidence kept exact as rows change.
 struct Filter {
@@ -516,6 +654,57 @@ impl Filter {
             "occupancy drifted from incidence"
         );
         &self.incidence[c]
+    }
+
+    /// The live rows that hold `column` and the fill of eliminating it,
+    /// from the lists as they stand.
+    fn planned(&self, column: u32) -> (Vec<u32>, i64) {
+        let (work, live) = (&self.work, &self.live);
+        let mut members: Vec<u32> = self.incidence[column as usize]
+            .iter()
+            .copied()
+            .filter(|&r| live[r as usize] && work[r as usize].binary_search(&column).is_ok())
+            .collect();
+        members.sort_unstable();
+        members.dedup();
+        debug_assert_eq!(
+            members.len(),
+            self.occupants[column as usize] as usize,
+            "occupancy drifted from incidence"
+        );
+        let rows: Vec<usize> = members.iter().map(|&r| r as usize).collect();
+        let fill = match rows[..] {
+            [only] => -(work[only].len() as i64),
+            _ => plan(&rows, work).fill,
+        };
+        (members, fill)
+    }
+
+    /// The fill of `column`, stale and at the head of `queue` under `key`,
+    /// and with it the fills of the stale columns behind it, planned side
+    /// by side when they are enough to share out.
+    ///
+    /// A plan reads the rows and changes nothing, and a fill planned ahead
+    /// is used only if no row of its column has changed since, so the
+    /// merge is the merge of one thread.
+    fn plan_ahead(&mut self, queue: &mut Queue, key: i64, column: u32) {
+        let threads = crate::parallel::budget();
+        let mut columns = vec![column];
+        if threads > 1 {
+            columns.extend(queue.stale_ahead((key, column), &self.occupants));
+        }
+        let workers = (columns.len() / PLANS_PER_WORKER).min(threads);
+        if workers < 2 {
+            columns.truncate(1);
+        }
+        let filter = &*self;
+        let plans =
+            crate::parallel::map_ordered(&columns, workers, |_, &column| filter.planned(column));
+        for (column, (members, fill)) in columns.into_iter().zip(plans) {
+            self.incidence[column as usize] = members;
+            queue.ahead[column as usize] = fill;
+            queue.known[column as usize] = true;
+        }
     }
 
     /// Remove a row, returning the columns it held.
@@ -622,79 +811,27 @@ impl Filter {
     /// Fill-ordered elimination, stopping where the solver's cost would
     /// rise; see the [module documentation](self).
     fn merge(&mut self, weight_cap: usize) {
-        let columns = self.columns;
-        // A min-heap keyed by fill with lazy re-evaluation. `last` is the
-        // key a column was last queued under and `fresh` whether that key
-        // is its exact current fill; a change to any member row clears
-        // `fresh`, and a popped stale entry is re-planned and re-queued
-        // rather than acted on. The initial keys sort by weight below any
-        // fill (see `SENTINEL_KEY_BASE`). `queued` keeps one entry per
-        // column.
-        let cap = weight_cap.max(1);
-        let initial = |weight: u32| SENTINEL_KEY_BASE + i64::from(weight);
-        let mut last: Vec<i64> = self.occupants.iter().map(|&w| initial(w)).collect();
-        let mut fresh = vec![false; columns];
-        let mut queued = vec![false; columns];
-        let mut heap: BinaryHeap<Reverse<(i64, u32)>> = BinaryHeap::new();
-        let merges = |weight: u32| weight != 0 && weight as usize <= cap;
-        for column in 0..columns {
-            if merges(self.occupants[column]) {
-                heap.push(Reverse((last[column], column as u32)));
-                queued[column] = true;
-            }
-        }
-
-        // `touch` marks a column's plan stale after one of its rows changed
-        // and, if it is `merged`, of a weight the elimination takes, makes
-        // sure it is queued to be re-planned. A column of another weight
-        // would be dropped when its turn came, and every change of a
-        // column's weight touches it, so it is queued when it comes to
-        // one: most of the columns a merge touches are heavier than the
-        // cap, and queueing them was most of the queue's work.
-        fn touch(
-            column: u32,
-            merged: bool,
-            last: &[i64],
-            fresh: &mut [bool],
-            queued: &mut [bool],
-            heap: &mut BinaryHeap<Reverse<(i64, u32)>>,
-        ) {
+        let mut queue = Queue::new(&self.occupants, weight_cap.max(1));
+        while let Some((key, column)) = queue.pop() {
             let c = column as usize;
-            fresh[c] = false;
-            if merged && !queued[c] {
-                queued[c] = true;
-                heap.push(Reverse((last[c], column)));
+            let weight = self.occupants[c];
+            if !queue.merges(weight) {
+                continue;
             }
-        }
-
-        while let Some(Reverse((key, column))) = heap.pop() {
-            let c = column as usize;
-            queued[c] = false;
-            let weight = self.occupants[c] as usize;
-            if weight == 0 || weight > cap {
+            if !queue.exact(key, column) {
+                // Stale: plan it, queue it under its exact fill, and let
+                // the heap decide when its turn comes.
+                if !queue.known[c] {
+                    self.plan_ahead(&mut queue, key, column);
+                }
+                queue.plan(column, queue.ahead[c]);
                 continue;
             }
             let members: Vec<usize> = self.members(column).iter().map(|&r| r as usize).collect();
 
-            if !(fresh[c] && last[c] == key) {
-                // Stale: plan it, queue it under its exact fill, and let
-                // the heap decide when its turn comes.
-                let fill = if weight == 1 {
-                    -(self.work[members[0]].len() as i64)
-                } else {
-                    plan(&members, &self.work).fill
-                };
-                last[c] = fill;
-                fresh[c] = true;
-                queued[c] = true;
-                heap.push(Reverse((fill, column)));
-                continue;
-            }
-
             if weight == 1 {
                 for touched in self.retire(members[0]) {
-                    let merged = merges(self.occupants[touched as usize]);
-                    touch(touched, merged, &last, &mut fresh, &mut queued, &mut heap);
+                    queue.touch(touched, self.occupants[touched as usize]);
                 }
                 continue;
             }
@@ -716,8 +853,7 @@ impl Filter {
                 self.nonzeros += after.len() as i64 - before.len() as i64;
                 for &touched in &before {
                     self.lose(touched);
-                    let merged = merges(self.occupants[touched as usize]);
-                    touch(touched, merged, &last, &mut fresh, &mut queued, &mut heap);
+                    queue.touch(touched, self.occupants[touched as usize]);
                 }
                 for &touched in &after {
                     self.gain(touched);
@@ -727,16 +863,14 @@ impl Filter {
                     if before.binary_search(&touched).is_err() {
                         self.incidence[touched as usize].push(child as u32);
                     }
-                    let merged = merges(self.occupants[touched as usize]);
-                    touch(touched, merged, &last, &mut fresh, &mut queued, &mut heap);
+                    queue.touch(touched, self.occupants[touched as usize]);
                 }
                 self.compositions[child] =
                     symmetric_difference(&self.compositions[child], &self.compositions[parent]);
                 self.work[child] = after;
             }
             for touched in self.retire(root) {
-                let merged = merges(self.occupants[touched as usize]);
-                touch(touched, merged, &last, &mut fresh, &mut queued, &mut heap);
+                queue.touch(touched, self.occupants[touched as usize]);
             }
             debug_assert_eq!(self.occupants[c], 0, "an eliminated column keeps no holder");
         }
@@ -774,6 +908,9 @@ impl Filter {
 
 /// Filters a matrix: singleton pruning, clique removal down to `excess`
 /// rows beyond the live columns, then fill-ordered column merges.
+///
+/// The trees of the merges are planned on the calling thread's budget of
+/// threads, ahead of their turns; the matrix is the same at any budget.
 ///
 /// Columns are eliminated in order of increasing fill until the next
 /// elimination would raise `rows · nonzeros`, the Block Lanczos cost: one
@@ -1168,6 +1305,36 @@ mod tests {
                     assert_eq!(kept.work, afresh.work, "{case}");
                     assert_eq!(kept.occupants, afresh.occupants, "{case}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn the_merge_is_the_merge_of_one_thread_at_any_budget() {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEEDS: std::ops::RangeInclusive<u64> = 600..=603;
+        for seed in SEEDS {
+            // 6000 rows over 5000 columns at eight nonzeros a row: every
+            // column is of a weight the merge takes, so the first plans
+            // are five thousand side by side, and the merges that follow
+            // touch columns planned ahead.
+            let matrix = random_matrix(seed, 6_000, 5_000, 625);
+            let alone = crate::parallel::with_budget(1, || filter_merge(&matrix, 32, 64));
+            assert!(alone.rows().len() < matrix.rows().len(), "seed {seed}");
+            // Budgets: the fewest that share, and more than a batch of
+            // five thousand is cut for.
+            for threads in [2usize, 32] {
+                let shared =
+                    crate::parallel::with_budget(threads, || filter_merge(&matrix, 32, 64));
+                assert_eq!(
+                    shared.rows(),
+                    alone.rows(),
+                    "seed {seed}, {threads} threads"
+                );
+                assert_eq!(
+                    shared.compositions, alone.compositions,
+                    "seed {seed}, {threads} threads"
+                );
             }
         }
     }

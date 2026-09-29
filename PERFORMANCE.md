@@ -617,17 +617,18 @@ ranges a worker, for a worker that finishes early to take another: 133 s.
 ## Filtering a sieve's matrix
 
 `filter_merge` on factoring's relations for RSA-120, 6 826 195 rows by
-7 526 701 columns and 251 million entries, on twilight, the host idle. It
-leaves 673 757 rows and 60 223 415 entries, the same before and after.
-Seconds on the one thread it runs on:
+7 526 701 columns and 251 million entries, on twilight, two EPYC 7452 and
+128 threads, the host idle. It leaves 673 757 rows and 60 223 415 entries,
+the same in every column of the table. Seconds:
 
-| | before | after |
-|---|---:|---:|
-| the incidence built | 9.4 | 9.7 |
-| singletons pruned | 4.1 | 4.4 |
-| cliques removed | 41.4 | 2.1 |
-| columns merged | 93.5 | 74.0 |
-| the rows gathered | 1.4 | 1.5 |
+| | one thread | cliques kept, columns queued by weight | and plans ahead |
+|---|---:|---:|---:|
+| the incidence built | 9.4 | 9.7 | 9.6 |
+| singletons pruned | 4.1 | 4.4 | 4.3 |
+| cliques removed | 41.4 | 2.1 | 2.1 |
+| columns merged | 93.5 | 74.0 | 34.5 |
+| the rows gathered | 1.4 | 1.5 | 1.6 |
+| | 149.8 | 91.7 | 52.1 |
 
 The cliques went in 38 rounds, and each found the components again from
 every column of weight two and every row: 1.1 s a round, the last dozen for
@@ -640,9 +641,14 @@ million of them as heavier than the cap: a merge touches every column of
 the rows it adds, and each was queued. A column is queued when it is of a
 weight the merge takes, 6.1 million pops.
 
-Of the merge's 74 s, 45 plan the trees, 3.4 million of them for 1.16
-million eliminations, 19 carry the eliminations out and 7 compact the
-columns' lists.
+Of the 74 s that left, 45 planned the trees, 3.4 million of them for 1.16
+million eliminations, 19 carried the eliminations out and 7 compacted the
+columns' lists. A plan reads the rows and changes nothing, so the plans of
+the stale columns next in the queue are made side by side, 8 192 entries
+ahead, and one is used if no row of its column has changed by its turn:
+one in forty has. What remains is the eliminations, 23 s on the calling
+thread, 4 s of batches, 4 s of plans made alone and 2 s reading ahead in
+the queue.
 
 ## GCD at scale
 
