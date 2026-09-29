@@ -614,6 +614,36 @@ two milliseconds before sleeping on them: 100 s, and 40 threads running, so
 it is not the waking that a pass waits for. One queue for the pool and four
 ranges a worker, for a worker that finishes early to take another: 133 s.
 
+## Filtering a sieve's matrix
+
+`filter_merge` on factoring's relations for RSA-120, 6 826 195 rows by
+7 526 701 columns and 251 million entries, on twilight, the host idle. It
+leaves 673 757 rows and 60 223 415 entries, the same before and after.
+Seconds on the one thread it runs on:
+
+| | before | after |
+|---|---:|---:|
+| the incidence built | 9.4 | 9.7 |
+| singletons pruned | 4.1 | 4.4 |
+| cliques removed | 41.4 | 2.1 |
+| columns merged | 93.5 | 74.0 |
+| the rows gathered | 1.4 | 1.5 |
+
+The cliques went in 38 rounds, and each found the components again from
+every column of weight two and every row: 1.1 s a round, the last dozen for
+a unit of excess apiece. A component is removed whole or not at all, so
+between rounds components only fuse, and the union-find is kept and told
+the columns a round brought down to weight two.
+
+The merge popped 148.6 million columns from its queue and dropped 144.0
+million of them as heavier than the cap: a merge touches every column of
+the rows it adds, and each was queued. A column is queued when it is of a
+weight the merge takes, 6.1 million pops.
+
+Of the merge's 74 s, 45 plan the trees, 3.4 million of them for 1.16
+million eliminations, 19 carry the eliminations out and 7 compact the
+columns' lists.
+
 ## GCD at scale
 
 The tables above stop at 64 limbs, where the whole family runs its Lehmer

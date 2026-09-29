@@ -145,6 +145,14 @@ what a consumer must change, not everything that moved.
 
 ### Changed
 
+- **`filter_merge` keeps its cliques from round to round, and queues only
+  the columns it would merge.** Clique removal found the components again
+  every round, from every column and every row, and the merge queued every
+  column a merge touched, to drop nine in ten when their turn came as
+  heavier than the cap. The matrix that comes out is the same matrix. On
+  the relations of a 120-digit sieve the cliques are 2 s where they were
+  41 and the merge 74 where it was 94.
+
 - **Large `BigUint` multiplication now dispatches to an exact NTT.** Four
   base-2^16 digits per limb are convolved under two 31-bit NTT primes and
   reconstructed by CRT, so recovery is deterministic and has no floating-point
