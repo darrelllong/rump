@@ -21,7 +21,7 @@ use rump::number_theory::{
     rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, valuation, CrtBasis,
     SmoothnessBase,
 };
-use rump::parallelism::{budget, with_budget};
+use rump::parallelism::{budget, gather_costs, with_budget};
 use rump::polynomial::{PolyMod, PolyZ, RealRootError};
 use rump::random::{
     random_below, random_coprime_below, random_nonzero_below, random_probable_prime, RandomSource,
@@ -537,6 +537,13 @@ fn manual_number_theory_modular() {
     let whole = budget();
     assert_eq!(with_budget(1, budget), 1);
     assert_eq!(budget(), whole);
+
+    // What a read at random costs here, two threads reading at once: blocks
+    // doubling from 16 KB, and the largest whose reads are within twice the
+    // cheapest.
+    let costs = gather_costs(2);
+    assert_eq!(costs.costs()[0].0, 16 << 10);
+    assert!(costs.block_within(2.0) >= costs.block_within(1.5));
 }
 
 #[test]

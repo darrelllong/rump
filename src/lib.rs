@@ -86,6 +86,7 @@ mod gf2m;
 mod gfp_impl;
 #[path = "lattice.rs"]
 mod lattice_impl;
+mod machine;
 mod modular_fixed;
 #[path = "number_theory.rs"]
 mod number_theory_impl;
@@ -165,8 +166,10 @@ pub mod lattice {
     pub use crate::poly::bareiss_determinant;
 }
 
-/// How many threads the work on a thread may use.
+/// How many threads the work on a thread may use, and what the machine's
+/// threads can do together.
 pub mod parallelism {
+    pub use crate::machine::{gather_costs, GatherCosts};
     pub use crate::parallel::{budget, with_budget};
 }
 

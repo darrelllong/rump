@@ -7,6 +7,17 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **`parallelism::gather_costs`.** What a word read from a place chosen at
+  random costs on this machine, by the size of the block it is read from,
+  with a number of threads reading at once, each from a block of its own;
+  `GatherCosts::block_within` names the largest block whose reads cost
+  within a multiple of the cheapest. A count of processors does not say
+  what they can do together: on two EPYC 7452 a read from a 4 MB block is
+  1.2 ns for one thread and 24 ns for each of 128. A measurement is a fifth
+  to a half of a second, and is timed against a small block on the same
+  core, so that cores that are not alike do not pass for caches that have
+  ended.
+
 - **`parallelism::budget` and `parallelism::with_budget`.** A thread's
   budget is the threads its work may use: what the machine reports until
   `with_budget` sets it, and a share of the caller's inside each of this

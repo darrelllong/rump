@@ -35,7 +35,7 @@ use rump::number_theory::{
     rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, valuation, CrtBasis,
     SmoothnessBase,
 };
-use rump::parallelism::{budget, with_budget};
+use rump::parallelism::{budget, gather_costs, with_budget};
 use rump::polynomial::{PolyMod, PolyZ, RealRootError};
 use rump::random::{
     random_below, random_coprime_below, random_nonzero_below, random_probable_prime, RandomSource,
@@ -695,6 +695,21 @@ the caller's inside each of the crate's own fan-outs. The trees, the basis
 and the transform all read it, so a caller that fans out on threads of its
 own gives each its share and the whole stays within the machine.
 
+How many processors a machine reports does not say what its threads can do
+together: they share caches, and a block one thread reads from cheaply is
+read from dearly when every thread has one. `parallelism::gather_costs`
+measures it: what a word read from a place chosen at random costs, by the
+size of the block it is read from, with a given number of threads reading
+at once, each from a block of its own. The blocks double from 16 KB until
+the reads cost four times the cheapest; each is timed against a block of
+16 KB read by the same thread in the same moments, so that a machine whose
+cores are not alike is not mistaken for one whose caches have ended. A
+measurement takes a fifth of a second or so and up to a gigabyte while it
+runs, and nothing is kept of it. `GatherCosts::block_within` names the
+largest block whose reads, and those of every smaller block, cost no more
+than a given multiple of the cheapest: the size to cut work into, for a
+routine that reads at random from something large.
+
 ```rust
 let p = BigUint::from_u64(41);
 
@@ -762,6 +777,13 @@ assert_eq!(basis.combine(&residues(104)), BigUint::from_u64(104));
 let whole = budget();
 assert_eq!(with_budget(1, budget), 1);
 assert_eq!(budget(), whole);
+
+// What a read at random costs here, two threads reading at once: blocks
+// doubling from 16 KB, and the largest whose reads are within twice the
+// cheapest.
+let costs = gather_costs(2);
+assert_eq!(costs.costs()[0].0, 16 << 10);
+assert!(costs.block_within(2.0) >= costs.block_within(1.5));
 ```
 
 ### Batch inversion

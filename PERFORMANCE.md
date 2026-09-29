@@ -709,6 +709,50 @@ thousands, so a count tried costs nothing to speak of; where the unit of
 work is seconds long, or runs once, a count tried and found slower is paid
 for in full.
 
+## What a read at random costs
+
+`parallelism::gather_costs`, the `gather_costs_timing` probe: nanoseconds a
+read from a block of each size, the threads reading at once, each from a
+block of its own. The hosts idle.
+
+| block | EPYC 7452 ×2: 1 thread | 64 | 128 | X925 + A725: 20 | i5-8259U: 8 | Cortex-A76: 4 | M4 Pro: 12 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 16 KB | 0.79 | 0.79 | 0.79 | 0.35 | 1.30 | 2.51 | 0.27 |
+| 128 KB | 0.79 | 0.79 | 0.79 | 0.37 | 1.50 | 2.51 | 0.27 |
+| 256 KB | 0.79 | 0.79 | 0.81 | 0.43 | 2.03 | 2.51 | 0.32 |
+| 512 KB | 0.99 | 1.01 | 1.02 | 0.57 | 2.74 | 5.17 | 0.38 |
+| 1 MB | 1.11 | 1.17 | 1.16 | 0.74 | 5.21 | 11.11 | 0.45 |
+| 2 MB | 1.18 | 1.24 | 1.40 | 1.60 | 8.73 | | 0.48 |
+| 4 MB | 1.20 | 8.11 | 24.22 | | | | 0.65 |
+| 8 MB | 1.25 | | | | | | 2.52 |
+| 16 MB | 8.61 | | | | | | |
+| measured in, s | 0.25 | 0.33 | 0.54 | 0.20 | 0.15 | 0.15 | 0.21 |
+
+The EPYC's third-level cache is 16 MB to four cores: one thread has it to
+8 MB, 64 threads to 2 MB each and 128 to 2 MB less easily. A measurement
+stops at the first block four times dearer than the cheapest.
+
+The largest block within twice the cheapest, five measurements of each:
+
+| | threads | blocks named |
+|---|---:|---|
+| EPYC 7452 ×2 | 128 | 1 MB four times, 2 MB once |
+| | 64 | 2 MB |
+| | 1 | 8 MB |
+| X925 + A725 | 20 | 512 KB three times, 1 MB twice |
+| i5-8259U | 8 | 512 KB four times, 256 KB once |
+| Cortex-A76 | 4 | 256 KB three times, 512 KB twice |
+
+Where two blocks are named they are a doubling apart and the costs rise
+gently between them, so either is within a little of the slack. Timed by
+itself and not against a small block on the same core, the machine of two
+kinds of core named 128 KB, 512 KB and 512 KB for its twenty threads and
+64 KB, 128 KB and 512 KB for ten: a thread was on a Cortex-X925 for one
+block, 0.35 ns a read, and on a Cortex-A725 for the next, 0.69.
+
+Block Lanczos on RSA-120's matrix pays 8.4 ns a gather on the EPYC's 128
+threads, from one block of 5.4 MB that every pass writes anew.
+
 ## Filtering a sieve's matrix
 
 `filter_merge` on factoring's relations for RSA-120, 6 826 195 rows by
