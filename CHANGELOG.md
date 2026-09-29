@@ -47,7 +47,11 @@ what a consumer must change, not everything that moved.
   recurrence are one pass, so an iteration is three dispatches. The
   dependencies are checked a bit a column, side by side, where each was
   checked by sorting the columns its rows touch. The result is bit for bit
-  what it was. The worker count is narrowed to the caller's budget.
+  what it was. The worker count is narrowed to the caller's budget. The
+  ranges of a sparse product are cut where its entries divide evenly, not
+  its lists: a sieve's matrix has most of its entries in the columns of its
+  smallest primes, and ranges of as many columns each gave one worker most
+  of `M·x`.
 
 - **`crt_combine_balanced` is a `CrtBasis` made and used once.** Its
   contract is unchanged. It inverted a partial product modulo its neighbour

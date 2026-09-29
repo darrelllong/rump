@@ -380,6 +380,41 @@ impl Lists {
     fn list(&self, index: usize) -> &[u32] {
         &self.indices[self.offsets[index]..self.offsets[index + 1]]
     }
+
+    /// Where to cut the lists into at most `parts` runs of about as many
+    /// indices each: the bounds of the runs, from zero to [`Self::len`],
+    /// climbing. A fold costs what its list is long, and a sieve's matrix
+    /// has most of its entries in the columns of its smallest primes, so
+    /// runs of as many lists each would give one worker most of the work.
+    fn cuts(&self, parts: usize) -> Vec<usize> {
+        let total = self.indices.len();
+        let parts = parts.clamp(1, self.len().max(1));
+        let mut cuts = vec![0];
+        for part in 1..parts {
+            // The first list that ends past this part's share.
+            let share = total / parts * part + total % parts * part / parts;
+            let cut = self.offsets.partition_point(|&offset| offset < share);
+            let cut = cut.min(self.len());
+            if cut > *cuts.last().expect("non-empty") {
+                cuts.push(cut);
+            }
+        }
+        if self.len() > *cuts.last().expect("non-empty") {
+            cuts.push(self.len());
+        }
+        cuts
+    }
+}
+
+/// The bounds of at most `parts` runs of `0..len`, as long as each other.
+fn even_cuts(len: usize, parts: usize) -> Vec<usize> {
+    let parts = parts.clamp(1, len.max(1));
+    let per = len.div_ceil(parts).max(1);
+    let mut cuts: Vec<usize> = (0..len).step_by(per).collect();
+    if len > 0 {
+        cuts.push(len);
+    }
+    cuts
 }
 
 /// The relation matrix `M`, held once by rows and once by columns.
@@ -471,7 +506,8 @@ impl Sparse {
     fn apply_with_products(&self, v: &Block, q: &Block) -> (Block, Products) {
         let image = self.forward(v);
         let (lists, v, q) = (Arc::clone(&self.by_relation), Arc::clone(v), Arc::clone(q));
-        let parts = self.folds.ranges(lists.len(), move |start, end| {
+        let cuts = lists.cuts(self.folds.useful(lists.len()));
+        let parts = self.folds.ranges(cuts, move |start, end| {
             let av = fold_range(&lists, start, end, &image);
             let products = Products {
                 t: dot(&v[start..end], &av),
@@ -501,7 +537,8 @@ impl Sparse {
     ) -> (Block, Block) {
         let (x, av) = (Arc::clone(x), Arc::clone(av));
         let [(v0, d), (v1, e), (v2, f)] = terms.map(|(v, p)| (Arc::clone(v), p));
-        let parts = self.folds.ranges(self.relations(), move |start, end| {
+        let cuts = even_cuts(self.relations(), self.folds.useful(self.relations()));
+        let parts = self.folds.ranges(cuts, move |start, end| {
             let mut solution = x[start..end].to_vec();
             xor_mul_block_into(&mut solution, &v0[start..end], &projected);
             let next = recurrence(
@@ -643,15 +680,24 @@ impl FoldPool {
         self.senders.len().max(1)
     }
 
+    /// The workers a pass over `len` outputs is worth: the pool's, narrowed
+    /// so that each has at least `MINIMUM_FOLDS_PER_WORKER` of them.
+    fn useful(&self, len: usize) -> usize {
+        let useful = (len / MINIMUM_FOLDS_PER_WORKER).max(1);
+        self.workers().min(useful)
+    }
+
     /// One output word per index list: the XOR-fold of `input` at those
     /// indices, split across workers when each gets enough folds to pay.
     ///
     /// Each output word is an independent fold, so the split is by output
     /// ranges and the gather is in range order: the result is identical to
-    /// the inline fold whatever the worker count.
+    /// the inline fold whatever the worker count. The ranges hold about as
+    /// many indices as each other, not as many lists.
     fn mapped(&self, lists: Arc<Lists>, input: Block) -> Vec<u64> {
         let len = lists.len();
-        let parts = self.ranges(len, move |start, end| {
+        let cuts = lists.cuts(self.useful(len));
+        let parts = self.ranges(cuts, move |start, end| {
             fold_range(&lists, start, end, &input)
         });
         let mut output = Vec::with_capacity(len);
@@ -661,29 +707,27 @@ impl FoldPool {
         output
     }
 
-    /// `work(start, end)` over ranges that partition `0..len`, in the order
-    /// of the ranges: one range on the calling thread when the pool is of
-    /// one or `len` is too short to give two workers
-    /// `MINIMUM_FOLDS_PER_WORKER` each, and a range a worker otherwise.
+    /// `work(start, end)` over the ranges `cuts` bounds, in their order: on
+    /// the calling thread when there is one range or none, and a range a
+    /// worker otherwise. `cuts` climbs, and bounds no more ranges than the
+    /// pool has workers.
     ///
     /// A worker's panic is caught where it happens and resumed here.
-    fn ranges<T, W>(&self, len: usize, work: W) -> Vec<T>
+    fn ranges<T, W>(&self, cuts: Vec<usize>, work: W) -> Vec<T>
     where
         T: Send + 'static,
         W: Fn(usize, usize) -> T + Send + Sync + 'static,
     {
-        let useful = (len / MINIMUM_FOLDS_PER_WORKER).max(1);
-        let workers = self.senders.len().min(useful);
-        if workers <= 1 {
-            return vec![work(0, len)];
+        if cuts.len() <= 2 {
+            let (start, end) = (cuts.first().copied(), cuts.last().copied());
+            return vec![work(start.unwrap_or(0), end.unwrap_or(0))];
         }
 
         let work = Arc::new(work);
-        let per = len.div_ceil(workers);
         let (reply, replies) = mpsc::channel();
-        let mut jobs = 0usize;
-        for (worker, start) in (0..len).step_by(per).enumerate() {
-            let end = (start + per).min(len);
+        let jobs = cuts.len() - 1;
+        for (worker, bounds) in cuts.windows(2).enumerate() {
+            let (start, end) = (bounds[0], bounds[1]);
             let (work, reply) = (Arc::clone(&work), reply.clone());
             self.senders[worker]
                 .send(FoldMessage::Run(Box::new(move || {
@@ -692,7 +736,6 @@ impl FoldPool {
                     let _ = reply.send((start, made));
                 })))
                 .expect("a retained fold worker exited early");
-            jobs += 1;
         }
         drop(reply);
 
@@ -1362,6 +1405,69 @@ mod tests {
                 expected
             );
         }
+    }
+
+    /// Lists as a sieve's columns are: the first few hold most of the
+    /// indices. The cuts give each run about its share of the indices, and
+    /// the fold over them is the inline fold.
+    #[test]
+    fn a_fold_is_cut_by_its_indices_and_not_by_its_lists() {
+        /// Input words; arbitrary.
+        const INPUT_WORDS: usize = 2_003;
+        /// Lists enough for eight workers at `MINIMUM_FOLDS_PER_WORKER`.
+        const LISTS: usize = 8 * super::MINIMUM_FOLDS_PER_WORKER;
+        /// The heavy lists, and how long each is: together four fifths of
+        /// the indices, in a hundredth of a run of even length.
+        const HEAVY: usize = 40;
+        const HEAVY_LENGTH: usize = 4 * LISTS / HEAVY;
+        const WORKERS: usize = 8;
+        let input: Arc<Vec<u64>> = Arc::new(
+            (0..INPUT_WORDS as u64)
+                .map(|value| value.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+                .collect(),
+        );
+        let lists: Vec<Vec<u32>> = (0..LISTS)
+            .map(|list| {
+                let length = if list < HEAVY { HEAVY_LENGTH } else { 1 };
+                (0..length)
+                    .map(|place| ((list * 31 + place * 7) % INPUT_WORDS) as u32)
+                    .collect()
+            })
+            .collect();
+        let lists = Arc::new(super::Lists::from_lists(&lists));
+        let total: usize = (0..lists.len()).map(|list| lists.list(list).len()).sum();
+
+        for parts in [1usize, 2, 3, WORKERS, 5 * LISTS] {
+            let cuts = lists.cuts(parts);
+            assert_eq!(cuts.first(), Some(&0), "{parts} parts");
+            assert_eq!(cuts.last(), Some(&lists.len()), "{parts} parts");
+            assert!(
+                cuts.windows(2).all(|pair| pair[0] < pair[1]),
+                "{parts} parts"
+            );
+            assert!(cuts.len() - 1 <= parts.min(lists.len()), "{parts} parts");
+        }
+        // No run of the eight holds more than its share and one list over.
+        let cuts = lists.cuts(WORKERS);
+        for bounds in cuts.windows(2) {
+            let held: usize = (bounds[0]..bounds[1])
+                .map(|list| lists.list(list).len())
+                .sum();
+            assert!(
+                held <= total / WORKERS + HEAVY_LENGTH,
+                "a run of {held} indices of {total}"
+            );
+        }
+        assert_eq!(super::even_cuts(10, 4), [0, 3, 6, 9, 10]);
+        assert_eq!(super::even_cuts(0, 4), [0usize; 0]);
+        assert_eq!(super::even_cuts(3, 8), [0, 1, 2, 3]);
+
+        let expected = fold_range(&lists, 0, lists.len(), &input);
+        let pool = FoldPool::new(WORKERS);
+        assert_eq!(
+            pool.mapped(Arc::clone(&lists), Arc::clone(&input)),
+            expected
+        );
     }
 
     /// Where the sparse solver's time goes on a large random matrix, timed,

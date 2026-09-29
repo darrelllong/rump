@@ -589,6 +589,31 @@ it, and the products wait on memory. The CPU is the same before and after,
 passes over the block, and the check of the dependencies, which was 21.7 s
 for the 108 of them.
 
+A sieve's matrix is not the probe's. factoring's for RSA-110, 312 284 rows
+by 312 156 columns and 28.5 million entries, solved on twilight, two EPYC
+7452 and 128 threads, the host idle:
+
+| | solve, s | threads running |
+|---|---:|---:|
+| the passes on the calling thread | 154 | 7.9 |
+| the passes on the workers | 114 | 10.2 |
+| and the ranges cut by their entries | 101 | 15.9 |
+
+The columns of the smallest primes hold most of a sieve's entries, so
+ranges of as many columns each gave the first worker most of the product
+`M·x`; the ranges are cut where the entries divide evenly.
+
+What remains, from timing the ranges of one solve: an iteration is 19.8 ms,
+of which its three passes are 13.4 and what the calling thread does between
+them, gathering the ranges into blocks, 6.5. A pass waits for its slowest
+range, 3.9 ms where the mean is 1.1. The ranges' own time is 0.30 s an
+iteration, 5.3 ns a gather, which on 64 cores would be 4.7 ms.
+
+Two things tried there and not kept. Workers that watch their channels for
+two milliseconds before sleeping on them: 100 s, and 40 threads running, so
+it is not the waking that a pass waits for. One queue for the pool and four
+ranges a worker, for a worker that finishes early to take another: 133 s.
+
 ## GCD at scale
 
 The tables above stop at 64 limbs, where the whole family runs its Lehmer
