@@ -37,6 +37,18 @@ what a consumer must change, not everything that moved.
   coefficient products, which is where a product tree of polynomials spends
   its time once the coefficients are wide.
 
+- **Block Lanczos runs its passes over the block on the solve's workers.**
+  An iteration is two sparse products, three inner products, the update of
+  the solution and the recurrence. The products were on the workers and the
+  rest on the calling thread, where on a host of many cores it was most of
+  the wall: factoring's solve of a 313 000-row matrix kept six of 128
+  threads busy. The worker that folds a range of `A·V` now takes the range's
+  share of the three inner products with it, and the update and the
+  recurrence are one pass, so an iteration is three dispatches. The
+  dependencies are checked a bit a column, side by side, where each was
+  checked by sorting the columns its rows touch. The result is bit for bit
+  what it was. The worker count is narrowed to the caller's budget.
+
 - **`crt_combine_balanced` is a `CrtBasis` made and used once.** Its
   contract is unchanged. It inverted a partial product modulo its neighbour
   at every node, by Half-GCD at the width of the node.

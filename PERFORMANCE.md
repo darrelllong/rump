@@ -571,6 +571,24 @@ products, where they are ahead of one on both hosts at every leaf width; at
 from 2²¹, where they are ahead of four on the EPYC and behind on the M4,
 whose eight threads are not eight like cores.
 
+## Block Lanczos on many cores
+
+`lanczos_cost_probe` solves a random matrix of 100 entries a row. Seconds,
+before and after the passes over the block went to the solve's workers and
+the dependencies were checked by parity:
+
+| host | rows | threads | before | after |
+|---|---:|---:|---:|---:|
+| M4 Pro, 8 + 4 cores | 200 000 | 8 | 23.4 | 11.7 |
+| baase, 20 cores | 313 000 | 20 | 151.2 | 111.8 |
+
+On baase the two sparse products are 108 s of the 112 that remain, on twenty
+threads, 7 ns a gather: the block is 2.5 MB, the gathers land anywhere in
+it, and the products wait on memory. The CPU is the same before and after,
+1 489 and 1 495 seconds. What was taken off is what ran on one thread: the
+passes over the block, and the check of the dependencies, which was 21.7 s
+for the 108 of them.
+
 ## GCD at scale
 
 The tables above stop at 64 limbs, where the whole family runs its Lehmer
