@@ -446,13 +446,31 @@ impl Sparse {
         Self::from_lists(by_relation, columns, threads)
     }
 
-    /// From each relation's ascending column list.
-    fn from_lists(by_relation: Vec<Vec<u32>>, columns: usize, threads: usize) -> Self {
+    /// From each relation's ascending column list, of `columns` columns.
+    ///
+    /// The columns are numbered again as those some relation sets, in their
+    /// order. A column none sets is a zero of `M·x` that `Mᵀ` never reads,
+    /// so `A` is the same `A`; and a matrix that has been filtered has ten
+    /// of them to each that is set, which made the block of `M·x` eleven
+    /// times as long and gave the fold of the empty lists to one worker.
+    fn from_lists(mut by_relation: Vec<Vec<u32>>, columns: usize, threads: usize) -> Self {
         assert!(
             u32::try_from(by_relation.len()).is_ok() && u32::try_from(columns).is_ok(),
             "{} rows by {columns} columns: the solver indexes both in thirty-two bits",
             by_relation.len()
         );
+        let mut number = vec![0u32; columns];
+        for &column in by_relation.iter().flatten() {
+            number[column as usize] = 1;
+        }
+        let mut set = 0;
+        for entry in &mut number {
+            set += core::mem::replace(entry, set);
+        }
+        for column in by_relation.iter_mut().flatten() {
+            *column = number[*column as usize];
+        }
+        let columns = set as usize;
         let mut by_column = vec![Vec::new(); columns];
         for (index, row) in by_relation.iter().enumerate() {
             for &column in row {
@@ -1526,6 +1544,57 @@ mod tests {
             started.elapsed(),
             dependencies.map_or(0, |d| d.len())
         );
+    }
+
+    /// A matrix whose columns lie among empty ones is solved as the matrix
+    /// without them: the same dependencies from the same random words.
+    #[test]
+    fn empty_columns_change_nothing_of_a_solve() {
+        /// Arbitrary, fixed so a failure reproduces.
+        const MATRIX_SEED: u64 = 0x0123_4567_89ab_cdef;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SOLVE_SEED: u64 = 0xfedc_ba98_7654_3210;
+        /// Rows enough beyond the columns that the solve has dependencies
+        /// to return by the block.
+        const ROWS: usize = 2_000;
+        const COLUMNS: usize = ROWS - 2 * WIDTH;
+        /// Nonzeros drawn per row; arbitrary.
+        const WEIGHT: usize = 12;
+        /// Columns of the wide matrix to each that is set: what filtering
+        /// leaves of a sieve's.
+        const SPREAD: usize = 11;
+        /// Where in each run of `SPREAD` the set column lies; arbitrary.
+        const PLACE: usize = 4;
+        let mut rng = TestRng(MATRIX_SEED);
+        let close: Vec<Vec<u32>> = (0..ROWS)
+            .map(|_| {
+                let mut row: Vec<u32> = (0..WEIGHT)
+                    .map(|_| {
+                        let mut bytes = [0u8; 8];
+                        crate::random::RandomSource::fill_bytes(&mut rng, &mut bytes);
+                        (u64::from_le_bytes(bytes) % COLUMNS as u64) as u32
+                    })
+                    .collect();
+                row.sort_unstable();
+                row.dedup();
+                row
+            })
+            .collect();
+        let wide: Vec<Vec<u32>> = close
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|&column| column * SPREAD as u32 + PLACE as u32)
+                    .collect()
+            })
+            .collect();
+        let close = super::filter::SparseMatrix::new(COLUMNS, close);
+        let wide = super::filter::SparseMatrix::new(COLUMNS * SPREAD, wide);
+        let solved =
+            |matrix| super::block_lanczos_dependencies_sparse(matrix, &mut TestRng(SOLVE_SEED), 4);
+        let dependencies = solved(&close).expect("the solve finds dependencies");
+        assert!(!dependencies.is_empty());
+        assert_eq!(solved(&wide), Some(dependencies));
     }
 
     /// A deterministic `RandomSource` for the tests, so a failure

@@ -145,6 +145,12 @@ what a consumer must change, not everything that moved.
 
 ### Changed
 
+- **Block Lanczos numbers the columns that are set.** A matrix from
+  `filter_merge` keeps its width, with every column eliminated left empty,
+  and the solver folded an empty list and made a word of `M·x` for each:
+  eleven columns for each one set, on the matrix of a 120-digit sieve,
+  whose solve is 183 s where it was 790. The dependencies are the same.
+
 - **`filter_merge` plans its merges ahead on the budget's threads.** The
   trees of the stale columns next in the queue are planned side by side,
   and a plan is used if no row of its column has changed by its turn. The

@@ -614,6 +614,39 @@ two milliseconds before sleeping on them: 100 s, and 40 threads running, so
 it is not the waking that a pass waits for. One queue for the pool and four
 ranges a worker, for a worker that finishes early to take another: 133 s.
 
+### The columns filtering emptied
+
+At RSA-120's size the solve gained nothing from any of that: 697 s before
+and 764 s after, on matrices a race had made different, 669 739 rows and
+673 769. The solve's three passes timed, 10 653 iterations on 673 757 rows:
+
+| an iteration, ms | before | the live columns numbered |
+|---|---:|---:|
+| `M·x`: the pass | 47.0 | 4.8 |
+| its longest range | 45.4 | 4.2 |
+| its ranges gathered into a block | 15.9 | 1.4 |
+| `Mᵀ·` that and the inner products: the pass | 6.1 | 4.7 |
+| its ranges gathered | 1.1 | 1.8 |
+| the solution and the recurrence: the pass | 1.2 | 1.2 |
+| its ranges gathered | 2.4 | 2.9 |
+| the rest | 0.5 | 0.4 |
+| | 74.2 | 17.2 |
+| the solve, s | 790 | 183 |
+
+`filter_merge` leaves a column it has eliminated empty in its place, and
+the matrix it handed over was 7 526 701 columns wide with 673 629 of them
+set. The solver made a list for each, and a word of `M·x`: a block of 60 MB
+made and gathered every iteration, and, the ranges being cut to hold as
+many entries each, one range of the 128 with the millions of empty lists
+beyond the last large prime that is set. The columns are numbered again as
+the ones set.
+
+What an iteration waits for now: 6.1 ms gathering ranges into blocks on
+the calling thread, and in each pass 0.9 to 1.3 ms handing the ranges to
+128 workers, the last of which starts 0.9 to 2.5 ms into the pass. The
+ranges' own time is 2.7 and 3.3 ms in the two products, 5.6 and 7.0 ns a
+gather from a block of 5.4 MB.
+
 ## Filtering a sieve's matrix
 
 `filter_merge` on factoring's relations for RSA-120, 6 826 195 rows by
