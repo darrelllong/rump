@@ -7,6 +7,40 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **`parallelism::budget` and `parallelism::with_budget`.** A thread's
+  budget is the threads its work may use: what the machine reports until
+  `with_budget` sets it, and a share of the caller's inside each of this
+  crate's fan-outs. `product_tree`, `remainder_tree`, `CrtBasis`,
+  `PolyZ::product_mod_monic`, `HenselSquareRoot`'s products and the NTT's
+  worker count all read it. A routine cannot see who called it, and each
+  asked the machine: eight threads that each took a product tree made a
+  thousand threads on a machine of 128. A caller that fans out on threads of
+  its own gives each `with_budget(share, …)`.
+
+- **`number_theory::CrtBasis`.** The moduli of a Chinese remaindering,
+  prepared once for every vector of residues combined over them. The
+  cofactor inverses `(M/mᵢ)⁻¹ mod mᵢ` come from `M mod mᵢ²`, one remainder
+  tree over the squares of the moduli, so nothing wider than a modulus is
+  inverted; `combine` then spends two products of balanced operands a node.
+
+- **`HenselSquareRoot::in_field_bounded` and `modulus_reaching`.** A lift
+  given `δ` modulo the modulus it will reach, in place of `δ`, and the
+  modulus a lift from a prime first has at or past a width. A lift's first
+  act is a long division of each coefficient of `δ` by that modulus; a
+  caller lifting at two thousand primes does them all down one
+  `remainder_tree`.
+
+- **`product_tree` and `remainder_tree` spread their levels over the
+  budget**, a level at a time, where the level's work repays the threads:
+  one thread for every 2¹⁸ limb products. The trees are the same trees at
+  any budget. A product of integer polynomials does the same with its
+  coefficient products, which is where a product tree of polynomials spends
+  its time once the coefficients are wide.
+
+- **`crt_combine_balanced` is a `CrtBasis` made and used once.** Its
+  contract is unchanged. It inverted a partial product modulo its neighbour
+  at every node, by Half-GCD at the width of the node.
+
 - **`BigUint::mul_into` and `BigUint::keep_low_bits`.** The product's
   three-operand form — below `KARATSUBA_THRESHOLD_LIMBS` the schoolbook
   kernel writes straight into the output's buffer — and `self mod 2^k` in

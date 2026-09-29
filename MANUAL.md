@@ -32,9 +32,10 @@ use rump::number_theory::{
     is_lucas_probable_prime, is_prime_aks, is_probable_prime, is_probable_prime_bpsw,
     is_strong_lucas_probable_prime, jacobi, kronecker, lcm, legendre, miller_rabin_with_bases,
     miller_rabin_witness, primes_below, product_tree, rational_reconstruct,
-    rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, valuation,
+    rational_reconstruct_bounded, remainder_tree, remove_factor, smooth_parts, valuation, CrtBasis,
     SmoothnessBase,
 };
+use rump::parallelism::{budget, with_budget};
 use rump::polynomial::{PolyMod, PolyZ, RealRootError};
 use rump::random::{
     random_below, random_coprime_below, random_nonzero_below, random_probable_prime, RandomSource,
@@ -682,8 +683,17 @@ answer through balanced partial products and bounded parallel workers;
 `crt_combine_u64` combines two congruences with word moduli into a `u128`
 without the heap. All three return `None` when the moduli are empty, zero, or
 not pairwise coprime. The
-balanced form takes a maximum worker count, caps it at reported machine
-parallelism, and treats zero as an explicit serial request.
+balanced form takes a maximum worker count, caps it at the caller's budget,
+and treats zero as an explicit serial request. It is a `CrtBasis` made and
+used once: a caller with several vectors of residues over the same moduli
+makes the basis once and calls `combine` for each.
+
+The budget is the threads the calling thread's work may use, which
+`parallelism::budget` reports: the machine's count until
+`parallelism::with_budget` sets it for the work it is given, and a share of
+the caller's inside each of the crate's own fan-outs. The trees, the basis
+and the transform all read it, so a caller that fans out on threads of its
+own gives each its share and the whole stays within the machine.
 
 ```rust
 let p = BigUint::from_u64(41);
@@ -735,6 +745,23 @@ assert_eq!(
 // Two word-sized congruences, no heap: 8 ≡ 2 (mod 3) and 8 ≡ 3 (mod 5).
 assert_eq!(crt_combine_u64((2, 3), (3, 5)), Some(8));
 assert_eq!(crt_combine_u64((1, 4), (3, 6)), None); // gcd(4, 6) = 2
+
+// The moduli prepared once, for as many vectors of residues as there are.
+let basis = CrtBasis::new(&[
+    BigUint::from_u64(3),
+    BigUint::from_u64(5),
+    BigUint::from_u64(7),
+])
+.expect("moduli are pairwise coprime");
+assert_eq!(*basis.modulus(), BigUint::from_u64(105));
+let residues = |value: u64| [3u64, 5, 7].map(|m| BigUint::from_u64(value % m));
+assert_eq!(basis.combine(&residues(23)), BigUint::from_u64(23));
+assert_eq!(basis.combine(&residues(104)), BigUint::from_u64(104));
+
+// A thread's budget is the machine's until it is set, and is put back.
+let whole = budget();
+assert_eq!(with_budget(1, budget), 1);
+assert_eq!(budget(), whole);
 ```
 
 ### Batch inversion

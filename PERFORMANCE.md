@@ -531,6 +531,46 @@ cargo test --release --lib <probe_name> -- --ignored --nocapture
 
 and their output is not reproduced here.
 
+## Fanning out a tree's level
+
+A level of a product tree, a remainder tree or a CRT is independent
+products, and is spread over threads when it holds work enough for them:
+one thread for every `GRAIN_LIMB_PRODUCTS`, 2¹⁸, where a product of `a`
+limbs by `b` counts `a·b`. `fan_out_grain_timing` times one level of a
+product tree on one, two, four and eight threads; microseconds, the least
+of 25 runs:
+
+| host | leaf limbs | limb products | one | two | four | eight |
+|---|---:|---:|---:|---:|---:|---:|
+| M4 Pro | 4 | 131 072 | 218.1 | 216.5 | 265.9 | 269.0 |
+| | 4 | 524 288 | 870.8 | 705.4 | 575.9 | 556.2 |
+| | 16 | 131 072 | 86.8 | 88.9 | 82.3 | 152.9 |
+| | 16 | 262 144 | 187.8 | 145.8 | 118.1 | 278.6 |
+| | 16 | 524 288 | 344.0 | 259.3 | 198.1 | 488.9 |
+| | 16 | 2 097 152 | 1 504.7 | 958.8 | 592.3 | 861.1 |
+| | 80 | 160 000 | 100.0 | 81.8 | 70.1 | 96.5 |
+| | 80 | 326 400 | 204.5 | 139.7 | 99.4 | 113.3 |
+| | 80 | 652 800 | 447.1 | 245.6 | 161.3 | 144.7 |
+| | 80 | 2 617 600 | 1 829.9 | 968.2 | 528.4 | 340.9 |
+| EPYC 7452 | 4 | 131 072 | 1 047.3 | 1 007.3 | 783.7 | 945.3 |
+| | 4 | 524 288 | 4 279.6 | 3 700.2 | 3 003.9 | 2 571.9 |
+| | 16 | 131 072 | 195.2 | 293.4 | 324.0 | 449.4 |
+| | 16 | 262 144 | 390.5 | 441.8 | 444.2 | 572.3 |
+| | 16 | 524 288 | 784.4 | 722.3 | 622.8 | 693.6 |
+| | 16 | 2 097 152 | 3 140.4 | 2 416.2 | 1 611.2 | 1 407.5 |
+| | 80 | 160 000 | 200.5 | 231.6 | 266.3 | 403.4 |
+| | 80 | 326 400 | 401.1 | 334.6 | 325.1 | 453.0 |
+| | 80 | 652 800 | 809.6 | 549.5 | 435.9 | 552.9 |
+| | 80 | 2 617 600 | 3 263.6 | 1 831.0 | 1 050.0 | 874.3 |
+
+The EPYC is twilight, two 7452s, with another user's load of about 25 on
+its 128 threads when it was measured. A thread there costs about 130 µs to
+make and join, on the M4 about 30. Two threads are used from 2¹⁹ limb
+products, where they are ahead of one on both hosts at every leaf width; at
+2¹⁸ one thread is ahead on the EPYC at sixteen limbs a leaf. Eight are used
+from 2²¹, where they are ahead of four on the EPYC and behind on the M4,
+whose eight threads are not eight like cores.
+
 ## GCD at scale
 
 The tables above stop at 64 limbs, where the whole family runs its Lehmer

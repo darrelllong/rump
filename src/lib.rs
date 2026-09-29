@@ -79,19 +79,6 @@
 // Implementation modules are private; every public path below is a facade, so
 // each exported item has exactly one public path, as NAMES.md requires.
 mod bigint;
-
-/// The machine's reported parallelism, asked once.
-///
-/// [`std::thread::available_parallelism`] reads `/proc/self/cgroup` and the
-/// cgroup's CPU limits on every call on Linux, several file syscalls each
-/// time. The NTT asks it on every large multiplication, where that cost
-/// dominates under many threads. The answer does not change within a process
-/// in any way this crate should react to, so it is taken once and kept.
-pub(crate) fn available_parallelism() -> usize {
-    static AVAILABLE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *AVAILABLE
-        .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
-}
 #[path = "gf2.rs"]
 mod gf2_impl;
 mod gf2m;
@@ -102,6 +89,7 @@ mod lattice_impl;
 mod modular_fixed;
 #[path = "number_theory.rs"]
 mod number_theory_impl;
+mod parallel;
 mod poly;
 #[path = "random.rs"]
 mod random_impl;
@@ -137,7 +125,7 @@ pub mod number_theory {
         is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker, lcm, legendre,
         miller_rabin_with_bases, miller_rabin_witness, primes_below, primes_past, product_tree,
         rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
-        smooth_parts, valuation, ProductTree, SmoothnessBase, SmoothnessBaseError,
+        smooth_parts, valuation, CrtBasis, ProductTree, SmoothnessBase, SmoothnessBaseError,
     };
 }
 
@@ -175,6 +163,11 @@ pub mod lattice {
         short_vectors_form, Enumeration, EnumerationOutcome, ReductionError,
     };
     pub use crate::poly::bareiss_determinant;
+}
+
+/// How many threads the work on a thread may use.
+pub mod parallelism {
+    pub use crate::parallel::{budget, with_budget};
 }
 
 /// Sampling, driven entirely by a caller-supplied byte source.

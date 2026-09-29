@@ -6710,7 +6710,7 @@ mod tests {
         // Arbitrary, fixed so a failure reproduces.
         const SEED: u64 = 0x510e_527f_ade6_82d1;
         let mut seed = SEED;
-        let available = crate::available_parallelism();
+        let available = crate::parallel::budget();
         eprintln!("available contexts: {available}");
         eprintln!(
             "{:>7} {:>12} {:>12} {:>12} {:>12} {:>12}  best",
@@ -6790,7 +6790,7 @@ mod tests {
         // Arbitrary, fixed so a failure reproduces.
         const SEED: u64 = 0xbb67_ae85_84ca_a73b;
         let mut seed = SEED;
-        let available = crate::available_parallelism();
+        let available = crate::parallel::budget();
         // The parallel threshold to the serial one, by doublings.
         let word_sizes = std::env::var("RUMP_NTT_SCALING_WORDS").map_or_else(
             |_| vec![8_192usize, 16_384, 32_768, 65_536, 131_072],

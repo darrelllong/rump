@@ -1835,10 +1835,11 @@ impl PolyZ {
     /// The empty product is `1`, reduced — which is the zero polynomial when
     /// `divisor` is the constant `1`, the ring having collapsed.
     ///
-    /// The pairs of a level are multiplied in parallel over the threads
-    /// the machine reports, as many as the level has pairs to give them;
-    /// the top levels, a few products of the largest operands, parallelise
-    /// inside the multiplication instead, through the NTT kernels.
+    /// The pairs of a level are multiplied in parallel over the caller's
+    /// [`budget`](crate::parallelism::budget), as many threads as the level
+    /// has pairs to give them, each with its share of the budget; the top
+    /// levels, a few products of the largest operands, spend their shares
+    /// inside the multiplication instead.
     ///
     /// # Panics
     ///
@@ -1849,36 +1850,11 @@ impl PolyZ {
         if level.is_empty() {
             return Self::constant(BigInt::one()).rem_monic(divisor);
         }
-        let workers = crate::available_parallelism();
         while level.len() > 1 {
-            let pairs = level.len().div_ceil(2);
-            let lanes = workers.min(pairs).max(1);
-            let per_lane = pairs.div_ceil(lanes);
-            let mut above: Vec<Self> = Vec::with_capacity(pairs);
-            if lanes == 1 {
-                for pair in level.chunks(2) {
-                    above.push(Self::pair_product_mod_monic(pair, divisor));
-                }
-            } else {
-                let products: Vec<Vec<Self>> = std::thread::scope(|scope| {
-                    let handles: Vec<_> = level
-                        .chunks(2 * per_lane)
-                        .map(|lane| {
-                            scope.spawn(move || {
-                                lane.chunks(2)
-                                    .map(|pair| Self::pair_product_mod_monic(pair, divisor))
-                                    .collect::<Vec<Self>>()
-                            })
-                        })
-                        .collect();
-                    handles
-                        .into_iter()
-                        .map(|handle| handle.join().expect("a product lane does not panic"))
-                        .collect()
-                });
-                above.extend(products.into_iter().flatten());
-            }
-            level = above;
+            let pairs: Vec<&[Self]> = level.chunks(2).collect();
+            level = crate::parallel::map_ordered(&pairs, pairs.len(), |_, pair| {
+                Self::pair_product_mod_monic(pair, divisor)
+            });
         }
         level.pop().expect("a non-empty level has a root")
     }
@@ -2161,6 +2137,10 @@ fn convolve_z(a: &[BigInt], b: &[BigInt]) -> Vec<BigInt> {
 /// The schoolbook convolution: every `out[i + j]` accumulates `aᵢ·bⱼ`. Zero
 /// coefficients skip their inner pass, which is what makes a sparse operand
 /// cheap here.
+///
+/// The products are independent. Where they amount to work enough for more
+/// than a thread, which is where the coefficients are wide, they are spread
+/// over the caller's [`budget`](crate::parallelism::budget) and then summed.
 fn convolve_schoolbook_z(a: &[BigInt], b: &[BigInt]) -> Vec<BigInt> {
     // Only the outer operand's zeros are skipped, so the sparser one goes
     // outside; the convolution is symmetric, which makes the swap free.
@@ -2170,6 +2150,20 @@ fn convolve_schoolbook_z(a: &[BigInt], b: &[BigInt]) -> Vec<BigInt> {
         (a, b)
     };
     let mut out = vec![BigInt::zero(); a.len() + b.len() - 1];
+    let limbs = |x: &BigInt| x.magnitude().limbs().len();
+    let width = |side: &[BigInt]| side.iter().map(limbs).fold(0, usize::saturating_add);
+    let workers = crate::parallel::threads_for(width(a).saturating_mul(width(b)));
+    if workers > 1 {
+        let pairs: Vec<(usize, usize)> = (0..a.len())
+            .filter(|&i| !a[i].is_zero())
+            .flat_map(|i| (0..b.len()).map(move |j| (i, j)))
+            .collect();
+        let terms = crate::parallel::map_ordered(&pairs, workers, |_, &(i, j)| a[i].mul(&b[j]));
+        for (&(i, j), term) in pairs.iter().zip(&terms) {
+            out[i + j].add_assign_ref(term);
+        }
+        return out;
+    }
     for (i, x) in a.iter().enumerate() {
         if x.is_zero() {
             continue;

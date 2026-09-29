@@ -135,8 +135,9 @@ impl Level {
 pub struct HenselSquareRoot<'a> {
     f: &'a PolyZ,
     /// `δ` reduced by `f` over `ℤ`, padded to `deg f` coefficients: the
-    /// integers every level's residues descend from.
-    delta: Vec<BigInt>,
+    /// integers every level's residues descend from. `None` for a lift
+    /// given `δ` modulo its last modulus, whose levels are all prepared.
+    delta: Option<Vec<BigInt>>,
     /// `levels[j]` is the precision `q^{2^j}`; the root lives at
     /// `levels[level]`.
     levels: Vec<Level>,
@@ -176,30 +177,41 @@ impl<'a> HenselSquareRoot<'a> {
             prime >= BigUint::from_u64(2),
             "the modulus must be at least 2"
         );
-        let f_mod = PolyMod::from_poly_z(f, &prime);
-        let delta_reduced = delta.rem_monic(f);
-        let delta_mod = PolyMod::from_poly_z(&delta_reduced, &prime);
+        let mut delta = delta.rem_monic(f).coefficients().to_vec();
+        delta.resize(degree, BigInt::zero());
+        let base = Level::from_integers(prime, &delta);
+        Self::seeded(f, Some(delta), vec![base], root, inverse)
+    }
+
+    /// The lift at `levels[0]`, its seed checked there against the level's
+    /// own `δ`: `None` when `root² ≢ δ` or `2·root·inverse ≢ 1`.
+    fn seeded(
+        f: &'a PolyZ,
+        delta: Option<Vec<BigInt>>,
+        levels: Vec<Level>,
+        root: &PolyMod,
+        inverse: &PolyMod,
+    ) -> Option<Self> {
+        let degree = f.degree().expect("f is non-zero");
+        let prime = root.modulus();
+        let f_mod = PolyMod::from_poly_z(f, prime);
+        let delta_mod = PolyMod::new(levels[0].delta.clone(), prime);
         if root.mul(root).rem(&f_mod) != delta_mod {
             return None;
         }
-        let two = PolyMod::new(vec![BigUint::from_u64(2)], &prime);
-        let one = PolyMod::new(vec![BigUint::one()], &prime);
+        let two = PolyMod::new(vec![BigUint::from_u64(2)], prime);
+        let one = PolyMod::new(vec![BigUint::one()], prime);
         if two.mul(root).mul(inverse).rem(&f_mod) != one {
             return None;
         }
-        let mut delta = delta_reduced.coefficients().to_vec();
-        delta.resize(degree, BigInt::zero());
-        let root = padded(root.coefficients(), degree);
-        let inverse = padded(inverse.coefficients(), degree);
-        let base = Level::from_integers(prime, &delta);
         Some(Self {
             f,
             delta,
-            levels: vec![base],
+            levels,
             level: 0,
-            root,
+            root: padded(root.coefficients(), degree),
             inverse_level: 0,
-            inverse,
+            inverse: padded(inverse.coefficients(), degree),
             workers: 1,
         })
     }
@@ -215,17 +227,114 @@ impl<'a> HenselSquareRoot<'a> {
     /// As [`Self::new`].
     #[must_use]
     pub fn in_field(f: &'a PolyZ, delta: &PolyZ, root: &PolyMod) -> Option<Self> {
+        Self::new(f, delta, root, &Self::field_inverse(f, root)?)
+    }
+
+    /// `(2·root)⁻¹` in the field `𝔽_q[x]/(f)` by Fermat, or `None` when
+    /// `2·root` is zero there.
+    fn field_inverse(f: &PolyZ, root: &PolyMod) -> Option<PolyMod> {
         let degree = f.degree().expect("f is non-zero");
-        let prime = root.modulus().clone();
-        let f_mod = PolyMod::from_poly_z(f, &prime);
-        let two = PolyMod::new(vec![BigUint::from_u64(2)], &prime);
+        let prime = root.modulus();
+        let f_mod = PolyMod::from_poly_z(f, prime);
+        let two = PolyMod::new(vec![BigUint::from_u64(2)], prime);
         let doubled = two.mul(root).rem(&f_mod);
         if doubled.is_zero() {
             return None;
         }
         let order = prime.pow_u64(degree as u64);
-        let inverse = doubled.mod_pow(&order.sub(&BigUint::from_u64(2)), &f_mod);
-        Self::new(f, delta, root, &inverse)
+        Some(doubled.mod_pow(&order.sub(&BigUint::from_u64(2)), &f_mod))
+    }
+
+    /// The modulus a lift from `prime` first has at or past `bits` wide:
+    /// `prime^{2^j}` for the least such `j`, which is `prime` itself when
+    /// that is wide enough. It is the modulus
+    /// [`Self::with_precision_hint`] prepares `δ` at, and the one
+    /// [`Self::in_field_bounded`] wants `δ` reduced by.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `prime` is below 2, whose powers do not widen.
+    #[must_use]
+    pub fn modulus_reaching(prime: &BigUint, bits: usize) -> BigUint {
+        assert!(
+            *prime >= BigUint::from_u64(2),
+            "the modulus must be at least 2"
+        );
+        let mut modulus = prime.clone();
+        while modulus.bits() < bits {
+            modulus = modulus.square();
+        }
+        modulus
+    }
+
+    /// [`Self::in_field`] for a lift that goes as far as `modulus` and no
+    /// farther, given `δ` modulo `modulus` in place of `δ`.
+    ///
+    /// A lift's first act is to reduce `δ` by the modulus it will reach, a
+    /// long division for each coefficient. One lift cannot avoid it. A
+    /// caller lifting at many primes can: a
+    /// [`remainder_tree`](crate::number_theory::remainder_tree) over the
+    /// moduli reduces `δ` by all of them in a few divisions of balanced
+    /// operands, and each lift is then given its residues.
+    ///
+    /// `modulus` is [`Self::modulus_reaching`]'s for `root`'s prime.
+    /// `residues` are the coefficients of `δ`, reduced by `f` over `ℤ`,
+    /// each modulo `modulus` and in `[0, modulus)`, lowest degree first;
+    /// fewer than `deg f` are padded with zeros. `None` as
+    /// [`Self::in_field`].
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::new`]; if `modulus` is not the prime squared some number
+    /// of times; if there are more than `deg f` residues or one is not below
+    /// `modulus`. [`Self::double`] panics past `modulus`, as does
+    /// [`Self::with_precision_hint`] asked for more than its width.
+    #[must_use]
+    pub fn in_field_bounded(
+        f: &'a PolyZ,
+        residues: &[BigUint],
+        modulus: &BigUint,
+        root: &PolyMod,
+    ) -> Option<Self> {
+        let degree = f.degree().expect("f is non-zero");
+        assert!(
+            f.leading_coefficient().is_one(),
+            "the Hensel square root lift needs a monic f"
+        );
+        let prime = root.modulus();
+        assert!(
+            *prime >= BigUint::from_u64(2),
+            "the modulus must be at least 2"
+        );
+        assert!(
+            residues.len() <= degree,
+            "δ reduced by f has at most deg f coefficients"
+        );
+        assert!(
+            residues.iter().all(|residue| residue < modulus),
+            "a residue is below its modulus"
+        );
+        let mut moduli = vec![prime.clone()];
+        while moduli.last().expect("non-empty") < modulus {
+            let next = moduli.last().expect("non-empty").square();
+            moduli.push(next);
+        }
+        assert!(
+            moduli.last().expect("non-empty") == modulus,
+            "the modulus is the prime squared some number of times"
+        );
+        let top = Level {
+            ring: Ring::new(moduli.pop().expect("non-empty")),
+            delta: padded(residues, degree),
+        };
+        let mut descending = vec![top];
+        while let Some(modulus) = moduli.pop() {
+            let above = descending.last().expect("non-empty");
+            descending.push(Level::from_above(modulus, above));
+        }
+        descending.reverse();
+        let inverse = Self::field_inverse(f, root)?;
+        Self::seeded(f, None, descending, root, &inverse)
     }
 
     /// Spread the coefficient products of each level over up to `workers`
@@ -247,6 +356,11 @@ impl<'a> HenselSquareRoot<'a> {
     /// with the input below the square of the modulus — each is one
     /// Barrett reduction. The hint says how far up to start; levels past
     /// it, if the lift goes on, fall back to the divisions.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lift is [bounded](Self::in_field_bounded) and `bits`
+    /// is past its modulus.
     #[must_use]
     pub fn with_precision_hint(mut self, bits: usize) -> Self {
         let mut moduli = vec![self.levels[0].ring.modulus.clone()];
@@ -259,7 +373,7 @@ impl<'a> HenselSquareRoot<'a> {
             return self;
         }
         let top = moduli.len() - 1;
-        let mut descending = vec![Level::from_integers(moduli[top].clone(), &self.delta)];
+        let mut descending = vec![Level::from_integers(moduli[top].clone(), self.integers())];
         for j in (start..top).rev() {
             let above = descending.last().expect("non-empty");
             descending.push(Level::from_above(moduli[j].clone(), above));
@@ -295,17 +409,34 @@ impl<'a> HenselSquareRoot<'a> {
         self.root().symmetric_lift()
     }
 
+    /// `δ` over `ℤ`, which a level past those prepared is reduced from.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lift is bounded: it was given `δ` modulo its last
+    /// modulus, and has no more of `δ` than that.
+    fn integers(&self) -> &[BigInt] {
+        self.delta
+            .as_deref()
+            .expect("a bounded lift goes no farther than its modulus")
+    }
+
     /// Make sure `levels[j]` exists, by squaring upward from the last one.
     fn ensure_level(&mut self, j: usize) {
         while self.levels.len() <= j {
             let modulus = self.levels.last().expect("non-empty").ring.modulus.square();
-            let level = Level::from_integers(modulus, &self.delta);
+            let level = Level::from_integers(modulus, self.integers());
             self.levels.push(level);
         }
     }
 
     /// Square the modulus: `q^k → q^{2k}`, with the root correct to the new
     /// precision.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lift is [bounded](Self::in_field_bounded) and already
+    /// at its modulus.
     pub fn double(&mut self) {
         self.refine_inverse();
         self.ensure_level(self.level + 1);
@@ -450,31 +581,8 @@ impl<'a> HenselSquareRoot<'a> {
         F: Fn((usize, usize)) -> BigUint + Sync,
     {
         let wide = self.modulus().bits() >= PARALLEL_PRODUCT_MIN_BITS;
-        let threads = self.workers.min(pairs.len());
-        if threads <= 1 || !wide {
-            return pairs.iter().map(|&pair| task(pair)).collect();
-        }
-        let mut out: Vec<Option<BigUint>> = vec![None; pairs.len()];
-        let chunk = pairs.len().div_ceil(threads);
-        std::thread::scope(|scope| {
-            let task = &task;
-            let handles: Vec<_> = pairs
-                .chunks(chunk)
-                .map(|chunk| {
-                    scope.spawn(move || chunk.iter().map(|&pair| task(pair)).collect::<Vec<_>>())
-                })
-                .collect();
-            let mut position = 0;
-            for handle in handles {
-                for product in handle.join().expect("a coefficient product does not panic") {
-                    out[position] = Some(product);
-                    position += 1;
-                }
-            }
-        });
-        out.into_iter()
-            .map(|p| p.expect("every product was filled"))
-            .collect()
+        let threads = if wide { self.workers } else { 1 };
+        crate::parallel::map_ordered(pairs, threads, |_, &pair| task(pair))
     }
 }
 
@@ -600,6 +708,86 @@ mod tests {
         assert_eq!(root.mul(&root).rem(&f_mod), delta_mod);
         let candidate = lift.symmetric_lift();
         assert!(candidate == beta || candidate.add(&beta).is_zero());
+    }
+
+    /// A lift given `δ` modulo its last modulus is the lift given `δ`, level
+    /// for level, negative coefficients of `δ` included.
+    #[test]
+    fn a_bounded_lift_is_the_lift_to_its_modulus() {
+        let f = poly(&[7, -3, 11, 5, 1]);
+        let beta = poly(&[-123_456_789, 987_654_321, -555_555_555, 42]);
+        let delta = beta.mul(&beta).rem_monic(&f);
+        assert!(
+            delta
+                .coefficients()
+                .iter()
+                .any(|c| c.sign() == Sign::Negative),
+            "the case has no negative coefficient to reduce"
+        );
+        let prime = irreducible_prime(&f, SEED_PRIME_SEARCH_START);
+        let seed = field_root(&f, &delta, prime);
+        // Past twice the 30-bit coefficients, and reached at q⁸, 160 bits.
+        const BITS: usize = 150;
+        const DOUBLINGS: u64 = 3;
+        let prime = BigUint::from_u64(prime);
+        let modulus = HenselSquareRoot::modulus_reaching(&prime, BITS);
+        assert_eq!(modulus, prime.pow_u64(1 << DOUBLINGS));
+        assert_eq!(HenselSquareRoot::modulus_reaching(&prime, 1), prime);
+
+        let residues = PolyMod::from_poly_z(&delta, &modulus);
+        let mut bounded =
+            HenselSquareRoot::in_field_bounded(&f, residues.coefficients(), &modulus, &seed)
+                .expect("a square");
+        let mut whole = HenselSquareRoot::in_field(&f, &delta, &seed).expect("a square");
+        assert_eq!(bounded.coefficients(), whole.coefficients());
+        for _ in 0..DOUBLINGS {
+            bounded.double();
+            whole.double();
+            assert_eq!(bounded.modulus(), whole.modulus());
+            assert_eq!(bounded.coefficients(), whole.coefficients());
+        }
+        assert_eq!(*bounded.modulus(), modulus);
+        let candidate = bounded.symmetric_lift();
+        assert!(candidate == beta || candidate.add(&beta).is_zero());
+
+        // A seed that is no root is refused, as it is with `δ` in hand.
+        let wrong = PolyMod::new(vec![BigUint::from_u64(2)], &prime);
+        assert!(
+            HenselSquareRoot::in_field_bounded(&f, residues.coefficients(), &modulus, &wrong)
+                .is_none()
+        );
+    }
+
+    /// The case of the bounded lift's refusals: `x² + 1` modulo 7, `δ` the
+    /// square of `5 + 3x`, reduced modulo `modulus`.
+    fn bounded_case(modulus: &BigUint) -> (PolyZ, Vec<BigUint>, PolyMod) {
+        let f = poly(&[1, 0, 1]);
+        let beta = poly(&[5, 3]);
+        let delta = beta.mul(&beta).rem_monic(&f);
+        let seed = field_root(&f, &delta, 7);
+        let residues = PolyMod::from_poly_z(&delta, modulus);
+        (f, residues.coefficients().to_vec(), seed)
+    }
+
+    #[test]
+    #[should_panic(expected = "a bounded lift goes no farther than its modulus")]
+    fn a_bounded_lift_does_not_pass_its_modulus() {
+        let modulus = BigUint::from_u64(49);
+        let (f, residues, seed) = bounded_case(&modulus);
+        let mut lift =
+            HenselSquareRoot::in_field_bounded(&f, &residues, &modulus, &seed).expect("a square");
+        lift.double();
+        assert_eq!(*lift.modulus(), modulus);
+        lift.double();
+    }
+
+    #[test]
+    #[should_panic(expected = "the modulus is the prime squared some number of times")]
+    fn a_bounded_lift_wants_a_modulus_the_lift_reaches() {
+        // 7³ lies between 7² and 7⁴.
+        let modulus = BigUint::from_u64(343);
+        let (f, residues, seed) = bounded_case(&modulus);
+        let _ = HenselSquareRoot::in_field_bounded(&f, &residues, &modulus, &seed);
     }
 
     /// Wide enough that the Barrett path and the threaded products both

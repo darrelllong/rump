@@ -1631,6 +1631,11 @@ impl ProductTree {
 /// permitted here (its product is zero), but [`remainder_tree`] cannot
 /// divide by it.
 ///
+/// The products of a level are independent, and a level wide enough to
+/// repay it is spread over the caller's
+/// [`budget`](crate::parallelism::budget) of threads; the tree is the same
+/// tree at any budget.
+///
 /// Reference: Bernstein, *How to find smooth parts of integers* (2004);
 /// the product/remainder tree is the standard fast multiple-reduction.
 #[must_use]
@@ -1641,19 +1646,48 @@ pub fn product_tree(values: &[BigUint]) -> ProductTree {
     let mut levels = vec![values.to_vec()];
     while levels.last().expect("non-empty").len() > 1 {
         let below = levels.last().expect("non-empty");
-        let mut up = Vec::with_capacity(below.len().div_ceil(2));
-        let mut i = 0;
-        while i < below.len() {
-            if i + 1 < below.len() {
-                up.push(below[i].mul(&below[i + 1]));
-            } else {
-                up.push(below[i].clone());
-            }
-            i += 2;
-        }
+        let up = products_of_pairs(below, crate::parallel::threads_for(product_work(below)));
         levels.push(up);
     }
     ProductTree { levels }
+}
+
+/// The work of the level above `below`, in products of two limbs.
+fn product_work(below: &[BigUint]) -> usize {
+    below
+        .chunks_exact(2)
+        .map(|pair| pair[0].limbs().len().saturating_mul(pair[1].limbs().len()))
+        .fold(0, usize::saturating_add)
+}
+
+/// The work of reducing `parents` by the nodes of `here`, in products of two
+/// limbs: a division is its quotient's limbs by its divisor's.
+fn remainder_work(parents: &[BigUint], here: &[BigUint]) -> usize {
+    here.iter()
+        .enumerate()
+        .map(|(node, value)| {
+            let divisor = value.limbs().len();
+            let quotient = parents[node / 2].limbs().len().saturating_sub(divisor) + 1;
+            quotient.saturating_mul(divisor)
+        })
+        .fold(0, usize::saturating_add)
+}
+
+/// The level of a product tree above `below`, on up to `workers` threads:
+/// the product of each pair, an odd last node carried up as it is.
+fn products_of_pairs(below: &[BigUint], workers: usize) -> Vec<BigUint> {
+    let pairs: Vec<&[BigUint]> = below.chunks(2).collect();
+    crate::parallel::map_ordered(&pairs, workers, |_, pair| match pair {
+        [left, right] => left.mul(right),
+        [only] => (*only).clone(),
+        _ => unreachable!("chunks(2) yields one or two"),
+    })
+}
+
+/// The level of a remainder tree at `here`, on up to `workers` threads: each
+/// node's parent's remainder reduced by the node.
+fn remainders_of_level(parents: &[BigUint], here: &[BigUint], workers: usize) -> Vec<BigUint> {
+    crate::parallel::map_ordered(here, workers, |node, value| parents[node / 2].rem(value))
 }
 
 /// `modulus mod vᵢ` for every leaf `vᵢ` of a [`product_tree`], by one
@@ -1662,6 +1696,10 @@ pub fn product_tree(values: &[BigUint]) -> ProductTree {
 /// shrinks toward the leaf rather than the whole modulus dividing each.
 /// Returns the leaf remainders in input order; empty tree yields an empty
 /// vector.
+///
+/// The reductions of a level are independent, and are spread over the
+/// caller's [`budget`](crate::parallelism::budget) as [`product_tree`]'s
+/// products are.
 ///
 /// # Panics
 ///
@@ -1680,11 +1718,8 @@ pub fn remainder_tree(tree: &ProductTree, modulus: &BigUint) -> Vec<BigUint> {
     // `product_tree` — see that type.
     for level in (0..levels.len() - 1).rev() {
         let here = &levels[level];
-        let mut next = Vec::with_capacity(here.len());
-        for (j, value) in here.iter().enumerate() {
-            next.push(remainders[j / 2].rem(value));
-        }
-        remainders = next;
+        let workers = crate::parallel::threads_for(remainder_work(&remainders, here));
+        remainders = remainders_of_level(&remainders, here, workers);
     }
     remainders
 }
@@ -3198,92 +3233,180 @@ pub fn crt_combine_u64(first: (u64, u64), second: (u64, u64)) -> Option<u128> {
     Some(u128::from(first_residue) + u128::from(first_modulus) * k)
 }
 
+/// Pairwise coprime moduli prepared for Chinese remaindering, once for every
+/// vector of residues to be combined over them.
+///
+/// The classical sum: with `M` the product of the moduli and
+/// `sᵢ = (M/mᵢ)⁻¹ mod mᵢ`, the `x` below `M` with `x ≡ rᵢ (mod mᵢ)` is
+/// `Σ (rᵢ·sᵢ mod mᵢ)·(M/mᵢ) mod M`. It is arranged so that nothing wider
+/// than one modulus is ever inverted (Borodin & Moenck, *Fast modular
+/// transforms*, J. Comput. System Sci. 8 (1974), 366–386; von zur Gathen &
+/// Gerhard, *Modern Computer Algebra*, §10.3):
+///
+/// - `M/mᵢ mod mᵢ` is `(M mod mᵢ²)/mᵢ`, exactly, and `M mod mᵢ²` for every
+///   `i` is one [`remainder_tree`] over the squares of the moduli;
+/// - the sum is built up the [`product_tree`] of the moduli, a node's value
+///   being its left child's by the right child's modulus and its right
+///   child's by the left's, so every product is of balanced operands.
+///
+/// The `sᵢ` and the tree are of the moduli alone. [`Self::new`] makes them,
+/// and [`Self::combine`] spends two products a node on each vector of
+/// residues. The levels of each are spread over the caller's
+/// [`budget`](crate::parallelism::budget).
+#[derive(Clone, Debug)]
+pub struct CrtBasis {
+    /// The product tree of the moduli.
+    tree: ProductTree,
+    /// `sᵢ = (M/mᵢ)⁻¹ mod mᵢ`, in the order of the moduli; zero where
+    /// `mᵢ` is one.
+    cofactor_inverses: Vec<BigUint>,
+}
+
+impl CrtBasis {
+    /// The basis of `moduli`, or `None` when there are none, when one is
+    /// zero, or when two share a factor: `M/mᵢ` has an inverse modulo `mᵢ`
+    /// exactly when `mᵢ` is coprime to every other, so the inversions are
+    /// the test.
+    #[must_use]
+    pub fn new(moduli: &[BigUint]) -> Option<Self> {
+        if moduli.is_empty() || moduli.iter().any(BigUint::is_zero) {
+            return None;
+        }
+        let tree = product_tree(moduli);
+        let product = tree.root().expect("a tree of moduli has a root");
+        // The tree of the squares is the tree with every node squared.
+        let squares = ProductTree {
+            levels: tree.levels.iter().map(|level| squares_of(level)).collect(),
+        };
+        let remainders = remainder_tree(&squares, product);
+        let work = moduli
+            .iter()
+            .map(|modulus| modulus.limbs().len().saturating_mul(modulus.limbs().len()))
+            .fold(0, usize::saturating_add);
+        let cofactor_inverses = crate::parallel::map_ordered(
+            moduli,
+            crate::parallel::threads_for(work),
+            |index, modulus| {
+                if modulus.is_one() {
+                    return Some(BigUint::zero());
+                }
+                let (cofactor, remainder) = remainders[index].div_rem(modulus);
+                debug_assert!(remainder.is_zero(), "M mod m² is a multiple of m");
+                mod_inverse(&cofactor, modulus)
+            },
+        )
+        .into_iter()
+        .collect::<Option<Vec<_>>>()?;
+        Some(Self {
+            tree,
+            cofactor_inverses,
+        })
+    }
+
+    /// The moduli, in the order they were given.
+    #[must_use]
+    pub fn moduli(&self) -> &[BigUint] {
+        self.tree.leaves()
+    }
+
+    /// The product of the moduli, which the combined residues are below.
+    #[must_use]
+    pub fn modulus(&self) -> &BigUint {
+        self.tree.root().expect("a basis has a modulus")
+    }
+
+    /// The `x` below [`Self::modulus`] with `x ≡ residues[i]` modulo the
+    /// `i`-th modulus, for every `i`. The residues may be unreduced.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless there is a residue for every modulus and no more.
+    #[must_use]
+    pub fn combine(&self, residues: &[BigUint]) -> BigUint {
+        let moduli = self.moduli();
+        assert_eq!(
+            residues.len(),
+            moduli.len(),
+            "a basis combines a residue for every modulus"
+        );
+        let work = product_work_of(moduli, moduli);
+        let mut values = crate::parallel::map_ordered(
+            moduli,
+            crate::parallel::threads_for(work),
+            |index, modulus| {
+                BigUint::mod_mul(
+                    &residues[index].rem(modulus),
+                    &self.cofactor_inverses[index],
+                    modulus,
+                )
+            },
+        );
+        let levels = &self.tree.levels;
+        for level in &levels[..levels.len() - 1] {
+            let pairs: Vec<usize> = (0..level.len().div_ceil(2)).collect();
+            // Two products a pair, each of a value by a modulus as wide.
+            let workers = crate::parallel::threads_for(2 * product_work(level));
+            values = crate::parallel::map_ordered(&pairs, workers, |_, &pair| {
+                let (left, right) = (2 * pair, 2 * pair + 1);
+                if right < level.len() {
+                    values[left]
+                        .mul(&level[right])
+                        .add(&values[right].mul(&level[left]))
+                } else {
+                    values[left].clone()
+                }
+            });
+        }
+        values
+            .pop()
+            .expect("a basis has a modulus")
+            .rem(self.modulus())
+    }
+}
+
+/// Every value of `level` squared, on as many threads as the work is for.
+fn squares_of(level: &[BigUint]) -> Vec<BigUint> {
+    let workers = crate::parallel::threads_for(product_work_of(level, level));
+    crate::parallel::map_ordered(level, workers, |_, value| value.square())
+}
+
+/// The work of multiplying each of `left` by its fellow in `right`, in
+/// products of two limbs.
+fn product_work_of(left: &[BigUint], right: &[BigUint]) -> usize {
+    left.iter()
+        .zip(right)
+        .map(|(l, r)| l.limbs().len().saturating_mul(r.limbs().len()))
+        .fold(0, usize::saturating_add)
+}
+
 /// Chinese remaindering through a balanced product tree.
 ///
 /// The mathematical contract is [`crt_combine`]'s: return the unique residue
 /// below the product of pairwise-coprime, non-zero moduli, and return `None`
 /// for empty or invalid input. The cost contract is different. The ordered
-/// fold combines one new modulus with an ever-growing product; this combines
-/// equal-width partial products at every level, so multiplication and
-/// inversion see balanced operands. Independent pairs at one level run on at
-/// most `threads` scoped workers and never more than
-/// [`std::thread::available_parallelism`] reports. Zero threads means the
-/// serial path, not an invalid mathematical input.
+/// fold combines one new modulus with an ever-growing product; this is
+/// [`CrtBasis`], made and used once, whose products are of balanced operands
+/// and whose inversions are no wider than a modulus. It runs on at most
+/// `threads` threads and never more than the caller's
+/// [`budget`](crate::parallelism::budget). Zero threads means the serial
+/// path, not an invalid mathematical input.
 ///
-/// The answer is independent of thread count. Each pair is tagged with its
-/// tree index and gathered in that order before the next level, and the final
-/// residue is the same canonical value [`crt_combine`] returns.
+/// The answer is independent of thread count, and is the same canonical
+/// value [`crt_combine`] returns.
 #[must_use]
 pub fn crt_combine_balanced(congruences: &[(BigUint, BigUint)], threads: usize) -> Option<BigUint> {
-    if congruences.is_empty() {
-        return None;
-    }
-    let mut level = congruences
-        .iter()
-        .map(|(residue, modulus)| {
-            if modulus.is_zero() {
-                None
-            } else {
-                Some((residue.rem(modulus), modulus.clone()))
-            }
-        })
-        .collect::<Option<Vec<_>>>()?;
-    let available = crate::available_parallelism();
-    while level.len() > 1 {
-        let pairs = level.len().div_ceil(2);
-        let workers = if threads == 0 {
-            1
-        } else {
-            threads.min(available).min(pairs)
-        };
-        let combine = |pair: usize| -> Option<(BigUint, BigUint)> {
-            let first = &level[2 * pair];
-            let Some(second) = level.get(2 * pair + 1) else {
-                return Some(first.clone());
-            };
-            let inverse = mod_inverse(&first.1, &second.1)?;
-            let difference = second.0.add(&second.1).sub(&first.0.rem(&second.1));
-            let k = BigUint::mod_mul(&difference, &inverse, &second.1);
-            Some((first.0.add(&first.1.mul(&k)), first.1.mul(&second.1)))
-        };
-
-        let next = if workers == 1 {
-            (0..pairs).map(combine).collect::<Option<Vec<_>>>()?
-        } else {
-            let cursor = std::sync::atomic::AtomicUsize::new(0);
-            let mut tagged = std::thread::scope(|scope| {
-                let handles: Vec<_> = (0..workers)
-                    .map(|_| {
-                        let cursor = &cursor;
-                        let combine = &combine;
-                        scope.spawn(move || {
-                            let mut mine = Vec::new();
-                            loop {
-                                let pair =
-                                    cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if pair >= pairs {
-                                    break;
-                                }
-                                mine.push((pair, combine(pair)));
-                            }
-                            mine
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .flat_map(|handle| handle.join().expect("a CRT worker panicked"))
-                    .collect::<Vec<_>>()
-            });
-            tagged.sort_unstable_by_key(|(pair, _)| *pair);
-            tagged
-                .into_iter()
-                .map(|(_, result)| result)
-                .collect::<Option<Vec<_>>>()?
-        };
-        level = next;
-    }
-    Some(level.pop().expect("a non-empty tree has a root").0)
+    let threads = threads.max(1).min(crate::parallel::budget());
+    crate::parallel::with_budget(threads, || {
+        let moduli: Vec<BigUint> = congruences
+            .iter()
+            .map(|(_, modulus)| modulus.clone())
+            .collect();
+        let residues: Vec<BigUint> = congruences
+            .iter()
+            .map(|(residue, _)| residue.clone())
+            .collect();
+        Some(CrtBasis::new(&moduli)?.combine(&residues))
+    })
 }
 
 // ─── Primality ─────────────────────────────────────────────────────────────────
@@ -4464,7 +4587,7 @@ mod tests {
             .checked_add(1)
             .expect("stress bound must fit usize");
         let expected = reference_prime_sieve(length);
-        let available = crate::available_parallelism();
+        let available = crate::parallel::budget();
         let workers = available.min(length).max(1);
         eprintln!("checking 0..={inclusive_bound} with {workers} workers");
 
@@ -6593,6 +6716,66 @@ mod tests {
         );
     }
 
+    /// A basis combines every vector of residues given it, wide moduli and
+    /// narrow, a modulus of one among them, at any budget.
+    #[test]
+    fn a_basis_combines_every_vector_of_residues() {
+        use super::CrtBasis;
+        use crate::parallel::with_budget;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x73ee_0007_0000_0004;
+        /// Primes from the first past 10⁶, each to a power that makes a
+        /// modulus of about twenty limbs; enough of them, and an odd count,
+        /// that the tree's lower levels are fanned out and a node is carried
+        /// up unpaired.
+        const FIRST_PRIME: u64 = 1_000_003;
+        const POWER: u64 = 64;
+        const MODULI: usize = 1_025;
+        const VECTORS: usize = 3;
+        let mut moduli: Vec<BigUint> = super::primes_past(FIRST_PRIME - 1)
+            .take(MODULI)
+            .map(|prime| BigUint::from_u64(prime).pow_u64(POWER))
+            .collect();
+        moduli.push(BigUint::one());
+        let product = moduli.iter().fold(BigUint::one(), |acc, m| acc.mul(m));
+        let mut rng = SplitMix64 { state: SEED };
+
+        let serial = with_budget(1, || CrtBasis::new(&moduli)).expect("coprime moduli");
+        assert_eq!(*serial.modulus(), product);
+        assert_eq!(serial.moduli(), moduli);
+        for budget in [1usize, 2, 8, 64] {
+            let basis = with_budget(budget, || CrtBasis::new(&moduli)).expect("coprime moduli");
+            for _ in 0..VECTORS {
+                let value = draw_below(&mut rng, &product);
+                // Unreduced: each residue with its modulus added.
+                let residues: Vec<BigUint> = moduli
+                    .iter()
+                    .map(|modulus| value.rem(modulus).add(modulus))
+                    .collect();
+                let combined = with_budget(budget, || basis.combine(&residues));
+                assert_eq!(combined, value, "at a budget of {budget}");
+            }
+        }
+
+        // A factor shared is no basis, and neither is nothing.
+        let mut shared = moduli.clone();
+        shared.push(BigUint::from_u64(FIRST_PRIME));
+        assert!(CrtBasis::new(&shared).is_none());
+        assert!(CrtBasis::new(&[]).is_none());
+        assert!(CrtBasis::new(&[BigUint::zero()]).is_none());
+        // One modulus is its own basis.
+        let lone = CrtBasis::new(&[BigUint::from_u64(5)]).expect("a modulus");
+        assert_eq!(lone.combine(&[BigUint::from_u64(14)]), BigUint::from_u64(4));
+    }
+
+    #[test]
+    #[should_panic(expected = "a basis combines a residue for every modulus")]
+    fn a_basis_wants_a_residue_for_every_modulus() {
+        let basis = super::CrtBasis::new(&[BigUint::from_u64(3), BigUint::from_u64(5)])
+            .expect("coprime moduli");
+        let _ = basis.combine(&[BigUint::one()]);
+    }
+
     #[test]
     fn balanced_crt_matches_the_ordered_fold_at_every_thread_count() {
         /// The first three-digit prime; the sieve below 2000 holds 278
@@ -6680,6 +6863,123 @@ mod tests {
             p += 1;
         }
         is_prime
+    }
+
+    /// Leaves enough, and wide enough, that every level up to the root's is
+    /// fanned out: the trees are the serial trees at every budget.
+    #[test]
+    fn the_trees_are_the_same_trees_at_any_budget() {
+        use super::{product_tree, product_work, remainder_tree};
+        use crate::parallel::{threads_for, with_budget, GRAIN_LIMB_PRODUCTS};
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x73ee_0007_0000_0002;
+        /// Sixteen limbs a leaf.
+        const LEAF_BITS: usize = 1024;
+        const LEAF_LIMBS: usize = LEAF_BITS / 64;
+        /// An odd count, so a leaf is carried up unpaired, of leaves whose
+        /// pairs' products are four grains of work.
+        const LEAVES: usize = 2 * 4 * GRAIN_LIMB_PRODUCTS / (LEAF_LIMBS * LEAF_LIMBS) + 1;
+        /// Wider than the root by half, so the root's reduction is one.
+        const MODULUS_BITS: usize = LEAVES * LEAF_BITS * 3 / 2;
+        let mut rng = SplitMix64 { state: SEED };
+        let values: Vec<BigUint> = (0..LEAVES)
+            .map(|_| {
+                let mut v = draw_below(&mut rng, &pow2(LEAF_BITS));
+                v.set_bit(LEAF_BITS - 1);
+                v
+            })
+            .collect();
+        assert!(
+            threads_for(product_work(&values)) >= 4,
+            "the leaves are too few to fan out"
+        );
+        let modulus = draw_below(&mut rng, &pow2(MODULUS_BITS));
+
+        let serial = with_budget(1, || {
+            let tree = product_tree(&values);
+            let remainders = remainder_tree(&tree, &modulus);
+            (tree, remainders)
+        });
+        for (value, remainder) in values.iter().zip(&serial.1).step_by(97) {
+            assert_eq!(
+                *remainder,
+                modulus.rem(value),
+                "batched vs direct reduction"
+            );
+        }
+        for budget in [2usize, 3, 8, 64] {
+            let fanned = with_budget(budget, || {
+                let tree = product_tree(&values);
+                let remainders = remainder_tree(&tree, &modulus);
+                (tree, remainders)
+            });
+            assert!(fanned == serial, "the trees differ at a budget of {budget}");
+        }
+    }
+
+    /// One level of a product tree on one thread and on several, across the
+    /// limbs the level holds: where a second thread starts to pay is
+    /// `GRAIN_LIMBS`.
+    #[test]
+    #[ignore = "timing probe for the fan-out grain; run with --ignored in release mode"]
+    fn fan_out_grain_timing() {
+        use super::products_of_pairs;
+        use std::hint::black_box;
+        use std::time::Instant;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x73ee_0007_0000_0003;
+        /// Leaf widths: a CRT lane's modulus, and a word-sized prime power.
+        const LEAF_LIMBS: [usize; 3] = [4, 16, 80];
+        /// The limbs a level holds, by doublings about the grain.
+        const LEVEL_LIMBS: [usize; 8] = [
+            1 << 10,
+            1 << 11,
+            1 << 12,
+            1 << 13,
+            1 << 14,
+            1 << 15,
+            1 << 16,
+            1 << 18,
+        ];
+        const THREADS: [usize; 4] = [1, 2, 4, 8];
+        /// Repetitions, the least of which is reported.
+        const REPS: usize = 25;
+        let mut rng = SplitMix64 { state: SEED };
+        eprintln!(
+            "{:>6} {:>8} {:>10} {:>12} {:>12} {:>12} {:>12}",
+            "leaf", "limbs", "work", "one_us", "two_us", "four_us", "eight_us"
+        );
+        for leaf in LEAF_LIMBS {
+            for limbs in LEVEL_LIMBS {
+                let values: Vec<BigUint> = (0..limbs / leaf)
+                    .map(|_| {
+                        let mut v = draw_below(&mut rng, &pow2(64 * leaf));
+                        v.set_bit(64 * leaf - 1);
+                        v
+                    })
+                    .collect();
+                let times: Vec<f64> = THREADS
+                    .iter()
+                    .map(|&threads| {
+                        (0..REPS)
+                            .map(|_| {
+                                let started = Instant::now();
+                                black_box(products_of_pairs(black_box(&values), threads));
+                                started.elapsed().as_secs_f64() * 1e6
+                            })
+                            .fold(f64::INFINITY, f64::min)
+                    })
+                    .collect();
+                eprintln!(
+                    "{leaf:6} {limbs:8} {:10} {:12.1} {:12.1} {:12.1} {:12.1}",
+                    super::product_work(&values),
+                    times[0],
+                    times[1],
+                    times[2],
+                    times[3]
+                );
+            }
+        }
     }
 
     #[test]

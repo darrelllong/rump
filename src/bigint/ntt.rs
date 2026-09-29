@@ -86,7 +86,7 @@ pub(super) fn transform_len(lhs_limbs: usize, rhs_limbs: usize) -> Option<usize>
 
 /// Number of execution contexts the automatic transform will actually use.
 pub(super) fn automatic_worker_count(transform_len: usize) -> usize {
-    let available = crate::available_parallelism();
+    let available = crate::parallel::budget();
     worker_count(transform_len, available)
 }
 
@@ -110,7 +110,7 @@ pub(super) fn worker_count(transform_len: usize, max_contexts: usize) -> usize {
 
 /// Multiply two non-zero values through an exact two-prime NTT convolution.
 pub(super) fn multiply(lhs: &BigUint, rhs: &BigUint) -> BigUint {
-    let contexts = crate::available_parallelism();
+    let contexts = crate::parallel::budget();
     multiply_impl(lhs, rhs, contexts)
 }
 

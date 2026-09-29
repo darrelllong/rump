@@ -154,8 +154,9 @@ use rump::number_theory::{
     is_strong_lucas_probable_prime,
     jacobi, kronecker, lcm, legendre, miller_rabin_with_bases, miller_rabin_witness,
     primes_below, product_tree, rational_reconstruct, rational_reconstruct_bounded,
-    remainder_tree, remove_factor, smooth_parts, valuation, SmoothnessBase,
+    remainder_tree, remove_factor, smooth_parts, valuation, CrtBasis, SmoothnessBase,
 };
+use rump::parallelism::{budget, with_budget};
 use rump::polynomial::{PolyMod, PolyZ, RealRootError};
 use rump::random::{
     random_below, random_coprime_below, random_nonzero_below, random_probable_prime, RandomSource,
@@ -1159,8 +1160,15 @@ failing inversion).
 \code{crt\_combine\_balanced} applies the same
 validation and returns the same canonical answer, but combines equal-width
 partial products up a balanced tree, running independent pairs on at most
-the requested number of workers --- never more than the machine reports,
-and serially when the request is zero. \code{crt\_combine\_u64} is one
+the requested number of workers --- never more than the caller's budget,
+and serially when the request is zero. It is a \code{CrtBasis} made and
+used once: a caller with several vectors of residues over the same moduli
+makes the basis once and calls \code{combine} for each. The budget is the
+threads the calling thread's work may use, which
+\code{parallelism::budget} reports: the machine's count until
+\code{parallelism::with\_budget} sets it for the work it is given, and a
+share of the caller's inside each of the crate's own fan-outs.
+\code{crt\_combine\_u64} is one
 Garner step at machine width: two congruences with word moduli, combined into
 the residue below their product, which always fits a \code{u128}; it returns
 \code{None} for a zero or non-coprime modulus.
@@ -1189,6 +1197,23 @@ assert_eq!(
 // Two word-sized congruences, no heap: 8 ≡ 2 (mod 3) and 8 ≡ 3 (mod 5).
 assert_eq!(crt_combine_u64((2, 3), (3, 5)), Some(8));
 assert_eq!(crt_combine_u64((1, 4), (3, 6)), None); // gcd(4, 6) = 2
+
+// The moduli prepared once, for as many vectors of residues as there are.
+let basis = CrtBasis::new(&[
+    BigUint::from_u64(3),
+    BigUint::from_u64(5),
+    BigUint::from_u64(7),
+])
+.expect("moduli are pairwise coprime");
+assert_eq!(*basis.modulus(), BigUint::from_u64(105));
+let residues = |value: u64| [3u64, 5, 7].map(|m| BigUint::from_u64(value % m));
+assert_eq!(basis.combine(&residues(23)), BigUint::from_u64(23));
+assert_eq!(basis.combine(&residues(104)), BigUint::from_u64(104));
+
+// A thread's budget is the machine's until it is set, and is put back.
+let whole = budget();
+assert_eq!(with_budget(1, budget), 1);
+assert_eq!(budget(), whole);
 \end{lstlisting}
 
 \subsection{Valuation}
