@@ -23,6 +23,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 use std::thread::Thread;
+use std::time::{Duration, Instant};
 
 use crate::random::RandomSource;
 
@@ -425,6 +426,11 @@ struct Sparse {
     /// Threads kept for the whole Lanczos recurrence, so no `A·x` spawns
     /// any.
     folds: FoldPool,
+    /// How many of them each kind of pass runs on: `M·x`, `Mᵀ·y` with the
+    /// inner products, and the recurrence.
+    forward_pace: Mutex<Pace>,
+    backward_pace: Mutex<Pace>,
+    step_pace: Mutex<Pace>,
 }
 
 impl Sparse {
@@ -487,6 +493,9 @@ impl Sparse {
             by_relation: Arc::new(by_relation),
             by_column: Arc::new(by_column),
             folds: FoldPool::new(threads),
+            forward_pace: Mutex::new(Pace::new(threads)),
+            backward_pace: Mutex::new(Pace::new(threads)),
+            step_pace: Mutex::new(Pace::new(threads)),
         }
     }
 
@@ -501,15 +510,15 @@ impl Sparse {
     /// `M·x` into `image`: a block over the relations becomes one over the
     /// columns.
     fn forward(&self, x: &Arc<Block>, image: &Arc<Block>) {
-        self.folds
-            .fold(&self.by_column, &self.column_runs, x, image);
+        let (lists, runs) = (&self.by_column, &self.column_runs);
+        self.folds.fold(&self.forward_pace, lists, runs, x, image);
     }
 
     /// `Mᵀ·y` into `out`: a block over the columns becomes one over the
     /// relations.
     fn backward(&self, y: &Arc<Block>, out: &Arc<Block>) {
-        self.folds
-            .fold(&self.by_relation, &self.relation_runs, y, out);
+        let (lists, runs) = (&self.by_relation, &self.relation_runs);
+        self.folds.fold(&self.backward_pace, lists, runs, y, out);
     }
 
     /// `A·x` with `A = MᵀM`, the symmetric operator the iteration runs on.
@@ -550,7 +559,7 @@ impl Sparse {
         let (image, av) = (Arc::clone(image), Arc::clone(av));
         let next = AtomicUsize::new(0);
         let made = Arc::clone(&shares);
-        self.folds.pass(move |thread| {
+        self.folds.pass(&self.backward_pace, move |thread| {
             let (mut t, mut squared, mut projection) = (Dot::new(), Dot::new(), Dot::new());
             while let Some((start, end)) = run(&runs, &next) {
                 let folded = fold_range(&lists, start, end, &image);
@@ -595,7 +604,7 @@ impl Sparse {
         let [v0, v1, v2] = terms.map(Arc::clone);
         let solve = SmallProduct::new(projected);
         let taken = AtomicUsize::new(0);
-        self.folds.pass(move |_| {
+        self.folds.pass(&self.step_pace, move |_| {
             while let Some((start, end)) = run(&runs, &taken) {
                 let words = av
                     .range(start, end)
@@ -717,6 +726,32 @@ const MINIMUM_FOLDS_PER_WORKER: usize = 4_096;
 /// at one run a thread, 11.3 at eight and 12.0 at thirty-two.
 const RUNS_PER_THREAD: usize = 8;
 
+/// The passes timed on one count of threads before the count is judged,
+/// by the shortest of them: what else the machine is doing makes a pass
+/// longer and never shorter. As many are run before any is timed, while a
+/// solve's blocks are first written: on the matrix of a 120-digit sieve
+/// the shortest of a solve's first sixteen passes was 6.1 ms and of later
+/// sixteens 4.2 to 5.0. Sixteen is a policy, a power of two; a search of
+/// three counts is then 48 passes of the ten thousand a solve of 670 000
+/// rows takes.
+const PACE_WINDOW: usize = 16;
+
+/// The passes run on a count once it is settled on, before the counts are
+/// tried again from the pool's whole. A search is cheap, and one that is
+/// repeated need not be right every time: on the matrix of a 120-digit
+/// sieve a search is 48 passes, sixteen of them on a count a fifth slower,
+/// and of twelve searches eleven settled on 64 threads and one, a solve's
+/// first, on 32. The solve took 120.0 s so, and 120.4 s on the pool's
+/// whole with no search at all. A policy, a power of two.
+const PACE_HOLD: usize = 1_024;
+
+/// Half the threads are taken for the whole when their pass is no longer
+/// than the shortest seen by more than this part of it. Measured on the
+/// matrix of a 120-digit sieve, two EPYC 7452, 64 cores and 128 threads:
+/// `M·x` took 4.89 ms on 128 threads, 4.95 on 64 and 5.78 on 32, a
+/// hundredth more and then a sixth, and a thirty-second lies between.
+const PACE_SLACK_DIVISOR: u32 = 32;
+
 /// The workers each thread wakes as a pass begins: the caller the first of
 /// them, and each of those the ones after it, so the last of 128 is woken
 /// fourth in a chain and not last of 128 by the caller. On the same matrix
@@ -747,16 +782,111 @@ const ROWS_PER_SPARE_ITERATION: usize = 4096;
 /// of rounds, plus sixteen for the lanes the last selections leave unused.
 const SPARE_ITERATIONS_FLOOR: usize = WIDTH + 16;
 
-/// What a pass has each thread of the pool do, given the thread's number
-/// among them.
+/// How many threads a kind of pass runs on, found by timing it.
+///
+/// The threads that pay are the machine's to say: the products of a solve
+/// are gathers from a block no core's cache holds, and two EPYC 7452 make
+/// as many of them a second on 64 threads as on 128, where a machine of
+/// more cores to its threads, or of faster memory, would not. So a pass is
+/// run on the pool's whole, then on half, and on half again while it is no
+/// slower, and keeps the fewest threads that were as fast as any; and
+/// after [`PACE_HOLD`] passes it looks again, so that a search misled is
+/// a search corrected. What a pass makes does not depend on its threads,
+/// so nothing but its time does.
+struct Pace {
+    /// The pool's threads.
+    most: usize,
+    /// The threads the next pass runs on.
+    threads: usize,
+    /// What the passes are run for.
+    looking: Looking,
+    /// The passes left of this window, or of this hold.
+    left: usize,
+    /// The shortest pass of this window.
+    shortest: Duration,
+    /// The fewest threads found as fast as any, and the shortest pass
+    /// seen.
+    best: Option<(usize, Duration)>,
+}
+
+/// What a [`Pace`] runs its passes for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Looking {
+    /// For the blocks to be written once, untimed.
+    Warming,
+    /// To time a count of threads.
+    Trying,
+    /// For the solve, on the count settled on.
+    Settled,
+}
+
+impl Pace {
+    fn new(most: usize) -> Self {
+        Self {
+            most,
+            threads: most,
+            looking: if most > 1 {
+                Looking::Warming
+            } else {
+                Looking::Settled
+            },
+            left: PACE_WINDOW,
+            shortest: Duration::MAX,
+            best: None,
+        }
+    }
+
+    /// A pass on [`Self::threads`] took `pass`.
+    fn timed(&mut self, pass: Duration) {
+        if self.most == 1 {
+            return;
+        }
+        self.shortest = self.shortest.min(pass);
+        self.left -= 1;
+        if self.left > 0 {
+            return;
+        }
+        let shortest = std::mem::replace(&mut self.shortest, Duration::MAX);
+        self.left = PACE_WINDOW;
+        if self.looking != Looking::Trying {
+            self.looking = Looking::Trying;
+            self.threads = self.most;
+            self.best = None;
+            return;
+        }
+        let as_fast = self
+            .best
+            .is_none_or(|(_, best)| shortest <= best + best / PACE_SLACK_DIVISOR);
+        if as_fast {
+            let shortest = self.best.map_or(shortest, |(_, best)| best.min(shortest));
+            self.best = Some((self.threads, shortest));
+        }
+        if as_fast && self.threads > 1 {
+            self.threads = self.threads.div_ceil(2);
+        } else {
+            self.threads = self.best.map_or(self.most, |(threads, _)| threads);
+            self.looking = Looking::Settled;
+            self.left = PACE_HOLD;
+        }
+    }
+}
+
+/// What a pass has each thread that runs it do, given the thread's number
+/// among the pool's.
 type Pass = Arc<dyn Fn(usize) + Send + Sync>;
+
+/// The bits of [`Shared::begun`] that count the workers of a pass; the
+/// bits above them count the passes.
+const WORKERS_BITS: u32 = 32;
 
 /// What the threads of a pool share.
 struct Shared {
     /// The pass in hand.
     pass: RwLock<Option<Pass>>,
-    /// The passes begun. A worker runs the pass in hand when this has
-    /// moved on from the last it ran.
+    /// The passes begun, and below [`WORKERS_BITS`] the workers the one in
+    /// hand runs on, the first so many: one word, so that a worker reads
+    /// the two of one pass. A worker runs the pass in hand when this has
+    /// moved on from what it last read.
     begun: AtomicU64,
     /// The workers that have not finished the pass in hand.
     running: AtomicUsize,
@@ -771,22 +901,28 @@ struct Shared {
 }
 
 impl Shared {
-    /// A worker's life: each pass as it begins, until the pool stops.
+    /// A worker's life: each pass it is of as it begins, until the pool
+    /// stops.
     fn work(&self, number: usize) {
-        let mut ran = 0;
+        let mut read = 0;
         loop {
             let begun = self.begun.load(Ordering::Acquire);
-            if begun == ran {
+            if begun == read {
                 std::thread::park();
                 continue;
             }
-            ran = begun;
-            let workers = self.workers.get().expect("the workers are named first");
-            for worker in workers.iter().skip(WAKES * (number + 1)).take(WAKES) {
-                worker.unpark();
-            }
+            read = begun;
             if self.stopping.load(Ordering::Acquire) {
                 return;
+            }
+            let of_the_pass = (begun & ((1 << WORKERS_BITS) - 1)) as usize;
+            if number >= of_the_pass {
+                continue;
+            }
+            let workers = self.workers.get().expect("the workers are named first");
+            let after = workers[..of_the_pass].iter().skip(WAKES * (number + 1));
+            for worker in after.take(WAKES) {
+                worker.unpark();
             }
             let pass = self
                 .pass
@@ -815,11 +951,13 @@ impl Shared {
 /// Threads kept for the lifetime of one sparse solve, the caller's among
 /// them.
 ///
-/// A pass is one closure that every thread runs, each taking runs of the
-/// pass from a count they share until none is left. The workers sleep
-/// between passes and are woken down a tree, [`WAKES`] by each. What a pass
-/// makes it writes where it belongs, a word to a run's thread, so the result
-/// is the result of the pass on one thread; only its schedule changes.
+/// A pass is one closure that every thread of the pass runs, each taking
+/// runs of the pass from a count they share until none is left. The
+/// workers sleep between passes and are woken down a tree, [`WAKES`] by
+/// each. What a pass makes it writes where it belongs, a word to a run's
+/// thread, so the result is the result of the pass on one thread; only its
+/// schedule changes, and how many threads it is run on is its [`Pace`]'s
+/// to find.
 struct FoldPool {
     shared: Arc<Shared>,
     handles: Vec<std::thread::JoinHandle<()>>,
@@ -829,6 +967,10 @@ impl FoldPool {
     /// A pool of `threads` threads: the caller's, and a worker for each of
     /// the rest.
     fn new(threads: usize) -> Self {
+        assert!(
+            threads as u64 >> WORKERS_BITS == 0,
+            "{threads} threads: a pool counts them in thirty-two bits"
+        );
         let shared = Arc::new(Shared {
             pass: RwLock::new(None),
             begun: AtomicU64::new(0),
@@ -852,18 +994,24 @@ impl FoldPool {
         Self { shared, handles }
     }
 
-    /// The threads a pass runs on, the caller's among them.
+    /// The pool's threads, the caller's among them.
     fn threads(&self) -> usize {
         self.handles.len() + 1
     }
 
-    /// `pass` on every thread of the pool, each given its number, the
-    /// caller's the last. A panic in it is resumed here once every thread
-    /// has left it.
-    fn pass(&self, pass: impl Fn(usize) + Send + Sync + 'static) {
-        let workers = self.handles.len();
+    /// `pass` on as many threads of the pool as `pace` has it run on, each
+    /// given its number among the pool's, the caller's the last; and
+    /// `pace` told how long it took. A panic in it is resumed here once
+    /// every thread has left it.
+    fn pass(&self, pace: &Mutex<Pace>, pass: impl Fn(usize) + Send + Sync + 'static) {
+        let began = Instant::now();
+        let pace = || pace.lock().unwrap_or_else(PoisonError::into_inner);
+        let workers = pace().threads.clamp(1, self.threads()) - 1;
+        let caller = self.handles.len();
         if workers == 0 {
-            return pass(0);
+            pass(caller);
+            pace().timed(began.elapsed());
+            return;
         }
         let pass: Pass = Arc::new(pass);
         let shared = &self.shared;
@@ -871,11 +1019,14 @@ impl FoldPool {
         *shared.caller.lock().unwrap_or_else(PoisonError::into_inner) =
             Some(std::thread::current());
         shared.running.store(workers, Ordering::Release);
-        shared.begun.fetch_add(1, Ordering::Release);
-        for handle in self.handles.iter().take(WAKES) {
+        let passes = (shared.begun.load(Ordering::Acquire) >> WORKERS_BITS) + 1;
+        shared
+            .begun
+            .store(passes << WORKERS_BITS | workers as u64, Ordering::Release);
+        for handle in self.handles[..workers].iter().take(WAKES) {
             handle.thread().unpark();
         }
-        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pass(workers)));
+        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pass(caller)));
         while shared.running.load(Ordering::Acquire) != 0 {
             std::thread::park();
         }
@@ -891,6 +1042,7 @@ impl FoldPool {
         if let Some(payload) = panicked {
             std::panic::resume_unwind(payload);
         }
+        pace().timed(began.elapsed());
     }
 
     /// One output word per index list: the XOR-fold of `input` at those
@@ -901,6 +1053,7 @@ impl FoldPool {
     /// inline fold's whatever the threads and whichever took each run.
     fn fold(
         &self,
+        pace: &Mutex<Pace>,
         lists: &Arc<Lists>,
         runs: &Arc<Vec<usize>>,
         input: &Arc<Block>,
@@ -909,7 +1062,7 @@ impl FoldPool {
         let (lists, runs) = (Arc::clone(lists), Arc::clone(runs));
         let (input, output) = (Arc::clone(input), Arc::clone(output));
         let taken = AtomicUsize::new(0);
-        self.pass(move |_| {
+        self.pass(pace, move |_| {
             while let Some((start, end)) = run(&runs, &taken) {
                 output.write(start, &fold_range(&lists, start, end, &input));
             }
@@ -920,7 +1073,9 @@ impl FoldPool {
 impl Drop for FoldPool {
     fn drop(&mut self) {
         self.shared.stopping.store(true, Ordering::Release);
-        self.shared.begun.fetch_add(1, Ordering::Release);
+        self.shared
+            .begun
+            .fetch_add(1 << WORKERS_BITS, Ordering::Release);
         for handle in &self.handles {
             handle.thread().unpark();
         }
@@ -1422,10 +1577,13 @@ fn lanczos_observed<R: RandomSource + ?Sized>(
 mod tests {
     use super::{
         block_lanczos_dependencies, borrow_two, dense_null_space, fold_range, lanczos_observed,
-        prune_singletons, words_for, Block, FoldPool, Recurrence, Small, SmallProduct, Sparse,
-        WIDTH, WORD,
+        prune_singletons, words_for, Block, FoldPool, Looking, Pace, Recurrence, Small,
+        SmallProduct, Sparse, PACE_HOLD, PACE_WINDOW, WIDTH, WORD,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::time::Duration;
 
     /// Pack a list of column indices into a row.
     fn pack(columns: usize, set: &[usize]) -> Vec<u64> {
@@ -1561,9 +1719,10 @@ mod tests {
         let expected = fold_range(&lists, 0, lists.len(), &input);
         let pool = FoldPool::new(THREADS);
         assert_eq!(pool.threads(), THREADS);
+        let pace = Mutex::new(Pace::new(THREADS));
         for _ in 0..REPEATS {
             let output = Block::zeroed(lists.len());
-            pool.fold(&lists, &runs, &input, &output);
+            pool.fold(&pace, &lists, &runs, &input, &output);
             assert_eq!(output.words().collect::<Vec<_>>(), expected);
         }
     }
@@ -1578,21 +1737,125 @@ mod tests {
         /// The thread that panics: a worker, and not one the caller wakes.
         const PANICS: usize = 6;
         let pool = FoldPool::new(THREADS);
-        let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pace = Mutex::new(Pace::new(THREADS));
+        let ran = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&ran);
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pool.pass(move |thread| {
-                counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            pool.pass(&pace, move |thread| {
+                counted.fetch_add(1, Ordering::Relaxed);
                 assert_ne!(thread, PANICS, "the pass panics on this thread");
             });
         }));
         assert!(caught.is_err());
-        assert_eq!(ran.load(std::sync::atomic::Ordering::Relaxed), THREADS);
+        assert_eq!(ran.load(Ordering::Relaxed), THREADS);
         let counted = Arc::clone(&ran);
-        pool.pass(move |_| {
-            counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        pool.pass(&pace, move |_| {
+            counted.fetch_add(1, Ordering::Relaxed);
         });
-        assert_eq!(ran.load(std::sync::atomic::Ordering::Relaxed), 2 * THREADS);
+        assert_eq!(ran.load(Ordering::Relaxed), 2 * THREADS);
+    }
+
+    /// The count a pace settles on, told that a pass on `threads` threads
+    /// takes `pass(threads)` microseconds, and the passes it took to
+    /// settle.
+    fn settled(pace: &mut Pace, pass: impl Fn(usize) -> u64) -> (usize, usize) {
+        let mut passes = 0;
+        while pace.looking != Looking::Settled {
+            pace.timed(Duration::from_micros(pass(pace.threads)));
+            passes += 1;
+        }
+        (pace.threads, passes)
+    }
+
+    #[test]
+    fn a_pace_keeps_the_fewest_threads_that_are_as_fast_as_any() {
+        /// The pool's threads: a machine of 64 cores and two threads to
+        /// each.
+        const MOST: usize = 128;
+        // Threads that all pay: a pass takes half as long on twice as
+        // many, and the whole is kept after one look at the half.
+        let mut pace = Pace::new(MOST);
+        let halved = |threads: usize| 640_000 / threads as u64;
+        assert_eq!(settled(&mut pace, halved), (MOST, 3 * PACE_WINDOW));
+        // Memory that gives out at 64 threads, as measured: a hundredth
+        // slower on 64 than on 128, and a sixth slower again on 32.
+        let mut pace = Pace::new(MOST);
+        let bound = |threads: usize| match threads {
+            128 => 4_890,
+            64 => 4_950,
+            _ => 5_780 * 32 / threads as u64,
+        };
+        assert_eq!(settled(&mut pace, bound), (64, 4 * PACE_WINDOW));
+        // Counts each a little slower than the last, and none by as much
+        // as the slack: they are measured against the shortest pass seen,
+        // so the slowness does not add up unseen.
+        let mut pace = Pace::new(MOST);
+        let creeping = |threads: usize| 5_000 + 100 * u64::from((MOST / threads).ilog2());
+        assert_eq!(settled(&mut pace, creeping).0, 64);
+        // One thread has nothing to find.
+        let mut pace = Pace::new(1);
+        pace.timed(Duration::from_micros(1));
+        assert_eq!(pace.threads, 1);
+    }
+
+    /// The passes before the first window are not timed: a first pass that
+    /// wrote its blocks for the first time, and took long over it, does
+    /// not make the half look as fast as the whole.
+    #[test]
+    fn a_pace_does_not_time_the_passes_that_warm_the_blocks() {
+        /// The pool's threads; as above.
+        const MOST: usize = 128;
+        let mut pace = Pace::new(MOST);
+        for _ in 0..PACE_WINDOW {
+            assert_eq!(pace.threads, MOST);
+            pace.timed(Duration::from_micros(1));
+        }
+        let halved = |threads: usize| 640_000 / threads as u64;
+        assert_eq!(settled(&mut pace, halved), (MOST, 2 * PACE_WINDOW));
+    }
+
+    /// A search misled is corrected by the next: a pace that settled on
+    /// one thread, the machine's other work making every count as slow,
+    /// holds it and then finds that the threads all pay.
+    #[test]
+    fn a_pace_looks_again_when_it_has_held() {
+        /// The pool's threads; as above.
+        const MOST: usize = 128;
+        let mut pace = Pace::new(MOST);
+        assert_eq!(settled(&mut pace, |_| 5_000).0, 1);
+        let halved = |threads: usize| 640_000 / threads as u64;
+        for _ in 0..PACE_HOLD {
+            assert_eq!((pace.threads, pace.looking), (1, Looking::Settled));
+            pace.timed(Duration::from_micros(halved(1)));
+        }
+        assert_eq!((pace.threads, pace.looking), (MOST, Looking::Trying));
+        assert_eq!(settled(&mut pace, halved), (MOST, 2 * PACE_WINDOW));
+    }
+
+    /// A pass runs on the threads its pace has, the first so many of the
+    /// pool's workers and the caller, and the pool runs the next on
+    /// others.
+    #[test]
+    fn a_pass_runs_on_the_threads_its_pace_has() {
+        /// Threads of the pool; more than [`super::WAKES`] and one, so
+        /// that workers wake workers.
+        const THREADS: usize = 12;
+        let pool = FoldPool::new(THREADS);
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        // The whole, the caller alone, some, and the whole again.
+        for threads in [THREADS, 1, 5, 2, THREADS, 7] {
+            let mut pace = Pace::new(THREADS);
+            pace.threads = threads;
+            pace.looking = Looking::Settled;
+            let pace = Mutex::new(pace);
+            let numbers = Arc::clone(&ran);
+            pool.pass(&pace, move |thread| numbers.lock().unwrap().push(thread));
+            let mut numbers = std::mem::take(&mut *ran.lock().unwrap());
+            numbers.sort_unstable();
+            let mut expected: Vec<usize> = (0..threads - 1).collect();
+            expected.push(THREADS - 1);
+            assert_eq!(numbers, expected, "{threads} threads");
+        }
     }
 
     /// Lists as a sieve's columns are: the first few hold most of the
@@ -1649,8 +1912,9 @@ mod tests {
 
         let expected = fold_range(&lists, 0, lists.len(), &input);
         let pool = FoldPool::new(WORKERS);
+        let pace = Mutex::new(Pace::new(WORKERS));
         let output = Block::zeroed(lists.len());
-        pool.fold(&lists, &Arc::new(lists.cuts(RUNS)), &input, &output);
+        pool.fold(&pace, &lists, &Arc::new(lists.cuts(RUNS)), &input, &output);
         assert_eq!(output.words().collect::<Vec<_>>(), expected);
     }
 

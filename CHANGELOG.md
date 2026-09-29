@@ -145,6 +145,15 @@ what a consumer must change, not everything that moved.
 
 ### Changed
 
+- **Block Lanczos finds how many threads pay.** Each kind of pass times
+  itself on the pool's whole and on half, and half again while it is no
+  slower, keeps the fewest threads that were as fast as any, and looks
+  again every thousand passes. On two EPYC 7452 the products of a
+  120-digit sieve's matrix are as fast on 64 threads as on 128, and the
+  solve as long on 83 threads running as on 128; a machine of more cores,
+  or of faster memory, is given all it can use. `threads` stays the
+  ceiling, and the dependencies are the same at any count.
+
 - **Block Lanczos writes its blocks in place.** The threads of a pass
   write their runs of a block where the next pass reads them, and take the
   runs from one count, the caller with them; the workers are woken down a

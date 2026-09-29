@@ -682,6 +682,33 @@ Tried there and not kept: workers that spin before they sleep, for 300 µs
 and for 1 ms, 11.6 and 11.5 ms an iteration. The last thread of a pass
 begins 0.7 ms in where it began 1.5, and the pass is as long.
 
+### The threads a pass runs on
+
+How many threads pay is the machine's to say, and the matrix's, so each
+kind of pass finds it by timing itself: sixteen passes on the pool's
+whole, sixteen on half, and on half again while the shortest of a window is
+no more than a thirty-second longer than the shortest seen; then 1 024
+passes on the fewest threads that were as fast as any, and the search
+again. The first sixteen passes of a solve are not timed. Twilight, the
+host idle, the matrices of three sieves:
+
+| | rows | the pool | settled on, and how often | threads running | the solve, s |
+|---|---:|---:|---|---:|---:|
+| RSA-100 | 164 629 | 40 | 40, 14; 20, 4 | 30.7 | 11.8 |
+| RSA-110 | 376 351 | 91 | 91, 18 | 75.2 | 43.4 |
+| RSA-120 | 673 757 | 128 | 128, 15; 64, 11; 32, 5 | 83.1 | 119.4 |
+
+RSA-120's solve on 128 threads throughout was 120.4 s. Where two counts
+are as fast as each other the searches do not agree which to keep, and the
+solve is as long whichever they keep; a search that is wrong is one
+thousand passes from the next. A search costs 48 passes of a solve's ten
+thousand, sixteen of them on the count found slower.
+
+This is for work that repeats. A pass is milliseconds and a solve has
+thousands, so a count tried costs nothing to speak of; where the unit of
+work is seconds long, or runs once, a count tried and found slower is paid
+for in full.
+
 ## Filtering a sieve's matrix
 
 `filter_merge` on factoring's relations for RSA-120, 6 826 195 rows by
