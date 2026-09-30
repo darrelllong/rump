@@ -709,6 +709,52 @@ thousands, so a count tried costs nothing to speak of; where the unit of
 work is seconds long, or runs once, a count tried and found slower is paid
 for in full.
 
+### The products blocked, and the form found on the machine
+
+With the block written in place and the lists read from one count, the
+two products of an iteration on RSA-120's matrix were 9.7 ms on twilight's
+128 threads, 27.0 on baase's twenty Cortex cores and 6.9 on an M4 Pro's
+twelve. What they were made of, on the compact lists tried and not kept:
+
+| the two products | twilight, 128 | baase, 20 |
+|---|---:|---:|
+| reading the lists' bytes | 2.8 ms | 2.0 ms |
+| decoding them | 0.7 | 4.0 |
+| the gathers | 4.4 | 21.2 |
+
+The gathers, from one block of 5.4 MB, were the most of it on both, and
+nearly all of it on baase. Blocked, the entries are by the slice of the
+block they gather from, two bytes each, and a thread keeps a part of the
+outputs and takes the slices in turn, so that the slice is in its cache
+while it is gathered from. The slice is half the block
+`parallelism::gather_costs` finds within once and a half the cheapest
+read, with every thread reading:
+
+| the two products, by slice | 64 KB | 128 KB | 256 KB | 512 KB | 1 MB | 2 MB |
+|---|---:|---:|---:|---:|---:|---:|
+| baase, 20 threads | 7.0 | 7.0 | 7.6 | 9.4 | 11.5 | 15.2 |
+| twilight, 128 threads | 5.8 | 6.5 | 6.4 | 6.8 | 6.6 | 6.5 |
+| the Mac, 12 threads | | 10.4 | | 11.7 | | |
+
+On the Mac the lists as they are, 6.9 ms, beat every blocking: its memory
+gives the lists up as fast as they are asked for, and decoding costs more
+than it saves. So the form is found on the machine: after the first
+sixteen iterations, if the solve ahead is sixteen times what the finding
+costs, the entries are blocked, both forms are timed sixteen times on the
+pool's whole, and the shorter is kept. The solve of RSA-120's matrix, the
+same 62 dependencies from each:
+
+| | an iteration before | the trial | an iteration after | the solve |
+|---|---:|---|---:|---:|
+| twilight, 128 threads | 11.3 ms | blocked 8.2, lists 11.1 | 8.6 ms | 120 s to 95 s |
+| baase, 20 threads | 35 ms | blocked 10.7, lists 32.0 | 11.0 ms | 119 s |
+| the Mac, 12 threads | 9.0 ms | blocked 10.0, lists 6.7 | 9.1 ms | 97 s |
+
+RSA-110's, 376 351 rows, 43 s to 29 s on twilight; RSA-100's, 164 629
+rows and a solve of nine seconds, is not worth the trial and is not tried.
+Twenty Cortex cores now solve as two EPYC 7452 do, and twelve of an M4
+Pro's nearly.
+
 ## What a read at random costs
 
 `parallelism::gather_costs`, the `gather_costs_timing` probe: nanoseconds a

@@ -409,20 +409,178 @@ impl Lists {
     }
 }
 
+/// A product's entries by the part of the outputs they sum into and the
+/// slice of the block they gather from.
+///
+/// A list gathers from anywhere in its block, and a block of any size is
+/// in no core's cache: on the matrix of a 120-digit sieve, a block of
+/// 5.4 MB, the gathers were four fifths of the two products on twenty
+/// Cortex cores and more than half on two EPYC 7452. Here a thread that
+/// has a part takes the slices of the block in turn, and against each
+/// slice every run of its part, so that the slice is in its cache while it
+/// is gathered from, and the sums it goes into, a run's, are too.
+///
+/// An entry is two bytes: how far the place in the slice moves on from the
+/// entry before, and which output of the run the word there is summed
+/// into. A run is [`RUN_OUTPUTS`] outputs, so that the second is a byte,
+/// and an entry that moves the place on by as much and sums into the place
+/// beyond the run's last carries a gap a byte cannot.
+struct Blocked {
+    /// The words of a slice.
+    slice: usize,
+    parts: Vec<Part>,
+}
+
+/// The outputs of a run, the most; and in an entry, to move the place on by
+/// this much and sum into no output.
+const RUN_OUTPUTS: usize = 255;
+
+/// The entries that sum into one part of the outputs.
+struct Part {
+    /// The runs: the first output of each, and how many it has.
+    runs: Vec<(usize, usize)>,
+    /// For each slice in turn, for each run in turn: the count of the
+    /// entries that follow, four bytes, and the entries.
+    bytes: Vec<u8>,
+}
+
+impl Blocked {
+    /// The entries of `lists`, which gather from `inputs` words, in
+    /// `parts` parts of about as many entries each and slices of `slice`
+    /// words. The parts are made side by side.
+    fn new(lists: &Lists, inputs: usize, parts: usize, slice: usize) -> Self {
+        let slice = slice.max(1);
+        let slices = inputs.div_ceil(slice).max(1);
+        let cuts = lists.cuts(parts);
+        let bounds: Vec<&[usize]> = cuts.windows(2).collect();
+        let parts = crate::parallel::map_ordered(&bounds, bounds.len(), |_, bounds| {
+            let runs: Vec<(usize, usize)> = (bounds[0]..bounds[1])
+                .step_by(RUN_OUTPUTS)
+                .map(|first| (first, RUN_OUTPUTS.min(bounds[1] - first)))
+                .collect();
+            // Each entry by its slice, its run, its place in the slice and
+            // its output of the run, and in that order.
+            let mut entries: Vec<(u32, u32, u32, u8)> = Vec::new();
+            for (run, &(first, outputs)) in runs.iter().enumerate() {
+                for output in 0..outputs {
+                    for &input in lists.list(first + output) {
+                        let (slice, place) = (input as usize / slice, input as usize % slice);
+                        entries.push((slice as u32, run as u32, place as u32, output as u8));
+                    }
+                }
+            }
+            entries.sort_unstable();
+            let mut bytes = Vec::with_capacity(2 * entries.len() + 4 * slices * runs.len());
+            let mut entries = entries.into_iter().peekable();
+            for slice in 0..slices as u32 {
+                for run in 0..runs.len() as u32 {
+                    let count = bytes.len();
+                    bytes.extend_from_slice(&[0; 4]);
+                    let (mut place, mut written) = (0u32, 0u32);
+                    while let Some((_, _, at, output)) =
+                        entries.next_if(|entry| (entry.0, entry.1) == (slice, run))
+                    {
+                        while at - place >= RUN_OUTPUTS as u32 {
+                            bytes.extend_from_slice(&[RUN_OUTPUTS as u8; 2]);
+                            place += RUN_OUTPUTS as u32;
+                            written += 1;
+                        }
+                        bytes.extend_from_slice(&[(at - place) as u8, output]);
+                        place = at;
+                        written += 1;
+                    }
+                    bytes[count..count + 4].copy_from_slice(&written.to_le_bytes());
+                }
+            }
+            Part { runs, bytes }
+        });
+        Self { slice, parts }
+    }
+
+    /// The sums of part `part` over `input`, each run's shown to `made`
+    /// with the first of its outputs.
+    fn fold(&self, part: usize, input: &Block, mut made: impl FnMut(usize, &[u64])) {
+        let part = &self.parts[part];
+        let mut sums = vec![[0u64; RUN_OUTPUTS + 1]; part.runs.len()];
+        let mut bytes = &part.bytes[..];
+        let mut slice = 0;
+        while !bytes.is_empty() {
+            for sums in &mut sums {
+                let (count, rest) = bytes.split_at(4);
+                let count = u32::from_le_bytes(count.try_into().expect("four bytes")) as usize;
+                let (entries, rest) = rest.split_at(2 * count);
+                let mut place = slice;
+                for entry in entries.chunks_exact(2) {
+                    place += entry[0] as usize;
+                    sums[entry[1] as usize] ^= input.word(place);
+                }
+                bytes = rest;
+            }
+            slice += self.slice;
+        }
+        for (sums, &(first, outputs)) in sums.iter().zip(&part.runs) {
+            made(first, &sums[..outputs]);
+        }
+    }
+}
+
+/// One product's entries, in the form its passes take them.
+#[derive(Clone)]
+enum Entries {
+    /// By the list they sum into, four bytes an index, the lists in runs
+    /// of about as many entries that the threads take from one count.
+    Listed {
+        lists: Arc<Lists>,
+        runs: Arc<Vec<usize>>,
+    },
+    /// By the slice of the block they gather from.
+    Blocked(Arc<Blocked>),
+}
+
+impl Entries {
+    /// The sums that are thread `slot`'s to make of the pass's `slots`
+    /// threads, over `input`: each run's shown to `made` with the first of
+    /// its outputs. `taken` counts the runs of lists taken; the parts of
+    /// blocked entries are a thread's own, the same every pass, so that
+    /// what it reads of them it read the pass before.
+    fn each(
+        &self,
+        taken: &AtomicUsize,
+        (slot, slots): (usize, usize),
+        input: &Block,
+        mut made: impl FnMut(usize, &[u64]),
+    ) {
+        match self {
+            Self::Listed { lists, runs } => {
+                while let Some((start, end)) = run(runs, taken) {
+                    made(start, &fold_range(lists, start, end, input));
+                }
+            }
+            Self::Blocked(blocked) => {
+                let parts = blocked.parts.len();
+                for part in slot * parts / slots..(slot + 1) * parts / slots {
+                    blocked.fold(part, input, &mut made);
+                }
+            }
+        }
+    }
+}
+
 /// The relation matrix `M`, held once by rows and once by columns.
 ///
 /// Both orientations are needed every iteration — `A = MᵀM` is two products —
 /// and each is a gather over the side it is indexed by, so storing both costs
 /// one extra copy of the indices and saves a scatter with random writes.
 struct Sparse {
+    relations: usize,
+    columns: usize,
     /// For each relation, the columns it sets.
-    by_relation: Arc<Lists>,
+    by_relation: RwLock<Entries>,
     /// For each column, the relations that set it.
-    by_column: Arc<Lists>,
-    /// The bounds of the runs of relations a pass is taken in, each of
-    /// about as many entries, and of the runs of columns.
+    by_column: RwLock<Entries>,
+    /// The bounds of the runs of relations the recurrence is taken in,
+    /// each of about as many entries.
     relation_runs: Arc<Vec<usize>>,
-    column_runs: Arc<Vec<usize>>,
     /// Threads kept for the whole Lanczos recurrence, so no `A·x` spawns
     /// any.
     folds: FoldPool,
@@ -478,20 +636,33 @@ impl Sparse {
                 by_column[column as usize].push(index as u32);
             }
         }
-        let useful = (by_relation.len().max(columns) / MINIMUM_FOLDS_PER_WORKER).max(1);
+        let relations = by_relation.len();
+        let useful = (relations.max(columns) / MINIMUM_FOLDS_PER_WORKER).max(1);
         let threads = threads.min(crate::parallel::budget()).min(useful).max(1);
-        let by_relation = Lists::from_lists(&by_relation);
-        let by_column = Lists::from_lists(&by_column);
         let runs = if threads == 1 {
             1
         } else {
             threads * RUNS_PER_THREAD
         };
+        let listed = |lists: &[Vec<u32>]| {
+            let lists = Lists::from_lists(lists);
+            let runs = Arc::new(lists.cuts(runs));
+            (Arc::new(lists), runs)
+        };
+        let (relation_lists, relation_runs) = listed(&by_relation);
+        let (column_lists, column_runs) = listed(&by_column);
         Self {
-            relation_runs: Arc::new(by_relation.cuts(runs)),
-            column_runs: Arc::new(by_column.cuts(runs)),
-            by_relation: Arc::new(by_relation),
-            by_column: Arc::new(by_column),
+            relations,
+            columns,
+            by_relation: RwLock::new(Entries::Listed {
+                lists: relation_lists,
+                runs: Arc::clone(&relation_runs),
+            }),
+            by_column: RwLock::new(Entries::Listed {
+                lists: column_lists,
+                runs: column_runs,
+            }),
+            relation_runs,
             folds: FoldPool::new(threads),
             forward_pace: Mutex::new(Pace::new(threads)),
             backward_pace: Mutex::new(Pace::new(threads)),
@@ -500,25 +671,37 @@ impl Sparse {
     }
 
     fn relations(&self) -> usize {
-        self.by_relation.len()
+        self.relations
     }
 
     fn columns(&self) -> usize {
-        self.by_column.len()
+        self.columns
+    }
+
+    /// The entries of the two products as they are now taken: by column,
+    /// for `M·x`, and by relation.
+    fn entries(&self) -> (Entries, Entries) {
+        let of = |entries: &RwLock<Entries>| {
+            entries
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        };
+        (of(&self.by_column), of(&self.by_relation))
     }
 
     /// `M·x` into `image`: a block over the relations becomes one over the
     /// columns.
     fn forward(&self, x: &Arc<Block>, image: &Arc<Block>) {
-        let (lists, runs) = (&self.by_column, &self.column_runs);
-        self.folds.fold(&self.forward_pace, lists, runs, x, image);
+        let (by_column, _) = self.entries();
+        self.folds.fold(&self.forward_pace, by_column, x, image);
     }
 
     /// `Mᵀ·y` into `out`: a block over the columns becomes one over the
     /// relations.
     fn backward(&self, y: &Arc<Block>, out: &Arc<Block>) {
-        let (lists, runs) = (&self.by_relation, &self.relation_runs);
-        self.folds.fold(&self.backward_pace, lists, runs, y, out);
+        let (_, by_relation) = self.entries();
+        self.folds.fold(&self.backward_pace, by_relation, y, out);
     }
 
     /// `A·x` with `A = MᵀM`, the symmetric operator the iteration runs on.
@@ -533,11 +716,6 @@ impl Sparse {
     /// `A·v` into `av`, by way of `M·v` into `image`, and with it the three
     /// inner products an iteration takes of `V`: `VᵀAV`, `(AV)ᵀAV` and
     /// `VᵀQ`.
-    ///
-    /// Each is a sum over the relations, so the thread that folds a run of
-    /// `A·v` takes the run's share of all three while the words are in its
-    /// cache, and the shares are XORed. Taken apart, on one thread, the
-    /// three cost more than the two products they follow.
     fn apply_with_products(
         &self,
         v: &Arc<Block>,
@@ -545,24 +723,38 @@ impl Sparse {
         image: &Arc<Block>,
         av: &Arc<Block>,
     ) -> Products {
-        self.forward(v, image);
+        let paces = (&self.forward_pace, &self.backward_pace);
+        self.products(self.entries(), paces, [v, q, image, av])
+    }
+
+    /// [`Self::apply_with_products`] of the blocks `[v, q, image, av]`, the
+    /// two products taking `entries` and running on the threads `paces`
+    /// have them run on.
+    ///
+    /// Each inner product is a sum over the relations, so the thread that
+    /// folds a run of `A·v` takes the run's share of all three while the
+    /// words are in its cache, and the shares are XORed. Taken apart, on
+    /// one thread, the three cost more than the two products they follow.
+    fn products(
+        &self,
+        (by_column, by_relation): (Entries, Entries),
+        paces: (&Mutex<Pace>, &Mutex<Pace>),
+        [v, q, image, av]: [&Arc<Block>; 4],
+    ) -> Products {
+        self.folds.fold(paces.0, by_column, v, image);
         let shares: Arc<Vec<Mutex<Products>>> = Arc::new(
             (0..self.folds.threads())
                 .map(|_| Mutex::default())
                 .collect(),
         );
-        let (lists, runs) = (
-            Arc::clone(&self.by_relation),
-            Arc::clone(&self.relation_runs),
-        );
         let (v, q) = (Arc::clone(v), Arc::clone(q));
         let (image, av) = (Arc::clone(image), Arc::clone(av));
-        let next = AtomicUsize::new(0);
+        let taken = AtomicUsize::new(0);
         let made = Arc::clone(&shares);
-        self.folds.pass(&self.backward_pace, move |thread| {
+        self.folds.pass(paces.1, move |slot, slots| {
             let (mut t, mut squared, mut projection) = (Dot::new(), Dot::new(), Dot::new());
-            while let Some((start, end)) = run(&runs, &next) {
-                let folded = fold_range(&lists, start, end, &image);
+            by_relation.each(&taken, (slot, slots), &image, |start, folded| {
+                let end = start + folded.len();
                 for ((&folded, v), q) in folded
                     .iter()
                     .zip(v.range(start, end))
@@ -572,20 +764,104 @@ impl Sparse {
                     squared.add(folded, folded);
                     projection.add(v, q);
                 }
-                av.write(start, &folded);
-            }
+                av.write(start, folded);
+            });
             let share = Products {
                 t: t.product(),
                 squared: squared.product(),
                 projection: projection.product(),
             };
-            *made[thread].lock().unwrap_or_else(PoisonError::into_inner) = share;
+            *made[slot].lock().unwrap_or_else(PoisonError::into_inner) = share;
         });
         let mut products = Products::default();
         for share in shares.iter() {
             products.add(&share.lock().unwrap_or_else(PoisonError::into_inner));
         }
         products
+    }
+
+    /// The products' entries blocked, in slices of `slice` words and a
+    /// part to each thread of the pool; `None` if they are blocked
+    /// already.
+    fn blocked(&self, slice: usize) -> Option<(Entries, Entries)> {
+        let (
+            Entries::Listed { lists: columns, .. },
+            Entries::Listed {
+                lists: relations, ..
+            },
+        ) = self.entries()
+        else {
+            return None;
+        };
+        let parts = self.folds.threads();
+        let blocked = |lists: &Lists, inputs: usize| {
+            Entries::Blocked(Arc::new(Blocked::new(lists, inputs, parts, slice)))
+        };
+        Some((
+            blocked(&columns, self.relations),
+            blocked(&relations, self.columns),
+        ))
+    }
+
+    /// Has the products take `entries` from here on, by column and by
+    /// relation. The paces begin again: what threads pay is another
+    /// question of other entries.
+    fn take(&self, (by_column, by_relation): (Entries, Entries)) {
+        let threads = self.folds.threads();
+        for (held, entries, pace) in [
+            (&self.by_column, by_column, &self.forward_pace),
+            (&self.by_relation, by_relation, &self.backward_pace),
+        ] {
+            *held.write().unwrap_or_else(PoisonError::into_inner) = entries;
+            *pace.lock().unwrap_or_else(PoisonError::into_inner) = Pace::new(threads);
+        }
+    }
+
+    /// Finds which form of the products' entries is the faster on this
+    /// machine, and has the products take it, if the solve ahead is long
+    /// enough to repay the finding: `ahead` iterations of about
+    /// `iteration` each. `v` and `q` are blocks over the relations for the
+    /// trial to multiply.
+    ///
+    /// Which is faster is the machine's to say. On the matrix of a
+    /// 120-digit sieve the products blocked were 7.0 ms for 27.0 on twenty
+    /// Cortex cores and 6.4 for 9.7 on two EPYC 7452, and 10.4 for 6.9 on
+    /// an M4 Pro, whose memory gives the lists up as fast as they are
+    /// asked for. So both are timed, [`PACE_WINDOW`] times each on the
+    /// pool's whole, and the shorter of their shortest kept. The slice is
+    /// what [`gather_costs`](crate::machine::gather_costs) finds cheap to
+    /// read from with every thread reading, and a block that is within one
+    /// is left in its lists.
+    fn choose(&self, iteration: Duration, ahead: usize, v: &Arc<Block>, q: &Arc<Block>) {
+        let threads = self.folds.threads();
+        if threads == 1 || !repays(iteration, ahead) {
+            return;
+        }
+        let cheap = crate::machine::gather_costs(threads).block_within(SLICE_SLACK);
+        let slice = cheap / SLICE_SHARE / core::mem::size_of::<u64>();
+        if self.relations.max(self.columns) <= slice {
+            return;
+        }
+        let Some(blocked) = self.blocked(slice) else {
+            return;
+        };
+        let image = Block::zeroed(self.columns);
+        let av = Block::zeroed(self.relations);
+        let shortest = |entries: &(Entries, Entries)| {
+            let held = || Mutex::new(Pace::held(threads));
+            let (forward, backward) = (held(), held());
+            (0..PACE_WINDOW)
+                .map(|_| {
+                    let began = Instant::now();
+                    let blocks = [v, q, &image, &av];
+                    self.products(entries.clone(), (&forward, &backward), blocks);
+                    began.elapsed()
+                })
+                .min()
+        };
+        if shortest(&blocked) < shortest(&self.entries()) {
+            self.take(blocked);
+        }
     }
 
     /// Equations (20) and (18) in one pass over the relations: `X + V·P`
@@ -604,7 +880,7 @@ impl Sparse {
         let [v0, v1, v2] = terms.map(Arc::clone);
         let solve = SmallProduct::new(projected);
         let taken = AtomicUsize::new(0);
-        self.folds.pass(&self.step_pace, move |_| {
+        self.folds.pass(&self.step_pace, move |_, _| {
             while let Some((start, end)) = run(&runs, &taken) {
                 let words = av
                     .range(start, end)
@@ -752,6 +1028,48 @@ const PACE_HOLD: usize = 1_024;
 /// hundredth more and then a sixth, and a thirty-second lies between.
 const PACE_SLACK_DIVISOR: u32 = 32;
 
+/// A slice of blocked entries is this part of the largest block whose reads
+/// cost within [`SLICE_SLACK`] of the cheapest: a thread's cache holds the
+/// slice and with it what is read beside it, its entries and the sums they
+/// go into. Measured on the matrix of a 120-digit sieve: twenty Cortex
+/// cores, whose block within the slack was 256 KB, four measurements of
+/// five, took 7.0 ms over the two products at slices of 64 and of 128 KB,
+/// 7.6 at 256 KB, 9.4 at 512 KB and 11.5 at 1 MB; 128 threads of two EPYC
+/// 7452, whose block was 512 KB or 1 MB, took 6.4 to 6.8 ms at every slice
+/// from 128 KB to 2 MB.
+const SLICE_SHARE: usize = 2;
+
+/// The slack of the block a slice is taken from: once and a half the
+/// cheapest read. It is where the five machines measured agreed with
+/// themselves from one measurement to the next as nearly as at twice, and
+/// it names the smaller block.
+const SLICE_SLACK: f64 = 1.5;
+
+/// What finding the faster form costs, in iterations of the solve: the
+/// entries blocked, and both forms timed. Blocking the entries of a
+/// 120-digit sieve's matrix took 1.6 s on two EPYC 7452, 142 iterations of
+/// 11.3 ms, and 0.8 s on twenty Cortex cores, fewer; the timing is
+/// [`PACE_WINDOW`] pairs of products twice over. A power of two over their
+/// sum.
+const TRIAL_ITERATIONS: u32 = 256;
+
+/// What [`gather_costs`](crate::machine::gather_costs) takes at most: 0.15
+/// to 0.55 s on the five machines measured.
+const GATHER_COSTS_LONG: Duration = Duration::from_millis(600);
+
+/// The solve ahead is this many times the cost of finding the faster form,
+/// or the form is not looked for: a sixteenth of the solve is spent to save
+/// a third of it, or three quarters, or nothing. A policy, a power of two.
+const TRIAL_REPAID: u32 = 16;
+
+/// Whether a solve with `ahead` iterations to go, of `iteration` each, is
+/// long enough to repay finding the faster form of its products.
+fn repays(iteration: Duration, ahead: usize) -> bool {
+    let ahead = iteration.saturating_mul(u32::try_from(ahead).unwrap_or(u32::MAX));
+    let trial = GATHER_COSTS_LONG.saturating_add(iteration.saturating_mul(TRIAL_ITERATIONS));
+    ahead >= trial.saturating_mul(TRIAL_REPAID)
+}
+
 /// The workers each thread wakes as a pass begins: the caller the first of
 /// them, and each of those the ones after it, so the last of 128 is woken
 /// fourth in a chain and not last of 128 by the caller. On the same matrix
@@ -836,6 +1154,16 @@ impl Pace {
         }
     }
 
+    /// A pace that keeps to `threads` threads and looks for no other count:
+    /// for passes timed against each other.
+    fn held(threads: usize) -> Self {
+        Self {
+            most: 1,
+            threads,
+            ..Self::new(1)
+        }
+    }
+
     /// A pass on [`Self::threads`] took `pass`.
     fn timed(&mut self, pass: Duration) {
         if self.most == 1 {
@@ -872,8 +1200,8 @@ impl Pace {
 }
 
 /// What a pass has each thread that runs it do, given the thread's number
-/// among the pool's.
-type Pass = Arc<dyn Fn(usize) + Send + Sync>;
+/// among the threads of the pass and how many they are.
+type Pass = Arc<dyn Fn(usize, usize) + Send + Sync>;
 
 /// The bits of [`Shared::begun`] that count the workers of a pass; the
 /// bits above them count the passes.
@@ -930,7 +1258,9 @@ impl Shared {
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
             if let Some(pass) = pass {
-                let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pass(number)));
+                let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    pass(number, of_the_pass + 1);
+                }));
                 if let Err(payload) = ended {
                     self.panic
                         .lock()
@@ -1000,16 +1330,15 @@ impl FoldPool {
     }
 
     /// `pass` on as many threads of the pool as `pace` has it run on, each
-    /// given its number among the pool's, the caller's the last; and
-    /// `pace` told how long it took. A panic in it is resumed here once
-    /// every thread has left it.
-    fn pass(&self, pace: &Mutex<Pace>, pass: impl Fn(usize) + Send + Sync + 'static) {
+    /// given its number among them and how many they are, the caller the
+    /// last; and `pace` told how long it took. A panic in it is resumed
+    /// here once every thread has left it.
+    fn pass(&self, pace: &Mutex<Pace>, pass: impl Fn(usize, usize) + Send + Sync + 'static) {
         let began = Instant::now();
         let pace = || pace.lock().unwrap_or_else(PoisonError::into_inner);
         let workers = pace().threads.clamp(1, self.threads()) - 1;
-        let caller = self.handles.len();
         if workers == 0 {
-            pass(caller);
+            pass(0, 1);
             pace().timed(began.elapsed());
             return;
         }
@@ -1026,7 +1355,8 @@ impl FoldPool {
         for handle in self.handles[..workers].iter().take(WAKES) {
             handle.thread().unpark();
         }
-        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pass(caller)));
+        let ended =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pass(workers, workers + 1)));
         while shared.running.load(Ordering::Acquire) != 0 {
             std::thread::park();
         }
@@ -1045,27 +1375,17 @@ impl FoldPool {
         pace().timed(began.elapsed());
     }
 
-    /// One output word per index list: the XOR-fold of `input` at those
-    /// indices, written to `output`, the lists taken in the runs `runs`
-    /// bounds.
+    /// The sums of `entries` over `input`, written to `output`.
     ///
-    /// Each output word is an independent fold, so the result is the
-    /// inline fold's whatever the threads and whichever took each run.
-    fn fold(
-        &self,
-        pace: &Mutex<Pace>,
-        lists: &Arc<Lists>,
-        runs: &Arc<Vec<usize>>,
-        input: &Arc<Block>,
-        output: &Arc<Block>,
-    ) {
-        let (lists, runs) = (Arc::clone(lists), Arc::clone(runs));
+    /// Each output word is an independent sum, so the result is the sum on
+    /// one thread whatever the threads and whichever made each.
+    fn fold(&self, pace: &Mutex<Pace>, entries: Entries, input: &Arc<Block>, output: &Arc<Block>) {
         let (input, output) = (Arc::clone(input), Arc::clone(output));
         let taken = AtomicUsize::new(0);
-        self.pass(pace, move |_| {
-            while let Some((start, end)) = run(&runs, &taken) {
-                output.write(start, &fold_range(&lists, start, end, &input));
-            }
+        self.pass(pace, move |slot, slots| {
+            entries.each(&taken, (slot, slots), &input, |start, sums| {
+                output.write(start, sums);
+            });
         });
     }
 }
@@ -1466,6 +1786,7 @@ fn lanczos_observed<R: RandomSource + ?Sized>(
     let full_blocks = count / WIDTH;
     let ceiling = full_blocks + count / ROWS_PER_SPARE_ITERATION + SPARE_ITERATIONS_FLOOR;
     let mut iterations = 0usize;
+    let began = Instant::now();
     while any(&t0) {
         iterations += 1;
         if iterations > ceiling {
@@ -1533,6 +1854,12 @@ fn lanczos_observed<R: RandomSource + ?Sized>(
             std::mem::replace(&mut v1, std::mem::replace(&mut v0, next)),
         );
         products = matrix.apply_with_products(&v0, &q, &image, &av0);
+        if iterations == PACE_WINDOW {
+            // The blocks have been written once and the passes timed:
+            // what an iteration takes is known, and how many are ahead.
+            let iteration = began.elapsed() / PACE_WINDOW as u32;
+            matrix.choose(iteration, full_blocks.saturating_sub(iterations), &v0, &q);
+        }
         w2i = w1i;
         w1i = w0i;
         t1 = t0;
@@ -1577,8 +1904,8 @@ fn lanczos_observed<R: RandomSource + ?Sized>(
 mod tests {
     use super::{
         block_lanczos_dependencies, borrow_two, dense_null_space, fold_range, lanczos_observed,
-        prune_singletons, words_for, Block, FoldPool, Looking, Pace, Recurrence, Small,
-        SmallProduct, Sparse, PACE_HOLD, PACE_WINDOW, WIDTH, WORD,
+        prune_singletons, words_for, Block, Blocked, Entries, FoldPool, Lists, Looking, Pace,
+        Recurrence, Small, SmallProduct, Sparse, PACE_HOLD, PACE_WINDOW, WIDTH, WORD,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -1722,7 +2049,11 @@ mod tests {
         let pace = Mutex::new(Pace::new(THREADS));
         for _ in 0..REPEATS {
             let output = Block::zeroed(lists.len());
-            pool.fold(&pace, &lists, &runs, &input, &output);
+            let entries = Entries::Listed {
+                lists: Arc::clone(&lists),
+                runs: Arc::clone(&runs),
+            };
+            pool.fold(&pace, entries, &input, &output);
             assert_eq!(output.words().collect::<Vec<_>>(), expected);
         }
     }
@@ -1741,7 +2072,7 @@ mod tests {
         let ran = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&ran);
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pool.pass(&pace, move |thread| {
+            pool.pass(&pace, move |thread, _| {
                 counted.fetch_add(1, Ordering::Relaxed);
                 assert_ne!(thread, PANICS, "the pass panics on this thread");
             });
@@ -1749,7 +2080,7 @@ mod tests {
         assert!(caught.is_err());
         assert_eq!(ran.load(Ordering::Relaxed), THREADS);
         let counted = Arc::clone(&ran);
-        pool.pass(&pace, move |_| {
+        pool.pass(&pace, move |_, _| {
             counted.fetch_add(1, Ordering::Relaxed);
         });
         assert_eq!(ran.load(Ordering::Relaxed), 2 * THREADS);
@@ -1832,9 +2163,8 @@ mod tests {
         assert_eq!(settled(&mut pace, halved), (MOST, 2 * PACE_WINDOW));
     }
 
-    /// A pass runs on the threads its pace has, the first so many of the
-    /// pool's workers and the caller, and the pool runs the next on
-    /// others.
+    /// A pass runs on the threads its pace has, each given its number among
+    /// them and how many they are, and the pool runs the next on others.
     #[test]
     fn a_pass_runs_on_the_threads_its_pace_has() {
         /// Threads of the pool; more than [`super::WAKES`] and one, so
@@ -1849,11 +2179,12 @@ mod tests {
             pace.looking = Looking::Settled;
             let pace = Mutex::new(pace);
             let numbers = Arc::clone(&ran);
-            pool.pass(&pace, move |thread| numbers.lock().unwrap().push(thread));
-            let mut numbers = std::mem::take(&mut *ran.lock().unwrap());
+            pool.pass(&pace, move |slot, slots| {
+                numbers.lock().unwrap().push((slot, slots))
+            });
+            let mut numbers: Vec<(usize, usize)> = std::mem::take(&mut *ran.lock().unwrap());
             numbers.sort_unstable();
-            let mut expected: Vec<usize> = (0..threads - 1).collect();
-            expected.push(THREADS - 1);
+            let expected: Vec<(usize, usize)> = (0..threads).map(|slot| (slot, threads)).collect();
             assert_eq!(numbers, expected, "{threads} threads");
         }
     }
@@ -1914,7 +2245,11 @@ mod tests {
         let pool = FoldPool::new(WORKERS);
         let pace = Mutex::new(Pace::new(WORKERS));
         let output = Block::zeroed(lists.len());
-        pool.fold(&pace, &lists, &Arc::new(lists.cuts(RUNS)), &input, &output);
+        let entries = Entries::Listed {
+            lists: Arc::clone(&lists),
+            runs: Arc::new(lists.cuts(RUNS)),
+        };
+        pool.fold(&pace, entries, &input, &output);
         assert_eq!(output.words().collect::<Vec<_>>(), expected);
     }
 
@@ -1974,6 +2309,127 @@ mod tests {
             started.elapsed(),
             dependencies.map_or(0, |d| d.len())
         );
+    }
+
+    /// Lists of a sieve's shape: `lists` of them over `inputs` inputs, the
+    /// first few heavy and the rest light, ascending, some empty.
+    fn sieve_like_lists(seed: u64, lists: usize, inputs: usize) -> Vec<Vec<u32>> {
+        let mut state = seed;
+        (0..lists)
+            .map(|list| {
+                let weight = match list {
+                    0..=3 => inputs / 2,
+                    4..=40 => inputs / 20,
+                    _ => (lcg(&mut state) % 12) as usize,
+                };
+                let mut entries: Vec<u32> = (0..weight)
+                    .map(|_| (lcg(&mut state) % inputs as u64) as u32)
+                    .collect();
+                entries.sort_unstable();
+                entries.dedup();
+                entries
+            })
+            .collect()
+    }
+
+    /// Blocked entries sum to what the lists sum to, whatever the slice,
+    /// the parts and the shape: slices that cut the inputs unevenly, more
+    /// parts than lists, runs of every length, and gaps a byte cannot
+    /// hold, which sparse lists over a long slice make.
+    #[test]
+    fn blocked_entries_sum_as_the_lists_do() {
+        /// Arbitrary, fixed so a failure reproduces.
+        const SEED: u64 = 0x1357_9bdf_2468_ace0;
+        /// Inputs: not a multiple of any slice tried.
+        const INPUTS: usize = 10_007;
+        let input =
+            Block::of((0..INPUTS as u64).map(|word| word.wrapping_mul(0x9e37_79b9_7f4a_7c15)));
+        for (lists, seed) in [
+            (1usize, SEED),
+            (3, SEED + 1),
+            (700, SEED + 2),
+            (2_000, SEED + 3),
+        ] {
+            let lists = Lists::from_lists(&sieve_like_lists(seed, lists, INPUTS));
+            let expected = fold_range(&lists, 0, lists.len(), &input);
+            for slice in [64usize, 1_000, 4_096, INPUTS, 2 * INPUTS] {
+                for parts in [1usize, 3, 8] {
+                    let blocked = Blocked::new(&lists, INPUTS, parts, slice);
+                    let mut sums = vec![u64::MAX; lists.len()];
+                    for part in 0..blocked.parts.len() {
+                        blocked.fold(part, &input, |first, made| {
+                            sums[first..first + made.len()].copy_from_slice(made);
+                        });
+                    }
+                    assert_eq!(
+                        sums,
+                        expected,
+                        "{} lists, slice {slice}, {parts} parts",
+                        lists.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// A solve on blocked entries is the solve on lists: the same
+    /// dependencies from the same random words, the entries blocked in
+    /// slices small enough to be many.
+    #[test]
+    fn a_solve_on_blocked_entries_is_the_solve_on_lists() {
+        /// Arbitrary, fixed so a failure reproduces.
+        const MATRIX_SEED: u64 = 0x2468_ace0_1357_9bdf;
+        /// Arbitrary, fixed so a failure reproduces.
+        const SOLVE_SEED: u64 = 0xdead_beef_cafe_f00d;
+        /// Rows enough beyond the columns that the solve has dependencies
+        /// to return by the block, and lists enough for four threads.
+        const ROWS: usize = 4 * super::MINIMUM_FOLDS_PER_WORKER + 2 * WIDTH;
+        const COLUMNS: usize = ROWS - 2 * WIDTH;
+        /// Nonzeros drawn per row; arbitrary.
+        const WEIGHT: usize = 12;
+        /// A slice of the block: a hundred of them and more.
+        const SLICE: usize = 150;
+        let mut rng = TestRng(MATRIX_SEED);
+        let rows: Vec<Vec<u32>> = (0..ROWS)
+            .map(|_| {
+                let mut row: Vec<u32> = (0..WEIGHT)
+                    .map(|_| {
+                        let mut bytes = [0u8; 8];
+                        crate::random::RandomSource::fill_bytes(&mut rng, &mut bytes);
+                        (u64::from_le_bytes(bytes) % COLUMNS as u64) as u32
+                    })
+                    .collect();
+                row.sort_unstable();
+                row.dedup();
+                row
+            })
+            .collect();
+        let listed = Sparse::from_lists(rows.clone(), COLUMNS, 4);
+        let blocked = Sparse::from_lists(rows, COLUMNS, 4);
+        blocked.take(blocked.blocked(SLICE).expect("the entries are lists"));
+        assert!(blocked.blocked(SLICE).is_none(), "blocked twice");
+        let solved = |matrix: &Sparse| {
+            lanczos_observed(matrix, &mut TestRng(SOLVE_SEED), |_| true, &mut |_| {})
+        };
+        let dependencies = solved(&listed).expect("the solve finds dependencies");
+        assert!(!dependencies.is_empty());
+        assert_eq!(solved(&blocked), Some(dependencies));
+    }
+
+    /// The faster form is looked for when the solve ahead is long enough
+    /// to repay looking, and not otherwise.
+    #[test]
+    fn the_form_is_looked_for_when_the_solve_repays_it() {
+        let ms = Duration::from_millis;
+        // At 10 ms an iteration the trial is 0.6 s and 2.56 s: ten seconds
+        // of solve do not repay it, a hundred do.
+        assert!(!super::repays(ms(10), 1_000));
+        assert!(super::repays(ms(10), 10_000));
+        // At 1 ms, 0.6 s and 0.256 s: five seconds do not, a hundred do.
+        assert!(!super::repays(ms(1), 5_000));
+        assert!(super::repays(ms(1), 100_000));
+        // Nothing ahead repays nothing.
+        assert!(!super::repays(ms(100), 0));
     }
 
     /// A matrix whose columns lie among empty ones is solved as the matrix

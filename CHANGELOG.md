@@ -7,6 +7,17 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **Block Lanczos blocks its products' entries by the slice of the block
+  they gather from, where that is faster here.** A thread keeps a part of
+  the outputs and takes the slices in turn, so that the slice is in its
+  cache while it is gathered from; the slice is what `gather_costs` finds
+  cheap on this machine with every thread reading. Which form is faster
+  is the machine's to say: after the first sixteen iterations, when the
+  solve ahead repays the finding, both are timed and the faster kept.
+  RSA-120's solve is 95 s where it was 120 on 128 threads of two EPYC
+  7452, and 119 s where it would be 370 on twenty Cortex cores; an M4 Pro
+  keeps its lists. The dependencies are the same.
+
 - **`parallelism::gather_costs`.** What a word read from a place chosen at
   random costs on this machine, by the size of the block it is read from,
   with a number of threads reading at once, each from a block of its own;
