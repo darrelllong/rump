@@ -7,6 +7,15 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **Block Lanczos keeps the densest columns as a mask a relation.** The
+  128 heaviest columns of the matrix, a sieve's quadratic characters and
+  smallest primes, a third of its entries, leave the index lists for a
+  bit each in a sixteen-byte mask a relation, and both products take them
+  through byte tables, the Method of Four Russians: `Mᵀ·y` as a lookup a
+  byte, `M·x` as each thread's relations summed into tables of its own.
+  RSA-120's solve is a tenth shorter on an M4 Pro and on two EPYC 7452,
+  and the dependencies are the same.
+
 - **Block Lanczos blocks its products' entries by the slice of the block
   they gather from, where that is faster here.** A thread keeps a part of
   the outputs and takes the slices in turn, so that the slice is in its

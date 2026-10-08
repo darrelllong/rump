@@ -566,6 +566,121 @@ impl Entries {
     }
 }
 
+/// The densest columns, a mask a relation rather than entries in the lists.
+///
+/// A column that half the relations hold is an index and a gather in each
+/// of them as a list entry. As a bit of a byte it is one table lookup for
+/// eight columns at once, the Method of Four Russians, and `M·x` over the
+/// eight is one table a relation summed into. A sieve's matrix has a few
+/// hundred such columns, the quadratic characters and the smallest
+/// primes, holding a third of its entries.
+struct Dense {
+    /// The dense columns, a multiple of eight; zero for none.
+    count: usize,
+    /// Where they begin in a block over the columns: after the sparse.
+    first: usize,
+    /// Each relation's mask, `count / 8` bytes, relation after relation;
+    /// bit `i` of byte `b` is the dense column `8b + i`.
+    masks: Vec<u8>,
+}
+
+/// How many of the densest columns are held as masks: the most whose
+/// tables stay in the smallest first-level data cache of the hosts
+/// measured, 32 KB on an EPYC 7452, as `DENSE_COLUMNS / 8` tables of 256
+/// words are. Measured on the matrix of a 120-digit sieve (673 757 rows,
+/// 60.2 M entries, the 128 densest columns 37 per cent of them): the
+/// solve 88–94 s against 99–110 with 64 to 128 columns as masks on an M4
+/// Pro, and 94 against 96–110 on two EPYC 7452; no shorter at 256, where
+/// the tables are 64 KB; twice as long at 1 024, where they are 256 KB.
+const DENSE_COLUMNS: usize = 128;
+
+impl Dense {
+    /// Takes the densest columns out of the lists. `by_relation` keeps the
+    /// rest, numbered again in their order; `by_column` becomes the rest's
+    /// lists; the dense columns are numbered after them, heaviest first.
+    fn take(by_relation: &mut [Vec<u32>], by_column: &mut Vec<Vec<u32>>) -> Self {
+        let columns = by_column.len();
+        let count = DENSE_COLUMNS.min(columns / 8 * 8);
+        let sparse = columns - count;
+        let mut order: Vec<usize> = (0..columns).collect();
+        order.sort_unstable_by_key(|&c| core::cmp::Reverse((by_column[c].len(), c)));
+        // Each column's number, and a dense column's bit.
+        let mut number = vec![0u32; columns];
+        let mut bit = vec![usize::MAX; columns];
+        for (j, &c) in order[..count].iter().enumerate() {
+            bit[c] = j;
+            number[c] = (sparse + j) as u32;
+        }
+        let mut next = 0u32;
+        for c in 0..columns {
+            if bit[c] == usize::MAX {
+                number[c] = next;
+                next += 1;
+            }
+        }
+        let bytes = count / 8;
+        let mut masks = vec![0u8; by_relation.len() * bytes];
+        for (r, row) in by_relation.iter_mut().enumerate() {
+            row.retain(|&c| {
+                let b = bit[c as usize];
+                if b == usize::MAX {
+                    return true;
+                }
+                masks[r * bytes + b / 8] |= 1 << (b % 8);
+                false
+            });
+            for c in row.iter_mut() {
+                *c = number[*c as usize];
+            }
+        }
+        by_column.clear();
+        by_column.resize(sparse, Vec::new());
+        for (r, row) in by_relation.iter().enumerate() {
+            for &c in row {
+                by_column[c as usize].push(r as u32);
+            }
+        }
+        Self {
+            count,
+            first: sparse,
+            masks,
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        self.count / 8
+    }
+
+    fn mask(&self, relation: usize) -> &[u8] {
+        let bytes = self.bytes();
+        &self.masks[relation * bytes..(relation + 1) * bytes]
+    }
+
+    /// Tables of a block `y` over the columns: table `b` at `x` is the XOR
+    /// of the words of the dense columns `8b + i` over the bits `i` of `x`,
+    /// so a relation's part of `Mᵀ·y` from them is one lookup a byte.
+    fn tables(&self, y: &Block) -> Vec<[u64; 256]> {
+        (0..self.bytes())
+            .map(|b| {
+                let mut table = [0u64; 256];
+                for x in 1..256usize {
+                    let low = x.trailing_zeros() as usize;
+                    table[x] = table[x & (x - 1)] ^ y.word(self.first + 8 * b + low);
+                }
+                table
+            })
+            .collect()
+    }
+
+    /// The dense columns' part of `Mᵀ·y` at `relation`, from `tables`.
+    fn lookup(&self, tables: &[[u64; 256]], relation: usize) -> u64 {
+        self.mask(relation)
+            .iter()
+            .zip(tables)
+            .fold(0, |sum, (&byte, table)| sum ^ table[byte as usize])
+    }
+}
+
 /// The relation matrix `M`, held once by rows and once by columns.
 ///
 /// Both orientations are needed every iteration — `A = MᵀM` is two products —
@@ -581,6 +696,10 @@ struct Sparse {
     /// The bounds of the runs of relations the recurrence is taken in,
     /// each of about as many entries.
     relation_runs: Arc<Vec<usize>>,
+    /// The densest columns, out of the lists.
+    dense: Arc<Dense>,
+    /// How many threads the dense columns' part of `M·x` runs on.
+    dense_pace: Mutex<Pace>,
     /// Threads kept for the whole Lanczos recurrence, so no `A·x` spawns
     /// any.
     folds: FoldPool,
@@ -636,6 +755,7 @@ impl Sparse {
                 by_column[column as usize].push(index as u32);
             }
         }
+        let dense = Dense::take(&mut by_relation, &mut by_column);
         let relations = by_relation.len();
         let useful = (relations.max(columns) / MINIMUM_FOLDS_PER_WORKER).max(1);
         let threads = threads.min(crate::parallel::budget()).min(useful).max(1);
@@ -663,6 +783,8 @@ impl Sparse {
                 runs: column_runs,
             }),
             relation_runs,
+            dense: Arc::new(dense),
+            dense_pace: Mutex::new(Pace::new(threads)),
             folds: FoldPool::new(threads),
             forward_pace: Mutex::new(Pace::new(threads)),
             backward_pace: Mutex::new(Pace::new(threads)),
@@ -695,13 +817,77 @@ impl Sparse {
     fn forward(&self, x: &Arc<Block>, image: &Arc<Block>) {
         let (by_column, _) = self.entries();
         self.folds.fold(&self.forward_pace, by_column, x, image);
+        self.forward_dense(x, image);
+    }
+
+    /// The dense columns' words of `M·x` into `image`: each thread sums
+    /// its runs of relations into tables, a byte of the mask choosing the
+    /// entry, and the tables fold to the columns' words.
+    fn forward_dense(&self, x: &Arc<Block>, image: &Arc<Block>) {
+        let dense = Arc::clone(&self.dense);
+        let count = dense.count;
+        if count == 0 {
+            return;
+        }
+        let runs = Arc::clone(&self.relation_runs);
+        let x = Arc::clone(x);
+        let taken = AtomicUsize::new(0);
+        let shares: Arc<Vec<Mutex<Vec<u64>>>> = Arc::new(
+            (0..self.folds.threads())
+                .map(|_| Mutex::new(Vec::new()))
+                .collect(),
+        );
+        let made = Arc::clone(&shares);
+        self.folds.pass(&self.dense_pace, move |slot, _| {
+            let mut tables = vec![[0u64; 256]; dense.bytes()];
+            while let Some((start, end)) = run(&runs, &taken) {
+                for (relation, word) in (start..end).zip(x.range(start, end)) {
+                    for (table, &byte) in tables.iter_mut().zip(dense.mask(relation)) {
+                        table[byte as usize] ^= word;
+                    }
+                }
+            }
+            let mut columns = vec![0u64; count];
+            for (b, table) in tables.iter().enumerate() {
+                for (entry, &word) in table.iter().enumerate() {
+                    let mut bits = entry;
+                    while bits != 0 {
+                        columns[8 * b + bits.trailing_zeros() as usize] ^= word;
+                        bits &= bits - 1;
+                    }
+                }
+            }
+            *made[slot].lock().unwrap_or_else(PoisonError::into_inner) = columns;
+        });
+        let mut total = vec![0u64; count];
+        for share in shares.iter() {
+            let share = share.lock().unwrap_or_else(PoisonError::into_inner);
+            for (sum, word) in total.iter_mut().zip(share.iter()) {
+                *sum ^= word;
+            }
+        }
+        image.write(self.dense.first, &total);
     }
 
     /// `Mᵀ·y` into `out`: a block over the columns becomes one over the
     /// relations.
     fn backward(&self, y: &Arc<Block>, out: &Arc<Block>) {
         let (_, by_relation) = self.entries();
-        self.folds.fold(&self.backward_pace, by_relation, y, out);
+        let dense = Arc::clone(&self.dense);
+        let tables = Arc::new(dense.tables(y));
+        let (input, output) = (Arc::clone(y), Arc::clone(out));
+        let taken = AtomicUsize::new(0);
+        self.folds.pass(&self.backward_pace, move |slot, slots| {
+            let mut full = Vec::new();
+            by_relation.each(&taken, (slot, slots), &input, |start, sums| {
+                full.clear();
+                full.extend_from_slice(sums);
+                for (i, word) in full.iter_mut().enumerate() {
+                    *word ^= dense.lookup(&tables, start + i);
+                }
+                output.write(start, &full);
+            });
+        });
     }
 
     /// `A·x` with `A = MᵀM`, the symmetric operator the iteration runs on.
@@ -742,6 +928,9 @@ impl Sparse {
         [v, q, image, av]: [&Arc<Block>; 4],
     ) -> Products {
         self.folds.fold(paces.0, by_column, v, image);
+        self.forward_dense(v, image);
+        let dense = Arc::clone(&self.dense);
+        let tables = Arc::new(dense.tables(image));
         let shares: Arc<Vec<Mutex<Products>>> = Arc::new(
             (0..self.folds.threads())
                 .map(|_| Mutex::default())
@@ -753,7 +942,15 @@ impl Sparse {
         let made = Arc::clone(&shares);
         self.folds.pass(paces.1, move |slot, slots| {
             let (mut t, mut squared, mut projection) = (Dot::new(), Dot::new(), Dot::new());
+            let mut full = Vec::new();
             by_relation.each(&taken, (slot, slots), &image, |start, folded| {
+                // The lists' sums, and the dense columns' part of each.
+                full.clear();
+                full.extend_from_slice(folded);
+                for (i, word) in full.iter_mut().enumerate() {
+                    *word ^= dense.lookup(&tables, start + i);
+                }
+                let folded = &full[..];
                 let end = start + folded.len();
                 for ((&folded, v), q) in folded
                     .iter()
@@ -1905,7 +2102,8 @@ mod tests {
     use super::{
         block_lanczos_dependencies, borrow_two, dense_null_space, fold_range, lanczos_observed,
         prune_singletons, words_for, Block, Blocked, Entries, FoldPool, Lists, Looking, Pace,
-        Recurrence, Small, SmallProduct, Sparse, PACE_HOLD, PACE_WINDOW, WIDTH, WORD,
+        Recurrence, Small, SmallProduct, Sparse, DENSE_COLUMNS, PACE_HOLD, PACE_WINDOW, WIDTH,
+        WORD,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -1958,6 +2156,47 @@ mod tests {
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         *state
+    }
+
+    /// Rows over two hundred columns, the first sixteen held by half the
+    /// rows and the rest by few, so that columns of both kinds are among
+    /// the densest taken as masks; `A·x` must be what the lists give.
+    #[test]
+    fn the_dense_columns_fold_as_their_entries_did() {
+        const RELATIONS: usize = 3_000;
+        const COLUMNS: usize = 200;
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let rows: Vec<Vec<u32>> = (0..RELATIONS)
+            .map(|_| {
+                (0..COLUMNS as u32)
+                    .filter(|&c| {
+                        let draw = lcg(&mut state) % 100;
+                        if c < 16 {
+                            draw < 50
+                        } else {
+                            draw < 3
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let sparse = Sparse::from_lists(rows.clone(), COLUMNS, 3);
+        assert_eq!(
+            sparse.dense.count, DENSE_COLUMNS,
+            "the matrix has columns to spare"
+        );
+        let x = Block::of((0..RELATIONS).map(|_| lcg(&mut state)));
+        let out = sparse.apply(&x);
+        let mut image = vec![0u64; COLUMNS];
+        for (r, row) in rows.iter().enumerate() {
+            for &c in row {
+                image[c as usize] ^= x.word(r);
+            }
+        }
+        for (r, row) in rows.iter().enumerate() {
+            let want = row.iter().fold(0, |sum, &c| sum ^ image[c as usize]);
+            assert_eq!(out.word(r), want, "relation {r}");
+        }
     }
 
     #[test]

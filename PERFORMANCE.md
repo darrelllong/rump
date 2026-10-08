@@ -755,6 +755,34 @@ rows and a solve of nine seconds, is not worth the trial and is not tried.
 Twenty Cortex cores now solve as two EPYC 7452 do, and twelve of an M4
 Pro's nearly.
 
+### The densest columns as masks
+
+A sieve's matrix holds its entries unevenly: on RSA-120's, 673 757 rows
+and 60.2 M entries, the 32 densest columns, the quadratic characters,
+hold 17 per cent of them, the 128 densest 37 per cent and the 256
+densest 43, where the other 673 000 columns peak at a weight of
+thirteen. The densest are kept as a mask a relation rather than in the
+lists: `Mᵀ·y` over them is one table lookup a byte of the mask, the
+tables built from `y` once a pass, and `M·x` is each thread summing its
+relations into tables of its own by the mask's bytes, the Method of Four
+Russians both ways. The solve of RSA-120's matrix, the same 62
+dependencies from each, by how many of the densest columns are masks:
+
+| the solve | 0 | 32 | 64 | 96 | 128 | 256 | 1 024 | 2 048 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| the Mac, 12 threads | 99–110 s | 103 | 91 | 89 | 94 | 109 | 470 | 1 059 |
+| dennard, two EPYC 7452, 64 threads, loaded | 96–110 | | | | 94, 94 | 96, 97 | | |
+| moore, the same, 64 threads, loaded | 92 | | 112 | | | 92 | 214 | |
+
+A tenth off at 64 to 128 columns on both, and no more: the dense
+entries were the cheap ones. By column their lists are half the rows in
+order, a stream, and by relation their words are the same few hundred in
+every row, in the first-level cache; what the tables save is their
+indices. Past 128 columns the tables themselves leave that cache,
+`DENSE_COLUMNS / 8` of 2 KB each, and at 1 024 the solve is five times
+as long on the Mac. So 128, the most whose tables stay within the
+smallest first-level data cache of the hosts measured, the EPYC's 32 KB.
+
 ## What a read at random costs
 
 `parallelism::gather_costs`, the `gather_costs_timing` probe: nanoseconds a
