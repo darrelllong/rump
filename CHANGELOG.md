@@ -7,6 +7,12 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **`gf2::SparseMatrix::to_bytes` and `from_bytes`.** A matrix kept as
+  bytes and read back, so that a sieve's filtered matrix is solved again
+  without its relations or its filtering; `gf2::MatrixBytesError` says
+  why bytes were refused. The solver's timing probe (`lanczos_cost_probe`)
+  takes such a file through `LANCZOS_MATRIX`.
+
 - **Block Lanczos keeps the densest columns as a mask a relation.** The
   128 heaviest columns of the matrix, a sieve's quadratic characters and
   smallest primes, a third of its entries, leave the index lists for a

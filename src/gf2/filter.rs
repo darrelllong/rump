@@ -177,6 +177,62 @@ impl SparseMatrix {
         self.rows.iter().map(Vec::len).sum()
     }
 
+    /// The matrix as bytes, to keep: `GF2M`, the row count, the width, and
+    /// each row's length and columns, every number a `u32` little-endian.
+    ///
+    /// A sieve's filtered matrix kept so is solved again without its
+    /// relations or its filtering, which is how a solver is measured.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the row count or the width does not fit `u32`, which the
+    /// solvers do not take either.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let word = |n: usize| u32::try_from(n).expect("the solvers index in thirty-two bits");
+        let mut bytes = Vec::with_capacity(12 + 4 * (self.rows.len() + self.nonzeros()));
+        bytes.extend_from_slice(MATRIX_MAGIC);
+        bytes.extend_from_slice(&word(self.rows.len()).to_le_bytes());
+        bytes.extend_from_slice(&word(self.columns).to_le_bytes());
+        for row in &self.rows {
+            bytes.extend_from_slice(&word(row.len()).to_le_bytes());
+            for &column in row {
+                bytes.extend_from_slice(&column.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    /// The matrix [`Self::to_bytes`] made `bytes` of.
+    ///
+    /// # Errors
+    ///
+    /// The bytes are not such a matrix: no header, fewer bytes than the
+    /// rows claim, or a row not strictly ascending below the width.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, MatrixBytesError> {
+        let mut words = bytes
+            .strip_prefix(MATRIX_MAGIC)
+            .ok_or(MatrixBytesError::Header)?
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("four bytes")) as usize);
+        let count = words.next().ok_or(MatrixBytesError::Header)?;
+        let columns = words.next().ok_or(MatrixBytesError::Header)?;
+        let mut rows = Vec::with_capacity(count);
+        for index in 0..count {
+            let length = words.next().ok_or(MatrixBytesError::Short)?;
+            let mut row = Vec::with_capacity(length);
+            for _ in 0..length {
+                let column = words.next().ok_or(MatrixBytesError::Short)?;
+                if column >= columns || row.last().is_some_and(|&last| column <= last as usize) {
+                    return Err(MatrixBytesError::Row(index));
+                }
+                row.push(column as u32);
+            }
+            rows.push(row);
+        }
+        Ok(Self { columns, rows })
+    }
+
     /// The rows packed one bit per column, for the dense solver.
     #[must_use]
     pub fn packed_rows(&self) -> Vec<Vec<u64>> {
@@ -194,6 +250,36 @@ impl SparseMatrix {
             .collect()
     }
 }
+
+/// The first four bytes of a matrix kept by [`SparseMatrix::to_bytes`].
+const MATRIX_MAGIC: &[u8; 4] = b"GF2M";
+
+/// Bytes handed to [`SparseMatrix::from_bytes`] that are not a matrix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum MatrixBytesError {
+    /// No `GF2M`, row count and width to begin with.
+    Header,
+    /// Fewer bytes than the rows claim.
+    Short,
+    /// The row at this index is not strictly ascending below the width.
+    Row(usize),
+}
+
+impl core::fmt::Display for MatrixBytesError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Header => f.write_str("not a GF(2) matrix: no header"),
+            Self::Short => f.write_str("not a GF(2) matrix: fewer bytes than its rows claim"),
+            Self::Row(index) => write!(
+                f,
+                "not a GF(2) matrix: row {index} is not ascending below the width"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MatrixBytesError {}
 
 /// A filtered GF(2) matrix: rows merged and pruned, each carrying the set
 /// of original rows it is the sum of. [`filter_merge`] builds it.
@@ -936,6 +1022,49 @@ pub fn filter_merge(matrix: &SparseMatrix, weight_cap: usize, excess: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::super::dense_null_space;
+
+    #[test]
+    fn a_matrix_kept_as_bytes_is_the_matrix() {
+        let rows = vec![vec![0, 5, 9], vec![], vec![2, 3], vec![9]];
+        let matrix = SparseMatrix::new(10, rows.clone());
+        let bytes = matrix.to_bytes();
+        assert_eq!(&bytes[..4], b"GF2M");
+        assert_eq!(bytes.len(), 12 + 4 * (4 + 6));
+        let back = SparseMatrix::from_bytes(&bytes).expect("the bytes are the matrix's");
+        assert_eq!(back.columns(), 10);
+        assert_eq!(back.rows(), &rows[..]);
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_matrix_are_refused() {
+        let matrix = SparseMatrix::new(10, vec![vec![1, 4], vec![7]]);
+        let bytes = matrix.to_bytes();
+        assert_eq!(
+            SparseMatrix::from_bytes(b"GF2X"),
+            Err(MatrixBytesError::Header)
+        );
+        assert_eq!(
+            SparseMatrix::from_bytes(&bytes[..8]),
+            Err(MatrixBytesError::Header)
+        );
+        assert_eq!(
+            SparseMatrix::from_bytes(&bytes[..bytes.len() - 4]),
+            Err(MatrixBytesError::Short)
+        );
+        let mut descending = bytes.clone();
+        descending[16..20].copy_from_slice(&4u32.to_le_bytes());
+        descending[20..24].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(
+            SparseMatrix::from_bytes(&descending),
+            Err(MatrixBytesError::Row(0))
+        );
+        let mut wide = bytes;
+        wide[28..32].copy_from_slice(&10u32.to_le_bytes());
+        assert_eq!(
+            SparseMatrix::from_bytes(&wide),
+            Err(MatrixBytesError::Row(1))
+        );
+    }
     use super::*;
 
     /// The `fmix64` finalizer of MurmurHash3 (Appleby), so the low bits of

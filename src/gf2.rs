@@ -29,7 +29,7 @@ use crate::random::RandomSource;
 
 #[path = "gf2/filter.rs"]
 mod filter;
-pub use filter::{filter_merge, FilteredMatrix, SparseMatrix};
+pub use filter::{filter_merge, FilteredMatrix, MatrixBytesError, SparseMatrix};
 
 /// Bits per storage word.
 const WORD: usize = 64;
@@ -2515,6 +2515,27 @@ mod tests {
         const PROBE_EXCESS: usize = 2 * WIDTH;
         /// Arbitrary, fixed so a run reproduces.
         const SEED: u64 = 0x5eed_1234_abcd_ef01;
+        // A kept matrix (`SparseMatrix::to_bytes`) in place of the drawn one.
+        if let Some(path) = std::env::var_os("LANCZOS_MATRIX") {
+            let bytes = std::fs::read(&path).expect("the kept matrix is read");
+            let matrix = super::filter::SparseMatrix::from_bytes(&bytes).expect("a kept matrix");
+            let threads: usize = std::env::var("LANCZOS_THREADS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(PROBE_THREADS);
+            let mut rng = TestRng(SEED);
+            let started = std::time::Instant::now();
+            let dependencies = super::block_lanczos_dependencies_sparse(&matrix, &mut rng, threads);
+            eprintln!(
+                "lanczos {} x {}, {} nonzeros, {threads} threads: {:?}, {} dependencies",
+                matrix.rows().len(),
+                matrix.columns(),
+                matrix.nonzeros(),
+                started.elapsed(),
+                dependencies.map_or(0, |d| d.len())
+            );
+            return;
+        }
         let size: usize = std::env::var("LANCZOS_SIZE")
             .ok()
             .and_then(|s| s.parse().ok())
