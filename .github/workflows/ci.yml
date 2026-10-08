@@ -4,16 +4,25 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Run by hand on any branch, from the Actions tab or `gh workflow run`.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
+# bash on every runner, Windows included (Git Bash): the steps set
+# environment variables inline and call the repository's scripts.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # The release gate's portable legs, run in both feature configurations:
   # the default build (forbid(unsafe_code), nothing wiped) and --features
-  # wipe (deny(unsafe_code), drop-time scrub). The whitespace leg is
-  # meaningless on a clean checkout and the package leg needs no matrix, so
-  # it runs once below.
+  # wipe (deny(unsafe_code), drop-time scrub), on every operating system and
+  # architecture GitHub hosts: Linux, macOS and Windows, each on x86_64 and
+  # aarch64. The whitespace leg is meaningless on a clean checkout and the
+  # package leg needs no matrix, so it runs once below.
   test:
     name: ${{ matrix.os }} / ${{ matrix.rust }}
     runs-on: ${{ matrix.os }}
@@ -21,14 +30,41 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-latest       # x86_64 Linux
             rust: stable
-          - os: macos-latest
+          - os: ubuntu-24.04-arm    # aarch64 Linux
+            rust: stable
+          - os: macos-latest        # aarch64 macOS (Apple silicon)
+            rust: stable
+          - os: macos-15-intel      # x86_64 macOS
+            rust: stable
+          - os: windows-latest      # x86_64 Windows, MSVC
+            rust: stable
+          - os: windows-11-arm      # aarch64 Windows, MSVC
             rust: stable
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust ${{ matrix.rust }}
-        run: rustup toolchain install ${{ matrix.rust }} --profile minimal --component clippy,rustfmt && rustup default ${{ matrix.rust }}
+        # Every image but windows-11-arm ships rustup; where it is missing
+        # it is installed first, with no toolchain, and the toolchain below.
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            if [ "$RUNNER_OS" = Windows ]; then
+              arch=x86_64
+              [ "$RUNNER_ARCH" = ARM64 ] && arch=aarch64
+              curl -sSfLo rustup-init.exe "https://win.rustup.rs/$arch"
+              ./rustup-init.exe -y --profile minimal --default-toolchain none
+              rm -f rustup-init.exe
+              echo "$USERPROFILE\\.cargo\\bin" >> "$GITHUB_PATH"
+            else
+              curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+              echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            fi
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install ${{ matrix.rust }} --profile minimal --component clippy,rustfmt
+          rustup default ${{ matrix.rust }}
+          rustc -vV
       - uses: Swatinem/rust-cache@v2
       - name: fmt
         run: cargo fmt --all -- --check
@@ -65,19 +101,29 @@ jobs:
 
   # The 32-bit leg the crate root promises: every limb-count-to-bit-index
   # conversion is checked, and i686 is where that boundary is reachable.
-  # check, not test — the release gate's cross leg semantics.
+  # An x86_64 Linux runner executes i686 binaries, so with a 32-bit linker
+  # (gcc-multilib) the tests run rather than merely compile. In release, as
+  # the release gate's test-release leg: the suite takes twenty minutes
+  # unoptimized on a 64-bit runner and 32-bit code is slower still.
   cross-32bit:
     name: i686-unknown-linux-gnu / stable
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust with i686 target
-        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable && rustup target add i686-unknown-linux-gnu
+      - name: Install Rust with the i686 target and a 32-bit linker
+        run: |
+          rustup toolchain install stable --profile minimal && rustup default stable
+          rustup target add i686-unknown-linux-gnu
+          sudo apt-get update -q && sudo apt-get install -y -q gcc-multilib
       - uses: Swatinem/rust-cache@v2
       - name: check (default)
         run: cargo check --target i686-unknown-linux-gnu --all-targets
       - name: check (wipe)
         run: cargo check --target i686-unknown-linux-gnu --all-targets --features wipe
+      - name: test (default, release)
+        run: cargo test --release --target i686-unknown-linux-gnu --all-targets && cargo test --release --target i686-unknown-linux-gnu --doc
+      - name: test (wipe, release)
+        run: cargo test --release --target i686-unknown-linux-gnu --all-targets --features wipe
 
   # A breaking push should turn THIS repository's CI red, not the consumers'
   # next push. The downstream crates build and test against the exact rump

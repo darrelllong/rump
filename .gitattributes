@@ -1,0 +1,5 @@
+# Checked out with LF line endings on every platform, Windows included:
+# `cargo fmt --check`, the `include_str!` fixtures and the manual.tex
+# extractor then read the bytes as committed.
+* text=auto eol=lf
+*.pdf binary

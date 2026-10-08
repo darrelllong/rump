@@ -50,7 +50,9 @@
 //! on the target refuses rather than wrapping — on a 32-bit `usize` that
 //! boundary is reachable, at operands of roughly 537 MB for `len · 64` and
 //! 268 MB for `len · 128`, and on a 64-bit one it is not. There is no
-//! target-width rejection: 32-bit builds are supported and gated in CI.
+//! target-width rejection: 32-bit builds are supported, and CI runs the
+//! tests on `i686-unknown-linux-gnu` as well as on Linux, macOS and Windows,
+//! each on x86_64 and aarch64.
 //!
 //! Minimum supported Rust version: 1.87, for `u64::is_multiple_of` and
 //! `usize::is_multiple_of`. Recorded as `rust-version` in `Cargo.toml`.

@@ -18,7 +18,11 @@ Usage (from the repository root; `check_manual_tex.sh` wraps this):
 import re
 import sys
 
-tex = open(sys.argv[1]).read()
+# UTF-8 in and out whatever the platform's default: manual.tex is UTF-8, and
+# the program printed must be, for rustc. Windows defaults to a code page.
+sys.stdout.reconfigure(encoding="utf-8")
+with open(sys.argv[1], encoding="utf-8") as source:
+    tex = source.read()
 blocks = re.findall(r"\\begin\{lstlisting\}\n(.*?)\\end\{lstlisting\}", tex, re.S)
 
 imports = None

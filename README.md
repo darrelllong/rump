@@ -159,6 +159,11 @@ mutation-hardened: seeded defects in the quotient estimate, the REDC carry
 chain, and the reciprocity logic are caught, and the survivors are proven
 behavior-equivalent and documented in place.
 
+CI runs the whole suite, in the default build and under `--features wipe`,
+on Linux, macOS and Windows, each on x86_64 and aarch64, and on 32-bit
+`i686-unknown-linux-gnu`; `scripts/release_gate.sh` is the same set of legs
+run locally before a tag.
+
 ## Naming
 
 The repository and library are `rump`; the crates.io package is `rust-mp`

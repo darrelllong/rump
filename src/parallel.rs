@@ -224,16 +224,42 @@ mod tests {
         assert!(empty.is_empty());
     }
 
+    /// The budget seen on each thread that mapped an item, keyed by the
+    /// thread: the budgets of a fan-out's threads, each once, whichever
+    /// items each took from the cursor.
+    fn budgets_by_thread(items: usize, workers: usize) -> std::collections::BTreeMap<u64, usize> {
+        let items = vec![(); items];
+        let seen = map_ordered(&items, workers, |_, ()| (thread_key(), budget()));
+        let mut by_thread = std::collections::BTreeMap::new();
+        for (thread, share) in seen {
+            let known = by_thread.entry(thread).or_insert(share);
+            assert_eq!(*known, share, "a thread's budget holds for all its items");
+        }
+        by_thread
+    }
+
+    /// The calling thread, as a key: `ThreadId` has no order, and the
+    /// `as_u64` form is unstable.
+    fn thread_key() -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::thread::current().id().hash(&mut hasher);
+        hasher.finish()
+    }
+
     #[test]
     fn a_fan_outs_threads_share_its_budget() {
-        // Eight to share among four: two each, and the shares sum to no more
-        // than the whole. On a machine of fewer than eight the whole is the
-        // machine's and the shares are of that.
-        let items = [(); 4];
-        let (whole, shares) =
-            with_budget(8, || (budget(), map_ordered(&items, 4, |_, ()| budget())));
+        // Eight to share among four: two each, and the shares of the threads
+        // that ran sum to no more than the whole. On a machine of fewer than
+        // eight the whole is the machine's, the workers are no more than
+        // that, and the shares are of it; a share is counted once a thread,
+        // however many items the thread took from the cursor, which is what
+        // a machine of three ran into when the items were summed instead.
+        let (whole, by_thread) = with_budget(8, || (budget(), budgets_by_thread(4, 4)));
         let workers = 4.min(whole);
-        for share in &shares {
+        assert!(!by_thread.is_empty());
+        assert!(by_thread.len() <= workers);
+        for share in by_thread.values() {
             assert_eq!(
                 *share,
                 if workers <= 1 {
@@ -243,12 +269,123 @@ mod tests {
                 }
             );
         }
-        assert!(workers <= 1 || shares.iter().sum::<usize>() <= whole.max(workers));
+        assert!(by_thread.values().sum::<usize>() <= whole);
         // Nothing to share: the fan-out runs on the caller's thread, with the
         // caller's budget.
         assert_eq!(
             with_budget(8, || map_ordered(&[()], 4, |_, ()| budget())),
             [whole]
         );
+    }
+
+    #[test]
+    fn the_shares_are_within_the_whole_at_every_budget_and_width() {
+        // Every budget up to the machine's and past it, workers fewer than
+        // the budget, as many and more, and more items than workers so that
+        // a thread takes several: the threads that ran number no more than
+        // the budget or the workers, each has the share, and the shares sum
+        // to no more than the whole. A budget of three with four workers is
+        // the shape of a three-core runner; a budget of one is a fan-out
+        // that does not fan out.
+        for asked in (1..=machine()).chain([machine() + 1, 2 * machine() + 3]) {
+            for workers in [1usize, 2, 3, 4, 5, 8, 64] {
+                for items in [1usize, 2, 4, 7, 50] {
+                    let (whole, by_thread) =
+                        with_budget(asked, || (budget(), budgets_by_thread(items, workers)));
+                    assert_eq!(whole, asked.min(machine()));
+                    let running = workers.min(whole).min(items);
+                    let context = format!("budget {asked}, workers {workers}, items {items}");
+                    if running <= 1 {
+                        assert_eq!(by_thread.len(), 1, "{context}: on the caller's thread");
+                        assert_eq!(by_thread.values().next(), Some(&whole), "{context}");
+                        continue;
+                    }
+                    assert!(
+                        by_thread.len() <= running,
+                        "{context}: too many threads ran"
+                    );
+                    for share in by_thread.values() {
+                        assert_eq!(*share, (whole / running).max(1), "{context}");
+                        assert!(*share >= 1, "{context}: a budget is never zero");
+                    }
+                    assert!(
+                        by_thread.values().sum::<usize>() <= whole,
+                        "{context}: the shares exceed the whole"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_nested_fan_out_stays_within_the_outer_share() {
+        // A fan-out inside a fan-out's thread shares that thread's share,
+        // not the whole: the innermost budgets, summed over the threads of
+        // one outer thread, are within the outer thread's share, so the
+        // budgets of the threads running at once are within the whole.
+        let outer_items = [(); 2];
+        let (whole, leaves) = with_budget(usize::MAX, || {
+            let whole = budget();
+            let leaves = map_ordered(&outer_items, 2, |_, ()| {
+                let share = budget();
+                let inner = budgets_by_thread(6, 4);
+                (share, inner)
+            });
+            (whole, leaves)
+        });
+        assert_eq!(whole, machine());
+        let outer_running = 2.min(whole);
+        for (share, inner) in &leaves {
+            assert_eq!(*share, (whole / outer_running).max(1));
+            for inner_share in inner.values() {
+                assert!(
+                    *inner_share <= *share,
+                    "an inner budget exceeds its outer share"
+                );
+            }
+            assert!(
+                inner.values().sum::<usize>() <= *share,
+                "the inner shares {inner:?} exceed the outer share {share}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fan_out_leaves_the_callers_budget_as_it_was() {
+        // The workers' shares are the workers'; the caller's budget is the
+        // same after the fan-out as before, and so is the machine's default.
+        let items: Vec<u32> = (0..40).collect();
+        let (before, after) = with_budget(3, || {
+            let before = budget();
+            let mapped: Vec<u32> = map_ordered(&items, 3, |_, v| v + 1);
+            assert_eq!(mapped, (1..=40).collect::<Vec<u32>>());
+            (before, budget())
+        });
+        assert_eq!(before, after);
+        let unset = budget();
+        let mapped: Vec<u32> = map_ordered(&items, 3, |_, v| v + 1);
+        assert_eq!(mapped.len(), 40);
+        assert_eq!(budget(), unset);
+        assert_eq!(unset, machine());
+    }
+
+    #[test]
+    fn map_ordered_keeps_the_order_when_the_items_cost_unevenly() {
+        // Items that take unequal time are taken from the cursor out of
+        // step; the results come back in the items' order all the same.
+        let items: Vec<u64> = (0..64).collect();
+        let mapped = map_ordered(&items, 4, |index, v| {
+            // The last items spin longest, so a thread that took an early
+            // block finishes first and takes more.
+            let spins = if index % 7 == 0 { 20_000 } else { 10 };
+            let mut acc = *v;
+            for _ in 0..spins {
+                acc = acc.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            }
+            (index as u64, acc)
+        });
+        for (index, (seen, _)) in mapped.iter().enumerate() {
+            assert_eq!(*seen, index as u64);
+        }
     }
 }
