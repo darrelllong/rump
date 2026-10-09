@@ -121,7 +121,7 @@ pub mod modular {
 
 /// Divisibility, symbols, primality, reconstruction, and batching.
 pub mod number_theory {
-    pub use crate::modular_fixed::is_prime_u64;
+    pub use crate::modular_fixed::{is_prime_u64, is_strong_probable_prime_u64};
     pub use crate::number_theory_impl::{
         crt_combine, crt_combine_balanced, crt_combine_u64, gcd, gcd_extended, gcd_u128, gcd_u64,
         is_lucas_probable_prime, is_prime_aks, is_probable_prime, is_probable_prime_bpsw,

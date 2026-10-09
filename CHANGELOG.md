@@ -7,6 +7,11 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **`number_theory::is_strong_probable_prime_u64`.** One Miller–Rabin
+  round on a word to a chosen base, the round `is_prime_u64` takes twelve
+  of: for a caller that refuses what is probably prime and need not prove
+  it, at a twelfth of the cost on a prime.
+
 - **`gf2::SparseMatrix::to_bytes` and `from_bytes`.** A matrix kept as
   bytes and read back, so that a sieve's filtered matrix is solved again
   without its relations or its filtering; `gf2::MatrixBytesError` says

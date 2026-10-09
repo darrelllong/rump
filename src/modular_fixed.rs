@@ -410,6 +410,42 @@ const PRIME_BELOW_2_128: u128 = u128::MAX - 158;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A prime passes every base; the smallest strong pseudoprimes to base
+    /// 2 (2047 = 23·89, 3277, 4033, 4681, 8321: Pomerance, Selfridge &
+    /// Wagstaff, Math. Comp. 35 (1980), 1003–1026) pass base 2 and fail
+    /// the twelve; and the round agrees with the twelve-base test on every
+    /// odd word of a range.
+    #[test]
+    fn a_strong_probable_prime_round_refuses_composites_but_not_pseudoprimes() {
+        for prime in [
+            3u64,
+            5,
+            7,
+            65_537,
+            4_294_967_291,
+            18_446_744_073_709_551_557,
+        ] {
+            for base in [2u64, 3, 37].into_iter().filter(|&base| base < prime) {
+                assert!(
+                    is_strong_probable_prime_u64(prime, base),
+                    "{prime} to {base}"
+                );
+            }
+        }
+        for pseudoprime in [2047u64, 3277, 4033, 4681, 8321] {
+            assert!(
+                is_strong_probable_prime_u64(pseudoprime, 2),
+                "{pseudoprime}"
+            );
+            assert!(!is_prime_u64(pseudoprime), "{pseudoprime}");
+        }
+        for candidate in (1_000_001u64..1_010_001).step_by(2) {
+            let twelve = is_prime_u64(candidate);
+            let two = is_strong_probable_prime_u64(candidate, 2);
+            assert!(two || !twelve, "{candidate}: a prime failed base 2");
+        }
+    }
     use crate::BigUint;
 
     /// Seeds, one per test: arbitrary, fixed so a failure reproduces. The
@@ -817,24 +853,57 @@ pub fn is_prime_u64(candidate: u64) -> bool {
         }
     }
     let domain = Montgomery64::new(candidate).expect("odd: even candidates fell to the base 2");
-    // candidate − 1 = 2^s · d with d odd.
+    MILLER_RABIN_BASES
+        .iter()
+        .all(|&base| strong_probable_prime_round(&domain, base))
+}
+
+/// Whether an odd `u64` above the base is a strong probable prime to one
+/// `base`: Miller–Rabin's single round, for a caller that refuses what is
+/// probably prime and need not prove it.
+///
+/// A prime always passes. A composite passes a base with probability under
+/// a quarter (Rabin), and the composites that pass base 2 below 2⁶⁴ are
+/// 31 894 014 of them (Feitsma & Galway, *Tables of pseudoprimes and
+/// related data*, 2013), one odd integer in 2.9×10¹¹; a caller that
+/// refuses a probable prime refuses those too, at that rate. Twelve
+/// rounds decide primality: [`is_prime_u64`].
+///
+/// `base` is taken below `candidate`: a base the candidate divides is zero
+/// in the domain and fails the round, so a prime fails such a base.
+///
+/// # Panics
+///
+/// Panics if `candidate` is even or below 3.
+#[must_use]
+pub fn is_strong_probable_prime_u64(candidate: u64, base: u64) -> bool {
+    assert!(
+        candidate >= 3 && candidate & 1 == 1,
+        "{candidate}: a strong probable-prime round takes an odd candidate above two"
+    );
+    let domain = Montgomery64::new(candidate).expect("odd");
+    strong_probable_prime_round(&domain, base)
+}
+
+/// One round of Miller–Rabin in `domain`, to `base`: `candidate − 1 =
+/// 2^s · d` with `d` odd, and `base^d` is one, or some `base^(2^k · d)` for
+/// `k < s` is minus one.
+fn strong_probable_prime_round(domain: &Montgomery64, base: u64) -> bool {
+    let candidate = domain.modulus();
     let trailing = (candidate - 1).trailing_zeros();
     let odd_part = (candidate - 1) >> trailing;
     let minus_one = domain.sub(domain.zero(), domain.one());
-    'bases: for &base in &MILLER_RABIN_BASES {
-        let mut x = domain.pow(domain.enter(base), odd_part);
-        if x == domain.one() || x == minus_one {
-            continue;
-        }
-        for _ in 1..trailing {
-            x = domain.square(x);
-            if x == minus_one {
-                continue 'bases;
-            }
-        }
-        return false;
+    let mut x = domain.pow(domain.enter(base), odd_part);
+    if x == domain.one() || x == minus_one {
+        return true;
     }
-    true
+    for _ in 1..trailing {
+        x = domain.square(x);
+        if x == minus_one {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
