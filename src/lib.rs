@@ -1,61 +1,18 @@
-//! Multiprecision integer arithmetic implemented from the literature.
+//! Multiprecision integers, modular arithmetic, number theory, polynomials,
+//! finite fields, lattices, and sparse linear algebra. Implementations cite
+//! their sources at the relevant definitions; `CITATIONS.md` collects them.
 //!
-//! The kernels are auditable against their sources: Knuth's Algorithm D for division
-//! (*TAOCP* vol. 2, §4.3.1),
-//! Montgomery multiplication with an explicit public Montgomery domain
-//! (Montgomery 1985; Koç, Acar & Kaliski 1996), schoolbook, Karatsuba, and
-//! Toom–Cook and exact NTT multiplication, Lehmer's gcd (Knuth §4.5.2, Algorithm L) with
-//! subquadratic Half-GCD at scale (Möller, Math. Comp. 77 (2008)), and the
-//! Jacobi symbol carried through that same quotient sequence by a state
-//! machine (Schönhage's identities, as in GMP's `mpn_hgcd_jacobi`). Every
-//! algorithm carries its citation at its definition, and `CITATIONS.md`
-//! collects them.
+//! Operations are variable-time and intended for non-secret data. Sampling
+//! uses a caller-supplied generator; the crate chooses no entropy source.
 //!
-//! Around that integer core sit three layers with the same discipline:
-//! [`Gf2m`](crate::finite_field::Gf2m) for binary extension fields GF(2^m), [`PolyZ`](crate::polynomial::PolyZ)/[`PolyMod`](crate::polynomial::PolyMod) for
-//! univariate polynomials, and [`lll_reduce`](crate::lattice::lll_reduce) for lattice basis reduction.
+//! The default build forbids unsafe code and does not wipe buffers. The
+//! `wipe` feature permits volatile scrubbing of live integer limbs, abandoned
+//! limbs on in-place shrink, arithmetic workspaces, and sampler buffers.
+//! Spare capacity and buffers freed by reallocation are not covered. `Debug`
+//! exposes values, and wiping does not make arithmetic constant-time.
 //!
-//! The arithmetic and number theory are deterministic functions of their
-//! inputs; the sampling routines (`random_below` and friends) are driven by a
-//! caller-supplied generator and choose no entropy source of their own.
-//!
-//! Two properties define the intended use:
-//!
-//! - **Variable-time, for non-secret data.** Operations take data-dependent
-//!   paths; do not use them where timing must not leak secrets.
-//! - **Not a secret-scrubbing or constant-time type by default.** In the
-//!   default build nothing is wiped: values live in ordinary heap buffers,
-//!   freed memory keeps its contents, and `Debug` prints every limb. The
-//!   opt-in **`wipe` cargo feature** adds a drop-time scrub as cheap
-//!   defense in depth: every [`BigUint`] volatile-wipes its live limbs on
-//!   drop, the in-place shrink paths wipe the limbs they abandon, the
-//!   exponentiation ladder and the Montgomery workspaces wipe on exit, and
-//!   the samplers wipe their drawn byte buffers. Spare capacity and buffers
-//!   freed by reallocation are not wiped, `Debug` still prints every limb,
-//!   and none of it makes any operation constant-time. Constant-time
-//!   operation is out of scope; a consumer needing it adds it at its own
-//!   layer with a purpose-built representation.
-//!
-//! Safety policy: `#![forbid(unsafe_code)]` crate-wide in the default build,
-//! with no exceptions. `forbid` rather than `deny` because an inner `allow`
-//! cannot lift it. The `wipe` feature relaxes the attribute to `deny(unsafe_code)`
-//! because a volatile scrub cannot be expressed in safe Rust; the two
-//! `unsafe` sites it admits are the scrub helper in `src/scrub.rs` and the
-//! read-back test that verifies it. `#![deny(missing_docs)]`
-//! holds every public item to a doc comment, and `MANUAL.md` carries a worked,
-//! test-pinned example for each.
-//!
-//! Targets: portable. Every place that turns a limb count into a bit index
-//! goes through one checked multiplication, so an operand too wide to index
-//! on the target refuses rather than wrapping — on a 32-bit `usize` that
-//! boundary is reachable, at operands of roughly 537 MB for `len · 64` and
-//! 268 MB for `len · 128`, and on a 64-bit one it is not. There is no
-//! target-width rejection: 32-bit builds are supported, and CI runs the
-//! tests on `i686-unknown-linux-gnu` as well as on Linux, macOS and Windows,
-//! each on x86_64 and aarch64.
-//!
-//! Minimum supported Rust version: 1.87, for `u64::is_multiple_of` and
-//! `usize::is_multiple_of`. Recorded as `rust-version` in `Cargo.toml`.
+//! The crate supports 32- and 64-bit targets and requires Rust 1.87 or later.
+//! Index-size calculations are checked for overflow.
 //!
 //! ```
 //! use rump::{BigUint};
@@ -78,8 +35,7 @@
 #![cfg_attr(feature = "wipe", deny(unsafe_code))]
 #![deny(missing_docs)]
 
-// Implementation modules are private; every public path below is a facade, so
-// each exported item has exactly one public path, as NAMES.md requires.
+// Public facades follow the API ownership recorded in NAMES.md.
 mod bigint;
 #[path = "gf2.rs"]
 mod gf2_impl;

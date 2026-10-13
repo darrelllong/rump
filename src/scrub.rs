@@ -1,51 +1,18 @@
-//! Volatile zeroization behind the opt-in `wipe` feature.
-//!
-//! With the feature enabled this module holds the crate's sole non-test
-//! `unsafe` exception (the other site is the test probe that reads a
-//! scrubbed buffer's raw tail back; the crate root names both). Without the
-//! feature the helper is an empty inline function, every call site compiles
-//! to nothing, and the crate-wide `forbid(unsafe_code)` stands with no
-//! exceptions.
-//!
-//! The one primitive below lets [`crate::BigUint`] wipe its limbs on drop
-//! without a dependency. It overwrites memory the caller still owns and can
-//! address at the moment of the call. It is a hygiene measure against values
-//! lingering in freed heap blocks, not a side-channel countermeasure, and it
-//! does not make any operation in this crate constant-time.
+//! Optional volatile scrubbing of the caller's live slice. This is a no-op
+//! without `wipe`. It does not erase copies or make arithmetic constant-time.
 
 #[cfg(feature = "wipe")]
 use core::ptr;
 #[cfg(feature = "wipe")]
 use core::sync::atomic::{compiler_fence, Ordering};
 
-/// Overwrites every element of `slice` with its `Default` value.
+/// Overwrite each element with `T::default()` using volatile stores.
+/// Volatile writes prevent dead-store elimination of this overwrite; the
+/// compiler fence orders it before subsequent buffer reuse.
 ///
-/// Why volatile rather than `slice.fill(T::default())`: a store to memory
-/// that is about to be dropped or returned to the allocator is dead by the
-/// compiler's own reasoning, and the optimizer is entitled to delete it.
-/// `ptr::write_volatile` is specified as an externally observable effect, so
-/// the store must be emitted and may not be merged away; the trailing
-/// `compiler_fence(SeqCst)` bars the compiler from sinking those stores past
-/// the deallocation or buffer reuse that follows the call.
-///
-/// What the call guarantees: the addresses `slice` currently spans hold
-/// `T::default()` when it returns.
-///
-/// What it does not guarantee, and what a consumer must not read into it:
-///
-/// - **It does not follow a reallocation.** A `Vec` that grows copies its
-///   elements into a new block and releases the old one; the abandoned block
-///   still holds the original bytes, and no later scrub of the live buffer
-///   reaches them. Only the buffer passed in is touched.
-/// - **It does not touch spare capacity.** `slice` is the live elements; the
-///   tail between length and capacity, and any limbs stranded when a buffer
-///   is truncated without this helper being called on the abandoned range,
-///   keep their contents.
-/// - **It is not a side-channel control.** The loop is an ordinary
-///   data-independent walk, but it neither hides nor equalizes the timing of
-///   anything else, and it cannot recall copies already made elsewhere:
-///   register and stack spills, cache lines, pages written to swap, or a core
-///   dump taken before the call.
+/// Only the supplied slice is covered. Spare capacity, buffers abandoned by
+/// reallocation, prior copies, registers, swap, and earlier dumps are not.
+/// This is not a side-channel control.
 ///
 /// # Safety argument for the `unsafe` block
 ///
@@ -62,9 +29,7 @@ pub(crate) fn zeroize_slice<T: Copy + Default>(slice: &mut [T]) {
     compiler_fence(Ordering::SeqCst);
 }
 
-/// Without the `wipe` feature the scrub is a no-op the optimizer deletes, so
-/// call sites carry no `cfg` noise and the default build stays pure safe
-/// Rust under `forbid(unsafe_code)`.
+/// No-op in builds without `wipe`; callers need no feature conditionals.
 #[cfg(not(feature = "wipe"))]
 #[inline(always)]
 pub(crate) fn zeroize_slice<T: Copy + Default>(_slice: &mut [T]) {}

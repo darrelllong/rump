@@ -1,17 +1,9 @@
-//! How many threads the work on a thread may use, and fanning work out
-//! within that.
+//! Thread-local worker budgets for nested arithmetic.
 //!
-//! A routine that fans out cannot see who called it. A product tree asked
-//! for by one of eight threads, each of which was given a sixteenth of the
-//! machine, has a sixteenth of the machine to spend and not the whole of it;
-//! asking the operating system how many processors there are answers a
-//! different question. So each thread carries a budget: the machine's count
-//! until something narrows it, and a fan-out's share inside a fan-out. The
-//! budgets of the threads running at any moment then sum to no more than the
-//! budget the outermost caller had.
-//!
-//! The budget is a ceiling on threads running, not a reservation: a routine
-//! that has nothing to fan out spends one.
+//! Internal fan-outs divide the caller's budget among their workers. Callers
+//! that create their own threads must assign budgets with [`with_budget`];
+//! independent entry points do not share a global process-wide limit.
+//! A budget is a ceiling, not a reservation.
 
 use std::cell::Cell;
 
@@ -23,11 +15,9 @@ thread_local! {
 
 /// The machine's reported parallelism, asked once.
 ///
-/// [`std::thread::available_parallelism`] reads `/proc/self/cgroup` and the
-/// cgroup's CPU limits on every call on Linux, several file syscalls each
-/// time. The NTT asks on every large multiplication, where that cost
-/// dominates under many threads. The answer does not change within a process
-/// in any way this crate should react to, so it is taken once and kept.
+/// Cache the OS query because repeated Linux cgroup lookups were expensive
+/// in the multiplication path. Changes to affinity or CPU quotas after the
+/// first query are not reflected in this value.
 fn machine() -> usize {
     static MACHINE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *MACHINE
@@ -99,8 +89,8 @@ pub(crate) fn threads_for(work: usize) -> usize {
 /// The blocks a thread's share of the items is taken in. A thread that took
 /// its whole share at once would leave the others idle when its items were
 /// the costly ones, and one that took an item at a time would pay the cursor
-/// for each; eight blocks a thread bounds the idling at an eighth of a
-/// share.
+/// for each. Eight blocks per worker is a load-balancing heuristic; varying
+/// item costs prevent a bound on idle time from the block count alone.
 const BLOCKS_PER_WORKER: usize = 8;
 
 /// `map` over `items`, the results in the order of the items, on as many

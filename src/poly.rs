@@ -2539,16 +2539,10 @@ fn fold_xn_minus_one(coefficients: &[BigUint], degree: usize, modulus: &BigUint)
 /// coefficients low-to-high and reduced, normalized to drop trailing
 /// zeros.
 ///
-/// The modulus travels with the polynomial, and every binary operation
-/// asserts that the two moduli agree — a **hard `assert_eq!` in release as
-/// well as debug**, not a `debug_assert!`. The whole point of carrying the
-/// modulus in the value is that it cannot drift out of step with the
-/// coefficients; a debug-only check would let an optimized build combine an
-/// 𝔽ₚ element with an 𝔽_q one and hand back a result tagged with whichever
-/// of the two moduli the receiver happened to hold. The check runs before
-/// any short-circuit, so mismatched zero operands panic too. Affected:
-/// [`Self::add`], [`Self::sub`], [`Self::mul`], [`Self::div_rem`],
-/// [`Self::rem`], [`Self::gcd`], and [`Self::mod_pow`].
+/// Binary operations check that the moduli agree in both debug and release
+/// builds, before any zero shortcut. This applies to [`Self::add`],
+/// [`Self::sub`], [`Self::mul`], [`Self::div_rem`], [`Self::rem`],
+/// [`Self::gcd`], and [`Self::mod_pow`].
 ///
 /// Addition, subtraction, multiplication, scaling, and evaluation work for
 /// any `m ≥ 2`. The division-based operations — [`Self::div_rem`],

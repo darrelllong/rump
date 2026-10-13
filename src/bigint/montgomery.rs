@@ -870,11 +870,8 @@ impl MontgomeryContext {
 
     // ─── Crate-private raw kernels ─────────────────────────────────────
     //
-    // The public domain API is the residue type above. These take bare
-    // `BigUint`s and carry the reduced-operand contract in a debug
-    // assertion, which is only sound because every caller is in this
-    // crate and holds the invariant by construction. They are not, and
-    // must not become, public.
+    // These private kernels require reduced operands; debug assertions check
+    // the internal callers. Public callers use the checked residue API.
 
     pub(crate) fn mul_mont(&self, lhs: &BigUint, rhs: &BigUint) -> BigUint {
         debug_assert!(

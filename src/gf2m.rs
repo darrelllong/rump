@@ -6,10 +6,6 @@
 //! polynomial of degree `m`, stored with the same bit-pattern convention —
 //! and derives the degree from it, so the two can never disagree.
 //!
-//! Binary fields underlie the FIPS binary elliptic curves, and equally the
-//! algebra of error-correcting codes, CRCs, and LFSR analysis; this module
-//! supplies the arithmetic and takes no position on the application.
-//!
 //! ## The irreducibility contract
 //!
 //! [`Gf2m::new`] accepts any polynomial of degree at least one and does not
@@ -22,20 +18,16 @@
 //!
 //! - [`Gf2m::inverse`] returns `None` for the zero divisors, which are
 //!   non-zero elements.
-//! - Squaring is no longer injective, so [`Gf2m::sqrt`] returns a value that
+//! - Squaring can fail to be injective, so [`Gf2m::sqrt`] returns a value that
 //!   need not square back to its argument.
 //! - The Frobenius sum that defines the trace need not land in GF(2), so
 //!   [`Gf2m::trace`] has no meaningful value to report; [`Gf2m::half_trace`]
 //!   need not solve its quadratic, and [`Gf2m::solve_quadratic`] answers
 //!   `None` rather than a root it cannot verify.
 //!
-//! Every routine still terminates on such a ring — none loops, none indexes
-//! out of range — and only [`Gf2m::inverse`] and [`Gf2m::solve_quadratic`]
-//! have a defined answer there. Two break totality deliberately, in every
-//! build: [`Gf2m::trace`] panics when the Frobenius sum leaves GF(2), because
-//! the alternative is to report 0 and tell the caller a quadratic is solvable
-//! when it is not, and [`Gf2m::half_trace`] panics on an even degree, where it
-//! is not a solver at all.
+//! Ring operations still apply to reducible moduli, but field-specific
+//! identities need not hold. [`Gf2m::trace`] panics if the Frobenius sum
+//! leaves GF(2), and [`Gf2m::half_trace`] requires odd degree.
 //!
 //! ## Algorithm notes
 //!

@@ -23,9 +23,8 @@
 //!
 //! # When to stop
 //!
-//! A merge bound — eliminate columns up to weight `k` — is the usual
-//! knob, and it is the wrong shape: whether a merge pays depends on the
-//! fill it causes, not on the weight of the column. The solver this feeds
+//! Column weight limits planning work; fill determines the estimated benefit
+//! of a merge. The solver this feeds
 //! is Block Lanczos (Montgomery, *A block Lanczos algorithm for finding
 //! dependencies over GF(2)*, EUROCRYPT '95, LNCS 921, 106–120), whose cost
 //! is `rows/64` iterations of a pass over
@@ -38,16 +37,16 @@
 //! Δ · (rows − 1) < nonzeros
 //! ```
 //!
-//! — the fill must be less than the mean row weight. So the eliminations
-//! run in order of increasing fill, Markowitz's rule for a sparse
-//! elimination (*The elimination form of the inverse and its application
-//! to linear programming*, Management Science 3 (1957), 255–269), and stop
-//! at the first that would not pay. The threshold moves as the matrix
-//! densifies, and so do the fills, so the greedy order is exactly the
-//! descent of the solver's cost; no bound is needed, and the `weight_cap`
-//! argument only limits how many members a tree may have.
+//! The queue prioritizes estimated fill, in the spirit of Markowitz's sparse
+//! elimination rule (*The elimination form of the inverse and its application
+//! to linear programming*, Management Science 3 (1957), 255–269).
+//! Each chosen merge is revalidated and must decrease this cost proxy.
+//! Other queued keys can be stale overestimates, so stopping at the first
+//! rejected merge can miss profitable candidates. Neither the queue order
+//! nor the cost proxy establishes a global optimum. `weight_cap` bounds the
+//! number of members in a planned tree.
 //!
-//! # Correctness travels with the data
+//! # Dependency reconstruction
 //!
 //! Every surviving row records the set of original rows it is the sum of.
 //! A dependency over the filtered matrix expands to one over the original
@@ -894,8 +893,8 @@ impl Filter {
         }
     }
 
-    /// Fill-ordered elimination, stopping where the solver's cost would
-    /// rise; see the [module documentation](self).
+    /// Eliminate by queued fill estimates; stop at the first fresh plan
+    /// that would raise the cost proxy. See the [module documentation](self).
     fn merge(&mut self, weight_cap: usize) {
         let mut queue = Queue::new(&self.occupants, weight_cap.max(1));
         while let Some((key, column)) = queue.pop() {
@@ -922,12 +921,9 @@ impl Filter {
                 continue;
             }
 
-            // The cheapest remaining merge: does it pay? Every entry still
-            // queued has a key at least this one, and the keys are exact
-            // fills or the fills before a member changed — rows grow as
-            // they merge, so a stale key is nearly always an under-estimate
-            // — so when this merge does not pay, no remaining one is
-            // expected to.
+            // Stop when this fresh plan raises the cost proxy. Other keys
+            // can be stale overestimates, so this is a heuristic stopping
+            // rule, not proof that no profitable merge remains.
             if key.saturating_mul(self.live_rows as i64 - 1) >= self.nonzeros {
                 break;
             }

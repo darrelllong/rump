@@ -279,7 +279,7 @@ pub fn prune_singletons(rows: &[Vec<u64>], columns: usize) -> PrunedMatrix {
 }
 
 // ─── Block Lanczos ─────────────────────────────────────────────────────
-// Block Lanczos over GF(2): the null space without the cube.
+// Block Lanczos over GF(2).
 //
 // [`dense_null_space`] is Gauss–Jordan, which costs
 // `O(columns · rows · (rows + columns)/64)` and is blind to sparsity. Relation
@@ -328,7 +328,7 @@ pub fn prune_singletons(rows: &[Vec<u64>], columns: usize) -> PrunedMatrix {
 // `j ≤ i`; and the dependencies returned span the null space found by dense
 // elimination.
 //
-// # The two things that make it delicate
+// # Singular blocks and kernel recovery
 //
 // `Vᵢᵀ A Vᵢ` is usually singular over `GF(2)`, which is why a block method is
 // needed at all: [`invert`] selects a subspace `Sᵢ` on which it is not, and
@@ -344,10 +344,9 @@ pub fn prune_singletons(rows: &[Vec<u64>], columns: usize) -> PrunedMatrix {
 //
 // # Safety
 //
-// Nothing here is trusted. Every vector returned is checked to be a genuine
-// dependency of the caller's rows, and [`block_lanczos_dependencies`] returns `None` rather
-// than anything doubtful, leaving the caller on the exact solver. A wrong
-// answer is not among the outcomes.
+// Every returned vector is checked against the caller's rows. On failure,
+// [`block_lanczos_dependencies`] returns `None`, allowing the caller to use
+// the dense solver.
 
 /// Bits per word, and the block width: sixty-four vectors advance together.
 const WIDTH: usize = 64;

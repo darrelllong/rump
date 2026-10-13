@@ -1,48 +1,20 @@
-//! Random sampling of integers and probable primes.
+//! Random sampling of integers and probable primes using a caller-supplied
+//! [`RandomSource`]. The crate chooses no entropy source. Cryptographic
+//! callers must supply a suitable CSPRNG. With `wipe`, temporary byte buffers
+//! are scrubbed before return.
 //!
-//! rump chooses no entropy source: every function is driven by a
-//! caller-supplied [`RandomSource`], and the output is exactly as good as that
-//! source. Cryptographic callers must supply a CSPRNG, for example by
-//! bridging a DRBG to [`RandomSource`]; simulations may supply any
-//! deterministic generator. Temporary buffers holding drawn bytes are wiped
-//! before each sampler returns when the crate's `wipe` feature is enabled;
-//! the default build leaves them to the allocator.
+//! Rejection sampling avoids modular-reduction bias when draws are independent
+//! and uniform. It has no deterministic draw-count bound. Stall guards panic
+//! after sufficiently many rejections or repeated rejected candidates; their
+//! probability bounds assume independent uniform draws and are not proofs
+//! that the source is faulty.
 //!
-//! Every sampler here is a rejection sampler: it draws from an enclosing set
-//! that is easy to sample and discards draws outside the target set. This
-//! buys exact uniformity — no modular folding, so no bias toward the low end
-//! of the range — at the cost of a draw count that is a random variable
-//! rather than a bound. Termination is therefore a probabilistic property of
-//! the supplied generator, not a guarantee of the code. Each sampler carries
-//! a stall guard that panics rather than looping forever on the degenerate
-//! sources it can soundly detect — the posture
-//! `PolyMod::equal_degree_split` takes — and every guard is sized so a
-//! working generator trips it with probability at most `e⁻¹¹¹ ≈ 2⁻¹⁶⁰`
-//! (the loosest of the individual bounds; each function documents its
-//! own), so the panic is a diagnosis, never a sampling accident. What
-//! each guard can detect differs:
-//!
-//! - [`random_below`] and [`random_nonzero_below`] accept every draw with
-//!   probability at least one half regardless of arguments, so they bound
-//!   consecutive *rejections* and catch every degenerate source.
-//! - [`random_probable_prime`]'s acceptance density is a function of the
-//!   width alone, so its rejection bound scales with the width (`64·bits`)
-//!   and likewise catches every degenerate source; a *constant* generator
-//!   additionally fails fast, via a repeat detector that skips the
-//!   Miller–Rabin re-screen.
-//! - [`random_coprime_below`] is the one sampler where no *usable*
-//!   rejection count exists. A primorial modulus legitimately leaves 1 as
-//!   the only unit below the bound, so acceptance can be as thin as
-//!   `1/(upper − 1)`; the only sound count therefore scales with the
-//!   bound itself (Θ(upper) draws), which is unreachable for a
-//!   multiprecision bound. Its guard instead detects a *pinned* generator
-//!   (the same rejected candidate over and over); a degenerate source
-//!   that cycles among several rejected values is statistically
-//!   indistinguishable from a legitimately unlucky run against a sparse
-//!   unit set, does not trip the guard, and remains the caller's to
-//!   avoid.
-//!
-//! Degenerate *arguments* are still reported as `None`.
+//! [`random_below`] and [`random_nonzero_below`] bound consecutive rejections;
+//! [`random_probable_prime`] uses a width-dependent limit and a repeat guard.
+//! [`random_coprime_below`] only detects repeated rejected candidates because
+//! its acceptance density can be arbitrarily small. A source cycling among
+//! several rejected values can therefore make that sampler fail to terminate.
+//! Invalid bounds are reported as `None`.
 
 use crate::bigint::BigUint;
 use crate::number_theory_impl::{gcd, is_probable_prime};
@@ -55,9 +27,8 @@ use crate::number_theory_impl::{gcd, is_probable_prime};
 /// `PolyMod::equal_degree_split`'s stall guard.
 const MAX_REJECTED_DRAWS: usize = 256;
 
-/// Consecutive draws of the *same rejected candidate* after which a
-/// sampler declares the generator pinned — the signature no working
-/// generator produces. Whenever a rejection is possible at all the
+/// Consecutive draws of the same rejected candidate before the sampler
+/// reports a stalled source. Whenever rejection is possible, the
 /// candidate space holds at least two values, so independent uniform
 /// draws repeat the previous one with probability at most one half, and
 /// 256 consecutive repeats has probability at most `2⁻²⁵⁶` — the same
@@ -311,8 +282,9 @@ pub fn random_coprime_below<R: RandomSource + ?Sized>(
 /// the width, so a working generator survives it with probability about
 /// `(1 − 2/(bits·ln 2))^(64·bits) ≈ e⁻¹⁸⁵` by the asymptotic density, and
 /// below `e⁻¹¹¹` unconditionally at every width in range — and catches
-/// every degenerate source, including one cycling among several
-/// composites. The unconditional bound splits by width: for `bits ≥ 6`,
+/// a source that never produces an accepted candidate, including one cycling
+/// among composites. For independent uniform draws, the bound splits by width:
+/// for `bits ≥ 6`,
 /// `π(2x) − π(x) > (3/5)·x/ln x` (Rosser & Schoenfeld, *Approximate
 /// formulas for some functions of prime numbers*, Illinois J. Math. 6
 /// (1962), 64–94, Theorem 3's bounds combined; the inequality itself
