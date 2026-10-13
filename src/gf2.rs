@@ -733,7 +733,18 @@ impl Sparse {
     /// so `A` is the same `A`; and a matrix that has been filtered has ten
     /// of them to each that is set, which made the block of `M·x` eleven
     /// times as long and gave the fold of the empty lists to one worker.
-    fn from_lists(mut by_relation: Vec<Vec<u32>>, columns: usize, threads: usize) -> Self {
+    fn from_lists(by_relation: Vec<Vec<u32>>, columns: usize, threads: usize) -> Self {
+        Self::build(by_relation, columns, threads, true)
+    }
+
+    /// [`Self::from_lists`] for `M·x` alone: the entries by relation, which
+    /// only `Mᵀ·y` reads, are not kept, which is half the entries' memory.
+    /// `backward` and the Lanczos products are not to be called on it.
+    fn forward_only(by_relation: Vec<Vec<u32>>, columns: usize, threads: usize) -> Self {
+        Self::build(by_relation, columns, threads, false)
+    }
+
+    fn build(mut by_relation: Vec<Vec<u32>>, columns: usize, threads: usize, both: bool) -> Self {
         assert!(
             u32::try_from(by_relation.len()).is_ok() && u32::try_from(columns).is_ok(),
             "{} rows by {columns} columns: the solver indexes both in thirty-two bits",
@@ -772,6 +783,12 @@ impl Sparse {
             (Arc::new(lists), runs)
         };
         let (relation_lists, relation_runs) = listed(&by_relation);
+        let relation_lists = if both {
+            relation_lists
+        } else {
+            drop(by_relation);
+            Arc::new(Lists::from_lists(&[]))
+        };
         let (column_lists, column_runs) = listed(&by_column);
         Self {
             relations,
