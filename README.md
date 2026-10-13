@@ -59,8 +59,9 @@ ownership is recorded in [NAMES.md](NAMES.md).
   limit, and every returned vector is rechecked exactly.
 - **`gf2`** — linear algebra over GF(2) for sieve matrices: singleton
   pruning, structured Gaussian elimination (`filter_merge`), a dense null
-  space, and Block Lanczos (Montgomery 1995) on a sparse matrix, its
-  matrix products spread over retained workers.
+  space, Block Lanczos (Montgomery 1995) on a sparse matrix, its matrix
+  products spread over retained workers, and block Wiedemann (Coppersmith
+  1994) on the same matrix, on one host for now.
 - **`gfp`** — linear algebra over a large prime field GF(l): a sparse
   matrix whose entries are small integers, held with its `±1` entries apart
   so a row costs additions, and Wiedemann's algorithm for a kernel vector —

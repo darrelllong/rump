@@ -30,6 +30,9 @@ use crate::random::RandomSource;
 #[path = "gf2/filter.rs"]
 mod filter;
 pub use filter::{filter_merge, FilteredMatrix, MatrixBytesError, SparseMatrix};
+#[path = "gf2/wiedemann.rs"]
+mod wiedemann;
+pub use wiedemann::block_wiedemann_dependencies_sparse;
 
 /// Bits per storage word.
 const WORD: usize = 64;
