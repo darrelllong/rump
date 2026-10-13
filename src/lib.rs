@@ -102,7 +102,9 @@ pub mod gf2 {
     pub use crate::gf2_impl::{
         block_lanczos_dependencies, block_lanczos_dependencies_sparse,
         block_wiedemann_dependencies_sparse, dense_null_space, filter_merge, prune_singletons,
-        FilteredMatrix, MatrixBytesError, PrunedMatrix, SparseMatrix,
+        wiedemann_finish, wiedemann_generators, wiedemann_sequence, wiedemann_solution,
+        wiedemann_terms, FilteredMatrix, Generators, MatrixBytesError, PrunedMatrix, Sequence,
+        SparseMatrix, WiedemannBytesError,
     };
 }
 

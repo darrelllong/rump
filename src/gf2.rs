@@ -32,7 +32,11 @@ mod filter;
 pub use filter::{filter_merge, FilteredMatrix, MatrixBytesError, SparseMatrix};
 #[path = "gf2/wiedemann.rs"]
 mod wiedemann;
-pub use wiedemann::block_wiedemann_dependencies_sparse;
+pub use wiedemann::{
+    block_wiedemann_dependencies_sparse, wiedemann_finish, wiedemann_generators,
+    wiedemann_sequence, wiedemann_solution, wiedemann_terms, Generators, Sequence,
+    WiedemannBytesError,
+};
 
 /// Bits per storage word.
 const WORD: usize = 64;
