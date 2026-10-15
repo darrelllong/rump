@@ -531,6 +531,29 @@ cargo test --release --lib <probe_name> -- --ignored --nocapture
 
 and their output is not reproduced here.
 
+### A stage's twiddles as a table
+
+Until 2026-10-15 each butterfly loop carried its twiddle as a running
+power, one multiplication depending on the last, and ran at that
+multiplication's latency a pair. Now a stage builds its powers once, a
+table of at most 2^16 entries, and wider stages apply the table under
+each span's leading power. One multiplication of two 2^k-bit numbers,
+`rump mul` (the NTT from 2^24 bits; 2^22 is Toom-4):
+
+| bits | Cortex core (knuth, `taskset`), before | after | M4 Pro, 8 workers, before | after |
+|---:|---:|---:|---:|---:|
+| 2^22 | 0.197 s | 0.197 s | | |
+| 2^23 | | | 31.5 ms (`ntt_phase_profile`) | 21.7 ms |
+| 2^24 | 0.668 | 0.522 | | |
+| 2^26 | 2.92 | 2.23 | | |
+| 2^28 | 12.8 | 9.76 | | |
+
+GMP 6.3.0 on the same Cortex core takes 0.060, 0.38 and 1.37 s at 2^24,
+2^26 and 2^28 bits: what remains is the design, 16-bit digits convolved
+modulo two 31-bit primes, four times the transform length of 64-bit
+digits over three primes, and a scalar butterfly of some twenty
+instructions.
+
 ## Fanning out a tree's level
 
 A level of a product tree, a remainder tree or a CRT is independent

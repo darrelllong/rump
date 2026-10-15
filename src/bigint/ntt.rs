@@ -61,6 +61,14 @@ const DIF_INVERSE_MIN_LEN: usize = 1 << 19;
 // also stops thread launch from dominating their work.
 const PARALLEL_TRANSFORM_MIN_LEN: usize = 1 << 16;
 
+// A stage's twiddles are a table, not a running power: a power carried
+// through the loop is a dependency chain, and a stage ran at a
+// multiplication's latency a butterfly. The table is at most 2^16 entries
+// (512 KB, a core's second-level cache); a wider stage applies it under
+// each span's leading power, one more independent multiplication a
+// butterfly. Measured in PERFORMANCE.md ("Exact NTT multiplication").
+const TWIDDLE_TABLE_LEN: usize = 1 << 16;
+
 // Worker targets by transform length: each row is the longest transform it
 // serves and the target for it; a longer transform takes
 // MAX_WORKER_TARGET. Measured on deepcore (256 contexts) by
@@ -814,9 +822,10 @@ fn inverse_stage_root<const MODULUS: u64, const ROOT: u64>(width: usize) -> u64 
 fn inverse_dif_stages<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], mut width: usize) {
     while width >= 2 {
         let root = inverse_stage_root::<MODULUS, ROOT>(width);
+        let table = twiddles::<MODULUS>(root, width / 2);
         for block in values.chunks_exact_mut(width) {
             let (low, high) = block.split_at_mut(width / 2);
-            inverse_dif_pairs::<MODULUS>(low, high, root, 1);
+            stage_pairs::<MODULUS, true>(low, high, root, &table, 0);
         }
         width >>= 1;
     }
@@ -832,71 +841,20 @@ fn inverse_dif_joining_stage<const MODULUS: u64>(
     debug_assert!(blocks <= workers);
     debug_assert_eq!(workers % blocks, 0);
     let contexts_per_block = workers / blocks;
+    let table = twiddles::<MODULUS>(root, width / 2);
     std::thread::scope(|scope| {
         let mut block_slices = values.chunks_exact_mut(width);
         let caller_block = block_slices
             .next()
             .expect("a DIF joining stage has a caller block");
         for block in block_slices {
-            let _ =
-                scope.spawn(move || inverse_dif_block::<MODULUS>(block, root, contexts_per_block));
-        }
-        inverse_dif_block::<MODULUS>(caller_block, root, contexts_per_block);
-    });
-}
-
-fn inverse_dif_block<const MODULUS: u64>(block: &mut [u64], root: u64, contexts: usize) {
-    let (low, high) = block.split_at_mut(block.len() / 2);
-    debug_assert_eq!(low.len(), high.len());
-    debug_assert_eq!(low.len() % contexts, 0);
-    if contexts == 1 {
-        inverse_dif_pairs::<MODULUS>(low, high, root, 1);
-        return;
-    }
-
-    let chunk_len = low.len() / contexts;
-    std::thread::scope(|scope| {
-        let mut chunks = low
-            .chunks_exact_mut(chunk_len)
-            .zip(high.chunks_exact_mut(chunk_len));
-        let (caller_low, caller_high) = chunks
-            .next()
-            .expect("a parallel DIF butterfly has a caller chunk");
-        for (chunk, (low, high)) in chunks.enumerate() {
-            let start = (chunk + 1) * chunk_len;
+            let table = &table;
             let _ = scope.spawn(move || {
-                inverse_dif_pairs::<MODULUS>(
-                    low,
-                    high,
-                    root,
-                    pow_mod::<MODULUS>(root, start as u64),
-                )
+                stage_block::<MODULUS, true>(block, root, table, contexts_per_block)
             });
         }
-        inverse_dif_pairs::<MODULUS>(caller_low, caller_high, root, 1);
+        stage_block::<MODULUS, true>(caller_block, root, &table, contexts_per_block);
     });
-}
-
-fn inverse_dif_pairs<const MODULUS: u64>(
-    low: &mut [u64],
-    high: &mut [u64],
-    root: u64,
-    mut weight: u64,
-) {
-    debug_assert_eq!(low.len(), high.len());
-    for (even, odd) in low.iter_mut().zip(high) {
-        let lhs = *even;
-        let rhs = *odd;
-        let sum = lhs + rhs;
-        *even = if sum >= MODULUS { sum - MODULUS } else { sum };
-        let difference = if lhs >= rhs {
-            lhs - rhs
-        } else {
-            lhs + MODULUS - rhs
-        };
-        *odd = mul_mod::<MODULUS>(difference, weight);
-        weight = mul_mod::<MODULUS>(weight, root);
-    }
 }
 
 fn gather_bit_reversed_normalized<const MODULUS: u64>(
@@ -963,9 +921,10 @@ fn transform_stages<const MODULUS: u64, const ROOT: u64>(
         if inverse {
             root = pow_mod::<MODULUS>(root, MODULUS - 2);
         }
+        let table = twiddles::<MODULUS>(root, width / 2);
         for block in values.chunks_exact_mut(width) {
             let (low, high) = block.split_at_mut(width / 2);
-            butterfly_pairs::<MODULUS>(low, high, root, 1);
+            stage_pairs::<MODULUS, false>(low, high, root, &table, 0);
         }
         width <<= 1;
     }
@@ -991,27 +950,37 @@ fn transform_joining_stages<const MODULUS: u64, const ROOT: u64>(
         debug_assert!(blocks < workers);
         debug_assert_eq!(workers % blocks, 0);
         let contexts_per_block = workers / blocks;
+        let table = twiddles::<MODULUS>(root, width / 2);
         std::thread::scope(|scope| {
             let mut block_slices = values.chunks_exact_mut(width);
             let caller_block = block_slices
                 .next()
                 .expect("a joining stage has a caller block");
             for block in block_slices {
-                let _ = scope
-                    .spawn(move || butterfly_block::<MODULUS>(block, root, contexts_per_block));
+                let table = &table;
+                let _ = scope.spawn(move || {
+                    stage_block::<MODULUS, false>(block, root, table, contexts_per_block)
+                });
             }
-            butterfly_block::<MODULUS>(caller_block, root, contexts_per_block);
+            stage_block::<MODULUS, false>(caller_block, root, &table, contexts_per_block);
         });
         width <<= 1;
     }
 }
 
-fn butterfly_block<const MODULUS: u64>(block: &mut [u64], root: u64, contexts: usize) {
+/// One block of a stage, its pairs divided among `contexts` workers, each
+/// chunk from its own position in the stage's twiddles.
+fn stage_block<const MODULUS: u64, const DIF: bool>(
+    block: &mut [u64],
+    root: u64,
+    table: &[u64],
+    contexts: usize,
+) {
     let (low, high) = block.split_at_mut(block.len() / 2);
     debug_assert_eq!(low.len(), high.len());
     debug_assert_eq!(low.len() % contexts, 0);
     if contexts == 1 {
-        butterfly_pairs::<MODULUS>(low, high, root, 1);
+        stage_pairs::<MODULUS, DIF>(low, high, root, table, 0);
         return;
     }
 
@@ -1025,32 +994,101 @@ fn butterfly_block<const MODULUS: u64>(block: &mut [u64], root: u64, contexts: u
             .expect("a parallel butterfly has a caller chunk");
         for (chunk, (low, high)) in chunks.enumerate() {
             let start = (chunk + 1) * chunk_len;
-            let _ = scope.spawn(move || {
-                butterfly_pairs::<MODULUS>(low, high, root, pow_mod::<MODULUS>(root, start as u64))
-            });
+            let _ = scope.spawn(move || stage_pairs::<MODULUS, DIF>(low, high, root, table, start));
         }
-        butterfly_pairs::<MODULUS>(caller_low, caller_high, root, 1);
+        stage_pairs::<MODULUS, DIF>(caller_low, caller_high, root, table, 0);
     });
 }
 
-fn butterfly_pairs<const MODULUS: u64>(
+/// `root^0, root^1, …` up to `count` entries or [`TWIDDLE_TABLE_LEN`],
+/// whichever is fewer.
+fn twiddles<const MODULUS: u64>(root: u64, count: usize) -> Vec<u64> {
+    let count = count.min(TWIDDLE_TABLE_LEN);
+    let mut table = Vec::with_capacity(count);
+    let mut weight = 1u64;
+    for _ in 0..count {
+        table.push(weight);
+        weight = mul_mod::<MODULUS>(weight, root);
+    }
+    table
+}
+
+/// The butterflies of pairs `start..start + low.len()` of one stage, whose
+/// twiddle at pair `j` is `root^j`: `table` holds the first powers, and a
+/// pair past the table takes its entry under the power at its span's head.
+/// Spans and chunks are powers of two, so a chunk is whole spans or lies
+/// within one. Decimation in time applies the twiddle before the sum,
+/// decimation in frequency (`DIF`) after the difference.
+fn stage_pairs<const MODULUS: u64, const DIF: bool>(
     low: &mut [u64],
     high: &mut [u64],
     root: u64,
-    mut weight: u64,
+    table: &[u64],
+    start: usize,
 ) {
     debug_assert_eq!(low.len(), high.len());
-    for (even, odd) in low.iter_mut().zip(high) {
-        let lhs = *even;
-        let rhs = mul_mod::<MODULUS>(*odd, weight);
-        let sum = lhs + rhs;
-        *even = if sum >= MODULUS { sum - MODULUS } else { sum };
-        *odd = if lhs >= rhs {
-            lhs - rhs
+    let span = table.len();
+    let head = start - start % span;
+    let mut scale = pow_mod::<MODULUS>(root, head as u64);
+    let step = pow_mod::<MODULUS>(root, span as u64);
+    let mut position = start;
+    let mut offset = 0;
+    while offset < low.len() {
+        let within = position % span;
+        let take = (span - within).min(low.len() - offset);
+        let (low, high) = (
+            &mut low[offset..offset + take],
+            &mut high[offset..offset + take],
+        );
+        let table = &table[within..within + take];
+        if scale == 1 {
+            butterflies::<MODULUS, DIF, false>(low, high, table, 1);
         } else {
-            lhs + MODULUS - rhs
+            butterflies::<MODULUS, DIF, true>(low, high, table, scale);
+        }
+        offset += take;
+        position += take;
+        if position.is_multiple_of(span) {
+            scale = mul_mod::<MODULUS>(scale, step);
+        }
+    }
+}
+
+/// One span of butterflies with twiddles `table[j]`, times `scale` when
+/// `SCALED`. Nothing carries from one pair to the next.
+fn butterflies<const MODULUS: u64, const DIF: bool, const SCALED: bool>(
+    low: &mut [u64],
+    high: &mut [u64],
+    table: &[u64],
+    scale: u64,
+) {
+    for ((even, odd), &twiddle) in low.iter_mut().zip(high).zip(table) {
+        let weight = if SCALED {
+            mul_mod::<MODULUS>(twiddle, scale)
+        } else {
+            twiddle
         };
-        weight = mul_mod::<MODULUS>(weight, root);
+        let lhs = *even;
+        if DIF {
+            let rhs = *odd;
+            let sum = lhs + rhs;
+            *even = if sum >= MODULUS { sum - MODULUS } else { sum };
+            let difference = if lhs >= rhs {
+                lhs - rhs
+            } else {
+                lhs + MODULUS - rhs
+            };
+            *odd = mul_mod::<MODULUS>(difference, weight);
+        } else {
+            let rhs = mul_mod::<MODULUS>(*odd, weight);
+            let sum = lhs + rhs;
+            *even = if sum >= MODULUS { sum - MODULUS } else { sum };
+            *odd = if lhs >= rhs {
+                lhs - rhs
+            } else {
+                lhs + MODULUS - rhs
+            };
+        }
     }
 }
 
