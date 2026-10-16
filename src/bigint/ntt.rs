@@ -10,11 +10,13 @@
 //! *An Algorithm for the Machine Calculation of Complex Fourier Series*,
 //! Math. Comp. 19 (1965), 297–301. It is not the recursive Schönhage–Strassen
 //! scheme over Z/(2^n+1); the transform length is capped by the primes'
-//! 2-adic valuation rather than recursed. Digit expansion writes the forward
-//! transform's bit-reversed input directly. Scoped workers divide disjoint
-//! stages and butterfly lanes without exceeding the reported machine
-//! parallelism; squaring uses one transform buffer and pointwise
-//! self-products.
+//! 2-adic valuation rather than recursed. The forward transform is
+//! decimation in frequency, natural order in and bit-reversed out, and the
+//! inverse decimation in time, bit-reversed in and natural out, so that
+//! nothing is ever permuted: the pointwise product does not care for the
+//! order of the spectrum. Scoped workers divide disjoint stages and
+//! butterfly lanes without exceeding the reported machine parallelism;
+//! squaring uses one transform buffer and pointwise self-products.
 
 use super::BigUint;
 
@@ -51,11 +53,6 @@ const NEG_PRIME_0_INVERSE_MOD_1: u64 = 9;
 // multiplication") records the value but not the curve it was read from.
 const MIN_LINEAR_VALUES_PER_WORKER: usize = 1 << 18;
 
-// Below this length, the extra gather pass of the parallel DIF inverse costs
-// more than the in-place DIT inverse's serial permutation, as measured by
-// `ntt_worker_scaling_timing`.
-const DIF_INVERSE_MIN_LEN: usize = 1 << 19;
-
 // Below 2^16 coefficients the NTT loses to the recursive multiplication
 // ladder even with four contexts. Keeping forced small-kernel tests serial
 // also stops thread launch from dominating their work.
@@ -64,10 +61,19 @@ const PARALLEL_TRANSFORM_MIN_LEN: usize = 1 << 16;
 // A stage's twiddles are a table, not a running power: a power carried
 // through the loop is a dependency chain, and a stage ran at a
 // multiplication's latency a butterfly. The table is at most 2^16 entries
-// (512 KB, a core's second-level cache); a wider stage applies it under
-// each span's leading power, one more independent multiplication a
-// butterfly. Measured in PERFORMANCE.md ("Exact NTT multiplication").
+// (a megabyte with their quotients, a core's second-level cache); a wider
+// stage applies it under each span's leading power, one more independent
+// multiplication a butterfly. Measured in PERFORMANCE.md ("Exact NTT
+// multiplication").
 const TWIDDLE_TABLE_LEN: usize = 1 << 16;
+
+// A transform's stages run depth first over blocks of this many values, so
+// that a block's stages find it in cache: a stage at a time over the whole
+// array reads and writes it once a stage, and past the cache the transform
+// ran at memory's pace, 1.4 ns a butterfly at 2^21 values on an M4 Pro
+// against 0.9 at 2^17. A block of 2^14 values is 128 KB, inside a core's
+// second-level cache with its twiddles.
+const CACHE_BLOCK_LEN: usize = 1 << 14;
 
 // Worker targets by transform length: each row is the longest transform it
 // serves and the target for it; a longer transform takes
@@ -143,12 +149,12 @@ pub(super) fn square(value: &BigUint) -> BigUint {
     let workers = automatic_worker_count(transform_len);
 
     let mut values = vec![0u64; transform_len];
-    write_digits_bit_reversed(value, digit_len, &mut values, workers);
+    write_digits(value, digit_len, &mut values, workers);
     square_mod::<PRIME_0, ROOT_0>(&mut values, workers);
     let residues_0 = copy_residues(&values, convolution_len, workers);
 
     values.fill(0);
-    write_digits_bit_reversed(value, digit_len, &mut values, workers);
+    write_digits(value, digit_len, &mut values, workers);
     square_mod::<PRIME_1, ROOT_1>(&mut values, workers);
     reconstruct(&residues_0, &mut values, convolution_len, workers)
 }
@@ -214,27 +220,18 @@ fn multiply_impl_selecting_workers(
 
     let mut left = vec![0u64; transform_len];
     let mut right = vec![0u64; transform_len];
-    write_input_pair_bit_reversed(
+    write_input_pair(
         lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
     );
-    let result_in_right = convolve_mod::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
-    let residues_0 = if result_in_right {
-        copy_residues(&right, convolution_len, workers)
-    } else {
-        copy_residues(&left, convolution_len, workers)
-    };
+    convolve_mod::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
+    let residues_0 = copy_residues(&left, convolution_len, workers);
 
     clear_pair(&mut left, &mut right, workers);
-    write_input_pair_bit_reversed(
+    write_input_pair(
         lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
     );
-    let result_in_right = convolve_mod::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
-
-    if result_in_right {
-        reconstruct(&residues_0, &mut right, convolution_len, workers)
-    } else {
-        reconstruct(&residues_0, &mut left, convolution_len, workers)
-    }
+    convolve_mod::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
+    reconstruct(&residues_0, &mut left, convolution_len, workers)
 }
 
 /// Wall-clock phase breakdown for the ignored NTT profiling probe.
@@ -277,54 +274,46 @@ pub(super) fn multiply_profiled(
     let allocate = started.elapsed();
 
     let started = Instant::now();
-    write_input_pair_bit_reversed(
+    write_input_pair(
         lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
     );
     let mut prepare_inputs = started.elapsed();
 
     let started = Instant::now();
-    forward_transform_pair::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
+    forward_pair::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
     let mut forward = started.elapsed();
     let started = Instant::now();
     pointwise_multiply::<PRIME_0>(&mut left, &right, workers);
     let mut pointwise = started.elapsed();
     let started = Instant::now();
-    let result_in_right = inverse_product::<PRIME_0, ROOT_0>(&mut left, &mut right, workers);
+    transform_from_bit_reversed::<PRIME_0, ROOT_0>(&mut left, true, workers);
     let mut inverse = started.elapsed();
 
     let started = Instant::now();
-    let residues_0 = if result_in_right {
-        copy_residues(&right, convolution_len, workers)
-    } else {
-        copy_residues(&left, convolution_len, workers)
-    };
+    let residues_0 = copy_residues(&left, convolution_len, workers);
     let residue_copy = started.elapsed();
 
     let started = Instant::now();
     clear_pair(&mut left, &mut right, workers);
     let clear = started.elapsed();
     let started = Instant::now();
-    write_input_pair_bit_reversed(
+    write_input_pair(
         lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
     );
     prepare_inputs += started.elapsed();
 
     let started = Instant::now();
-    forward_transform_pair::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
+    forward_pair::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
     forward += started.elapsed();
     let started = Instant::now();
     pointwise_multiply::<PRIME_1>(&mut left, &right, workers);
     pointwise += started.elapsed();
     let started = Instant::now();
-    let result_in_right = inverse_product::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
+    transform_from_bit_reversed::<PRIME_1, ROOT_1>(&mut left, true, workers);
     inverse += started.elapsed();
 
     let started = Instant::now();
-    let product = if result_in_right {
-        reconstruct(&residues_0, &mut right, convolution_len, workers)
-    } else {
-        reconstruct(&residues_0, &mut left, convolution_len, workers)
-    };
+    let product = reconstruct(&residues_0, &mut left, convolution_len, workers);
     let reconstruct = started.elapsed();
 
     (
@@ -418,71 +407,35 @@ fn significant_digit_len(value: &BigUint) -> usize {
         .expect("NTT digit length fits usize")
 }
 
-/// Expand directly into the permutation expected by a decimation-in-time
-/// transform, saving four full-array bit-reversal passes per product. The
-/// destination must already be zero-filled.
-fn write_digits_bit_reversed(
-    value: &BigUint,
-    digit_len: usize,
-    digits: &mut [u64],
-    workers: usize,
-) {
-    debug_assert!(digits.len().is_power_of_two());
-    debug_assert!(workers.is_power_of_two() && workers <= digits.len());
-    if workers == 1 {
-        write_digit_segment_bit_reversed(value, digit_len, digits, 0, 1);
-        return;
-    }
-
-    let segment_len = digits.len() / workers;
+/// Expand a value's digits into the first `digit_len` places of a
+/// zero-filled transform input, in natural order, a run of digits a worker.
+fn write_digits(value: &BigUint, digit_len: usize, digits: &mut [u64], workers: usize) {
+    debug_assert!(digits.len() >= digit_len);
+    let digits = &mut digits[..digit_len];
+    let workers = linear_worker_count(digit_len.max(1), workers);
+    let chunk_len = digit_len.div_ceil(workers).max(1);
     std::thread::scope(|scope| {
-        let mut segments = digits.chunks_exact_mut(segment_len).enumerate();
-        let (caller_index, caller_segment) = segments
-            .next()
-            .expect("a non-empty transform has a caller input segment");
-        for (segment_index, segment) in segments {
-            let _ = scope.spawn(move || {
-                write_digit_segment_bit_reversed(value, digit_len, segment, segment_index, workers)
-            });
+        let mut chunks = digits.chunks_mut(chunk_len).enumerate();
+        let Some((caller_index, caller_chunk)) = chunks.next() else {
+            return;
+        };
+        for (chunk_index, chunk) in chunks {
+            let _ = scope.spawn(move || write_digit_run(value, chunk, chunk_index * chunk_len));
         }
-        write_digit_segment_bit_reversed(value, digit_len, caller_segment, caller_index, workers);
+        write_digit_run(value, caller_chunk, caller_index * chunk_len);
     });
 }
 
-/// Fill one aligned segment of a globally bit-reversed transform input.
-///
-/// Reversing an index swaps the high bits that select the destination segment
-/// with the low bits of the source index. Consequently segment `s` owns every
-/// source digit whose low `log2(workers)` bits equal `reverse(s)`. This gives
-/// each worker a disjoint mutable slice without locks or unsafe code.
-fn write_digit_segment_bit_reversed(
-    value: &BigUint,
-    digit_len: usize,
-    segment: &mut [u64],
-    segment_index: usize,
-    workers: usize,
-) {
-    let worker_bits = workers.ilog2();
-    let source_offset = if worker_bits == 0 {
-        0
-    } else {
-        segment_index.reverse_bits() >> (usize::BITS - worker_bits)
-    };
-    let segment_bits = segment.len().ilog2();
-    for source_index in (source_offset..digit_len).step_by(workers) {
-        let local_source = source_index >> worker_bits;
-        let destination = if segment_bits == 0 {
-            0
-        } else {
-            local_source.reverse_bits() >> (usize::BITS - segment_bits)
-        };
-        let limb = value.limbs[source_index / DIGITS_PER_LIMB];
-        let shift = DIGIT_BITS * (source_index % DIGITS_PER_LIMB);
-        segment[destination] = (limb >> shift) & DIGIT_MASK;
+/// Digits `first..first + run.len()` of `value`.
+fn write_digit_run(value: &BigUint, run: &mut [u64], first: usize) {
+    for (offset, digit) in run.iter_mut().enumerate() {
+        let index = first + offset;
+        let limb = value.limbs[index / DIGITS_PER_LIMB];
+        *digit = (limb >> (DIGIT_BITS * (index % DIGITS_PER_LIMB))) & DIGIT_MASK;
     }
 }
 
-fn write_input_pair_bit_reversed(
+fn write_input_pair(
     lhs: &BigUint,
     lhs_digits: usize,
     rhs: &BigUint,
@@ -493,15 +446,15 @@ fn write_input_pair_bit_reversed(
 ) {
     debug_assert_eq!(left.len(), right.len());
     if workers == 1 {
-        write_digits_bit_reversed(lhs, lhs_digits, left, 1);
-        write_digits_bit_reversed(rhs, rhs_digits, right, 1);
+        write_digits(lhs, lhs_digits, left, 1);
+        write_digits(rhs, rhs_digits, right, 1);
         return;
     }
 
     let input_workers = workers / 2;
     std::thread::scope(|scope| {
-        let _ = scope.spawn(|| write_digits_bit_reversed(lhs, lhs_digits, left, input_workers));
-        write_digits_bit_reversed(rhs, rhs_digits, right, input_workers);
+        let _ = scope.spawn(|| write_digits(lhs, lhs_digits, left, input_workers));
+        write_digits(rhs, rhs_digits, right, input_workers);
     });
 }
 
@@ -524,43 +477,28 @@ fn crt_two(residue_0: u64, residue_1: u64) -> u64 {
     residue_0 + PRIME_0 * multiplier
 }
 
+/// The cyclic convolution of `left` and `right` modulo `MODULUS`, left in
+/// `left` in natural order; `right` is spent.
 fn convolve_mod<const MODULUS: u64, const ROOT: u64>(
     left: &mut [u64],
     right: &mut [u64],
     workers: usize,
-) -> bool {
+) {
     debug_assert_eq!(left.len(), right.len());
-    forward_transform_pair::<MODULUS, ROOT>(left, right, workers);
+    forward_pair::<MODULUS, ROOT>(left, right, workers);
     pointwise_multiply::<MODULUS>(left, right, workers);
-    inverse_product::<MODULUS, ROOT>(left, right, workers)
+    transform_from_bit_reversed::<MODULUS, ROOT>(left, true, workers);
 }
 
-/// Invert the product and report whether its natural-order coefficients are
-/// in `right` (parallel DIF) or `left` (classic in-place DIT).
-fn inverse_product<const MODULUS: u64, const ROOT: u64>(
-    left: &mut [u64],
-    right: &mut [u64],
-    workers: usize,
-) -> bool {
-    if left.len() >= DIF_INVERSE_MIN_LEN {
-        // `right` is dead after the pointwise product, so it becomes the
-        // natural-order inverse output without another transform allocation.
-        inverse_to_natural::<MODULUS, ROOT>(left, right, workers);
-        true
-    } else {
-        transform::<MODULUS, ROOT>(left, true, workers);
-        false
-    }
-}
-
-fn forward_transform_pair<const MODULUS: u64, const ROOT: u64>(
+/// Both forward transforms, at once where there are workers to share.
+fn forward_pair<const MODULUS: u64, const ROOT: u64>(
     left: &mut [u64],
     right: &mut [u64],
     workers: usize,
 ) {
     if workers == 1 {
-        transform_from_bit_reversed::<MODULUS, ROOT>(left, false, 1);
-        transform_from_bit_reversed::<MODULUS, ROOT>(right, false, 1);
+        forward_dif::<MODULUS, ROOT>(left, 1);
+        forward_dif::<MODULUS, ROOT>(right, 1);
     } else {
         // The two forward transforms are independent. Running both at once
         // with half the worker budget removes one whole transform from the
@@ -568,10 +506,8 @@ fn forward_transform_pair<const MODULUS: u64, const ROOT: u64>(
         // The inverse has no independent peer and uses the full budget.
         let forward_workers = workers / 2;
         std::thread::scope(|scope| {
-            let _ = scope.spawn(|| {
-                transform_from_bit_reversed::<MODULUS, ROOT>(left, false, forward_workers)
-            });
-            transform_from_bit_reversed::<MODULUS, ROOT>(right, false, forward_workers);
+            let _ = scope.spawn(|| forward_dif::<MODULUS, ROOT>(left, forward_workers));
+            forward_dif::<MODULUS, ROOT>(right, forward_workers);
         });
     }
 }
@@ -664,7 +600,7 @@ fn parallel_fill_zero(values: &mut [u64], workers: usize) {
 }
 
 fn square_mod<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], max_contexts: usize) {
-    transform_from_bit_reversed::<MODULUS, ROOT>(values, false, max_contexts);
+    forward_dif::<MODULUS, ROOT>(values, max_contexts);
     let workers = linear_worker_count(values.len(), max_contexts);
     let chunk_len = values.len().div_ceil(workers);
     std::thread::scope(|scope| {
@@ -677,39 +613,13 @@ fn square_mod<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], max_conte
         }
         pointwise_square_chunk::<MODULUS>(caller_chunk);
     });
-    transform::<MODULUS, ROOT>(values, true, max_contexts);
+    transform_from_bit_reversed::<MODULUS, ROOT>(values, true, max_contexts);
 }
 
 fn pointwise_square_chunk<const MODULUS: u64>(values: &mut [u64]) {
     for value in values {
         *value = mul_mod::<MODULUS>(*value, *value);
     }
-}
-
-/// In-place iterative radix-2 Cooley–Tukey transform.
-fn transform<const MODULUS: u64, const ROOT: u64>(
-    values: &mut [u64],
-    inverse: bool,
-    max_contexts: usize,
-) {
-    debug_assert!(values.len().is_power_of_two());
-    debug_assert!((MODULUS - 1).is_multiple_of(values.len() as u64));
-
-    // Bit-reversal permutation, incrementally updating the reversed index.
-    let mut reversed = 0usize;
-    for index in 1..values.len() {
-        let mut bit = values.len() >> 1;
-        while reversed & bit != 0 {
-            reversed ^= bit;
-            bit >>= 1;
-        }
-        reversed ^= bit;
-        if index < reversed {
-            values.swap(index, reversed);
-        }
-    }
-
-    transform_from_bit_reversed::<MODULUS, ROOT>(values, inverse, max_contexts);
 }
 
 /// Transform input already in bit-reversed order into natural order.
@@ -766,18 +676,14 @@ fn transform_from_bit_reversed<const MODULUS: u64, const ROOT: u64>(
     }
 }
 
-/// Inverse a natural-order spectrum into natural-order coefficients.
+/// The forward transform by decimation in frequency: natural-order input to
+/// a bit-reversed spectrum, in place.
 ///
-/// A decimation-in-frequency inverse emits bit-reversed coefficients without
-/// a leading permutation. The final parallel gather both restores natural
-/// order and applies `n^-1`, replacing the serial bit-reversal and serial
-/// normalization passes used by the general in-place transform.
-fn inverse_to_natural<const MODULUS: u64, const ROOT: u64>(
-    values: &mut [u64],
-    output: &mut [u64],
-    max_contexts: usize,
-) {
-    debug_assert_eq!(values.len(), output.len());
+/// Wide stages cross the segments the workers retain, so they run first,
+/// each split over the workers; once the width reaches one segment the
+/// remaining stages are independent and each worker takes its segment to
+/// the end.
+fn forward_dif<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], max_contexts: usize) {
     debug_assert!(values.len().is_power_of_two());
     debug_assert!((MODULUS - 1).is_multiple_of(values.len() as u64));
 
@@ -785,13 +691,10 @@ fn inverse_to_natural<const MODULUS: u64, const ROOT: u64>(
     let workers = 1usize << worker_limit.ilog2();
     let segment_len = values.len() / workers;
 
-    // Wide DIF stages cross retained-segment boundaries, so execute them
-    // first. Once the width reaches one segment, all remaining stages are
-    // independent and each worker retains its slice to the end.
     let mut width = values.len();
     while width > segment_len {
-        let root = inverse_stage_root::<MODULUS, ROOT>(width);
-        inverse_dif_joining_stage::<MODULUS>(values, width, root, workers);
+        let root = stage_root::<MODULUS, ROOT>(width, false);
+        dif_joining_stage::<MODULUS>(values, width, root, workers);
         width >>= 1;
     }
     if workers > 1 {
@@ -799,39 +702,70 @@ fn inverse_to_natural<const MODULUS: u64, const ROOT: u64>(
             let mut segments = values.chunks_exact_mut(segment_len);
             let caller_segment = segments
                 .next()
-                .expect("a non-empty inverse transform has a caller segment");
+                .expect("a non-empty transform has a caller segment");
             for segment in segments {
-                let _ =
-                    scope.spawn(move || inverse_dif_stages::<MODULUS, ROOT>(segment, segment_len));
+                let _ = scope.spawn(move || dif_stages::<MODULUS, ROOT>(segment, segment_len));
             }
-            inverse_dif_stages::<MODULUS, ROOT>(caller_segment, segment_len);
+            dif_stages::<MODULUS, ROOT>(caller_segment, segment_len);
         });
     } else {
-        inverse_dif_stages::<MODULUS, ROOT>(values, segment_len);
+        dif_stages::<MODULUS, ROOT>(values, segment_len);
     }
-
-    let inverse_len = pow_mod::<MODULUS>(values.len() as u64, MODULUS - 2);
-    gather_bit_reversed_normalized::<MODULUS>(values, output, inverse_len, workers);
 }
 
-fn inverse_stage_root<const MODULUS: u64, const ROOT: u64>(width: usize) -> u64 {
+/// The root of a stage of `width`: a primitive `width`-th root of unity, or
+/// its inverse.
+fn stage_root<const MODULUS: u64, const ROOT: u64>(width: usize, inverse: bool) -> u64 {
     let forward = pow_mod::<MODULUS>(ROOT, (MODULUS - 1) / width as u64);
-    pow_mod::<MODULUS>(forward, MODULUS - 2)
+    if inverse {
+        pow_mod::<MODULUS>(forward, MODULUS - 2)
+    } else {
+        forward
+    }
 }
 
-fn inverse_dif_stages<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], mut width: usize) {
-    while width >= 2 {
-        let root = inverse_stage_root::<MODULUS, ROOT>(width);
-        let table = twiddles::<MODULUS>(root, width / 2);
-        for block in values.chunks_exact_mut(width) {
-            let (low, high) = block.split_at_mut(width / 2);
-            stage_pairs::<MODULUS, true>(low, high, root, &table, 0);
+/// The forward stages of widths `width` down to 2 over `values`,
+/// decimation in frequency, depth first as [`transform_stages`]: a wide
+/// span takes the stage that splits it, then each half.
+fn dif_stages<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], width: usize) {
+    if width < 2 {
+        return;
+    }
+    let tables = StageTables::new::<MODULUS, ROOT>(false, width);
+    dif_depth_first::<MODULUS>(values, width, &tables);
+}
+
+fn dif_depth_first<const MODULUS: u64>(values: &mut [u64], width: usize, tables: &StageTables) {
+    let len = values.len();
+    if len > CACHE_BLOCK_LEN {
+        let (low, high) = values.split_at_mut(len / 2);
+        if len <= width {
+            let (root, table) = tables.stage(len);
+            stage_pairs::<MODULUS, true>(low, high, root, table, 0);
+        }
+        dif_depth_first::<MODULUS>(low, width.min(low.len()), tables);
+        dif_depth_first::<MODULUS>(high, width.min(high.len()), tables);
+        return;
+    }
+    let mut width = width.min(values.len());
+    while width >= 4 {
+        let (root, table) = tables.stage(width);
+        if width / 2 <= table.len() {
+            stage_within_table::<MODULUS, true>(values, width, table);
+        } else {
+            for block in values.chunks_exact_mut(width) {
+                let (low, high) = block.split_at_mut(width / 2);
+                stage_pairs::<MODULUS, true>(low, high, root, table, 0);
+            }
         }
         width >>= 1;
     }
+    if width == 2 {
+        stage_of_pairs::<MODULUS, true>(values);
+    }
 }
 
-fn inverse_dif_joining_stage<const MODULUS: u64>(
+fn dif_joining_stage<const MODULUS: u64>(
     values: &mut [u64],
     width: usize,
     root: u64,
@@ -857,76 +791,113 @@ fn inverse_dif_joining_stage<const MODULUS: u64>(
     });
 }
 
-fn gather_bit_reversed_normalized<const MODULUS: u64>(
-    source: &[u64],
-    output: &mut [u64],
-    inverse_len: u64,
-    workers: usize,
-) {
-    let transform_bits = source.len().ilog2();
-    let chunk_len = output.len() / workers;
-    std::thread::scope(|scope| {
-        let mut chunks = output.chunks_exact_mut(chunk_len).enumerate();
-        let (caller_index, caller_chunk) = chunks
-            .next()
-            .expect("a non-empty inverse output has a caller chunk");
-        for (chunk_index, chunk) in chunks {
-            let start = chunk_index * chunk_len;
-            let _ = scope.spawn(move || {
-                gather_bit_reversed_chunk::<MODULUS>(
-                    source,
-                    chunk,
-                    start,
-                    transform_bits,
-                    inverse_len,
-                )
-            });
-        }
-        gather_bit_reversed_chunk::<MODULUS>(
-            source,
-            caller_chunk,
-            caller_index * chunk_len,
-            transform_bits,
-            inverse_len,
-        );
-    });
-}
-
-fn gather_bit_reversed_chunk<const MODULUS: u64>(
-    source: &[u64],
-    output: &mut [u64],
-    start: usize,
-    transform_bits: u32,
-    inverse_len: u64,
-) {
-    for (offset, value) in output.iter_mut().enumerate() {
-        let index = start + offset;
-        let reversed = if transform_bits == 0 {
-            0
-        } else {
-            index.reverse_bits() >> (usize::BITS - transform_bits)
-        };
-        *value = mul_mod::<MODULUS>(source[reversed], inverse_len);
-    }
-}
-
+/// The stages of widths `width..=final_width` over `values`, decimation in
+/// time, depth first: a span of [`CACHE_BLOCK_LEN`] values takes all its
+/// stages while it is in cache, and a wider span its two halves and then
+/// the stage that joins them.
 fn transform_stages<const MODULUS: u64, const ROOT: u64>(
     values: &mut [u64],
     inverse: bool,
-    mut width: usize,
+    width: usize,
     final_width: usize,
 ) {
-    while width <= final_width {
-        let mut root = pow_mod::<MODULUS>(ROOT, (MODULUS - 1) / width as u64);
-        if inverse {
-            root = pow_mod::<MODULUS>(root, MODULUS - 2);
+    if width > final_width {
+        return;
+    }
+    let tables = StageTables::new::<MODULUS, ROOT>(inverse, final_width);
+    dit_depth_first::<MODULUS>(values, width, final_width, &tables);
+}
+
+fn dit_depth_first<const MODULUS: u64>(
+    values: &mut [u64],
+    width: usize,
+    final_width: usize,
+    tables: &StageTables,
+) {
+    let len = values.len();
+    if len > CACHE_BLOCK_LEN && len > width {
+        let (low, high) = values.split_at_mut(len / 2);
+        dit_depth_first::<MODULUS>(low, width, final_width.min(low.len()), tables);
+        dit_depth_first::<MODULUS>(high, width, final_width.min(high.len()), tables);
+        if len <= final_width {
+            let (root, table) = tables.stage(len);
+            stage_pairs::<MODULUS, false>(low, high, root, table, 0);
         }
-        let table = twiddles::<MODULUS>(root, width / 2);
-        for block in values.chunks_exact_mut(width) {
-            let (low, high) = block.split_at_mut(width / 2);
-            stage_pairs::<MODULUS, false>(low, high, root, &table, 0);
+        return;
+    }
+    let final_width = final_width.min(values.len());
+    let mut width = width;
+    if width == 2 && final_width >= 2 {
+        stage_of_pairs::<MODULUS, false>(values);
+        width = 4;
+    }
+    while width <= final_width {
+        let (root, table) = tables.stage(width);
+        if width / 2 <= table.len() {
+            stage_within_table::<MODULUS, false>(values, width, table);
+        } else {
+            for block in values.chunks_exact_mut(width) {
+                let (low, high) = block.split_at_mut(width / 2);
+                stage_pairs::<MODULUS, false>(low, high, root, table, 0);
+            }
         }
         width <<= 1;
+    }
+}
+
+/// The stage of width two: its one twiddle is one, so a butterfly is a sum
+/// and a difference, the same in either decimation.
+fn stage_of_pairs<const MODULUS: u64, const DIF: bool>(values: &mut [u64]) {
+    for pair in values.chunks_exact_mut(2) {
+        let (lhs, rhs) = (pair[0], pair[1]);
+        let sum = lhs + rhs;
+        pair[0] = if sum >= MODULUS { sum - MODULUS } else { sum };
+        pair[1] = if lhs >= rhs {
+            lhs - rhs
+        } else {
+            lhs + MODULUS - rhs
+        };
+    }
+}
+
+/// One stage whose table covers it, every block in one loop: a call a
+/// stage, where a call a block cost a short stage more than its
+/// butterflies.
+fn stage_within_table<const MODULUS: u64, const DIF: bool>(
+    values: &mut [u64],
+    width: usize,
+    table: &[Twiddle],
+) {
+    let table = &table[..width / 2];
+    let one = Twiddle::new::<MODULUS>(1);
+    for block in values.chunks_exact_mut(width) {
+        let (low, high) = block.split_at_mut(width / 2);
+        butterflies::<MODULUS, DIF, false>(low, high, table, one);
+    }
+}
+
+/// Each stage's root and twiddle table, built once for a transform: the
+/// depth-first order visits a stage's width many times.
+struct StageTables {
+    /// Indexed by the stage's `log2(width)`.
+    stages: Vec<(u64, Vec<Twiddle>)>,
+}
+
+impl StageTables {
+    fn new<const MODULUS: u64, const ROOT: u64>(inverse: bool, final_width: usize) -> Self {
+        let stages = (0..=final_width.ilog2())
+            .map(|bits| {
+                let width = 1usize << bits;
+                let root = stage_root::<MODULUS, ROOT>(width, inverse);
+                (root, twiddles::<MODULUS>(root, width / 2))
+            })
+            .collect();
+        Self { stages }
+    }
+
+    fn stage(&self, width: usize) -> (u64, &[Twiddle]) {
+        let (root, table) = &self.stages[width.ilog2() as usize];
+        (*root, table)
     }
 }
 
@@ -942,10 +913,7 @@ fn transform_joining_stages<const MODULUS: u64, const ROOT: u64>(
     workers: usize,
 ) {
     while width <= values.len() {
-        let mut root = pow_mod::<MODULUS>(ROOT, (MODULUS - 1) / width as u64);
-        if inverse {
-            root = pow_mod::<MODULUS>(root, MODULUS - 2);
-        }
+        let root = stage_root::<MODULUS, ROOT>(width, inverse);
         let blocks = values.len() / width;
         debug_assert!(blocks < workers);
         debug_assert_eq!(workers % blocks, 0);
@@ -973,7 +941,7 @@ fn transform_joining_stages<const MODULUS: u64, const ROOT: u64>(
 fn stage_block<const MODULUS: u64, const DIF: bool>(
     block: &mut [u64],
     root: u64,
-    table: &[u64],
+    table: &[Twiddle],
     contexts: usize,
 ) {
     let (low, high) = block.split_at_mut(block.len() / 2);
@@ -1000,14 +968,52 @@ fn stage_block<const MODULUS: u64, const DIF: bool>(
     });
 }
 
+/// A fixed multiplier under a modulus with its quotient precomputed, so
+/// that a product by it reduces with one high multiplication and one
+/// subtraction in place of a division: Shoup's trick, as in V. Shoup's NTL
+/// and D. Harvey, *Faster arithmetic for number-theoretic transforms*, J.
+/// Symbolic Computation 60 (2014), 113–119.
+#[derive(Clone, Copy)]
+struct Twiddle {
+    value: u64,
+    /// `⌊value · 2⁶⁴ / MODULUS⌋`.
+    quotient: u64,
+}
+
+impl Twiddle {
+    fn new<const MODULUS: u64>(value: u64) -> Self {
+        debug_assert!(value < MODULUS);
+        Self {
+            value,
+            quotient: ((u128::from(value) << 64) / u128::from(MODULUS)) as u64,
+        }
+    }
+
+    /// `lhs · value mod MODULUS` for `lhs < MODULUS`: the quotient estimate
+    /// `⌊lhs · quotient / 2⁶⁴⌋` is the true quotient or one under it, so the
+    /// remainder is below `2 · MODULUS` and one subtraction settles it.
+    #[inline]
+    fn times<const MODULUS: u64>(self, lhs: u64) -> u64 {
+        let estimate = ((u128::from(lhs) * u128::from(self.quotient)) >> 64) as u64;
+        let remainder = lhs
+            .wrapping_mul(self.value)
+            .wrapping_sub(estimate.wrapping_mul(MODULUS));
+        if remainder >= MODULUS {
+            remainder - MODULUS
+        } else {
+            remainder
+        }
+    }
+}
+
 /// `root^0, root^1, …` up to `count` entries or [`TWIDDLE_TABLE_LEN`],
 /// whichever is fewer.
-fn twiddles<const MODULUS: u64>(root: u64, count: usize) -> Vec<u64> {
+fn twiddles<const MODULUS: u64>(root: u64, count: usize) -> Vec<Twiddle> {
     let count = count.min(TWIDDLE_TABLE_LEN);
     let mut table = Vec::with_capacity(count);
     let mut weight = 1u64;
     for _ in 0..count {
-        table.push(weight);
+        table.push(Twiddle::new::<MODULUS>(weight));
         weight = mul_mod::<MODULUS>(weight, root);
     }
     table
@@ -1023,11 +1029,23 @@ fn stage_pairs<const MODULUS: u64, const DIF: bool>(
     low: &mut [u64],
     high: &mut [u64],
     root: u64,
-    table: &[u64],
+    table: &[Twiddle],
     start: usize,
 ) {
     debug_assert_eq!(low.len(), high.len());
     let span = table.len();
+    if start == 0 && low.len() <= span {
+        // The common call: a stage no wider than its table, from its head.
+        // The powers of the general case cost more than a short stage's
+        // butterflies.
+        butterflies::<MODULUS, DIF, false>(
+            low,
+            high,
+            &table[..low.len()],
+            Twiddle::new::<MODULUS>(1),
+        );
+        return;
+    }
     let head = start - start % span;
     let mut scale = pow_mod::<MODULUS>(root, head as u64);
     let step = pow_mod::<MODULUS>(root, span as u64);
@@ -1042,9 +1060,9 @@ fn stage_pairs<const MODULUS: u64, const DIF: bool>(
         );
         let table = &table[within..within + take];
         if scale == 1 {
-            butterflies::<MODULUS, DIF, false>(low, high, table, 1);
+            butterflies::<MODULUS, DIF, false>(low, high, table, Twiddle::new::<MODULUS>(1));
         } else {
-            butterflies::<MODULUS, DIF, true>(low, high, table, scale);
+            butterflies::<MODULUS, DIF, true>(low, high, table, Twiddle::new::<MODULUS>(scale));
         }
         offset += take;
         position += take;
@@ -1055,19 +1073,16 @@ fn stage_pairs<const MODULUS: u64, const DIF: bool>(
 }
 
 /// One span of butterflies with twiddles `table[j]`, times `scale` when
-/// `SCALED`. Nothing carries from one pair to the next.
+/// `SCALED`: the scale is applied as a multiplication of its own, since
+/// both it and the twiddle carry a quotient and their product would not.
+/// Nothing carries from one pair to the next.
 fn butterflies<const MODULUS: u64, const DIF: bool, const SCALED: bool>(
     low: &mut [u64],
     high: &mut [u64],
-    table: &[u64],
-    scale: u64,
+    table: &[Twiddle],
+    scale: Twiddle,
 ) {
     for ((even, odd), &twiddle) in low.iter_mut().zip(high).zip(table) {
-        let weight = if SCALED {
-            mul_mod::<MODULUS>(twiddle, scale)
-        } else {
-            twiddle
-        };
         let lhs = *even;
         if DIF {
             let rhs = *odd;
@@ -1078,9 +1093,19 @@ fn butterflies<const MODULUS: u64, const DIF: bool, const SCALED: bool>(
             } else {
                 lhs + MODULUS - rhs
             };
-            *odd = mul_mod::<MODULUS>(difference, weight);
+            let twisted = twiddle.times::<MODULUS>(difference);
+            *odd = if SCALED {
+                scale.times::<MODULUS>(twisted)
+            } else {
+                twisted
+            };
         } else {
-            let rhs = mul_mod::<MODULUS>(*odd, weight);
+            let scaled = if SCALED {
+                scale.times::<MODULUS>(*odd)
+            } else {
+                *odd
+            };
+            let rhs = twiddle.times::<MODULUS>(scaled);
             let sum = lhs + rhs;
             *even = if sum >= MODULUS { sum - MODULUS } else { sum };
             *odd = if lhs >= rhs {
@@ -1137,8 +1162,6 @@ mod tests {
     /// Context limits, including the non-powers of two 3 and 5 that must
     /// round down to 2 and 4.
     const CONTEXT_LIMITS: [usize; 6] = [1, 2, 3, 4, 5, 8];
-    /// The same limits without the serial reference.
-    const PARALLEL_CONTEXT_LIMITS: [usize; 5] = [2, 3, 4, 5, 8];
     /// Worker counts for the bit-reversed input split: one, two and three
     /// segment bits.
     const INPUT_WORKER_COUNTS: [usize; 3] = [2, 4, 8];
@@ -1210,9 +1233,29 @@ mod tests {
         for len in ROUND_TRIP_LENS {
             let original = ramp(len, RAMP_STEP, RAMP_OFFSET);
             let mut transformed = original.clone();
-            transform::<PRIME_0, ROOT_0>(&mut transformed, false, 1);
-            transform::<PRIME_0, ROOT_0>(&mut transformed, true, 1);
+            forward_dif::<PRIME_0, ROOT_0>(&mut transformed, 1);
+            transform_from_bit_reversed::<PRIME_0, ROOT_0>(&mut transformed, true, 1);
             assert_eq!(transformed, original);
+        }
+    }
+
+    /// The spectrum is bit-reversed: the forward transform of a ramp agrees
+    /// with the sum `Σ x_k ω^{jk}` at the reversed index.
+    #[test]
+    fn the_forward_spectrum_is_bit_reversed() {
+        let len = 32;
+        let original = ramp(len, SECOND_RAMP_STEP, SECOND_RAMP_OFFSET);
+        let mut spectrum = original.clone();
+        forward_dif::<PRIME_0, ROOT_0>(&mut spectrum, 1);
+        let root = stage_root::<PRIME_0, ROOT_0>(len, false);
+        for j in 0..len {
+            let direct = (0..len).fold(0u64, |sum, k| {
+                let term =
+                    mul_mod::<PRIME_0>(original[k], pow_mod::<PRIME_0>(root, (j * k) as u64));
+                (sum + term) % PRIME_0
+            });
+            let reversed = j.reverse_bits() >> (usize::BITS - len.ilog2());
+            assert_eq!(spectrum[reversed], direct, "coefficient {j}");
         }
     }
 
@@ -1221,18 +1264,19 @@ mod tests {
         for len in DIF_LENS {
             let original = ramp(len, SECOND_RAMP_STEP, SECOND_RAMP_OFFSET);
             let mut spectrum = original.clone();
-            transform::<PRIME_0, ROOT_0>(&mut spectrum, false, 1);
+            forward_dif::<PRIME_0, ROOT_0>(&mut spectrum, 1);
             for contexts in CONTEXT_LIMITS {
-                let mut transformed = spectrum.clone();
-                let mut actual = vec![0u64; len];
-                inverse_to_natural::<PRIME_0, ROOT_0>(&mut transformed, &mut actual, contexts);
-                assert_eq!(actual, original, "DIF inverse at {contexts} contexts");
+                let mut parallel = original.clone();
+                forward_dif::<PRIME_0, ROOT_0>(&mut parallel, contexts);
+                assert_eq!(parallel, spectrum, "forward at {contexts} contexts");
+                transform_from_bit_reversed::<PRIME_0, ROOT_0>(&mut parallel, true, contexts);
+                assert_eq!(parallel, original, "inverse at {contexts} contexts");
             }
         }
     }
 
     #[test]
-    fn parallel_bit_reversed_input_matches_serial_for_partial_limbs() {
+    fn parallel_digit_input_matches_serial_for_partial_limbs() {
         // One digit; a full limb; a full limb under a one-digit top; a zero
         // limb inside and a partial top limb; and a five-limb value whose
         // zero limbs sit between non-zero ones.
@@ -1247,32 +1291,15 @@ mod tests {
             let digit_len = significant_digit_len(&value);
             let transform_len = (digit_len * 2).next_power_of_two();
             let mut expected = vec![0u64; transform_len];
-            write_digits_bit_reversed(&value, digit_len, &mut expected, 1);
+            write_digits(&value, digit_len, &mut expected, 1);
             for workers in INPUT_WORKER_COUNTS
                 .into_iter()
                 .filter(|&w| w <= transform_len)
             {
                 let mut actual = vec![0u64; transform_len];
-                write_digits_bit_reversed(&value, digit_len, &mut actual, workers);
-                assert_eq!(actual, expected, "bit-reversed input at {workers} workers");
+                write_digits(&value, digit_len, &mut actual, workers);
+                assert_eq!(actual, expected, "digit input at {workers} workers");
             }
-        }
-    }
-
-    #[test]
-    fn transform_is_independent_of_context_limit() {
-        let original = ramp(LONG_LEN, RAMP_STEP, RAMP_OFFSET);
-        let mut serial = original.clone();
-        transform::<PRIME_0, ROOT_0>(&mut serial, false, 1);
-        for contexts in PARALLEL_CONTEXT_LIMITS {
-            let mut parallel = original.clone();
-            transform::<PRIME_0, ROOT_0>(&mut parallel, false, contexts);
-            assert_eq!(parallel, serial, "forward transform at {contexts} contexts");
-            transform::<PRIME_0, ROOT_0>(&mut parallel, true, contexts);
-            assert_eq!(
-                parallel, original,
-                "inverse transform at {contexts} contexts"
-            );
         }
     }
 

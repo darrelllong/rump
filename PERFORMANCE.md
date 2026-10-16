@@ -554,6 +554,48 @@ modulo two 31-bit primes, four times the transform length of 64-bit
 digits over three primes, and a scalar butterfly of some twenty
 instructions.
 
+### No permutation, no call a block, no division a twiddle
+
+2026-10-16, measured with `ntt_phase_profile` at one worker. Four
+changes to the transform, each kept on its measurement:
+
+- **The twiddles carry a quotient** (`Twiddle`, Shoup's trick: `⌊w·2⁶⁴/p⌋`
+  beside `w`, a product by `w` reduced by one high multiplication and a
+  subtraction). A wide stage's span scale is applied as a multiplication
+  of its own, since a product of two such twiddles has no quotient.
+  2^20 bits on the M4 Pro 18.8 → 14.4 ms; nothing at 2^24 bits, where
+  the table of a megabyte and the passes over memory set the pace.
+- **Stages depth first over blocks of 2^14 values** (`CACHE_BLOCK_LEN`):
+  a span of a block takes all its stages in cache, a wider span its two
+  halves and the stage that joins them. Nothing on the M4 Pro, whose
+  second-level cache holds a 2^21 transform; on an EPYC 7452 core
+  (512 KB) 2^28 bits 14.0 → 13.4 s.
+- **A call a stage, not a block** (`stage_within_table`, `stage_of_pairs`):
+  a stage of width two was one butterfly behind two `pow_mod` calls and
+  a multiplication by one; now it is a sum and a difference, and a stage
+  within its table is one loop over its blocks. EPYC 2^24 bits 0.756 →
+  0.580 s, 2^28 13.4 → 10.6 s.
+- **Decimation in frequency forward, decimation in time back**
+  (`forward_dif`, `transform_from_bit_reversed`): the digits are written
+  in natural order, the spectrum comes out bit-reversed, the pointwise
+  product does not care, and the inverse takes the bit-reversed spectrum
+  back to natural order. The scatter of digits into bit-reversed places
+  (17 of 214 ms at 2^24 bits on the M4 Pro) and the inverse's gather
+  (its own pass over the array by reversed index) are gone with the
+  in-place permutation.
+
+| bits | M4 Pro core, before | after | EPYC 7452 core, before | after |
+|---:|---:|---:|---:|---:|
+| 2^20 | 18.8 ms | 9.2 ms | | |
+| 2^24 | 214 ms | 153 ms | 728 ms | 402 ms |
+| 2^28 | 4.61 s | 2.72 s | 14.0 s | 7.69 s |
+
+What remains is the butterfly itself, 1.4 ns on the M4 Pro and 3 ns on
+the EPYC where its instructions need about one: the wide joining stages,
+which sweep the whole array once each, and the scalar arithmetic. Radix
+four would halve the sweeps and the loads a butterfly; 32-bit residues
+would halve the bytes and open four lanes to the vector unit.
+
 ## Fanning out a tree's level
 
 A level of a product tree, a remainder tree or a CRT is independent
