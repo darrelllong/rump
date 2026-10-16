@@ -596,6 +596,24 @@ which sweep the whole array once each, and the scalar arithmetic. Radix
 four would halve the sweeps and the loads a butterfly; 32-bit residues
 would halve the bytes and open four lanes to the vector unit.
 
+### Residues in a word
+
+2026-10-16, after the entry above. The transform buffers hold `u32`: both
+primes are under `2³¹`, so a residue, a sum of two and a Shoup remainder
+under `2p` all fit a word, and `Twiddle` carries its quotient against
+`2³²`. Half the bytes through memory, and the compiler takes the
+butterflies four lanes at a time where before the 64-bit words and the
+128-bit high multiplication kept them scalar. The CRT writes its
+coefficients, up to `p₀·p₁`, into a `u64` buffer of their own.
+
+| bits | M4 Pro core, before | after | EPYC 7452 core, before | after |
+|---:|---:|---:|---:|---:|
+| 2^20 | 9.2 ms | 5.5 ms | | |
+| 2^24 | 153 ms | 65 ms | 402 ms | 262 ms |
+| 2^28 | 2.72 s | 1.17 s | 7.69 s | 5.35 s |
+
+GMP 6.3.0 on a Cortex core: 0.060 s at 2^24 bits and 1.37 s at 2^28.
+
 ## Fanning out a tree's level
 
 A level of a product tree, a remainder tree or a CRT is independent

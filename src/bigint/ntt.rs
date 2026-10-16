@@ -148,7 +148,7 @@ pub(super) fn square(value: &BigUint) -> BigUint {
     assert!(coefficient_bound < u128::from(PRIME_PRODUCT));
     let workers = automatic_worker_count(transform_len);
 
-    let mut values = vec![0u64; transform_len];
+    let mut values = vec![0u32; transform_len];
     write_digits(value, digit_len, &mut values, workers);
     square_mod::<PRIME_0, ROOT_0>(&mut values, workers);
     let residues_0 = copy_residues(&values, convolution_len, workers);
@@ -156,7 +156,7 @@ pub(super) fn square(value: &BigUint) -> BigUint {
     values.fill(0);
     write_digits(value, digit_len, &mut values, workers);
     square_mod::<PRIME_1, ROOT_1>(&mut values, workers);
-    reconstruct(&residues_0, &mut values, convolution_len, workers)
+    reconstruct(&residues_0, &values, convolution_len, workers)
 }
 
 /// Serial reference for differential and crossover measurement.
@@ -218,8 +218,8 @@ fn multiply_impl_selecting_workers(
     let workers = select_workers(transform_len);
     debug_assert!(workers.is_power_of_two() && workers <= transform_len);
 
-    let mut left = vec![0u64; transform_len];
-    let mut right = vec![0u64; transform_len];
+    let mut left = vec![0u32; transform_len];
+    let mut right = vec![0u32; transform_len];
     write_input_pair(
         lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
     );
@@ -231,7 +231,7 @@ fn multiply_impl_selecting_workers(
         lhs, lhs_digits, rhs, rhs_digits, &mut left, &mut right, workers,
     );
     convolve_mod::<PRIME_1, ROOT_1>(&mut left, &mut right, workers);
-    reconstruct(&residues_0, &mut left, convolution_len, workers)
+    reconstruct(&residues_0, &left, convolution_len, workers)
 }
 
 /// Wall-clock phase breakdown for the ignored NTT profiling probe.
@@ -269,8 +269,8 @@ pub(super) fn multiply_profiled(
     let workers = workers.min(transform_len);
 
     let started = Instant::now();
-    let mut left = vec![0u64; transform_len];
-    let mut right = vec![0u64; transform_len];
+    let mut left = vec![0u32; transform_len];
+    let mut right = vec![0u32; transform_len];
     let allocate = started.elapsed();
 
     let started = Instant::now();
@@ -313,7 +313,7 @@ pub(super) fn multiply_profiled(
     inverse += started.elapsed();
 
     let started = Instant::now();
-    let product = reconstruct(&residues_0, &mut left, convolution_len, workers);
+    let product = reconstruct(&residues_0, &left, convolution_len, workers);
     let reconstruct = started.elapsed();
 
     (
@@ -334,14 +334,20 @@ pub(super) fn multiply_profiled(
 /// Reconstruct coefficients and carry directly into packed 64-bit limbs.
 fn reconstruct(
     residues_0: &[u32],
-    residues_1: &mut [u64],
+    residues_1: &[u32],
     convolution_len: usize,
     workers: usize,
 ) -> BigUint {
     debug_assert_eq!(residues_0.len(), convolution_len);
     debug_assert!(residues_1.len() >= convolution_len);
-    let coefficients = &mut residues_1[..convolution_len];
-    reconstruct_coefficients(residues_0, coefficients, workers);
+    let mut coefficients = vec![0u64; convolution_len];
+    reconstruct_coefficients(
+        residues_0,
+        &residues_1[..convolution_len],
+        &mut coefficients,
+        workers,
+    );
+    let coefficients = &coefficients;
     let mut limbs = Vec::with_capacity((convolution_len + DIGITS_PER_LIMB) / DIGITS_PER_LIMB);
     let mut word = 0u64;
     let mut digit_in_word = 0usize;
@@ -371,26 +377,35 @@ fn reconstruct(
     BigUint::from_limbs(limbs)
 }
 
-fn reconstruct_coefficients(residues_0: &[u32], coefficients: &mut [u64], workers: usize) {
+fn reconstruct_coefficients(
+    residues_0: &[u32],
+    residues_1: &[u32],
+    coefficients: &mut [u64],
+    workers: usize,
+) {
     let workers = linear_worker_count(coefficients.len(), workers);
     let chunk_len = coefficients.len().div_ceil(workers);
     std::thread::scope(|scope| {
         let mut chunks = residues_0
             .chunks(chunk_len)
+            .zip(residues_1.chunks(chunk_len))
             .zip(coefficients.chunks_mut(chunk_len));
-        let (caller_0, caller_coefficients) = chunks
+        let ((caller_0, caller_1), caller_coefficients) = chunks
             .next()
             .expect("an NTT convolution has at least one coefficient");
-        for (residues_0, coefficients) in chunks {
-            let _ = scope.spawn(move || reconstruct_coefficient_chunk(residues_0, coefficients));
+        for ((residues_0, residues_1), coefficients) in chunks {
+            let _ = scope
+                .spawn(move || reconstruct_coefficient_chunk(residues_0, residues_1, coefficients));
         }
-        reconstruct_coefficient_chunk(caller_0, caller_coefficients);
+        reconstruct_coefficient_chunk(caller_0, caller_1, caller_coefficients);
     });
 }
 
-fn reconstruct_coefficient_chunk(residues_0: &[u32], coefficients: &mut [u64]) {
-    for (&residue_0, residue_1) in residues_0.iter().zip(coefficients) {
-        *residue_1 = crt_two(u64::from(residue_0), *residue_1);
+fn reconstruct_coefficient_chunk(residues_0: &[u32], residues_1: &[u32], coefficients: &mut [u64]) {
+    for ((&residue_0, &residue_1), coefficient) in
+        residues_0.iter().zip(residues_1).zip(coefficients)
+    {
+        *coefficient = crt_two(u64::from(residue_0), u64::from(residue_1));
     }
 }
 
@@ -409,7 +424,7 @@ fn significant_digit_len(value: &BigUint) -> usize {
 
 /// Expand a value's digits into the first `digit_len` places of a
 /// zero-filled transform input, in natural order, a run of digits a worker.
-fn write_digits(value: &BigUint, digit_len: usize, digits: &mut [u64], workers: usize) {
+fn write_digits(value: &BigUint, digit_len: usize, digits: &mut [u32], workers: usize) {
     debug_assert!(digits.len() >= digit_len);
     let digits = &mut digits[..digit_len];
     let workers = linear_worker_count(digit_len.max(1), workers);
@@ -427,11 +442,11 @@ fn write_digits(value: &BigUint, digit_len: usize, digits: &mut [u64], workers: 
 }
 
 /// Digits `first..first + run.len()` of `value`.
-fn write_digit_run(value: &BigUint, run: &mut [u64], first: usize) {
+fn write_digit_run(value: &BigUint, run: &mut [u32], first: usize) {
     for (offset, digit) in run.iter_mut().enumerate() {
         let index = first + offset;
         let limb = value.limbs[index / DIGITS_PER_LIMB];
-        *digit = (limb >> (DIGIT_BITS * (index % DIGITS_PER_LIMB))) & DIGIT_MASK;
+        *digit = ((limb >> (DIGIT_BITS * (index % DIGITS_PER_LIMB))) & DIGIT_MASK) as u32;
     }
 }
 
@@ -440,8 +455,8 @@ fn write_input_pair(
     lhs_digits: usize,
     rhs: &BigUint,
     rhs_digits: usize,
-    left: &mut [u64],
-    right: &mut [u64],
+    left: &mut [u32],
+    right: &mut [u32],
     workers: usize,
 ) {
     debug_assert_eq!(left.len(), right.len());
@@ -480,8 +495,8 @@ fn crt_two(residue_0: u64, residue_1: u64) -> u64 {
 /// The cyclic convolution of `left` and `right` modulo `MODULUS`, left in
 /// `left` in natural order; `right` is spent.
 fn convolve_mod<const MODULUS: u64, const ROOT: u64>(
-    left: &mut [u64],
-    right: &mut [u64],
+    left: &mut [u32],
+    right: &mut [u32],
     workers: usize,
 ) {
     debug_assert_eq!(left.len(), right.len());
@@ -492,8 +507,8 @@ fn convolve_mod<const MODULUS: u64, const ROOT: u64>(
 
 /// Both forward transforms, at once where there are workers to share.
 fn forward_pair<const MODULUS: u64, const ROOT: u64>(
-    left: &mut [u64],
-    right: &mut [u64],
+    left: &mut [u32],
+    right: &mut [u32],
     workers: usize,
 ) {
     if workers == 1 {
@@ -512,7 +527,7 @@ fn forward_pair<const MODULUS: u64, const ROOT: u64>(
     }
 }
 
-fn pointwise_multiply<const MODULUS: u64>(left: &mut [u64], right: &[u64], workers: usize) {
+fn pointwise_multiply<const MODULUS: u64>(left: &mut [u32], right: &[u32], workers: usize) {
     let workers = linear_worker_count(left.len(), workers);
     let chunk_len = left.len().div_ceil(workers);
     std::thread::scope(|scope| {
@@ -527,9 +542,9 @@ fn pointwise_multiply<const MODULUS: u64>(left: &mut [u64], right: &[u64], worke
     });
 }
 
-fn pointwise_chunk<const MODULUS: u64>(left: &mut [u64], right: &[u64]) {
+fn pointwise_chunk<const MODULUS: u64>(left: &mut [u32], right: &[u32]) {
     for (lhs, &rhs) in left.iter_mut().zip(right) {
-        *lhs = mul_mod::<MODULUS>(*lhs, rhs);
+        *lhs = mul_mod::<MODULUS>(u64::from(*lhs), u64::from(rhs)) as u32;
     }
 }
 
@@ -540,7 +555,7 @@ fn linear_worker_count(len: usize, max_workers: usize) -> usize {
     1usize << maximum.ilog2()
 }
 
-fn copy_residues(values: &[u64], len: usize, workers: usize) -> Vec<u32> {
+fn copy_residues(values: &[u32], len: usize, workers: usize) -> Vec<u32> {
     let mut residues = vec![0u32; len];
     let workers = linear_worker_count(len, workers);
     let chunk_len = len.div_ceil(workers);
@@ -559,13 +574,11 @@ fn copy_residues(values: &[u64], len: usize, workers: usize) -> Vec<u32> {
     residues
 }
 
-fn copy_residue_chunk(values: &[u64], residues: &mut [u32]) {
-    for (&value, residue) in values.iter().zip(residues) {
-        *residue = value as u32;
-    }
+fn copy_residue_chunk(values: &[u32], residues: &mut [u32]) {
+    residues.copy_from_slice(values);
 }
 
-fn clear_pair(left: &mut [u64], right: &mut [u64], workers: usize) {
+fn clear_pair(left: &mut [u32], right: &mut [u32], workers: usize) {
     debug_assert_eq!(left.len(), right.len());
     let workers = linear_worker_count(left.len().saturating_mul(2), workers);
     if workers == 1 {
@@ -581,7 +594,7 @@ fn clear_pair(left: &mut [u64], right: &mut [u64], workers: usize) {
     });
 }
 
-fn parallel_fill_zero(values: &mut [u64], workers: usize) {
+fn parallel_fill_zero(values: &mut [u32], workers: usize) {
     if workers == 1 {
         values.fill(0);
         return;
@@ -599,7 +612,7 @@ fn parallel_fill_zero(values: &mut [u64], workers: usize) {
     });
 }
 
-fn square_mod<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], max_contexts: usize) {
+fn square_mod<const MODULUS: u64, const ROOT: u64>(values: &mut [u32], max_contexts: usize) {
     forward_dif::<MODULUS, ROOT>(values, max_contexts);
     let workers = linear_worker_count(values.len(), max_contexts);
     let chunk_len = values.len().div_ceil(workers);
@@ -616,15 +629,15 @@ fn square_mod<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], max_conte
     transform_from_bit_reversed::<MODULUS, ROOT>(values, true, max_contexts);
 }
 
-fn pointwise_square_chunk<const MODULUS: u64>(values: &mut [u64]) {
+fn pointwise_square_chunk<const MODULUS: u64>(values: &mut [u32]) {
     for value in values {
-        *value = mul_mod::<MODULUS>(*value, *value);
+        *value = mul_mod::<MODULUS>(u64::from(*value), u64::from(*value)) as u32;
     }
 }
 
 /// Transform input already in bit-reversed order into natural order.
 fn transform_from_bit_reversed<const MODULUS: u64, const ROOT: u64>(
-    values: &mut [u64],
+    values: &mut [u32],
     inverse: bool,
     max_contexts: usize,
 ) {
@@ -669,9 +682,10 @@ fn transform_from_bit_reversed<const MODULUS: u64, const ROOT: u64>(
     );
 
     if inverse {
-        let inverse_len = pow_mod::<MODULUS>(values.len() as u64, MODULUS - 2);
+        let inverse_len =
+            Twiddle::new::<MODULUS>(pow_mod::<MODULUS>(values.len() as u64, MODULUS - 2));
         for value in values {
-            *value = mul_mod::<MODULUS>(*value, inverse_len);
+            *value = inverse_len.times::<MODULUS>(*value);
         }
     }
 }
@@ -683,7 +697,7 @@ fn transform_from_bit_reversed<const MODULUS: u64, const ROOT: u64>(
 /// each split over the workers; once the width reaches one segment the
 /// remaining stages are independent and each worker takes its segment to
 /// the end.
-fn forward_dif<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], max_contexts: usize) {
+fn forward_dif<const MODULUS: u64, const ROOT: u64>(values: &mut [u32], max_contexts: usize) {
     debug_assert!(values.len().is_power_of_two());
     debug_assert!((MODULUS - 1).is_multiple_of(values.len() as u64));
 
@@ -727,7 +741,7 @@ fn stage_root<const MODULUS: u64, const ROOT: u64>(width: usize, inverse: bool) 
 /// The forward stages of widths `width` down to 2 over `values`,
 /// decimation in frequency, depth first as [`transform_stages`]: a wide
 /// span takes the stage that splits it, then each half.
-fn dif_stages<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], width: usize) {
+fn dif_stages<const MODULUS: u64, const ROOT: u64>(values: &mut [u32], width: usize) {
     if width < 2 {
         return;
     }
@@ -735,7 +749,7 @@ fn dif_stages<const MODULUS: u64, const ROOT: u64>(values: &mut [u64], width: us
     dif_depth_first::<MODULUS>(values, width, &tables);
 }
 
-fn dif_depth_first<const MODULUS: u64>(values: &mut [u64], width: usize, tables: &StageTables) {
+fn dif_depth_first<const MODULUS: u64>(values: &mut [u32], width: usize, tables: &StageTables) {
     let len = values.len();
     if len > CACHE_BLOCK_LEN {
         let (low, high) = values.split_at_mut(len / 2);
@@ -766,7 +780,7 @@ fn dif_depth_first<const MODULUS: u64>(values: &mut [u64], width: usize, tables:
 }
 
 fn dif_joining_stage<const MODULUS: u64>(
-    values: &mut [u64],
+    values: &mut [u32],
     width: usize,
     root: u64,
     workers: usize,
@@ -796,7 +810,7 @@ fn dif_joining_stage<const MODULUS: u64>(
 /// stages while it is in cache, and a wider span its two halves and then
 /// the stage that joins them.
 fn transform_stages<const MODULUS: u64, const ROOT: u64>(
-    values: &mut [u64],
+    values: &mut [u32],
     inverse: bool,
     width: usize,
     final_width: usize,
@@ -809,7 +823,7 @@ fn transform_stages<const MODULUS: u64, const ROOT: u64>(
 }
 
 fn dit_depth_first<const MODULUS: u64>(
-    values: &mut [u64],
+    values: &mut [u32],
     width: usize,
     final_width: usize,
     tables: &StageTables,
@@ -847,15 +861,16 @@ fn dit_depth_first<const MODULUS: u64>(
 
 /// The stage of width two: its one twiddle is one, so a butterfly is a sum
 /// and a difference, the same in either decimation.
-fn stage_of_pairs<const MODULUS: u64, const DIF: bool>(values: &mut [u64]) {
+fn stage_of_pairs<const MODULUS: u64, const DIF: bool>(values: &mut [u32]) {
+    let modulus = MODULUS as u32;
     for pair in values.chunks_exact_mut(2) {
         let (lhs, rhs) = (pair[0], pair[1]);
         let sum = lhs + rhs;
-        pair[0] = if sum >= MODULUS { sum - MODULUS } else { sum };
+        pair[0] = if sum >= modulus { sum - modulus } else { sum };
         pair[1] = if lhs >= rhs {
             lhs - rhs
         } else {
-            lhs + MODULUS - rhs
+            lhs + modulus - rhs
         };
     }
 }
@@ -864,7 +879,7 @@ fn stage_of_pairs<const MODULUS: u64, const DIF: bool>(values: &mut [u64]) {
 /// stage, where a call a block cost a short stage more than its
 /// butterflies.
 fn stage_within_table<const MODULUS: u64, const DIF: bool>(
-    values: &mut [u64],
+    values: &mut [u32],
     width: usize,
     table: &[Twiddle],
 ) {
@@ -907,7 +922,7 @@ impl StageTables {
 /// workers include their calling block worker in the budget: the total live
 /// execution contexts is exactly `workers`, never `workers + callers`.
 fn transform_joining_stages<const MODULUS: u64, const ROOT: u64>(
-    values: &mut [u64],
+    values: &mut [u32],
     inverse: bool,
     mut width: usize,
     workers: usize,
@@ -939,7 +954,7 @@ fn transform_joining_stages<const MODULUS: u64, const ROOT: u64>(
 /// One block of a stage, its pairs divided among `contexts` workers, each
 /// chunk from its own position in the stage's twiddles.
 fn stage_block<const MODULUS: u64, const DIF: bool>(
-    block: &mut [u64],
+    block: &mut [u32],
     root: u64,
     table: &[Twiddle],
     contexts: usize,
@@ -975,31 +990,32 @@ fn stage_block<const MODULUS: u64, const DIF: bool>(
 /// Symbolic Computation 60 (2014), 113–119.
 #[derive(Clone, Copy)]
 struct Twiddle {
-    value: u64,
-    /// `⌊value · 2⁶⁴ / MODULUS⌋`.
-    quotient: u64,
+    value: u32,
+    /// `⌊value · 2³² / MODULUS⌋`.
+    quotient: u32,
 }
 
 impl Twiddle {
     fn new<const MODULUS: u64>(value: u64) -> Self {
         debug_assert!(value < MODULUS);
         Self {
-            value,
-            quotient: ((u128::from(value) << 64) / u128::from(MODULUS)) as u64,
+            value: value as u32,
+            quotient: ((value << 32) / MODULUS) as u32,
         }
     }
 
     /// `lhs · value mod MODULUS` for `lhs < MODULUS`: the quotient estimate
-    /// `⌊lhs · quotient / 2⁶⁴⌋` is the true quotient or one under it, so the
-    /// remainder is below `2 · MODULUS` and one subtraction settles it.
+    /// `⌊lhs · quotient / 2³²⌋` is the true quotient or one under it, so the
+    /// remainder is below `2 · MODULUS`, which a word holds since the
+    /// modulus is under `2³¹`, and one subtraction settles it.
     #[inline]
-    fn times<const MODULUS: u64>(self, lhs: u64) -> u64 {
-        let estimate = ((u128::from(lhs) * u128::from(self.quotient)) >> 64) as u64;
+    fn times<const MODULUS: u64>(self, lhs: u32) -> u32 {
+        let estimate = ((u64::from(lhs) * u64::from(self.quotient)) >> 32) as u32;
         let remainder = lhs
             .wrapping_mul(self.value)
-            .wrapping_sub(estimate.wrapping_mul(MODULUS));
-        if remainder >= MODULUS {
-            remainder - MODULUS
+            .wrapping_sub(estimate.wrapping_mul(MODULUS as u32));
+        if u64::from(remainder) >= MODULUS {
+            remainder - MODULUS as u32
         } else {
             remainder
         }
@@ -1026,8 +1042,8 @@ fn twiddles<const MODULUS: u64>(root: u64, count: usize) -> Vec<Twiddle> {
 /// within one. Decimation in time applies the twiddle before the sum,
 /// decimation in frequency (`DIF`) after the difference.
 fn stage_pairs<const MODULUS: u64, const DIF: bool>(
-    low: &mut [u64],
-    high: &mut [u64],
+    low: &mut [u32],
+    high: &mut [u32],
     root: u64,
     table: &[Twiddle],
     start: usize,
@@ -1077,21 +1093,22 @@ fn stage_pairs<const MODULUS: u64, const DIF: bool>(
 /// both it and the twiddle carry a quotient and their product would not.
 /// Nothing carries from one pair to the next.
 fn butterflies<const MODULUS: u64, const DIF: bool, const SCALED: bool>(
-    low: &mut [u64],
-    high: &mut [u64],
+    low: &mut [u32],
+    high: &mut [u32],
     table: &[Twiddle],
     scale: Twiddle,
 ) {
+    let modulus = MODULUS as u32;
     for ((even, odd), &twiddle) in low.iter_mut().zip(high).zip(table) {
         let lhs = *even;
         if DIF {
             let rhs = *odd;
             let sum = lhs + rhs;
-            *even = if sum >= MODULUS { sum - MODULUS } else { sum };
+            *even = if sum >= modulus { sum - modulus } else { sum };
             let difference = if lhs >= rhs {
                 lhs - rhs
             } else {
-                lhs + MODULUS - rhs
+                lhs + modulus - rhs
             };
             let twisted = twiddle.times::<MODULUS>(difference);
             *odd = if SCALED {
@@ -1107,11 +1124,11 @@ fn butterflies<const MODULUS: u64, const DIF: bool, const SCALED: bool>(
             };
             let rhs = twiddle.times::<MODULUS>(scaled);
             let sum = lhs + rhs;
-            *even = if sum >= MODULUS { sum - MODULUS } else { sum };
+            *even = if sum >= modulus { sum - modulus } else { sum };
             *odd = if lhs >= rhs {
                 lhs - rhs
             } else {
-                lhs + MODULUS - rhs
+                lhs + modulus - rhs
             };
         }
     }
@@ -1177,9 +1194,9 @@ mod tests {
     /// two equal operands need just under eight coefficients per limb.
     const CEILING_LIMBS: usize = MAX_TRANSFORM_LEN / (2 * DIGITS_PER_LIMB);
 
-    fn ramp(len: usize, step: u64, offset: u64) -> Vec<u64> {
+    fn ramp(len: usize, step: u64, offset: u64) -> Vec<u32> {
         (0..len)
-            .map(|index| (index as u64 * step + offset) % PRIME_0)
+            .map(|index| ((index as u64 * step + offset) % PRIME_0) as u32)
             .collect()
     }
 
@@ -1250,10 +1267,12 @@ mod tests {
         let root = stage_root::<PRIME_0, ROOT_0>(len, false);
         for j in 0..len {
             let direct = (0..len).fold(0u64, |sum, k| {
-                let term =
-                    mul_mod::<PRIME_0>(original[k], pow_mod::<PRIME_0>(root, (j * k) as u64));
+                let term = mul_mod::<PRIME_0>(
+                    u64::from(original[k]),
+                    pow_mod::<PRIME_0>(root, (j * k) as u64),
+                );
                 (sum + term) % PRIME_0
-            });
+            }) as u32;
             let reversed = j.reverse_bits() >> (usize::BITS - len.ilog2());
             assert_eq!(spectrum[reversed], direct, "coefficient {j}");
         }
@@ -1290,13 +1309,13 @@ mod tests {
         for value in values {
             let digit_len = significant_digit_len(&value);
             let transform_len = (digit_len * 2).next_power_of_two();
-            let mut expected = vec![0u64; transform_len];
+            let mut expected = vec![0u32; transform_len];
             write_digits(&value, digit_len, &mut expected, 1);
             for workers in INPUT_WORKER_COUNTS
                 .into_iter()
                 .filter(|&w| w <= transform_len)
             {
-                let mut actual = vec![0u64; transform_len];
+                let mut actual = vec![0u32; transform_len];
                 write_digits(&value, digit_len, &mut actual, workers);
                 assert_eq!(actual, expected, "digit input at {workers} workers");
             }
