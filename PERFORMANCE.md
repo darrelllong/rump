@@ -614,6 +614,31 @@ coefficients, up to `p₀·p₁`, into a `u64` buffer of their own.
 
 GMP 6.3.0 on a Cortex core: 0.060 s at 2^24 bits and 1.37 s at 2^28.
 
+## The Hensel lift ends at its target
+
+2026-10-24. `HenselSquareRoot` reached its precisions by squaring,
+`q^{2^j}`, so a lift asked for `B` bits ended on the first such power
+past `B`, up to twice as wide as asked, and its widest level, the dearest,
+was the one inflated. A step from `q^k` may go to any `q^{k'}` with
+`k' ≤ 2k`, so `with_precision_hint` now plans the precisions down from
+the least `q^K` at least `B` bits wide: `K` halved and rounded up to 1. A
+step of `2k − 1` reduces its correction modulo its rise `q^{k−1}`, which
+its level keeps.
+
+The NFS square root of RSA-120 (factoring 449f823, a dependency of 1.17 M
+relations, `δ` of 50.5 Mbit a coefficient, the root's height 25.25 Mbit),
+four roots at once on 2×EPYC 7702, the same kept dependencies under the
+same load:
+
+| | squaring | planned |
+|---|---:|---:|
+| widest level | 41.8 Mbit | 25.25 Mbit |
+| its step | 37.6–38.7 s | 23.7–25.5 s |
+| the lift | 120–121 s | 75–77 s |
+| the process, wall | 189 s | 146 s |
+
+The exact check passed at the planned top in all four.
+
 ## Fanning out a tree's level
 
 A level of a product tree, a remainder tree or a CRT is independent

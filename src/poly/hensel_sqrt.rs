@@ -3,8 +3,8 @@
 //!
 //! Given a monic `f ∈ ℤ[x]`, a `δ ∈ ℤ[x]/(f)`, and a `β₀` with
 //! `β₀² ≡ δ (mod f, q)`, [`HenselSquareRoot`] produces `β` with
-//! `β² ≡ δ (mod f, q^k)` for `k = 1, 2, 4, 8, …`. It is the p-adic Newton
-//! iteration
+//! `β² ≡ δ (mod f, q^k)` for a climbing `k`, each at most twice the one
+//! before. It is the p-adic Newton iteration
 //!
 //! ```text
 //! β ← β − (β² − δ) · (2β)⁻¹
@@ -42,6 +42,12 @@
 //!   `u ≡ (2β)⁻¹` only modulo `q^k`, so `u` is refined to `q^{2k}` only
 //!   when — and if — a further level is asked for. The final level, the
 //!   widest and dearest, skips the refinement entirely.
+//!
+//! - **The last precision is the one asked for.** A step from `q^k` may go
+//!   to any `q^{k'}` with `k' ≤ 2k`, so a lift told its target `q^K` takes
+//!   `K` halved, rounded up, down to 1 as its precisions, and its widest
+//!   level is `q^K` and not the first `q^{2^j}` past it, which can be all
+//!   but twice as wide.
 //!
 //! No level checks anything: the invariant is established once by
 //! [`HenselSquareRoot::new`] at the prime and preserved algebraically.
@@ -97,33 +103,139 @@ impl Ring {
     }
 }
 
-/// One precision `q^{2^j}`: its reduction machinery and `δ` modulo it.
+/// A precision a lift passes through: `q^exponent`, and the rise over the
+/// precision before it, `q^{exponent − k}` for that one's `q^k`, when the
+/// rise is not `q^k` itself.
+struct Rung {
+    exponent: usize,
+    modulus: BigUint,
+    rise: Option<BigUint>,
+}
+
+impl Rung {
+    fn seed(prime: &BigUint) -> Self {
+        Self {
+            exponent: 1,
+            modulus: prime.clone(),
+            rise: None,
+        }
+    }
+}
+
+/// The rungs from `q^from`, which is `below`, to `q^top`: `top` halved and
+/// rounded up while past `from`, climbing. Each exponent is then at most
+/// twice the one before: the least past `from` halves to `from` or below.
+fn rungs_to(prime: &BigUint, from: usize, below: &BigUint, top: usize) -> Vec<Rung> {
+    let mut exponents = Vec::new();
+    let mut exponent = top;
+    while exponent > from {
+        exponents.push(exponent);
+        exponent = exponent.div_ceil(2);
+    }
+    let mut rungs: Vec<Rung> = Vec::with_capacity(exponents.len());
+    let (mut k, mut modulus) = (from, below.clone());
+    for &next in exponents.iter().rev() {
+        let rise = next - k;
+        let rung = if rise == k {
+            Rung {
+                exponent: next,
+                modulus: modulus.square(),
+                rise: None,
+            }
+        } else {
+            let rise = if rise + 1 == k {
+                divide_exact(&modulus, prime)
+            } else {
+                prime.pow_u64(rise as u64)
+            };
+            Rung {
+                exponent: next,
+                modulus: modulus.mul(&rise),
+                rise: Some(rise),
+            }
+        };
+        (k, modulus) = (next, rung.modulus.clone());
+        rungs.push(rung);
+    }
+    rungs
+}
+
+/// The rungs from `q^from`, which is `below`, to the least power of `prime`
+/// at least `bits` wide; none when `below` is. The exponent is first
+/// estimated from `log₂ q` and then settled on the powers themselves.
+fn rungs_reaching(prime: &BigUint, from: usize, below: &BigUint, bits: usize) -> Vec<Rung> {
+    if below.bits() >= bits {
+        return Vec::new();
+    }
+    let estimate = (bits - 1) as f64 / prime.to_f64_lossy().log2();
+    let mut top = (estimate.ceil() as usize).max(from + 1);
+    loop {
+        let rungs = rungs_to(prime, from, below, top);
+        let modulus = &rungs.last().expect("past from").modulus;
+        if modulus.bits() < bits {
+            top += 1;
+        } else if top > from + 1 && divide_exact(modulus, prime).bits() >= bits {
+            top -= 1;
+        } else {
+            return rungs;
+        }
+    }
+}
+
+/// `value / prime`, which divides it.
+fn divide_exact(value: &BigUint, prime: &BigUint) -> BigUint {
+    if let Some(small) = prime.to_u64() {
+        let (quotient, remainder) = value.div_rem_u64(small);
+        debug_assert_eq!(remainder, 0, "the prime divides its power");
+        quotient
+    } else {
+        let (quotient, remainder) = value.div_rem(prime);
+        debug_assert!(remainder.is_zero(), "the prime divides its power");
+        quotient
+    }
+}
+
+/// One precision `q^k`: its reduction machinery, `δ` modulo it, and the
+/// ring of its rise over the level below when that is not the level below's
+/// own (a step that does not double).
 struct Level {
+    exponent: usize,
     ring: Ring,
+    rise: Option<Ring>,
     delta: Vec<BigUint>,
 }
 
 impl Level {
-    /// The level at `modulus`, with `δ` reduced from its integer form —
-    /// a division per coefficient, which is what
+    /// The level at `rung`, with `δ` reduced from its integer form — a
+    /// division per coefficient, which is what
     /// [`HenselSquareRoot::with_precision_hint`] exists to avoid.
-    fn from_integers(modulus: BigUint, delta: &[BigInt]) -> Self {
-        let ring = Ring::new(modulus);
+    fn from_integers(rung: Rung, delta: &[BigInt]) -> Self {
+        let ring = Ring::new(rung.modulus);
         let delta = delta.iter().map(|d| ring.reduce_signed(d)).collect();
-        Self { ring, delta }
+        Self {
+            exponent: rung.exponent,
+            ring,
+            rise: rung.rise.map(Ring::new),
+            delta,
+        }
     }
 
-    /// The level at `modulus`, with `δ` reduced from the level above — whose
+    /// The level at `rung`, with `δ` reduced from the level above — whose
     /// residues are below the square of this modulus, so Barrett applies.
-    fn from_above(modulus: BigUint, above: &Self) -> Self {
-        let ring = Ring::new(modulus);
+    fn from_above(rung: Rung, above: &Self) -> Self {
+        let ring = Ring::new(rung.modulus);
         let delta = above.delta.iter().map(|d| ring.reduce(d)).collect();
-        Self { ring, delta }
+        Self {
+            exponent: rung.exponent,
+            ring,
+            rise: rung.rise.map(Ring::new),
+            delta,
+        }
     }
 }
 
-/// A square root of `δ` in `ℤ[x]/(f)` modulo `q^k`, lifted one doubling of
-/// `k` at a time by the p-adic Newton iteration `β ← β − (β² − δ)·(2β)⁻¹`,
+/// A square root of `δ` in `ℤ[x]/(f)` modulo `q^k`, lifted a level at a
+/// time, `k` at most doubling, by the p-adic Newton iteration `β ← β − (β² − δ)·(2β)⁻¹`,
 /// whose convergence is Hensel's lemma (Cohen, *A Course in Computational
 /// Algebraic Number Theory*, §3.5.3).
 ///
@@ -138,11 +250,11 @@ pub struct HenselSquareRoot<'a> {
     /// integers every level's residues descend from. `None` for a lift
     /// given `δ` modulo its last modulus, whose levels are all prepared.
     delta: Option<Vec<BigInt>>,
-    /// `levels[j]` is the precision `q^{2^j}`; the root lives at
-    /// `levels[level]`.
+    /// `levels[j]` is a precision `q^k`, `levels[0]` the prime's, each `k`
+    /// at most twice the one before; the root lives at `levels[level]`.
     levels: Vec<Level>,
     level: usize,
-    /// `deg f` coefficients in `[0, q^{2^level})`.
+    /// `deg f` coefficients in `[0, q^k)` for `levels[level]`'s `q^k`.
     root: Vec<BigUint>,
     /// `(2β)⁻¹` at `levels[inverse_level]`, which is `level` right after
     /// construction and `level − 1` after every doubling: it is refined
@@ -179,7 +291,7 @@ impl<'a> HenselSquareRoot<'a> {
         );
         let mut delta = delta.rem_monic(f).coefficients().to_vec();
         delta.resize(degree, BigInt::zero());
-        let base = Level::from_integers(prime, &delta);
+        let base = Level::from_integers(Rung::seed(&prime), &delta);
         Self::seeded(f, Some(delta), vec![base], root, inverse)
     }
 
@@ -246,8 +358,8 @@ impl<'a> HenselSquareRoot<'a> {
     }
 
     /// The modulus a lift from `prime` first has at or past `bits` wide:
-    /// `prime^{2^j}` for the least such `j`, which is `prime` itself when
-    /// that is wide enough. It is the modulus
+    /// `prime^k` for the least such `k`, which is `prime` itself when that
+    /// is wide enough. It is the modulus
     /// [`Self::with_precision_hint`] prepares `δ` at, and the one
     /// [`Self::in_field_bounded`] wants `δ` reduced by.
     ///
@@ -260,11 +372,9 @@ impl<'a> HenselSquareRoot<'a> {
             *prime >= BigUint::from_u64(2),
             "the modulus must be at least 2"
         );
-        let mut modulus = prime.clone();
-        while modulus.bits() < bits {
-            modulus = modulus.square();
-        }
-        modulus
+        rungs_reaching(prime, 1, prime, bits)
+            .pop()
+            .map_or_else(|| prime.clone(), |rung| rung.modulus)
     }
 
     /// [`Self::in_field`] for a lift that goes as far as `modulus` and no
@@ -285,8 +395,7 @@ impl<'a> HenselSquareRoot<'a> {
     ///
     /// # Panics
     ///
-    /// As [`Self::new`]; if `modulus` is not the prime squared some number
-    /// of times; if there are more than `deg f` residues or one is not below
+    /// As [`Self::new`]; if `modulus` is not a power of the prime; if there are more than `deg f` residues or one is not below
     /// `modulus`. [`Self::double`] panics past `modulus`, as does
     /// [`Self::with_precision_hint`] asked for more than its width.
     #[must_use]
@@ -314,23 +423,24 @@ impl<'a> HenselSquareRoot<'a> {
             residues.iter().all(|residue| residue < modulus),
             "a residue is below its modulus"
         );
-        let mut moduli = vec![prime.clone()];
-        while moduli.last().expect("non-empty") < modulus {
-            let next = moduli.last().expect("non-empty").square();
-            moduli.push(next);
-        }
+        let mut rungs = rungs_reaching(prime, 1, prime, modulus.bits());
+        let top = rungs.pop().unwrap_or_else(|| Rung::seed(prime));
         assert!(
-            moduli.last().expect("non-empty") == modulus,
-            "the modulus is the prime squared some number of times"
+            top.modulus == *modulus,
+            "the modulus is a power of the prime"
         );
-        let top = Level {
-            ring: Ring::new(moduli.pop().expect("non-empty")),
+        let mut descending = vec![Level {
+            exponent: top.exponent,
+            ring: Ring::new(top.modulus),
+            rise: top.rise.map(Ring::new),
             delta: padded(residues, degree),
-        };
-        let mut descending = vec![top];
-        while let Some(modulus) = moduli.pop() {
+        }];
+        if top.exponent > 1 {
+            rungs.insert(0, Rung::seed(prime));
+        }
+        while let Some(rung) = rungs.pop() {
             let above = descending.last().expect("non-empty");
-            descending.push(Level::from_above(modulus, above));
+            descending.push(Level::from_above(rung, above));
         }
         descending.reverse();
         let inverse = Self::field_inverse(f, root)?;
@@ -348,14 +458,16 @@ impl<'a> HenselSquareRoot<'a> {
     /// Announce the width the lift is expected to reach, so that `δ`'s
     /// residues can be prepared from the top down.
     ///
-    /// Each level needs `δ mod q^{2^j}`. Taken from `δ` itself that is a
-    /// long division of a wide integer by a narrow one, per coefficient
-    /// per level, and at wide precisions those divisions outweigh the
-    /// products they sit beside. Taken from the
-    /// level above instead — `δ mod q^{2^j} = (δ mod q^{2^{j+1}}) mod q^{2^j}`,
-    /// with the input below the square of the modulus — each is one
-    /// Barrett reduction. The hint says how far up to start; levels past
-    /// it, if the lift goes on, fall back to the divisions.
+    /// The levels from the lift's last to the least `q^K` at least `bits`
+    /// wide are planned from the top: `K` halved and rounded up, so that
+    /// the widest is `q^K` itself. Each level needs `δ mod q^k`. Taken
+    /// from `δ` itself that is a long division of a wide integer by a
+    /// narrow one, per coefficient per level, and at wide precisions those
+    /// divisions outweigh the products they sit beside. Taken from the
+    /// level above instead — `δ mod q^k = (δ mod q^{k'}) mod q^k` for the
+    /// next `k' ≤ 2k`, the input below the square of the modulus — each is
+    /// one Barrett reduction. Levels past the hint, if the lift goes on,
+    /// double and fall back to the divisions.
     ///
     /// # Panics
     ///
@@ -363,20 +475,20 @@ impl<'a> HenselSquareRoot<'a> {
     /// is past its modulus.
     #[must_use]
     pub fn with_precision_hint(mut self, bits: usize) -> Self {
-        let mut moduli = vec![self.levels[0].ring.modulus.clone()];
-        while moduli.last().expect("non-empty").bits() < bits {
-            let next = moduli.last().expect("non-empty").square();
-            moduli.push(next);
-        }
-        let start = self.levels.len();
-        if moduli.len() <= start {
+        let last = self.levels.last().expect("non-empty");
+        let mut rungs = rungs_reaching(
+            &self.levels[0].ring.modulus,
+            last.exponent,
+            &last.ring.modulus,
+            bits,
+        );
+        let Some(top) = rungs.pop() else {
             return self;
-        }
-        let top = moduli.len() - 1;
-        let mut descending = vec![Level::from_integers(moduli[top].clone(), self.integers())];
-        for j in (start..top).rev() {
+        };
+        let mut descending = vec![Level::from_integers(top, self.integers())];
+        while let Some(rung) = rungs.pop() {
             let above = descending.last().expect("non-empty");
-            descending.push(Level::from_above(moduli[j].clone(), above));
+            descending.push(Level::from_above(rung, above));
         }
         descending.reverse();
         self.levels.extend(descending);
@@ -424,14 +536,19 @@ impl<'a> HenselSquareRoot<'a> {
     /// Make sure `levels[j]` exists, by squaring upward from the last one.
     fn ensure_level(&mut self, j: usize) {
         while self.levels.len() <= j {
-            let modulus = self.levels.last().expect("non-empty").ring.modulus.square();
-            let level = Level::from_integers(modulus, self.integers());
+            let last = self.levels.last().expect("non-empty");
+            let rung = Rung {
+                exponent: 2 * last.exponent,
+                modulus: last.ring.modulus.square(),
+                rise: None,
+            };
+            let level = Level::from_integers(rung, self.integers());
             self.levels.push(level);
         }
     }
 
-    /// Square the modulus: `q^k → q^{2k}`, with the root correct to the new
-    /// precision.
+    /// Lift to the next level: `q^k → q^{k'}`, `k'` the next planned
+    /// precision or else `2k`, with the root correct to the new precision.
     ///
     /// # Panics
     ///
@@ -441,7 +558,7 @@ impl<'a> HenselSquareRoot<'a> {
         self.refine_inverse();
         self.ensure_level(self.level + 1);
 
-        // β_k² − δ over ℤ, reduced by f, then modulo q^{2k}; each
+        // β_k² − δ over ℤ, reduced by f, then modulo q^{k'}; each
         // coefficient is a multiple of q^k, and the quotient is what the
         // correction is built from.
         let squared = self.reduce_by_f(&self.square(&self.root));
@@ -463,10 +580,11 @@ impl<'a> HenselSquareRoot<'a> {
             })
             .collect();
 
-        // c = e · u mod (f, q^k), then β ← β − q^k · c mod q^{2k}.
+        // c = e · u mod (f, q^{k'−k}), then β ← β − q^k · c mod q^{k'}.
         let correction = self.reduce_by_f(&self.multiply(&error, &self.inverse));
+        let rise = next.rise.as_ref().unwrap_or(&previous.ring);
         for (b, c) in self.root.iter_mut().zip(&correction) {
-            let c = previous.ring.reduce_signed(c);
+            let c = rise.reduce_signed(c);
             let step = previous.ring.modulus.mul(&c);
             *b = if *b >= step {
                 b.sub(&step)
@@ -477,9 +595,10 @@ impl<'a> HenselSquareRoot<'a> {
         self.level += 1;
     }
 
-    /// Bring `u ≡ (2β)⁻¹` from `q^{k/2}` up to the root's current `q^k`, by
-    /// the same half-width Newton step: `2βu − 1` is a multiple of
-    /// `q^{k/2}`, and `u ← u − q^{k/2} · ((2βu − 1)/q^{k/2} · u mod q^{k/2})`.
+    /// Bring `u ≡ (2β)⁻¹` from the level below, `q^j`, up to the root's
+    /// current `q^k`, `k ≤ 2j`, by the same half-width Newton step:
+    /// `2βu − 1` is a multiple of `q^j`, and
+    /// `u ← u − q^j · ((2βu − 1)/q^j · u mod q^{k−j})`.
     fn refine_inverse(&mut self) {
         if self.inverse_level == self.level {
             return;
@@ -511,8 +630,9 @@ impl<'a> HenselSquareRoot<'a> {
             })
             .collect();
         let correction = self.reduce_by_f(&self.multiply(&error, &self.inverse));
+        let rise = full.rise.as_ref().unwrap_or(&half.ring);
         for (u, c) in self.inverse.iter_mut().zip(&correction) {
-            let c = half.ring.reduce_signed(c);
+            let c = rise.reduce_signed(c);
             let step = half.ring.modulus.mul(&c);
             *u = if *u >= step {
                 u.sub(&step)
@@ -710,6 +830,56 @@ mod tests {
         assert!(candidate == beta || candidate.add(&beta).is_zero());
     }
 
+    /// A lift told its target ends at that power of the prime, through
+    /// steps that do not all double, with every level a root there; a
+    /// bounded lift to it is the same lift; and past it the lift goes on to
+    /// the integer root.
+    #[test]
+    fn a_planned_lift_ends_at_its_target() {
+        // q⁶ and q¹³ are reached by steps of 2k − 1: 3 → 5 → 6 and 4 → 7 → 13.
+        const TARGETS: u64 = 13;
+        let f = poly(&[7, -3, 11, 5, 1]);
+        let beta = poly(&[-123_456_789, 987_654_321, -555_555_555, 42]);
+        let delta = beta.mul(&beta).rem_monic(&f);
+        let prime = irreducible_prime(&f, SEED_PRIME_SEARCH_START);
+        let seed = field_root(&f, &delta, prime);
+        let prime = BigUint::from_u64(prime);
+        for target in 1..=TARGETS {
+            let modulus = prime.pow_u64(target);
+            assert_eq!(
+                HenselSquareRoot::modulus_reaching(&prime, modulus.bits()),
+                modulus
+            );
+            let mut lift = HenselSquareRoot::in_field(&f, &delta, &seed)
+                .expect("a square")
+                .with_precision_hint(modulus.bits());
+            let residues = PolyMod::from_poly_z(&delta, &modulus);
+            let mut bounded =
+                HenselSquareRoot::in_field_bounded(&f, residues.coefficients(), &modulus, &seed)
+                    .expect("a square");
+            while *lift.modulus() < modulus {
+                lift.double();
+                bounded.double();
+                assert_eq!(bounded.modulus(), lift.modulus());
+                assert_eq!(bounded.coefficients(), lift.coefficients());
+                let f_mod = PolyMod::from_poly_z(&f, lift.modulus());
+                let root = lift.root();
+                let delta_mod = PolyMod::from_poly_z(&delta, lift.modulus()).rem(&f_mod);
+                assert_eq!(
+                    root.mul(&root).rem(&f_mod),
+                    delta_mod,
+                    "a root at every level"
+                );
+            }
+            assert_eq!(*lift.modulus(), modulus, "the last level is the target");
+            while lift.modulus().bits() <= 2 * 31 + 1 {
+                lift.double();
+            }
+            let candidate = lift.symmetric_lift();
+            assert!(candidate == beta || candidate.add(&beta).is_zero());
+        }
+    }
+
     /// A lift given `δ` modulo its last modulus is the lift given `δ`, level
     /// for level, negative coefficients of `δ` included.
     #[test]
@@ -782,10 +952,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "the modulus is the prime squared some number of times")]
-    fn a_bounded_lift_wants_a_modulus_the_lift_reaches() {
-        // 7³ lies between 7² and 7⁴.
-        let modulus = BigUint::from_u64(343);
+    #[should_panic(expected = "the modulus is a power of the prime")]
+    fn a_bounded_lift_wants_a_power_of_its_prime() {
+        // 300 lies between 7² and 7³.
+        let modulus = BigUint::from_u64(300);
         let (f, residues, seed) = bounded_case(&modulus);
         let _ = HenselSquareRoot::in_field_bounded(&f, &residues, &modulus, &seed);
     }
@@ -796,18 +966,20 @@ mod tests {
     #[test]
     fn the_wide_lift_uses_barrett_and_threads() {
         // Width of the root's coefficients. The lift is exact once the
-        // modulus exceeds twice the largest, which from the 20-bit seed
-        // prime is its 14th doubling, 326,560 bits: 5,103 limbs against
-        // the Newton threshold's 3,072, as the assertion at the end checks.
+        // modulus exceeds twice the largest.
         const COEFFICIENT_BITS: usize = 200_000;
-        // The prepared levels run up to the first modulus of at least this
-        // width, which is the 326,560-bit level the lift ends on: every
-        // level it takes is then prepared from above, and none falls back
-        // to the division per coefficient the hint exists to avoid.
-        const HINT_BITS: usize = 300_000;
-        // Doublings before the lift is called unconverged. It needs 14,
-        // and the loop checks before each one, so 16 leaves one to spare;
-        // the assertion, not the bound, reports a failure.
+        // A coefficient's width and one bit for the factor of two: the
+        // least power of the 20-bit seed prime this wide, q^10035 of
+        // 200,015 bits and 3,126 limbs against the Newton threshold's
+        // 3,072 (the assertion at the end checks), is the level the lift
+        // ends on, so every level it takes is prepared from above and
+        // none falls back to the division per coefficient the hint exists
+        // to avoid.
+        const HINT_BITS: usize = COEFFICIENT_BITS + 2;
+        // Levels before the lift is called unconverged. It needs 14, from
+        // 10,035 halved and rounded up to 1, and the loop checks before
+        // each one, so 16 leaves one to spare; the assertion, not the
+        // bound, reports a failure.
         const MAX_DOUBLINGS: usize = 16;
         // More than one thread, so the threaded path runs. A policy.
         const WORKERS: usize = 4;
