@@ -55,6 +55,7 @@
 
 use core::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::{set_bits, words_for, WORD};
 
@@ -288,6 +289,8 @@ pub struct FilteredMatrix {
     live_columns: usize,
     /// Ascending original-row indices whose XOR is the corresponding row.
     compositions: Vec<Vec<usize>>,
+    /// How many rows the original matrix had.
+    originals: usize,
 }
 
 impl FilteredMatrix {
@@ -339,19 +342,29 @@ impl FilteredMatrix {
     }
 
     /// Expands a dependency over the filtered rows to one over the
-    /// original rows, by symmetric difference of the compositions.
+    /// original rows, by symmetric difference of the compositions: each
+    /// turns over its originals' bits, one bit an original row, and the
+    /// bits left set are the dependency, ascending.
     #[must_use]
     pub fn expand(&self, dependency: &[usize]) -> Vec<usize> {
-        let mut counts: std::collections::BTreeMap<usize, u32> = std::collections::BTreeMap::new();
+        let words = words_for(self.originals);
+        let mut odd = vec![0u64; words];
         for &row in dependency {
             for &original in &self.compositions[row] {
-                *counts.entry(original).or_insert(0) += 1;
+                odd[original / WORD] ^= 1 << (original % WORD);
             }
         }
-        counts
-            .into_iter()
-            .filter_map(|(original, count)| (count % 2 == 1).then_some(original))
-            .collect()
+        set_bits(&odd, words, self.originals).collect()
+    }
+}
+
+/// The original rows `row` is the sum of: its set in `sets`, or `alone`, the
+/// row itself, where the set is empty because it has not been merged.
+fn composition<'a>(sets: &'a [Vec<usize>], row: usize, alone: &'a [usize; 1]) -> &'a [usize] {
+    if sets[row].is_empty() {
+        alone
+    } else {
+        &sets[row]
     }
 }
 
@@ -561,6 +574,12 @@ struct Queue {
     ahead: Vec<i64>,
     /// Whether a column's fill planned ahead is its exact fill.
     known: Vec<bool>,
+    /// The trees planned ahead, so that a merge does not plan its column
+    /// again. A column's tree is the one of its fill planned ahead: it comes
+    /// to an exact key only through [`Filter::plan_ahead`], which plans its
+    /// tree beside it, so a tree left from before a row changed is never
+    /// the one taken.
+    planned: std::collections::HashMap<u32, Plan>,
     /// The last entry read in looking ahead.
     horizon: Option<(i64, u32)>,
     heap: BinaryHeap<Reverse<(i64, u32)>>,
@@ -580,6 +599,7 @@ impl Queue {
             queued: vec![false; columns],
             ahead: vec![0; columns],
             known: vec![false; columns],
+            planned: std::collections::HashMap::new(),
             horizon: None,
             heap: BinaryHeap::new(),
         };
@@ -609,8 +629,15 @@ impl Queue {
     /// queued to be planned again. A column of another weight would be
     /// dropped when its turn came, and every change of a column's weight
     /// touches it, so it is queued when it comes to one: most of the
-    /// columns a merge touches are heavier than the cap.
+    /// columns a merge touches are heavier than the cap. For the same
+    /// reason a column heavier than the cap is left as it is: what is known
+    /// of its fill is read only once it comes down to the cap, and coming
+    /// down touches it under the weight it comes to. Each flag is a reach
+    /// into an array of every column, and a merge touches some two hundred.
     fn touch(&mut self, column: u32, weight: u32) {
+        if weight as usize > self.cap {
+            return;
+        }
         let c = column as usize;
         self.fresh[c] = false;
         self.known[c] = false;
@@ -662,45 +689,200 @@ impl Queue {
     }
 }
 
+/// A column held by more than this share of the rows, and by this many
+/// times the merge's cap, is given no list of its rows at the start: the
+/// characters and the sign and count columns, held by about half, and the
+/// smallest primes, two fifths of all the entries at RSA-155 together. A
+/// column's density stays about what it is as rows go, so one this dense
+/// comes down to the cap only once the rows are fewer by as much again;
+/// if one does, its list is made then ([`Filter::track`]).
+const UNTRACKED_SHARE: usize = 64;
+
+/// The runs of rows a thread takes in turn where the rows are dealt out, so
+/// that one run slower than the rest is an eighth of a thread's share.
+const CHUNKS_PER_THREAD: usize = 8;
+
+/// The rows of each column, as the filter keeps them: the rows the matrix
+/// held at the start, in one array a column's slot after another, each
+/// slot as long as the column's first weight; and the rows merges have
+/// added since, beside. Rows retired, or that have cancelled the column,
+/// linger and are compacted away when the column's members are asked for.
+///
+/// The slots are made side by side: the rows are counted into each
+/// column, the slots laid out from the counts, and the rows written into
+/// them, each by a worker, at a place a column's cursor hands out. The
+/// order a slot is filled in is not the rows' order, and every reader
+/// sorts what it reads.
+struct Lists {
+    /// Each column's slot: where it starts, how much of it is in use, and
+    /// how long it is, one record a column, so that a column's state is one
+    /// reach and not four.
+    slots_of: Vec<Slot>,
+    slots: Vec<AtomicU32>,
+    /// Rows added to a column whose slot is full; empty unless it is.
+    added: Vec<Vec<u32>>,
+}
+
+/// A column's place in [`Lists`]. A column given no list has a room of
+/// [`UNTRACKED`].
+#[derive(Clone, Copy)]
+struct Slot {
+    start: usize,
+    used: u32,
+    room: u32,
+}
+
+/// The room of a column given no list; see [`UNTRACKED_SHARE`].
+const UNTRACKED: u32 = u32::MAX;
+
+impl Lists {
+    /// The lists of `rows` over `columns`, and each column's weight.
+    fn new(rows: &[Vec<u32>], columns: usize, cap: usize) -> (Self, Vec<u32>) {
+        let threads = crate::parallel::budget();
+        let length = rows.len().div_ceil(threads * CHUNKS_PER_THREAD).max(1);
+        let chunks: Vec<&[Vec<u32>]> = rows.chunks(length).collect();
+        let counts: Vec<AtomicU32> = (0..columns).map(|_| AtomicU32::new(0)).collect();
+        crate::parallel::map_ordered(&chunks, threads, |_, chunk| {
+            for row in *chunk {
+                for &column in row {
+                    counts[column as usize].fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+        let occupants: Vec<u32> = counts.into_iter().map(AtomicU32::into_inner).collect();
+        let mut slots_of = Vec::with_capacity(columns);
+        let mut end = 0;
+        for &weight in &occupants {
+            let dense = weight as usize * UNTRACKED_SHARE > rows.len()
+                && weight as usize > UNTRACKED_SHARE * cap;
+            slots_of.push(Slot {
+                start: end,
+                used: 0,
+                room: if dense { UNTRACKED } else { weight },
+            });
+            if !dense {
+                end += weight as usize;
+            }
+        }
+        let slots: Vec<AtomicU32> = (0..end).map(|_| AtomicU32::new(0)).collect();
+        let cursors: Vec<AtomicU32> = (0..columns).map(|_| AtomicU32::new(0)).collect();
+        crate::parallel::map_ordered(&chunks, threads, |number, chunk| {
+            let offset = number * length;
+            for (index, row) in chunk.iter().enumerate() {
+                for &column in row {
+                    let slot = slots_of[column as usize];
+                    if slot.room != UNTRACKED {
+                        let place = slot.start
+                            + cursors[column as usize].fetch_add(1, Ordering::Relaxed) as usize;
+                        slots[place].store((offset + index) as u32, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+        for (slot, cursor) in slots_of.iter_mut().zip(cursors) {
+            slot.used = cursor.into_inner();
+        }
+        let lists = Self {
+            slots_of,
+            slots,
+            added: vec![Vec::new(); columns],
+        };
+        (lists, occupants)
+    }
+
+    /// Whether `column` was given no list and has not been given one since.
+    fn untracked(&self, column: u32) -> bool {
+        self.slots_of[column as usize].room == UNTRACKED
+    }
+
+    /// The rows listed under `column`, in no order, some perhaps no longer
+    /// holding it.
+    fn listed(&self, column: u32) -> impl Iterator<Item = u32> + '_ {
+        let c = column as usize;
+        let slot = self.slots_of[c];
+        let full = slot.used == slot.room;
+        self.slots[slot.start..slot.start + slot.used as usize]
+            .iter()
+            .map(|slot| slot.load(Ordering::Relaxed))
+            .chain(
+                full.then(|| self.added[c].iter().copied())
+                    .into_iter()
+                    .flatten(),
+            )
+    }
+
+    /// `members` as the list of `column`, in its slot as far as it fits. A
+    /// column given no list is given one, the whole of it beside.
+    fn set(&mut self, column: u32, members: &[u32]) {
+        let c = column as usize;
+        let slot = &mut self.slots_of[c];
+        let was_full = slot.used == slot.room;
+        if slot.room == UNTRACKED {
+            slot.room = 0;
+        }
+        let kept = members.len().min(slot.room as usize);
+        for (place, &row) in self.slots[slot.start..slot.start + kept]
+            .iter()
+            .zip(members)
+        {
+            place.store(row, Ordering::Relaxed);
+        }
+        slot.used = kept as u32;
+        if was_full || kept < members.len() {
+            self.added[c].clear();
+            self.added[c].extend_from_slice(&members[kept..]);
+        }
+    }
+
+    /// `row` has come to hold `column`.
+    fn add(&mut self, column: u32, row: u32) {
+        let c = column as usize;
+        let slot = &mut self.slots_of[c];
+        if slot.room == UNTRACKED {
+            return;
+        }
+        if slot.used == slot.room {
+            self.added[c].push(row);
+        } else {
+            self.slots[slot.start + slot.used as usize].store(row, Ordering::Relaxed);
+            slot.used += 1;
+        }
+    }
+}
+
 /// The working state of one filtering run: rows, their compositions, and
 /// the column incidence kept exact as rows change.
 struct Filter {
     columns: usize,
     work: Vec<Vec<u32>>,
+    /// The original rows each row is the sum of; empty for a row not yet
+    /// merged, which is itself alone. A merged row's set is never empty:
+    /// the live rows' sets stay independent, so no two are equal.
     compositions: Vec<Vec<usize>>,
     live: Vec<bool>,
     live_rows: usize,
     live_columns: usize,
     nonzeros: i64,
-    /// Column incidence as row lists, maintained incrementally. Retired
-    /// rows and rows that cancelled the column linger and are compacted
-    /// away by [`Self::members`]; the occupancy counts are exact
-    /// throughout.
-    incidence: Vec<Vec<u32>>,
+    /// Column incidence as row lists, maintained incrementally; the
+    /// occupancy counts are exact throughout.
+    lists: Lists,
     occupants: Vec<u32>,
 }
 
 impl Filter {
-    fn new(matrix: &SparseMatrix) -> Self {
+    fn new(matrix: SparseMatrix, cap: usize) -> Self {
         let columns = matrix.columns();
-        let work: Vec<Vec<u32>> = matrix.rows().to_vec();
-        let mut incidence: Vec<Vec<u32>> = vec![Vec::new(); columns];
-        let mut occupants = vec![0u32; columns];
-        for (index, row) in work.iter().enumerate() {
-            for &column in row {
-                incidence[column as usize].push(index as u32);
-                occupants[column as usize] += 1;
-            }
-        }
+        let work: Vec<Vec<u32>> = matrix.into_rows();
+        let (lists, occupants) = Lists::new(&work, columns, cap);
         Self {
             columns,
-            compositions: (0..work.len()).map(|i| vec![i]).collect(),
+            compositions: vec![Vec::new(); work.len()],
             live: vec![true; work.len()],
             live_rows: work.len(),
             live_columns: occupants.iter().filter(|&&count| count > 0).count(),
             nonzeros: work.iter().map(|row| row.len() as i64).sum(),
             work,
-            incidence,
+            lists,
             occupants,
         }
     }
@@ -725,29 +907,34 @@ impl Filter {
         }
     }
 
-    /// The live rows that hold `column`, once each, compacted in place.
-    fn members(&mut self, column: u32) -> &[u32] {
-        let c = column as usize;
+    /// A list for `column`, given none at the start because it was dense,
+    /// made from the live rows that hold it: the rows are scanned side by
+    /// side, once for each such column that comes to need a list.
+    fn track(&mut self, column: u32) {
+        if !self.lists.untracked(column) {
+            return;
+        }
         let (work, live) = (&self.work, &self.live);
-        self.incidence[c]
-            .retain(|&r| live[r as usize] && work[r as usize].binary_search(&column).is_ok());
-        self.incidence[c].sort_unstable();
-        self.incidence[c].dedup();
-        debug_assert_eq!(
-            self.incidence[c].len(),
-            self.occupants[c] as usize,
-            "occupancy drifted from incidence"
-        );
-        &self.incidence[c]
+        let threads = crate::parallel::budget();
+        let length = work.len().div_ceil(threads * CHUNKS_PER_THREAD).max(1);
+        let chunks: Vec<usize> = (0..work.len().div_ceil(length)).collect();
+        let found = crate::parallel::map_ordered(&chunks, threads, |_, &chunk| {
+            (chunk * length..((chunk + 1) * length).min(work.len()))
+                .filter(|&r| live[r] && work[r].binary_search(&column).is_ok())
+                .map(|r| r as u32)
+                .collect::<Vec<u32>>()
+        });
+        let members: Vec<u32> = found.into_iter().flatten().collect();
+        self.lists.set(column, &members);
     }
 
-    /// The live rows that hold `column` and the fill of eliminating it,
-    /// from the lists as they stand.
-    fn planned(&self, column: u32) -> (Vec<u32>, i64) {
+    /// The live rows that hold `column`, once each and ascending, from the
+    /// lists as they stand.
+    fn holders(&self, column: u32) -> Vec<u32> {
         let (work, live) = (&self.work, &self.live);
-        let mut members: Vec<u32> = self.incidence[column as usize]
-            .iter()
-            .copied()
+        let mut members: Vec<u32> = self
+            .lists
+            .listed(column)
             .filter(|&r| live[r as usize] && work[r as usize].binary_search(&column).is_ok())
             .collect();
         members.sort_unstable();
@@ -757,12 +944,42 @@ impl Filter {
             self.occupants[column as usize] as usize,
             "occupancy drifted from incidence"
         );
+        members
+    }
+
+    /// The one live row that holds `column`, a singleton: the first such row
+    /// its list names, with nothing gathered, sorted or written back.
+    fn only_holder(&mut self, column: u32) -> usize {
+        debug_assert_eq!(self.occupants[column as usize], 1, "a singleton");
+        self.track(column);
+        let (work, live) = (&self.work, &self.live);
+        self.lists
+            .listed(column)
+            .find(|&r| live[r as usize] && work[r as usize].binary_search(&column).is_ok())
+            .expect("a singleton's row is listed") as usize
+    }
+
+    /// The live rows that hold `column`, once each, compacted in place.
+    fn members(&mut self, column: u32) -> Vec<u32> {
+        self.track(column);
+        let members = self.holders(column);
+        self.lists.set(column, &members);
+        members
+    }
+
+    /// The live rows that hold `column`, the fill of eliminating it, and the
+    /// tree that does, from the lists as they stand.
+    fn planned(&self, column: u32) -> (Vec<u32>, i64, Option<Plan>) {
+        let work = &self.work;
+        let members = self.holders(column);
         let rows: Vec<usize> = members.iter().map(|&r| r as usize).collect();
-        let fill = match rows[..] {
-            [only] => -(work[only].len() as i64),
-            _ => plan(&rows, work).fill,
-        };
-        (members, fill)
+        match rows[..] {
+            [only] => (members, -(work[only].len() as i64), None),
+            _ => {
+                let tree = plan(&rows, work);
+                (members, tree.fill, Some(tree))
+            }
+        }
     }
 
     /// The fill of `column`, stale and at the head of `queue` under `key`,
@@ -782,13 +999,20 @@ impl Filter {
         if workers < 2 {
             columns.truncate(1);
         }
+        for &column in &columns {
+            self.track(column);
+        }
         let filter = &*self;
         let plans =
             crate::parallel::map_ordered(&columns, workers, |_, &column| filter.planned(column));
-        for (column, (members, fill)) in columns.into_iter().zip(plans) {
-            self.incidence[column as usize] = members;
+        for (column, (members, fill, tree)) in columns.into_iter().zip(plans) {
+            self.lists.set(column, &members);
             queue.ahead[column as usize] = fill;
             queue.known[column as usize] = true;
+            match tree {
+                Some(tree) => queue.planned.insert(column, tree),
+                None => queue.planned.remove(&column),
+            };
         }
     }
 
@@ -813,7 +1037,7 @@ impl Filter {
             if self.occupants[column as usize] != 1 {
                 continue;
             }
-            let victim = self.members(column)[0] as usize;
+            let victim = self.only_holder(column);
             for touched in self.retire(victim) {
                 if self.occupants[touched as usize] == 1 {
                     pending.push(touched);
@@ -912,14 +1136,14 @@ impl Filter {
                 queue.plan(column, queue.ahead[c]);
                 continue;
             }
-            let members: Vec<usize> = self.members(column).iter().map(|&r| r as usize).collect();
-
             if weight == 1 {
-                for touched in self.retire(members[0]) {
+                let only = self.only_holder(column);
+                for touched in self.retire(only) {
                     queue.touch(touched, self.occupants[touched as usize]);
                 }
                 continue;
             }
+            let members: Vec<usize> = self.members(column).iter().map(|&r| r as usize).collect();
 
             // Stop when this fresh plan raises the cost proxy. Other keys
             // can be stale overestimates, so this is a heuristic stopping
@@ -927,7 +1151,10 @@ impl Filter {
             if key.saturating_mul(self.live_rows as i64 - 1) >= self.nonzeros {
                 break;
             }
-            let Plan { root, edges, fill } = plan(&members, &self.work);
+            let Plan { root, edges, fill } = queue
+                .planned
+                .remove(&column)
+                .unwrap_or_else(|| plan(&members, &self.work));
             debug_assert_eq!(fill, key, "a fresh key is the plan's fill");
             for (child, parent) in edges {
                 let before = core::mem::take(&mut self.work[child]);
@@ -943,12 +1170,16 @@ impl Filter {
                     // list entry; it is still listed under the columns it
                     // kept.
                     if before.binary_search(&touched).is_err() {
-                        self.incidence[touched as usize].push(child as u32);
+                        self.lists.add(touched, child as u32);
                     }
                     queue.touch(touched, self.occupants[touched as usize]);
                 }
-                self.compositions[child] =
-                    symmetric_difference(&self.compositions[child], &self.compositions[parent]);
+                let (alone, beside) = ([child], [parent]);
+                let sum = symmetric_difference(
+                    composition(&self.compositions, child, &alone),
+                    composition(&self.compositions, parent, &beside),
+                );
+                self.compositions[child] = sum;
                 self.work[child] = after;
             }
             for touched in self.retire(root) {
@@ -964,7 +1195,8 @@ impl Filter {
         for index in 0..self.work.len() {
             if self.live[index] {
                 kept_rows.push(core::mem::take(&mut self.work[index]));
-                kept_compositions.push(core::mem::take(&mut self.compositions[index]));
+                let set = core::mem::take(&mut self.compositions[index]);
+                kept_compositions.push(if set.is_empty() { vec![index] } else { set });
             }
         }
         debug_assert_eq!(
@@ -984,6 +1216,7 @@ impl Filter {
             },
             live_columns: self.live_columns,
             compositions: kept_compositions,
+            originals: self.work.len(),
         }
     }
 }
@@ -1006,8 +1239,8 @@ impl Filter {
 /// can find, and every one past what the caller needs is rows and
 /// nonzeros the solver walks for nothing.
 #[must_use]
-pub fn filter_merge(matrix: &SparseMatrix, weight_cap: usize, excess: usize) -> FilteredMatrix {
-    let mut filter = Filter::new(matrix);
+pub fn filter_merge(matrix: SparseMatrix, weight_cap: usize, excess: usize) -> FilteredMatrix {
+    let mut filter = Filter::new(matrix, weight_cap.max(1));
     let singletons = filter.all_singletons();
     filter.prune_singletons(singletons, |_| {});
     filter.purge(excess);
@@ -1018,6 +1251,38 @@ pub fn filter_merge(matrix: &SparseMatrix, weight_cap: usize, excess: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::super::dense_null_space;
+
+    /// A column too dense for a list at the start that comes down to a
+    /// singleton is given one then, and pruned like any other.
+    #[test]
+    fn a_dense_column_brought_down_is_listed_and_pruned() {
+        // Column 0 is held by 200 of 10 200 rows, past both a sixty-fourth
+        // of them and sixty-four times a cap of one. Rows 1 to 199 hold a
+        // singleton each beside it; row 0 holds it and a column it shares
+        // with one filler row. The fillers pair up over columns of their
+        // own, so nothing else is a singleton at the start.
+        const DENSE_ROWS: u32 = 200;
+        const FILLERS: u32 = 10_000;
+        let pair_base = DENSE_ROWS + 1;
+        let mut rows: Vec<Vec<u32>> = vec![vec![0, pair_base]];
+        rows.extend((1..DENSE_ROWS).map(|i| vec![0, i]));
+        rows.push(vec![pair_base, pair_base + 1]);
+        rows.extend((1..FILLERS).map(|k| vec![pair_base + k / 2 + 1, pair_base + k / 2 + 2]));
+        let columns = (pair_base + FILLERS + 2) as usize;
+        let matrix = SparseMatrix::new(columns, rows);
+        assert!(
+            Filter::new(matrix.clone(), 1).lists.untracked(0),
+            "column 0 starts without a list"
+        );
+        let filtered = filter_merge(matrix, 1, usize::MAX);
+        assert!(
+            filtered
+                .rows()
+                .iter()
+                .all(|row| row.binary_search(&0).is_err()),
+            "the dense column came down to one row and that row went"
+        );
+    }
 
     #[test]
     fn a_matrix_kept_as_bytes_is_the_matrix() {
@@ -1144,7 +1409,7 @@ mod tests {
             // Caps: pruning alone, pairs, the two smallest trees with
             // depth, and two wider, the last the widest these tests use.
             for cap in [1usize, 2, 3, 4, 8, 32] {
-                let filtered = filter_merge(&matrix, cap, usize::MAX);
+                let filtered = filter_merge(matrix.clone(), cap, usize::MAX);
                 for (index, row) in filtered.rows().iter().enumerate() {
                     assert_eq!(
                         &xor_of(&matrix, filtered.composition(index)),
@@ -1182,7 +1447,7 @@ mod tests {
             if dense_null_space(&matrix.packed_rows(), columns).is_empty() {
                 continue;
             }
-            let filtered = filter_merge(&matrix, 32, usize::MAX);
+            let filtered = filter_merge(matrix.clone(), 32, usize::MAX);
             assert!(
                 !dense_null_space(&filtered.packed_rows(), columns).is_empty(),
                 "seed {seed}: filtering lost every dependency"
@@ -1201,8 +1466,8 @@ mod tests {
             // 1500 rows over 1200 columns at twenty nonzeros a row: wide
             // enough that merges of every weight up to the cap occur.
             let matrix = random_matrix(seed, 1_500, 1_200, 60);
-            let pairs = filter_merge(&matrix, 2, usize::MAX);
-            let wide = filter_merge(&matrix, 32, usize::MAX);
+            let pairs = filter_merge(matrix.clone(), 2, usize::MAX);
+            let wide = filter_merge(matrix.clone(), 32, usize::MAX);
             assert!(
                 cost(&wide) <= cost(&pairs),
                 "seed {seed}: cap 32 cost {} against cap 2 cost {}",
@@ -1231,12 +1496,12 @@ mod tests {
         // dense shape, two and a half in the sparse.
         let columns = 4_000;
         let dense = random_matrix(DENSE_SEED, 4_600, columns, 160);
-        let filtered = filter_merge(&dense, 32, usize::MAX);
+        let filtered = filter_merge(dense.clone(), 32, usize::MAX);
         if let Some(dependency) = dense_null_space(&filtered.packed_rows(), columns).first() {
             assert!(xor_of(&dense, &filtered.expand(dependency)).is_empty());
         }
         let sparse = random_matrix(SPARSE_SEED, 4_600, columns, 1_600);
-        let filtered = filter_merge(&sparse, 32, usize::MAX);
+        let filtered = filter_merge(sparse.clone(), 32, usize::MAX);
         assert!(
             filtered.rows().len() < sparse.rows().len(),
             "a sparse matrix full of light columns did not shrink"
@@ -1251,7 +1516,7 @@ mod tests {
         // columns are emptied by the filter.
         let columns = 4_000;
         let sparse = random_matrix(SEED, 4_600, columns, 1_600);
-        let filtered = filter_merge(&sparse, 32, usize::MAX);
+        let filtered = filter_merge(sparse.clone(), 32, usize::MAX);
         assert!(filtered.live_columns() <= filtered.columns());
         let mut seen = vec![false; columns];
         for row in filtered.rows() {
@@ -1277,7 +1542,7 @@ mod tests {
             8,
             vec![vec![0, 1], vec![1, 2], vec![2, 3], vec![4, 5], vec![4, 5]],
         );
-        let filtered = filter_merge(&matrix, 2, usize::MAX);
+        let filtered = filter_merge(matrix.clone(), 2, usize::MAX);
         assert_eq!(filtered.rows(), &[Vec::<u32>::new()]);
         assert_eq!(filtered.composition(0), &[3, 4]);
         assert_eq!(filtered.live_columns(), 0);
@@ -1298,7 +1563,7 @@ mod tests {
                 vec![1, 5],
             ],
         );
-        let filtered = filter_merge(&matrix, 4, usize::MAX);
+        let filtered = filter_merge(matrix.clone(), 4, usize::MAX);
         for (index, row) in filtered.rows().iter().enumerate() {
             assert_eq!(&xor_of(&matrix, filtered.composition(index)), row);
             assert!(row.binary_search(&0).is_err(), "column 0 survived");
@@ -1332,11 +1597,11 @@ mod tests {
                 shared(&[6, 7]),
             ],
         );
-        let full = filter_merge(&matrix, 1, usize::MAX);
+        let full = filter_merge(matrix.clone(), 1, usize::MAX);
         assert_eq!(full.rows().len(), 10);
         let excess = full.rows().len() - full.live_columns();
         assert_eq!(excess, 2);
-        let purged = filter_merge(&matrix, 1, excess - 1);
+        let purged = filter_merge(matrix.clone(), 1, excess - 1);
         assert_eq!(purged.rows().len() - purged.live_columns(), excess - 1);
         assert_eq!(purged.rows().len(), 8, "one two-row clique removed");
         for index in 0..purged.rows().len() {
@@ -1414,7 +1679,7 @@ mod tests {
             for seed in SEEDS {
                 let matrix = random_matrix(seed, 1_300, 1_000, density);
                 let pruned = || {
-                    let mut filter = Filter::new(&matrix);
+                    let mut filter = Filter::new(matrix.clone(), 32);
                     let singletons = filter.all_singletons();
                     filter.prune_singletons(singletons, |_| {});
                     filter
@@ -1444,13 +1709,13 @@ mod tests {
             // are five thousand side by side, and the merges that follow
             // touch columns planned ahead.
             let matrix = random_matrix(seed, 6_000, 5_000, 625);
-            let alone = crate::parallel::with_budget(1, || filter_merge(&matrix, 32, 64));
+            let alone = crate::parallel::with_budget(1, || filter_merge(matrix.clone(), 32, 64));
             assert!(alone.rows().len() < matrix.rows().len(), "seed {seed}");
             // Budgets: the fewest that share, and more than a batch of
             // five thousand is cut for.
             for threads in [2usize, 32] {
                 let shared =
-                    crate::parallel::with_budget(threads, || filter_merge(&matrix, 32, 64));
+                    crate::parallel::with_budget(threads, || filter_merge(matrix.clone(), 32, 64));
                 assert_eq!(
                     shared.rows(),
                     alone.rows(),
@@ -1483,7 +1748,7 @@ mod tests {
             let matrix = random_matrix(seed, 260, columns, 20);
             // Excesses: one dependency, a few, and many.
             for excess in [1usize, 4, 16] {
-                let filtered = filter_merge(&matrix, 32, excess);
+                let filtered = filter_merge(matrix.clone(), 32, excess);
                 let kept = filtered
                     .rows()
                     .len()

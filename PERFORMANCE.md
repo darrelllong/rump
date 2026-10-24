@@ -919,6 +919,47 @@ indices. Past 128 columns the tables themselves leave that cache,
 as long on the Mac. So 128, the most whose tables stay within the
 smallest first-level data cache of the hosts measured, the EPYC's 32 KB.
 
+## The filter at RSA-155
+
+2026-10-24. `filter_merge` on the harvest of RSA-155 (factoring's gather on
+deepcore, 2×EPYC 7702: 100 996 356 relations, 109 851 424 columns, to
+5 122 455 rows and 611 767 263 nonzeros), each step timed in a scratch
+copy. The matrix is the same matrix byte for byte at every stage below.
+
+| step | before | after |
+|---|---:|---:|
+| `Filter::new` | 211.5 s | 29.6 s |
+| singleton pruning | 92.8 s | 116.7 s |
+| purge | 66.8 s | 77.3 s |
+| merge | 516.9 s | 443.1 s |
+| `finish` | 41.7 s | 7.7 s |
+| all of it | 930.2 s | 674.4 s |
+
+What `Filter::new` and `finish` were, and what changed:
+
+- `filter_merge` took the matrix by reference and copied its 101 million
+  rows; it takes it by value.
+- Each original row's composition was a vector of one, 101 million of
+  them; a row not merged has none, and is itself.
+- The column lists were 5 G pushes into 110 million growing vectors on
+  one thread (183 s). They are counted into, laid out from the counts and
+  written side by side, one array of slots, a column's bookkeeping one
+  record; and the 35 columns held by about half the rows and the smallest
+  primes, two fifths of the entries, get no list unless one comes down to
+  where a list is read ([`UNTRACKED_SHARE`]).
+- `expand` summed a dependency in a `BTreeMap`; it turns bits over.
+
+The merge's 12.45 million trees were each planned twice, once ahead and
+side by side, once again on the merging thread (53 s); the tree planned
+ahead is kept. `touch` cleared two flags of every column a merge touched,
+two hundred a merge, most far heavier than the cap; a column heavier than
+the cap is left as it is.
+
+Pruning and the purge are slower by about a fifth, the same in four runs,
+and the cause is not found. They are still a thread's: the merge's row
+sums and their bookkeeping, 300 s of its 443, and the pruning are where
+the time is.
+
 ## What a read at random costs
 
 `parallelism::gather_costs`, the `gather_costs_timing` probe: nanoseconds a
