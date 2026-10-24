@@ -108,17 +108,43 @@ impl BarrettContext {
         &self.modulus
     }
 
-    /// `x mod n` for `x < b^{2k}` — every product of two reduced values
-    /// qualifies. Wider inputs fall back to the division this context
-    /// exists to avoid, so callers keep their operands reduced.
+    /// `x mod n`. For `x < b^{2k}`, which every product of two reduced
+    /// values is, two multiplications. Up to `b^{3k}` the part above the
+    /// low `k` limbs is reduced first: `r·b^k + x_low < n·b^k ≤ b^{2k}`, two
+    /// reductions where a division would build its own reciprocal. Wider
+    /// inputs fall back to that division.
     #[must_use]
     pub fn reduce(&self, x: &BigUint) -> BigUint {
         let k = self.limb_count;
         if x.bits() > bit_span(k, 128) {
-            return x.rem(&self.modulus);
+            if x.bits() > bit_span(k, 192) {
+                return x.rem(&self.modulus);
+            }
+            let low = bit_span(k, 64);
+            let mut high = x.clone();
+            high.shr_bits(low);
+            let mut folded = self.within_span(&high).1;
+            folded.shl_bits(low);
+            return self.within_span(&folded.add(&x.low_bits(low))).1;
         }
+        self.within_span(x).1
+    }
+
+    /// `(⌊x/n⌋, x mod n)` for `x < b^{2k}` by the reduction's own estimate
+    /// of the quotient; wider inputs fall back to a division.
+    #[must_use]
+    pub fn div_rem(&self, x: &BigUint) -> (BigUint, BigUint) {
+        if x.bits() > bit_span(self.limb_count, 128) {
+            return x.div_rem(&self.modulus);
+        }
+        self.within_span(x)
+    }
+
+    /// The quotient and remainder of `x < b^{2k}`.
+    fn within_span(&self, x: &BigUint) -> (BigUint, BigUint) {
+        let k = self.limb_count;
         if *x < self.modulus {
-            return x.clone();
+            return (BigUint::zero(), x.clone());
         }
         // q̂ = ⌊⌊x/b^(k−1)⌋·μ/b^(k+1)⌋ — the two shifts are limb-aligned.
         let mut q = x.clone();
@@ -155,7 +181,7 @@ impl BarrettContext {
         }
         #[cfg(test)]
         CORRECTIONS.with(|cell| cell.set(corrections));
-        r
+        (q.add(&BigUint::from_u64(u64::from(corrections))), r)
     }
 
     /// The correction count of the last [`reduce`](Self::reduce) on this

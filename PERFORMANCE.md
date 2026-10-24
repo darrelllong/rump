@@ -639,6 +639,34 @@ same load:
 
 The exact check passed at the planned top in all four.
 
+### The reductions, not the products
+
+2026-10-24, after the entry above. The top step of that lift, 12.6 →
+25.25 Mbit, took 23.4 s, and its products 0.8 s of it: the rest was
+reductions and divisions a coefficient at a time. At 12.6 Mbit on
+deepcore a product is 0.10–0.13 s, a Barrett reduction 0.20 s, and
+`div_rem` 1.03–1.09 s, since it builds a reciprocal of its own each call.
+Three things took the dear path:
+
+- The exact quotient by `q^k` was a `div_rem`; the level's Barrett context
+  gives it with the remainder (`BarrettContext::div_rem`).
+- A product reduced by `f` runs a few hundred bits past `b^{2k}`, the
+  algebraic polynomial's coefficients, and Barrett fell back to a division
+  there. `BarrettContext::reduce` now reduces the part above the low `k`
+  limbs first up to `b^{3k}`: two reductions.
+- A level's five reductions ran one after another, and so did the making
+  of the levels: the rings, each a division for its `μ`, and `δ` reduced
+  into each. The coefficients are reduced side by side as the products
+  were, and the rings made side by side.
+
+One dependency of RSA-120, alone on the host:
+
+| | the lift | its top step | before the first step |
+|---|---:|---:|---:|
+| the entry above | 71–72 s | 23.4 s | 11.0 s |
+| the quotient, the split, the coefficients side by side | 24.2 s | 3.6 s | 11.0 s |
+| and the levels made side by side | 17.1 s | 3.6 s | 4.0 s |
+
 ## Fanning out a tree's level
 
 A level of a product tree, a remainder tree or a CRT is independent

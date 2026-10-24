@@ -4299,11 +4299,20 @@ mod tests {
                 edge.set_bit(128 * words);
                 let edge = edge.sub(&BigUint::one());
                 assert_eq!(ctx.reduce(&edge), edge.rem(&n));
-                // Beyond the contract the fallback still answers.
-                let mut wide = seeded_biguint(3 * words, &mut seed);
-                wide.set_bit(3 * words * 64 - 1);
-                assert_eq!(ctx.reduce(&wide), wide.rem(&n));
+                // Past b^2k: up to b^3k by one split, and past it by the
+                // division.
+                for extra in [1, words, 2 * words] {
+                    let mut wide = seeded_biguint(2 * words + extra, &mut seed);
+                    wide.set_bit((2 * words + extra) * 64 - 1);
+                    assert_eq!(ctx.reduce(&wide), wide.rem(&n), "{extra} limbs past b^2k");
+                }
                 assert_eq!(ctx.reduce(&BigUint::zero()), BigUint::zero());
+                // The quotient with the remainder, within the span and past it.
+                for limbs in [words, 2 * words, 3 * words] {
+                    let x = seeded_biguint(limbs, &mut seed);
+                    assert_eq!(ctx.div_rem(&x), x.div_rem(&n), "{limbs} limbs");
+                }
+                assert_eq!(ctx.div_rem(&edge), edge.div_rem(&n));
             }
         }
         // Tiny and structured moduli.

@@ -86,6 +86,15 @@ impl Ring {
         }
     }
 
+    /// `(⌊x/m⌋, x mod m)`: by Barrett's estimate once the modulus is wide,
+    /// where a division would build a reciprocal of its own each time.
+    fn div_rem(&self, x: &BigUint) -> (BigUint, BigUint) {
+        match &self.barrett {
+            Some(context) => context.div_rem(x),
+            None => x.div_rem(&self.modulus),
+        }
+    }
+
     /// `x mod m` in `[0, m)` for a signed `x`.
     fn reduce_signed(&self, x: &BigInt) -> BigUint {
         match x.sign() {
@@ -219,19 +228,44 @@ impl Level {
             delta,
         }
     }
+}
 
-    /// The level at `rung`, with `δ` reduced from the level above — whose
-    /// residues are below the square of this modulus, so Barrett applies.
-    fn from_above(rung: Rung, above: &Self) -> Self {
-        let ring = Ring::new(rung.modulus);
-        let delta = above.delta.iter().map(|d| ring.reduce(d)).collect();
-        Self {
+/// The levels at `rungs`, climbing: `δ` at the widest from `top`, given
+/// that level's ring, and at each below reduced from the level above, whose
+/// residues are below the square of its modulus, so Barrett applies. The
+/// rings are independent of one another and made side by side, the widest
+/// first; a level's coefficients are reduced side by side.
+fn levels_at(
+    mut rungs: Vec<Rung>,
+    workers: usize,
+    top: impl FnOnce(&Ring) -> Vec<BigUint>,
+) -> Vec<Level> {
+    rungs.reverse();
+    let rings: Vec<(Ring, Option<Ring>)> =
+        crate::parallel::map_ordered(&rungs, workers, |_, rung| {
+            (
+                Ring::new(rung.modulus.clone()),
+                rung.rise.clone().map(Ring::new),
+            )
+        });
+    let mut top = Some(top);
+    let mut descending: Vec<Level> = Vec::with_capacity(rungs.len());
+    for (rung, (ring, rise)) in rungs.iter().zip(rings) {
+        let delta = match descending.last() {
+            None => top.take().expect("one widest level")(&ring),
+            Some(above) => {
+                crate::parallel::map_ordered(&above.delta, workers, |_, d| ring.reduce(d))
+            }
+        };
+        descending.push(Level {
             exponent: rung.exponent,
             ring,
-            rise: rung.rise.map(Ring::new),
+            rise,
             delta,
-        }
+        });
     }
+    descending.reverse();
+    descending
 }
 
 /// A square root of `δ` in `ℤ[x]/(f)` modulo `q^k`, lifted a level at a
@@ -424,31 +458,19 @@ impl<'a> HenselSquareRoot<'a> {
             "a residue is below its modulus"
         );
         let mut rungs = rungs_reaching(prime, 1, prime, modulus.bits());
-        let top = rungs.pop().unwrap_or_else(|| Rung::seed(prime));
+        rungs.insert(0, Rung::seed(prime));
         assert!(
-            top.modulus == *modulus,
+            rungs.last().expect("the seed's").modulus == *modulus,
             "the modulus is a power of the prime"
         );
-        let mut descending = vec![Level {
-            exponent: top.exponent,
-            ring: Ring::new(top.modulus),
-            rise: top.rise.map(Ring::new),
-            delta: padded(residues, degree),
-        }];
-        if top.exponent > 1 {
-            rungs.insert(0, Rung::seed(prime));
-        }
-        while let Some(rung) = rungs.pop() {
-            let above = descending.last().expect("non-empty");
-            descending.push(Level::from_above(rung, above));
-        }
-        descending.reverse();
+        let levels = levels_at(rungs, 1, |_| padded(residues, degree));
         let inverse = Self::field_inverse(f, root)?;
-        Self::seeded(f, None, descending, root, &inverse)
+        Self::seeded(f, None, levels, root, &inverse)
     }
 
-    /// Spread the coefficient products of each level over up to `workers`
-    /// threads. One (the default) keeps everything on the calling thread.
+    /// Spread each level's coefficient products and reductions, and the
+    /// making of the levels a hint plans, over up to `workers` threads. One
+    /// (the default) keeps everything on the calling thread.
     #[must_use]
     pub fn with_workers(mut self, workers: usize) -> Self {
         self.workers = workers.max(1);
@@ -476,22 +498,21 @@ impl<'a> HenselSquareRoot<'a> {
     #[must_use]
     pub fn with_precision_hint(mut self, bits: usize) -> Self {
         let last = self.levels.last().expect("non-empty");
-        let mut rungs = rungs_reaching(
+        let rungs = rungs_reaching(
             &self.levels[0].ring.modulus,
             last.exponent,
             &last.ring.modulus,
             bits,
         );
-        let Some(top) = rungs.pop() else {
+        if rungs.is_empty() {
             return self;
-        };
-        let mut descending = vec![Level::from_integers(top, self.integers())];
-        while let Some(rung) = rungs.pop() {
-            let above = descending.last().expect("non-empty");
-            descending.push(Level::from_above(rung, above));
         }
-        descending.reverse();
-        self.levels.extend(descending);
+        let workers = self.workers;
+        let integers = self.integers();
+        let levels = levels_at(rungs, workers, |ring| {
+            crate::parallel::map_ordered(integers, workers, |_, d| ring.reduce_signed(d))
+        });
+        self.levels.extend(levels);
         self
     }
 
@@ -564,34 +585,32 @@ impl<'a> HenselSquareRoot<'a> {
         let squared = self.reduce_by_f(&self.square(&self.root));
         let previous = &self.levels[self.level];
         let next = &self.levels[self.level + 1];
-        let error: Vec<BigUint> = squared
-            .iter()
-            .zip(&next.delta)
-            .map(|(s, d)| {
-                let residue = next
-                    .ring
-                    .reduce_signed(&s.sub(&BigInt::from_biguint(d.clone())));
-                let (quotient, remainder) = residue.div_rem(&previous.ring.modulus);
-                debug_assert!(
-                    remainder.is_zero(),
-                    "β² − δ must vanish modulo q^k: the seed was not a root"
-                );
-                quotient
-            })
-            .collect();
+        let pairs: Vec<(&BigInt, &BigUint)> = squared.iter().zip(&next.delta).collect();
+        let error = self.per_coefficient(&pairs, |&(s, d)| {
+            let residue = next
+                .ring
+                .reduce_signed(&s.sub(&BigInt::from_biguint(d.clone())));
+            let (quotient, remainder) = previous.ring.div_rem(&residue);
+            debug_assert!(
+                remainder.is_zero(),
+                "β² − δ must vanish modulo q^k: the seed was not a root"
+            );
+            quotient
+        });
 
         // c = e · u mod (f, q^{k'−k}), then β ← β − q^k · c mod q^{k'}.
         let correction = self.reduce_by_f(&self.multiply(&error, &self.inverse));
         let rise = next.rise.as_ref().unwrap_or(&previous.ring);
-        for (b, c) in self.root.iter_mut().zip(&correction) {
-            let c = rise.reduce_signed(c);
-            let step = previous.ring.modulus.mul(&c);
-            *b = if *b >= step {
+        let pairs: Vec<(&BigUint, &BigInt)> = self.root.iter().zip(&correction).collect();
+        let root = self.per_coefficient(&pairs, |&(b, c)| {
+            let step = previous.ring.modulus.mul(&rise.reduce_signed(c));
+            if *b >= step {
                 b.sub(&step)
             } else {
                 b.add(&next.ring.modulus).sub(&step)
-            };
-        }
+            }
+        });
+        self.root = root;
         self.level += 1;
     }
 
@@ -611,35 +630,33 @@ impl<'a> HenselSquareRoot<'a> {
         let product = self.reduce_by_f(&self.multiply(&doubled, &self.inverse));
         let half = &self.levels[self.inverse_level];
         let full = &self.levels[self.level];
-        let error: Vec<BigUint> = product
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let p = if i == 0 {
-                    p.sub(&BigInt::one())
-                } else {
-                    p.clone()
-                };
-                let residue = full.ring.reduce_signed(&p);
-                let (quotient, remainder) = residue.div_rem(&half.ring.modulus);
-                debug_assert!(
-                    remainder.is_zero(),
-                    "2βu − 1 must vanish modulo the reciprocal's modulus"
-                );
-                quotient
-            })
-            .collect();
+        let indexed: Vec<(usize, &BigInt)> = product.iter().enumerate().collect();
+        let error = self.per_coefficient(&indexed, |&(i, p)| {
+            let p = if i == 0 {
+                p.sub(&BigInt::one())
+            } else {
+                p.clone()
+            };
+            let residue = full.ring.reduce_signed(&p);
+            let (quotient, remainder) = half.ring.div_rem(&residue);
+            debug_assert!(
+                remainder.is_zero(),
+                "2βu − 1 must vanish modulo the reciprocal's modulus"
+            );
+            quotient
+        });
         let correction = self.reduce_by_f(&self.multiply(&error, &self.inverse));
         let rise = full.rise.as_ref().unwrap_or(&half.ring);
-        for (u, c) in self.inverse.iter_mut().zip(&correction) {
-            let c = rise.reduce_signed(c);
-            let step = half.ring.modulus.mul(&c);
-            *u = if *u >= step {
+        let pairs: Vec<(&BigUint, &BigInt)> = self.inverse.iter().zip(&correction).collect();
+        let inverse = self.per_coefficient(&pairs, |&(u, c)| {
+            let step = half.ring.modulus.mul(&rise.reduce_signed(c));
+            if *u >= step {
                 u.sub(&step)
             } else {
                 u.add(&full.ring.modulus).sub(&step)
-            };
-        }
+            }
+        });
+        self.inverse = inverse;
         self.inverse_level = self.level;
     }
 
@@ -700,9 +717,22 @@ impl<'a> HenselSquareRoot<'a> {
     where
         F: Fn((usize, usize)) -> BigUint + Sync,
     {
+        self.per_coefficient(pairs, |&pair| task(pair))
+    }
+
+    /// `task` over `items`, a level's coefficients or their products, in
+    /// order: on the calling thread unless the budget and the width both
+    /// justify threads. Each item is a product or a reduction at the
+    /// level's width, and they are independent.
+    fn per_coefficient<T, R, F>(&self, items: &[T], task: F) -> Vec<R>
+    where
+        T: Sync,
+        R: Send,
+        F: Fn(&T) -> R + Sync,
+    {
         let wide = self.modulus().bits() >= PARALLEL_PRODUCT_MIN_BITS;
         let threads = if wide { self.workers } else { 1 };
-        crate::parallel::map_ordered(pairs, threads, |_, &pair| task(pair))
+        crate::parallel::map_ordered(items, threads, |_, item| task(item))
     }
 }
 
