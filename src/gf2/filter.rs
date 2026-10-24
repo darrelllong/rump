@@ -55,7 +55,7 @@
 
 use core::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::{set_bits, words_for, WORD};
 
@@ -498,7 +498,7 @@ struct Cliques {
 
 impl Cliques {
     /// Every live row a component of its own.
-    fn new(rows: &[Vec<u32>], live: &[bool]) -> Self {
+    fn new(rows: &[Vec<u32>], live: &[AtomicBool]) -> Self {
         let count = rows.len();
         assert!(
             u32::try_from(count).is_ok_and(|count| count < LAST),
@@ -506,7 +506,7 @@ impl Cliques {
         );
         let weight: Vec<i64> = rows.iter().map(|row| row.len() as i64).collect();
         let heap = (0..count)
-            .filter(|&row| live[row])
+            .filter(|&row| live[row].load(Ordering::Relaxed))
             .map(|row| (weight[row], Reverse(row as u32)))
             .collect();
         Self {
@@ -542,10 +542,13 @@ impl Cliques {
     }
 
     /// The root of the heaviest component not yet taken, which is taken.
-    fn heaviest(&mut self, live: &[bool]) -> Option<u32> {
+    fn heaviest(&mut self, live: &[AtomicBool]) -> Option<u32> {
         while let Some((weight, Reverse(root))) = self.heap.pop() {
             let row = root as usize;
-            if live[row] && self.parent[row] == root && self.weight[row] == weight {
+            if live[row].load(Ordering::Relaxed)
+                && self.parent[row] == root
+                && self.weight[row] == weight
+            {
                 return Some(root);
             }
         }
@@ -587,13 +590,13 @@ struct Queue {
 
 impl Queue {
     /// Every column of `occupants` the merge takes, under its weight.
-    fn new(occupants: &[u32], cap: usize) -> Self {
+    fn new(occupants: &[AtomicU32], cap: usize) -> Self {
         let columns = occupants.len();
         let mut queue = Self {
             cap,
             last: occupants
                 .iter()
-                .map(|&weight| SENTINEL_KEY_BASE + i64::from(weight))
+                .map(|weight| SENTINEL_KEY_BASE + i64::from(weight.load(Ordering::Relaxed)))
                 .collect(),
             fresh: vec![false; columns],
             queued: vec![false; columns],
@@ -603,8 +606,8 @@ impl Queue {
             horizon: None,
             heap: BinaryHeap::new(),
         };
-        for (column, &weight) in occupants.iter().enumerate() {
-            if queue.merges(weight) {
+        for (column, weight) in occupants.iter().enumerate() {
+            if queue.merges(weight.load(Ordering::Relaxed)) {
                 queue
                     .heap
                     .push(Reverse((queue.last[column], column as u32)));
@@ -667,7 +670,7 @@ impl Queue {
     /// The stale columns among the next [`PLANS_AHEAD`] entries that the
     /// merge takes and whose fills are not known, if nothing has been read
     /// as far as `entry`. The entries stay queued.
-    fn stale_ahead(&mut self, entry: (i64, u32), occupants: &[u32]) -> Vec<u32> {
+    fn stale_ahead(&mut self, entry: (i64, u32), occupants: &[AtomicU32]) -> Vec<u32> {
         if self.horizon.is_some_and(|horizon| entry <= horizon) {
             return Vec::new();
         }
@@ -678,7 +681,7 @@ impl Queue {
                 break;
             };
             let known = self.known[column as usize] || self.exact(key, column);
-            if self.merges(occupants[column as usize]) && !known {
+            if self.merges(occupants[column as usize].load(Ordering::Relaxed)) && !known {
                 stale.push(column);
             }
             read.push(Reverse((key, column)));
@@ -850,6 +853,16 @@ impl Lists {
     }
 }
 
+/// What a run of rows retired side by side did.
+#[derive(Default)]
+struct Retired {
+    rows: usize,
+    entries: i64,
+    emptied: usize,
+    singletons: Vec<u32>,
+    twos: Vec<u32>,
+}
+
 /// The working state of one filtering run: rows, their compositions, and
 /// the column incidence kept exact as rows change.
 struct Filter {
@@ -859,14 +872,17 @@ struct Filter {
     /// merged, which is itself alone. A merged row's set is never empty:
     /// the live rows' sets stay independent, so no two are equal.
     compositions: Vec<Vec<usize>>,
-    live: Vec<bool>,
+    /// Whether each row is live; atomic, so that rows can be retired side
+    /// by side, a row claimed by turning its flag.
+    live: Vec<AtomicBool>,
     live_rows: usize,
     live_columns: usize,
     nonzeros: i64,
     /// Column incidence as row lists, maintained incrementally; the
     /// occupancy counts are exact throughout.
     lists: Lists,
-    occupants: Vec<u32>,
+    /// Each column's weight; atomic for the same reason.
+    occupants: Vec<AtomicU32>,
 }
 
 impl Filter {
@@ -877,14 +893,23 @@ impl Filter {
         Self {
             columns,
             compositions: vec![Vec::new(); work.len()],
-            live: vec![true; work.len()],
+            live: (0..work.len()).map(|_| AtomicBool::new(true)).collect(),
             live_rows: work.len(),
             live_columns: occupants.iter().filter(|&&count| count > 0).count(),
             nonzeros: work.iter().map(|row| row.len() as i64).sum(),
             work,
             lists,
-            occupants,
+            occupants: occupants.into_iter().map(AtomicU32::new).collect(),
         }
+    }
+
+    /// The live rows that hold `column`.
+    fn weight(&self, column: u32) -> u32 {
+        self.occupants[column as usize].load(Ordering::Relaxed)
+    }
+
+    fn is_live(&self, row: usize) -> bool {
+        self.live[row].load(Ordering::Relaxed)
     }
 
     fn excess(&self) -> usize {
@@ -892,17 +917,17 @@ impl Filter {
     }
 
     fn gain(&mut self, column: u32) {
-        let c = column as usize;
-        if self.occupants[c] == 0 {
+        let weight = self.weight(column);
+        if weight == 0 {
             self.live_columns += 1;
         }
-        self.occupants[c] += 1;
+        self.occupants[column as usize].store(weight + 1, Ordering::Relaxed);
     }
 
     fn lose(&mut self, column: u32) {
-        let c = column as usize;
-        self.occupants[c] -= 1;
-        if self.occupants[c] == 0 {
+        let weight = self.weight(column) - 1;
+        self.occupants[column as usize].store(weight, Ordering::Relaxed);
+        if weight == 0 {
             self.live_columns -= 1;
         }
     }
@@ -920,7 +945,9 @@ impl Filter {
         let chunks: Vec<usize> = (0..work.len().div_ceil(length)).collect();
         let found = crate::parallel::map_ordered(&chunks, threads, |_, &chunk| {
             (chunk * length..((chunk + 1) * length).min(work.len()))
-                .filter(|&r| live[r] && work[r].binary_search(&column).is_ok())
+                .filter(|&r| {
+                    live[r].load(Ordering::Relaxed) && work[r].binary_search(&column).is_ok()
+                })
                 .map(|r| r as u32)
                 .collect::<Vec<u32>>()
         });
@@ -935,13 +962,16 @@ impl Filter {
         let mut members: Vec<u32> = self
             .lists
             .listed(column)
-            .filter(|&r| live[r as usize] && work[r as usize].binary_search(&column).is_ok())
+            .filter(|&r| {
+                live[r as usize].load(Ordering::Relaxed)
+                    && work[r as usize].binary_search(&column).is_ok()
+            })
             .collect();
         members.sort_unstable();
         members.dedup();
         debug_assert_eq!(
             members.len(),
-            self.occupants[column as usize] as usize,
+            self.weight(column) as usize,
             "occupancy drifted from incidence"
         );
         members
@@ -950,12 +980,20 @@ impl Filter {
     /// The one live row that holds `column`, a singleton: the first such row
     /// its list names, with nothing gathered, sorted or written back.
     fn only_holder(&mut self, column: u32) -> usize {
-        debug_assert_eq!(self.occupants[column as usize], 1, "a singleton");
         self.track(column);
+        self.holder(column)
+    }
+
+    /// As [`Self::only_holder`], for a column that has a list.
+    fn holder(&self, column: u32) -> usize {
+        debug_assert_eq!(self.weight(column), 1, "a singleton");
         let (work, live) = (&self.work, &self.live);
         self.lists
             .listed(column)
-            .find(|&r| live[r as usize] && work[r as usize].binary_search(&column).is_ok())
+            .find(|&r| {
+                live[r as usize].load(Ordering::Relaxed)
+                    && work[r as usize].binary_search(&column).is_ok()
+            })
             .expect("a singleton's row is listed") as usize
     }
 
@@ -1018,8 +1056,8 @@ impl Filter {
 
     /// Remove a row, returning the columns it held.
     fn retire(&mut self, row: usize) -> Vec<u32> {
-        debug_assert!(self.live[row]);
-        self.live[row] = false;
+        debug_assert!(self.is_live(row));
+        self.live[row].store(false, Ordering::Relaxed);
         self.live_rows -= 1;
         self.nonzeros -= self.work[row].len() as i64;
         let held = core::mem::take(&mut self.work[row]);
@@ -1029,38 +1067,134 @@ impl Filter {
         held
     }
 
-    /// Remove every row pinned by a singleton column, to a fixed point,
-    /// starting from the columns in `pending`. `lightened` is shown each
-    /// column a row removed had held.
-    fn prune_singletons(&mut self, mut pending: Vec<u32>, mut lightened: impl FnMut(u32)) {
-        while let Some(column) = pending.pop() {
-            if self.occupants[column as usize] != 1 {
-                continue;
-            }
-            let victim = self.only_holder(column);
-            for touched in self.retire(victim) {
-                if self.occupants[touched as usize] == 1 {
-                    pending.push(touched);
+    /// Retire the live rows among `rows`, side by side: a row is claimed
+    /// by turning its flag, so one named twice goes once, and its columns'
+    /// weights are counted down where they stand. A column's weight before
+    /// says what became of it: two, a singleton; three, held by two; one,
+    /// empty. Returns the columns the rows left singletons and those they
+    /// left at two. A row retired so keeps its entries until
+    /// [`Self::release`]; nothing reads a retired row.
+    fn retire_all(&mut self, rows: &[u32]) -> (Vec<u32>, Vec<u32>) {
+        let threads = crate::parallel::budget();
+        let length = rows.len().div_ceil(threads * CHUNKS_PER_THREAD).max(1);
+        let chunks: Vec<&[u32]> = rows.chunks(length).collect();
+        let (work, live, occupants) = (&self.work, &self.live, &self.occupants);
+        let retired = crate::parallel::map_ordered(&chunks, threads, |_, chunk| {
+            let mut retired = Retired::default();
+            for &row in *chunk {
+                if !live[row as usize].swap(false, Ordering::Relaxed) {
+                    continue;
                 }
-                lightened(touched);
+                retired.rows += 1;
+                retired.entries += work[row as usize].len() as i64;
+                for &column in &work[row as usize] {
+                    match occupants[column as usize].fetch_sub(1, Ordering::Relaxed) {
+                        1 => retired.emptied += 1,
+                        2 => retired.singletons.push(column),
+                        3 => retired.twos.push(column),
+                        _ => {}
+                    }
+                }
             }
+            retired
+        });
+        let (mut singletons, mut twos) = (Vec::new(), Vec::new());
+        for part in retired {
+            self.live_rows -= part.rows;
+            self.nonzeros -= part.entries;
+            self.live_columns -= part.emptied;
+            singletons.extend(part.singletons);
+            twos.extend(part.twos);
         }
+        (singletons, twos)
     }
 
-    /// Every column of `columns` that two rows hold binds them.
-    fn bind(&mut self, cliques: &mut Cliques, columns: impl Iterator<Item = u32>) {
-        for column in columns {
-            if self.occupants[column as usize] == 2 {
-                let members = self.members(column);
-                cliques.bind(members[0], members[1]);
+    /// The entries of the rows retired side by side, given back.
+    fn release(&mut self) {
+        let threads = crate::parallel::budget();
+        let length = self.work.len().div_ceil(threads * CHUNKS_PER_THREAD).max(1);
+        let live = &self.live;
+        std::thread::scope(|scope| {
+            for (number, rows) in self.work.chunks_mut(length).enumerate() {
+                scope.spawn(move || {
+                    for (index, row) in rows.iter_mut().enumerate() {
+                        if !live[number * length + index].load(Ordering::Relaxed) {
+                            *row = Vec::new();
+                        }
+                    }
+                });
             }
+        });
+    }
+
+    /// The live rows that hold each of `columns` still held by one, once
+    /// each, found side by side; a column given no list is listed first.
+    fn pinned(&mut self, columns: &[u32]) -> Vec<u32> {
+        for &column in columns {
+            if self.weight(column) == 1 && self.lists.untracked(column) {
+                self.track(column);
+            }
+        }
+        let threads = crate::parallel::budget();
+        let length = columns.len().div_ceil(threads * CHUNKS_PER_THREAD).max(1);
+        let chunks: Vec<&[u32]> = columns.chunks(length).collect();
+        let filter = &*self;
+        crate::parallel::map_ordered(&chunks, threads, |_, chunk| {
+            chunk
+                .iter()
+                .filter(|&&column| filter.weight(column) == 1)
+                .map(|&column| filter.holder(column) as u32)
+                .collect::<Vec<u32>>()
+        })
+        .concat()
+    }
+
+    /// Remove every row pinned by a singleton column, to a fixed point,
+    /// starting from the columns in `singletons`: in rounds, each the rows
+    /// the singletons pin, retired side by side, and the columns they left
+    /// singletons the next. Which rows go does not depend on the order they
+    /// go in. Returns the columns left at two along the way.
+    fn prune(&mut self, mut singletons: Vec<u32>) -> Vec<u32> {
+        let mut twos = Vec::new();
+        while !singletons.is_empty() {
+            let rows = self.pinned(&singletons);
+            let (next, two) = self.retire_all(&rows);
+            twos.extend(two);
+            singletons = next;
+        }
+        twos
+    }
+
+    /// Every column of `columns` that two rows hold binds them. The pairs
+    /// are found side by side and bound in the order of `columns`.
+    fn bind(&mut self, cliques: &mut Cliques, columns: &[u32]) {
+        for &column in columns {
+            if self.weight(column) == 2 && self.lists.untracked(column) {
+                self.track(column);
+            }
+        }
+        let threads = crate::parallel::budget();
+        let length = columns.len().div_ceil(threads * CHUNKS_PER_THREAD).max(1);
+        let chunks: Vec<&[u32]> = columns.chunks(length).collect();
+        let filter = &*self;
+        let pairs = crate::parallel::map_ordered(&chunks, threads, |_, chunk| {
+            chunk
+                .iter()
+                .filter(|&&column| filter.weight(column) == 2)
+                .map(|&column| {
+                    let held = filter.holders(column);
+                    (held[0], held[1])
+                })
+                .collect::<Vec<(u32, u32)>>()
+        });
+        for (a, b) in pairs.into_iter().flatten() {
+            cliques.bind(a, b);
         }
     }
 
     fn all_singletons(&self) -> Vec<u32> {
-        (0..self.columns)
-            .filter(|&c| self.occupants[c] == 1)
-            .map(|c| c as u32)
+        (0..self.columns as u32)
+            .filter(|&c| self.weight(c) == 1)
             .collect()
     }
 
@@ -1084,14 +1218,15 @@ impl Filter {
             return;
         }
         let mut cliques = Cliques::new(&self.work, &self.live);
-        self.bind(&mut cliques, 0..self.columns as u32);
+        let every: Vec<u32> = (0..self.columns as u32).collect();
+        self.bind(&mut cliques, &every);
         loop {
             let excess = self.excess();
             if excess <= target {
-                return;
+                break;
             }
             let share = (excess - target).div_ceil(PURGE_SHARE_DIVISOR);
-            let (mut pending, mut lightened) = (Vec::new(), Vec::new());
+            let mut rows = Vec::new();
             let mut taken = 0;
             while taken < share {
                 let Some(root) = cliques.heaviest(&self.live) else {
@@ -1100,20 +1235,16 @@ impl Filter {
                 taken += 1;
                 let mut row = root;
                 while row != LAST {
-                    for touched in self.retire(row as usize) {
-                        if self.occupants[touched as usize] == 1 {
-                            pending.push(touched);
-                        }
-                        lightened.push(touched);
-                    }
+                    rows.push(row);
                     row = cliques.next[row as usize];
                 }
             }
             if taken == 0 {
-                return;
+                break;
             }
-            self.prune_singletons(pending, |column| lightened.push(column));
-            self.bind(&mut cliques, lightened.into_iter());
+            let (singletons, mut twos) = self.retire_all(&rows);
+            twos.extend(self.prune(singletons));
+            self.bind(&mut cliques, &twos);
         }
     }
 
@@ -1123,7 +1254,7 @@ impl Filter {
         let mut queue = Queue::new(&self.occupants, weight_cap.max(1));
         while let Some((key, column)) = queue.pop() {
             let c = column as usize;
-            let weight = self.occupants[c];
+            let weight = self.weight(column);
             if !queue.merges(weight) {
                 continue;
             }
@@ -1139,7 +1270,7 @@ impl Filter {
             if weight == 1 {
                 let only = self.only_holder(column);
                 for touched in self.retire(only) {
-                    queue.touch(touched, self.occupants[touched as usize]);
+                    queue.touch(touched, self.weight(touched));
                 }
                 continue;
             }
@@ -1162,7 +1293,7 @@ impl Filter {
                 self.nonzeros += after.len() as i64 - before.len() as i64;
                 for &touched in &before {
                     self.lose(touched);
-                    queue.touch(touched, self.occupants[touched as usize]);
+                    queue.touch(touched, self.weight(touched));
                 }
                 for &touched in &after {
                     self.gain(touched);
@@ -1172,7 +1303,7 @@ impl Filter {
                     if before.binary_search(&touched).is_err() {
                         self.lists.add(touched, child as u32);
                     }
-                    queue.touch(touched, self.occupants[touched as usize]);
+                    queue.touch(touched, self.weight(touched));
                 }
                 let (alone, beside) = ([child], [parent]);
                 let sum = symmetric_difference(
@@ -1183,9 +1314,13 @@ impl Filter {
                 self.work[child] = after;
             }
             for touched in self.retire(root) {
-                queue.touch(touched, self.occupants[touched as usize]);
+                queue.touch(touched, self.weight(touched));
             }
-            debug_assert_eq!(self.occupants[c], 0, "an eliminated column keeps no holder");
+            debug_assert_eq!(
+                self.weight(column),
+                0,
+                "an eliminated column keeps no holder"
+            );
         }
     }
 
@@ -1193,7 +1328,7 @@ impl Filter {
         let mut kept_rows = Vec::with_capacity(self.live_rows);
         let mut kept_compositions = Vec::with_capacity(self.live_rows);
         for index in 0..self.work.len() {
-            if self.live[index] {
+            if self.is_live(index) {
                 kept_rows.push(core::mem::take(&mut self.work[index]));
                 let set = core::mem::take(&mut self.compositions[index]);
                 kept_compositions.push(if set.is_empty() { vec![index] } else { set });
@@ -1205,7 +1340,10 @@ impl Filter {
             "the running nonzero count drifted"
         );
         debug_assert_eq!(
-            self.occupants.iter().filter(|&&count| count > 0).count(),
+            self.occupants
+                .iter()
+                .filter(|count| count.load(Ordering::Relaxed) > 0)
+                .count(),
             self.live_columns,
             "the running live column count drifted"
         );
@@ -1242,8 +1380,9 @@ impl Filter {
 pub fn filter_merge(matrix: SparseMatrix, weight_cap: usize, excess: usize) -> FilteredMatrix {
     let mut filter = Filter::new(matrix, weight_cap.max(1));
     let singletons = filter.all_singletons();
-    filter.prune_singletons(singletons, |_| {});
+    filter.prune(singletons);
     filter.purge(excess);
+    filter.release();
     filter.merge(weight_cap);
     filter.finish()
 }
@@ -1628,7 +1767,7 @@ mod tests {
             }
             let mut parent: Vec<usize> = (0..count).collect();
             for column in 0..filter.columns {
-                if filter.occupants[column] == 2 {
+                if filter.weight(column as u32) == 2 {
                     let members = filter.members(column as u32);
                     let (a, b) = (members[0] as usize, members[1] as usize);
                     let (a, b) = (find(&mut parent, a), find(&mut parent, b));
@@ -1637,7 +1776,7 @@ mod tests {
             }
             let mut weight = vec![0usize; count];
             let mut rows_of = vec![Vec::new(); count];
-            for row in (0..count).filter(|&row| filter.live[row]) {
+            for row in (0..count).filter(|&row| filter.is_live(row)) {
                 let root = find(&mut parent, row);
                 weight[root] += filter.work[row].len();
                 rows_of[root].push(row);
@@ -1657,13 +1796,63 @@ mod tests {
             for &root in &components[..share] {
                 for &row in &rows_of[root] {
                     for touched in filter.retire(row) {
-                        if filter.occupants[touched as usize] == 1 {
+                        if filter.weight(touched) == 1 {
                             pending.push(touched);
                         }
                     }
                 }
             }
-            filter.prune_singletons(pending, |_| {});
+            filter.prune(pending);
+        }
+    }
+
+    /// Pruning in rounds, side by side, leaves the rows the naive fixed
+    /// point leaves: every column scanned again and again, a row holding a
+    /// singleton removed, until none does.
+    #[test]
+    fn pruning_in_rounds_is_the_fixed_point() {
+        const SEEDS: std::ops::RangeInclusive<u64> = 600..=607;
+        for density in [200, 330, 500] {
+            for seed in SEEDS {
+                let matrix = random_matrix(seed, 1_300, 1_000, density);
+                let mut live = vec![true; matrix.rows().len()];
+                loop {
+                    let mut holders = vec![Vec::new(); matrix.columns()];
+                    for (row, columns) in matrix.rows().iter().enumerate() {
+                        if live[row] {
+                            for &column in columns {
+                                holders[column as usize].push(row);
+                            }
+                        }
+                    }
+                    let pinned: Vec<usize> = holders
+                        .iter()
+                        .filter(|held| held.len() == 1)
+                        .map(|held| held[0])
+                        .collect();
+                    if pinned.is_empty() {
+                        break;
+                    }
+                    for row in pinned {
+                        live[row] = false;
+                    }
+                }
+                for threads in [1, 4] {
+                    let mut filter = Filter::new(matrix.clone(), 32);
+                    let singletons = filter.all_singletons();
+                    crate::parallel::with_budget(threads, || filter.prune(singletons));
+                    let kept: Vec<bool> = (0..live.len()).map(|row| filter.is_live(row)).collect();
+                    assert_eq!(
+                        kept, live,
+                        "density {density} seed {seed}, {threads} threads"
+                    );
+                    assert_eq!(
+                        filter.live_rows,
+                        live.iter().filter(|&&row| row).count(),
+                        "the live count"
+                    );
+                }
+            }
         }
     }
 
@@ -1681,7 +1870,7 @@ mod tests {
                 let pruned = || {
                     let mut filter = Filter::new(matrix.clone(), 32);
                     let singletons = filter.all_singletons();
-                    filter.prune_singletons(singletons, |_| {});
+                    filter.prune(singletons);
                     filter
                 };
                 // Targets: all but one dependency purged, and two between.
@@ -1691,9 +1880,21 @@ mod tests {
                     let rounds = purge_afresh(&mut afresh, target);
                     assert!(rounds > 1, "density {density} seed {seed}: one round");
                     let case = format!("density {density} seed {seed} target {target}");
-                    assert_eq!(kept.live, afresh.live, "{case}");
+                    kept.release();
+                    afresh.release();
+                    let live = |filter: &Filter| -> Vec<bool> {
+                        (0..filter.work.len())
+                            .map(|row| filter.is_live(row))
+                            .collect()
+                    };
+                    let weights = |filter: &Filter| -> Vec<u32> {
+                        (0..filter.columns as u32)
+                            .map(|c| filter.weight(c))
+                            .collect()
+                    };
+                    assert_eq!(live(&kept), live(&afresh), "{case}");
                     assert_eq!(kept.work, afresh.work, "{case}");
-                    assert_eq!(kept.occupants, afresh.occupants, "{case}");
+                    assert_eq!(weights(&kept), weights(&afresh), "{case}");
                 }
             }
         }

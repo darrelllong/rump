@@ -955,10 +955,36 @@ ahead is kept. `touch` cleared two flags of every column a merge touched,
 two hundred a merge, most far heavier than the cap; a column heavier than
 the cap is left as it is.
 
-Pruning and the purge are slower by about a fifth, the same in four runs,
-and the cause is not found. They are still a thread's: the merge's row
-sums and their bookkeeping, 300 s of its 443, and the pruning are where
-the time is.
+Pruning and the purge were slower by about a fifth, the same in four runs,
+and the cause was not found; pruning in rounds, below, replaced the loop.
+The merge's row sums and their bookkeeping, 300 s of its 443, are a
+thread's still.
+
+### Pruning in rounds
+
+2026-10-24, after the entry above. Singleton pruning took a column at a
+time from a work list, and its cost was the weights: every entry of every
+row it retires counts its column down, a reach into an array of 110
+million columns, some three thousand million of them one after another.
+Which rows go does not depend on the order they go in, so pruning is in
+rounds: the rows the singletons pin, found side by side, retired side by
+side, each claimed by turning its live flag and its columns counted down
+where they stand, the weight before saying whether a column became a
+singleton, came down to two or emptied; and the singletons a round made
+the next round's. The purge retires each round's cliques and prunes their
+cascade so, and binds the columns that came down to two, found side by
+side. The weights and the live flags are atomic; the merge, on one
+thread, reads and writes them as plain words.
+
+| step | before | in rounds |
+|---|---:|---:|
+| pruning | 116.7 s | 13.8 s |
+| purge | 77.3 s | 27.5 s |
+| the retired rows given back | | 2.1 s |
+| all of `filter_merge` | 674.4 s | 572.6 s |
+
+The same RSA-155 harvest and the same matrix byte for byte. The merge,
+443 s and 492 s in two runs, is now nearly all of it.
 
 ## What a read at random costs
 
