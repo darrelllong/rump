@@ -601,15 +601,16 @@ struct Dense {
 const DENSE_COLUMNS: usize = 128;
 
 impl Dense {
-    /// Takes the densest columns out of the lists. `by_relation` keeps the
-    /// rest, numbered again in their order; `by_column` becomes the rest's
-    /// lists; the dense columns are numbered after them, heaviest first.
-    fn take(by_relation: &mut [Vec<u32>], by_column: &mut Vec<Vec<u32>>) -> Self {
-        let columns = by_column.len();
+    /// Takes the densest columns out of the lists, `weights` each column's
+    /// count of relations. `by_relation` keeps the rest, numbered again in
+    /// their order; the rest's lists by column are returned beside; the
+    /// dense columns are numbered after them, heaviest first.
+    fn take(by_relation: &mut [Vec<u32>], weights: &[usize]) -> (Self, Vec<Vec<u32>>) {
+        let columns = weights.len();
         let count = DENSE_COLUMNS.min(columns / 8 * 8);
         let sparse = columns - count;
         let mut order: Vec<usize> = (0..columns).collect();
-        order.sort_unstable_by_key(|&c| core::cmp::Reverse((by_column[c].len(), c)));
+        order.sort_unstable_by_key(|&c| core::cmp::Reverse((weights[c], c)));
         // Each column's number, and a dense column's bit.
         let mut number = vec![0u32; columns];
         let mut bit = vec![usize::MAX; columns];
@@ -639,18 +640,23 @@ impl Dense {
                 *c = number[*c as usize];
             }
         }
-        by_column.clear();
-        by_column.resize(sparse, Vec::new());
+        let mut by_column: Vec<Vec<u32>> = vec![Vec::new(); sparse];
+        for (c, &weight) in weights.iter().enumerate() {
+            if bit[c] == usize::MAX {
+                by_column[number[c] as usize].reserve_exact(weight);
+            }
+        }
         for (r, row) in by_relation.iter().enumerate() {
             for &c in row {
                 by_column[c as usize].push(r as u32);
             }
         }
-        Self {
+        let dense = Self {
             count,
             first: sparse,
             masks,
-        }
+        };
+        (dense, by_column)
     }
 
     fn bytes(&self) -> usize {
@@ -766,13 +772,11 @@ impl Sparse {
             *column = number[*column as usize];
         }
         let columns = set as usize;
-        let mut by_column = vec![Vec::new(); columns];
-        for (index, row) in by_relation.iter().enumerate() {
-            for &column in row {
-                by_column[column as usize].push(index as u32);
-            }
+        let mut weights = vec![0usize; columns];
+        for &column in by_relation.iter().flatten() {
+            weights[column as usize] += 1;
         }
-        let dense = Dense::take(&mut by_relation, &mut by_column);
+        let (dense, by_column) = Dense::take(&mut by_relation, &weights);
         let relations = by_relation.len();
         let useful = (relations.max(columns) / MINIMUM_FOLDS_PER_WORKER).max(1);
         let threads = threads.min(crate::parallel::budget()).min(useful).max(1);
