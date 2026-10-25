@@ -435,18 +435,19 @@ fn z_slice(seed: u64, slice: usize, dimension: usize) -> Arc<Block> {
     Block::of((0..dimension).map(|_| draw.next()))
 }
 
-/// `B·v` in place: `M·v` over the columns, which are the first of the
-/// block's coordinates, and zero below. The block is `N` words, the
-/// greater of the relations and the columns; `M` reads the first of them
-/// up to the relations.
-fn advance(matrix: &Sparse, v: &Arc<Block>, image: &Arc<Block>) {
+/// `B·v` as the next `v`: `M·v` over the columns, which are the first of the
+/// block's coordinates, into `image`, its words past the columns zero; then
+/// the two change places, the old `v` the next image. Each block is `N`
+/// words, the greater of the relations and the columns; `M` reads the
+/// first of them up to the relations. The words past the columns are the
+/// excess of relations, a few hundred, where copying the image into `v`
+/// was every word.
+fn advance(matrix: &Sparse, v: &mut Arc<Block>, image: &mut Arc<Block>) {
     matrix.forward(v, image);
-    for (index, word) in image.words().enumerate() {
-        v.set(index, word);
+    for index in matrix.columns()..image.len() {
+        image.set(index, 0);
     }
-    for index in image.len()..v.len() {
-        v.set(index, 0);
-    }
+    core::mem::swap(v, image);
 }
 
 /// Slice `slice` of `of` of the sequence, `terms` terms long: from the
@@ -470,8 +471,8 @@ pub fn wiedemann_sequence(
     let (count, columns) = (sparse.relations(), sparse.columns());
     let dimension = count.max(columns);
     let supports = supports(seed, of, columns);
-    let image = Block::zeroed(columns);
-    let (v, mut slabs, done) = match from {
+    let mut image = Block::zeroed(dimension);
+    let (mut v, mut slabs, done) = match from {
         Some(from)
             if from.seed == seed
                 && from.slice == slice
@@ -485,15 +486,15 @@ pub fn wiedemann_sequence(
             )
         }
         _ => {
-            let v = z_slice(seed, slice, dimension);
-            advance(&sparse, &v, &image);
+            let mut v = z_slice(seed, slice, dimension);
+            advance(&sparse, &mut v, &mut image);
             (v, Vec::new(), 0)
         }
     };
     slabs.reserve(terms.saturating_sub(done) * WIDTH * of);
     for term in done..terms {
         if term > 0 {
-            advance(&sparse, &v, &image);
+            advance(&sparse, &mut v, &mut image);
         }
         for support in &supports {
             slabs.push(support.iter().fold(0, |sum, &at| sum ^ v.word(at)));
@@ -598,11 +599,12 @@ pub fn wiedemann_solution(
     }
     let (of, degree) = (generators.of, generators.degree());
     let z = z_slice(generators.seed, slice, dimension);
-    let image = Block::zeroed(columns);
-    let w = Block::zeroed(dimension);
+    let mut image = Block::zeroed(dimension);
+    let mut w = Block::zeroed(dimension);
+    let runs = word_runs(dimension, threads);
     for power in (0..=degree).rev() {
         if power < degree {
-            advance(&sparse, &w, &image);
+            advance(&sparse, &mut w, &mut image);
         }
         // Row k of the table's matrix: the lanes whose coefficient at this
         // power, in this slice's word, has bit k. Coefficient `p` of the
@@ -624,15 +626,40 @@ pub fn wiedemann_solution(
             continue;
         }
         let product = SmallProduct::new(&by_bit);
-        for index in 0..dimension {
-            let add = product.apply(z.word(index));
-            if add != 0 {
-                w.set(index, w.word(index) ^ add);
+        let (z, w) = (&z, &w);
+        crate::parallel::map_ordered(&runs, threads, |_, run| {
+            for index in run.clone() {
+                let add = product.apply(z.word(index));
+                if add != 0 {
+                    w.set(index, w.word(index) ^ add);
+                }
             }
-        }
+        });
     }
     Some(w.words().collect())
 }
+
+/// The words of a block of `length` in runs, a few a thread, for passes over
+/// every word that the threads take in turn; one run below a thread's
+/// share of [`MINIMUM_WORDS_PER_RUN`].
+fn word_runs(length: usize, threads: usize) -> Vec<std::ops::Range<usize>> {
+    let run = length
+        .div_ceil(threads.max(1) * RUNS_PER_THREAD)
+        .max(MINIMUM_WORDS_PER_RUN);
+    (0..length)
+        .step_by(run)
+        .map(|start| start..(start + run).min(length))
+        .collect()
+}
+
+/// The runs a pass over a block's words is cut into a thread, so that a
+/// slow run is an eighth of a thread's share.
+const RUNS_PER_THREAD: usize = 8;
+
+/// The fewest words a run is given: a run is a thread's wake and its
+/// joining, some microseconds, and a word's product a few nanoseconds, so a
+/// run of 64 Ki words is a thousand times what starting it costs.
+const MINIMUM_WORDS_PER_RUN: usize = 1 << 16;
 
 /// The dependencies from the slices' parts of the solutions, summed: a
 /// lane is a null vector when `B` takes it to zero, one that is not yet is
