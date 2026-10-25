@@ -30,6 +30,8 @@ use crate::random::RandomSource;
 #[path = "gf2/filter.rs"]
 mod filter;
 pub use filter::{filter_merge, FilteredMatrix, MatrixBytesError, SparseMatrix};
+#[path = "gf2/generator.rs"]
+mod generator;
 #[path = "gf2/wiedemann.rs"]
 mod wiedemann;
 pub use wiedemann::{

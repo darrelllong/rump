@@ -1020,6 +1020,72 @@ The matrix is no longer the one-at-a-time merge's, whose every merge was
 planned against the last; it is the same at any number of threads, and
 its solve costs 0.45 % more.
 
+## Thomé's recursion for the generator
+
+2026-10-25. Block Wiedemann's generator stage was Coppersmith's iteration
+a term at a time, each step a product of every column with every term so
+far: quadratic in the sequence's length, and on one host. On RSA-155's
+matrix in four slices of 50 185 terms it took 16 714 s of a 59 133 s
+solve on four GB10s, with three hosts idle; a first pass at 40 148 terms
+that did not settle took 12 840 s more.
+
+It is now Thomé's recursion (*Subquadratic computation of vector
+generating polynomials and improvement of the block Wiedemann algorithm*,
+J. Symbolic Comput. 33 (2002), 757–775; his habilitation, ch. 12,
+Algorithm 12.3): the `π` of `k` steps from the first half's `π_L`, the
+second half's `E` as `(E·π_L mod X^k) div X^{k/2}`, and `π_L·π_R`, the
+products of polynomials whose coefficients are matrices by Karatsuba's
+split over byte tables. Below a number of steps the iteration itself runs,
+on `E` and `π` in place of `F`; its elimination is the old one, so the
+generators are the old ones bit for bit.
+
+Where each method gives way to the next is worked out from what each
+costs at the shape in hand, from the kernels' own timings, M4 Pro, one
+thread:
+
+| kernel, ns | 1 word | 2 words | 4 words | 8 words |
+|---|---:|---:|---:|---:|
+| a table entry, built by doubling | 1.05 | 1.11 | 1.64 | 1.43 |
+| a lookup and its XOR | 1.39 | 2.17 | 2.73 | 3.10 |
+| a streamed word XOR | 0.165 | | | |
+
+Built an entry at a time from the entry without its lowest bit, the
+tables had cost 3.0–4.6 ns an entry, two to five times a lookup pass;
+building them a block a bit, entries `2^i` to `2^{i+1}` from `0` to `2^i`,
+cut that by 2.9–3.2 times. The GB10's Grace cores timed the table and
+lookup kernels within a third of these. The model's prediction of one
+split against schoolbook at two coefficients was +1.6 µs and −63 µs at
+RSA-120's and RSA-155's shapes; measured, +1.7 µs and −61 µs. A thread's
+start and join, 9–10 µs on the M4 Pro and 23–29 µs on Grace, sets the
+grain: 2²¹ streamed XORs a thread, ten times the start.
+
+RSA-120's kept matrix, one slice, 23 832 terms, ten M4 Pro threads, the
+crossovers forced against the model's (Karatsuba from 4 coefficients,
+halves from 245 steps):
+
+| Karatsuba from | 2 | **4** | 8 | 16 | 32 |
+|---|---:|---:|---:|---:|---:|
+| generators | 19.8 s | **15.2 s** | 16.8 s | 18.8 s | 22.2 s |
+
+| halves from | 8 | 32 | 128 | **245** | 512 |
+|---|---:|---:|---:|---:|---:|
+| generators | 15.7 s | 14.8 s | 15.2 s | **15.1 s** | 17.7 s |
+
+The old iteration took 180.9 s on the same sequence; the generators are
+the same file, 63 lanes of degree 10 693.
+
+RSA-155's matrix in four slices of 50 185 terms, one GB10, twenty
+threads, `factor --stage generators` on the sequences the four-host solve
+kept:
+
+| RSA-155 generators | the iteration | Thomé's recursion |
+|---|---:|---:|
+| wall | 16 714 s | 632 s |
+| CPU | 303 393 s | 7 246 s |
+| peak resident | 20.0 GB | 15.9 GB |
+
+The same file, 64 generators of degree 20 087.
+
 ## What a read at random costs
 
 `parallelism::gather_costs`, the `gather_costs_timing` probe: nanoseconds a

@@ -14,11 +14,11 @@
 //!    ([`wiedemann_sequence`]).
 //! 2. **The generator.** Vectors of polynomials `f(λ) = Σ fᵢλⁱ` of degree
 //!    at most `δ` with `Σᵢ aₖ₋ᵢ·fᵢ = 0` for `δ ≤ k < L`, by Coppersmith's
-//!    iteration: his generalisation of Berlekamp–Massey, here in the form
+//!    iteration: his generalisation of Berlekamp–Massey, made by halves as
 //!    Thomé gives it (*Subquadratic computation of vector generating
 //!    polynomials and improvement of the block Wiedemann algorithm*, J.
-//!    Symbolic Comput. 33 (2002), 757–775, §3), quadratic in `L`, on one
-//!    host ([`wiedemann_generators`]).
+//!    Symbolic Comput. 33 (2002), 757–775), in `L^{log₂3}` products by
+//!    Karatsuba's split, on one host ([`wiedemann_generators`]).
 //! 3. **The solution.** `w = Σᵢ B^{δ−i}·z·fᵢ`, by Horner's rule, which is
 //!    the sum over the slices of `z` of what each slice makes with its own
 //!    words of the coefficients ([`wiedemann_solution`], a host each); then
@@ -37,13 +37,15 @@
 //! The sequence is `N/m + N/n` products and the solution `N/n`, against
 //! `2N/64` for Lanczos, so `J` hosts each take about `2/J` of what one
 //! host of Lanczos takes; the generator stage costs the same whatever `J`
-//! is, and holds the terms' tables, `16 KiB · J²` a term. Each stage reads
+//! is, and holds `E` and `π`, `2 KiB · J²` a term, beside its products'
+//! working space, which grows with the threads they run on. Each stage reads
 //! what the last wrote ([`Sequence::to_bytes`], [`Generators::to_bytes`])
 //! and is restartable from it. Nothing here is trusted either: every vector
 //! returned is checked against the caller's rows.
 
 use std::sync::Arc;
 
+use super::generator::{halves_from, steps, transpose, Degrees, Polynomials};
 use super::{any, lane, Block, SmallProduct, Sparse, SparseMatrix, WIDTH};
 use crate::random::RandomSource;
 
@@ -72,12 +74,6 @@ const TERMS_MOST: usize = 3;
 /// `B`'s nilpotent part is; a lane not finished by then is dropped. Set by
 /// hand.
 const POWERS: usize = 16;
-
-/// The work of a step from which it runs on the threads, as the term's
-/// number times the cube of the words a coefficient: a step is `128·J`
-/// columns of `t` products, each `J²` words of table lookups, and below this
-/// the threads cost more than they do. Set by hand; not measured.
-const PARALLEL_FROM_WORK: usize = 2_048;
 
 /// The magic that begins a stage's bytes, and the stage's own letter after
 /// it.
@@ -535,30 +531,32 @@ pub fn wiedemann_generators(slices: &[Sequence], threads: usize) -> Option<Gener
         by_slice[slice.slice] = Some(slice);
     }
     let by_slice: Vec<&Sequence> = by_slice.into_iter().collect::<Option<_>>()?;
-    // Term k: 64·of rows, each `of` words; word j of row r is slab j's row r.
-    let rows = WIDTH * of;
-    let mut iteration = Iteration::new(of);
-    let mut term = vec![0u64; rows * of];
-    for k in 0..first.terms() {
-        for (j, slice) in by_slice.iter().enumerate() {
-            let slab = &slice.terms[k * rows..(k + 1) * rows];
-            for (r, &word) in slab.iter().enumerate() {
-                term[r * of + j] = word;
-            }
-        }
-        iteration.take(&term, threads);
-    }
-    if iteration.settled() < WIDTH {
+    let n = WIDTH * of;
+    let e = initial_e(&by_slice, of);
+    let mut state = Degrees {
+        degrees: vec![1; 2 * n],
+        quiet: vec![0; 2 * n],
+    };
+    let pi =
+        crate::parallel::with_budget(threads, || steps(&e, &mut state, halves_from(2 * n, of)));
+    if state
+        .quiet
+        .iter()
+        .filter(|&&steps| steps >= SPARE_TERMS)
+        .count()
+        < WIDTH
+    {
         return None;
     }
-    // Each generator from its leading coefficient: a column's nominal degree
-    // can pass its own, and the powers of B between would be applied to a
+    // Each settled column from its leading coefficient: a column's δ can
+    // pass its degree, and the powers of B between would be applied to a
     // vector that may already be a null vector, and take it to zero.
-    let mut lanes: Vec<Vec<u64>> = iteration
-        .generators()
+    let mut lanes: Vec<Vec<u64>> = (0..2 * n)
+        .filter(|&column| state.quiet[column] >= SPARE_TERMS)
         .filter_map(|column| {
-            let lead = column.reversed.chunks(of).position(any)?;
-            Some(column.reversed[lead * of..].to_vec())
+            let f = f_column(&pi, column, of);
+            let lead = f.iter().rposition(|coefficient| any(coefficient))?;
+            Some(f[..=lead].iter().rev().flatten().copied().collect())
         })
         .collect();
     lanes.sort_by_key(Vec::len);
@@ -573,6 +571,55 @@ pub fn wiedemann_generators(slices: &[Sequence], threads: usize) -> Option<Gener
         columns: first.columns,
         lanes,
     })
+}
+
+/// `E` at `t = 1` for `F = [I | X·I]`, every `δ` one: coefficient `k` is
+/// `[a_{k+1} | a_k]`, a column an `m`-bit vector. Term `k`'s rows are each
+/// slab's words, so a 64-row block of slab `j`, transposed, is that block
+/// of the rows of columns `64·j` onwards.
+fn initial_e(by_slice: &[&Sequence], of: usize) -> Polynomials {
+    let n = WIDTH * of;
+    let terms = by_slice[0].terms();
+    let mut e = Polynomials::zero(of, 2 * n, terms.saturating_sub(1));
+    for k in 0..terms {
+        for (j, slice) in by_slice.iter().enumerate() {
+            for w in 0..of {
+                let mut block = [0u64; WIDTH];
+                block.copy_from_slice(&slice.terms[k * n + w * WIDTH..][..WIDTH]);
+                transpose(&mut block);
+                for (b, &word) in block.iter().enumerate() {
+                    let column = j * WIDTH + b;
+                    if k >= 1 {
+                        e.column_mut(k - 1, column)[w] = word;
+                    }
+                    if k + 1 < terms {
+                        e.column_mut(k, n + column)[w] = word;
+                    }
+                }
+            }
+        }
+    }
+    e
+}
+
+/// Column `column` of `F = [I | X·I]·π`, its coefficients from the
+/// constant up, `of` words each: coefficient `d` is `π`'s rows under `n` at
+/// `d` and those from `n` at `d − 1`.
+fn f_column(pi: &Polynomials, column: usize, of: usize) -> Vec<Vec<u64>> {
+    (0..=pi.length())
+        .map(|d| {
+            let mut word = vec![0u64; of];
+            if d < pi.length() {
+                word.copy_from_slice(&pi.column(d, column)[..of]);
+            }
+            if d >= 1 {
+                for (into, &add) in word.iter_mut().zip(&pi.column(d - 1, column)[of..]) {
+                    *into ^= add;
+                }
+            }
+            word
+        })
+        .collect()
 }
 
 /// Slice `slice`'s part of the solutions: `w_j = Σᵢ B^{δ−i}·z_j·fᵢ⁽ʲ⁾`, a
@@ -741,245 +788,6 @@ pub fn wiedemann_finish(
     .flatten()
     .collect();
     (!found.is_empty()).then_some(found)
-}
-
-/// A column of the generator matrix: a vector of `n` polynomials, `of`
-/// words a coefficient, held from the top down. Coefficient `i` of
-/// `reversed` is that of `λ^{δ−i}` for the nominal degree `δ`, so that
-/// multiplying by `λ` is a zero coefficient pushed on the end.
-#[derive(Clone)]
-struct Column {
-    reversed: Vec<u64>,
-}
-
-/// `aₖ·v` for a term `aₖ` of `64·of` rows and as many columns and a vector
-/// `v` of `of` words, by bytes of `v`: the tables hold the XOR of the
-/// columns each byte selects, `of` words an entry.
-struct TermProduct {
-    of: usize,
-    tables: Vec<u64>,
-}
-
-impl TermProduct {
-    /// From the term as rows, `of` words a row.
-    fn new(term: &[u64], of: usize) -> Self {
-        let rows = WIDTH * of;
-        // The term's columns, each a vector over the rows.
-        let mut columns = vec![0u64; rows * of];
-        for r in 0..rows {
-            for (j, &word) in term[r * of..(r + 1) * of].iter().enumerate() {
-                let mut bits = word;
-                while bits != 0 {
-                    let c = j * WIDTH + bits.trailing_zeros() as usize;
-                    columns[c * of + r / WIDTH] |= 1u64 << (r % WIDTH);
-                    bits &= bits - 1;
-                }
-            }
-        }
-        let bytes = 8 * of;
-        let mut tables = vec![0u64; bytes * 256 * of];
-        for byte in 0..bytes {
-            for selector in 1usize..256 {
-                let without_lowest = selector & (selector - 1);
-                let column = byte * 8 + selector.trailing_zeros() as usize;
-                let at = (byte * 256 + selector) * of;
-                let from = (byte * 256 + without_lowest) * of;
-                for w in 0..of {
-                    tables[at + w] = tables[from + w] ^ columns[column * of + w];
-                }
-            }
-        }
-        Self { of, tables }
-    }
-
-    /// `aₖ·v` into `out`, XORed.
-    fn apply_into(&self, v: &[u64], out: &mut [u64]) {
-        let of = self.of;
-        for (j, &word) in v.iter().enumerate() {
-            let mut value = word;
-            for b in 0..8 {
-                let byte = j * 8 + b;
-                let at = (byte * 256 + (value & 0xff) as usize) * of;
-                for (sum, &entry) in out.iter_mut().zip(&self.tables[at..at + of]) {
-                    *sum ^= entry;
-                }
-                value >>= 8;
-            }
-        }
-    }
-}
-
-/// Coppersmith's iteration over the sequence `a`, a term at a time: the
-/// `m + n = 128·of` columns, of which those that have settled are
-/// generators.
-///
-/// At step `t` every column `f` of nominal degree `δ` has
-/// `Σᵢ aₖ₋ᵢ·fᵢ = 0` for `δ ≤ k < t`. The step takes each column's term at
-/// `k = t`, an `m`-bit vector, and eliminates among the columns in order of
-/// degree, a column only ever receiving columns of no greater degree, so
-/// that its degree stands. The `m` columns the elimination leaves non-zero
-/// are multiplied by `λ`, which moves their terms out of the way; the `n`
-/// it clears hold at `t` too.
-struct Iteration {
-    of: usize,
-    products: Vec<TermProduct>,
-    columns: Vec<Column>,
-    /// The steps each column has gone without a term of its own.
-    quiet: Vec<usize>,
-}
-
-impl Iteration {
-    /// At `t = 1`, with every degree one: the unit vectors, whose terms are
-    /// `a₁`'s columns, and `λ` times them, whose terms are `a₀`'s.
-    fn new(of: usize) -> Self {
-        let count = 2 * WIDTH * of;
-        let columns = (0..count)
-            .map(|index| {
-                let unit = index % (WIDTH * of);
-                let mut word = vec![0u64; of];
-                word[unit / WIDTH] = 1u64 << (unit % WIDTH);
-                let zero = vec![0u64; of];
-                Column {
-                    reversed: if index < WIDTH * of {
-                        [zero, word].concat()
-                    } else {
-                        [word, zero].concat()
-                    },
-                }
-            })
-            .collect();
-        Self {
-            of,
-            products: Vec::new(),
-            columns,
-            quiet: vec![0; count],
-        }
-    }
-
-    /// The columns that have settled.
-    fn settled(&self) -> usize {
-        self.quiet
-            .iter()
-            .filter(|&&steps| steps >= SPARE_TERMS)
-            .count()
-    }
-
-    /// The settled columns, which generate the sequence.
-    fn generators(&self) -> impl Iterator<Item = &Column> {
-        self.columns
-            .iter()
-            .zip(&self.quiet)
-            .filter(|(_, &steps)| steps >= SPARE_TERMS)
-            .map(|(column, _)| column)
-    }
-
-    /// The next term of the sequence, `64·of` rows of `of` words, and from
-    /// the second the step at it.
-    fn take(&mut self, term: &[u64], threads: usize) {
-        let of = self.of;
-        self.products.push(TermProduct::new(term, of));
-        let t = self.products.len() - 1;
-        if t == 0 {
-            return;
-        }
-        let (products, columns) = (&self.products, &self.columns);
-        let count = columns.len();
-
-        // Each column's term at t: Σᵢ a_{t−δ+i}·reversed[i]. Threads are
-        // spawned for a step only once a step has the work to repay them:
-        // the parallel map makes its workers afresh each call.
-        let term_of = |column: &Column| {
-            let degree = column.reversed.len() / of - 1;
-            let first = t - degree;
-            let mut sum = vec![0u64; of];
-            for (i, coefficient) in column.reversed.chunks(of).enumerate() {
-                if any(coefficient) {
-                    products[first + i].apply_into(coefficient, &mut sum);
-                }
-            }
-            sum
-        };
-        let wide = t * of * of * of >= PARALLEL_FROM_WORK;
-        let mut terms: Vec<Vec<u64>> = if wide {
-            crate::parallel::map_ordered(columns, threads, |_, column| term_of(column))
-        } else {
-            columns.iter().map(term_of).collect()
-        };
-
-        // The elimination, on the terms alone: which columns each column
-        // receives, as a set of the columns the step began with.
-        let mut order: Vec<usize> = (0..count).collect();
-        order.sort_by_key(|&index| (columns[index].reversed.len(), index));
-        let set_words = count.div_ceil(WIDTH);
-        let mut received: Vec<Vec<u64>> = (0..count)
-            .map(|index| {
-                let mut set = vec![0u64; set_words];
-                set[index / WIDTH] |= 1u64 << (index % WIDTH);
-                set
-            })
-            .collect();
-        let mut pivots: Vec<(usize, usize)> = Vec::with_capacity(WIDTH * of);
-        let mut pivot = vec![false; count];
-        for &index in &order {
-            let mut term = terms[index].clone();
-            let mut set = received[index].clone();
-            for &(bit, other) in &pivots {
-                if term[bit / WIDTH] >> (bit % WIDTH) & 1 == 1 {
-                    for (word, &add) in term.iter_mut().zip(&terms[other]) {
-                        *word ^= add;
-                    }
-                    for (word, &add) in set.iter_mut().zip(&received[other]) {
-                        *word ^= add;
-                    }
-                }
-            }
-            if let Some(bit) = term.iter().enumerate().find_map(|(w, &word)| {
-                (word != 0).then(|| w * WIDTH + word.trailing_zeros() as usize)
-            }) {
-                pivots.push((bit, index));
-                pivot[index] = true;
-            }
-            terms[index] = term;
-            received[index] = set;
-        }
-
-        // The columns themselves, each from the step's own, aligned at the
-        // top: a column of lower degree enters below its receiver's.
-        let combine = |&index: &usize| {
-            let mut reversed = columns[index].reversed.clone();
-            for (w, &word) in received[index].iter().enumerate() {
-                let mut others = word;
-                if w == index / WIDTH {
-                    others &= !(1u64 << (index % WIDTH));
-                }
-                while others != 0 {
-                    let other = &columns[w * WIDTH + others.trailing_zeros() as usize].reversed;
-                    others &= others - 1;
-                    let offset = reversed.len() - other.len();
-                    for (word, &add) in reversed[offset..].iter_mut().zip(other) {
-                        *word ^= add;
-                    }
-                }
-            }
-            if pivot[index] {
-                reversed.extend(std::iter::repeat_n(0, of));
-            }
-            Column { reversed }
-        };
-        let next: Vec<Column> = if wide {
-            crate::parallel::map_ordered(&order, threads, |_, index| combine(index))
-        } else {
-            order.iter().map(combine).collect()
-        };
-        for (&index, column) in order.iter().zip(next) {
-            self.columns[index] = column;
-            self.quiet[index] = if pivot[index] {
-                0
-            } else {
-                self.quiet[index] + 1
-            };
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1284,43 +1092,8 @@ mod tests {
         }
     }
 
-    /// The term product by tables against the plain parity product, at
-    /// one word and at three.
-    #[test]
-    fn the_term_product_is_the_plain_product() {
-        let mut rng = Lcg(77);
-        let mut draw = || {
-            let mut bytes = [0u8; 8];
-            rng.fill_bytes(&mut bytes);
-            u64::from_le_bytes(bytes)
-        };
-        for of in [1usize, 3] {
-            let rows = WIDTH * of;
-            let term: Vec<u64> = (0..rows * of).map(|_| draw()).collect();
-            let product = TermProduct::new(&term, of);
-            for _ in 0..8 {
-                let v: Vec<u64> = (0..of).map(|_| draw()).collect();
-                let mut fast = vec![0u64; of];
-                product.apply_into(&v, &mut fast);
-                let mut plain = vec![0u64; of];
-                for r in 0..rows {
-                    let row = &term[r * of..(r + 1) * of];
-                    let parity = row
-                        .iter()
-                        .zip(&v)
-                        .map(|(a, b)| (a & b).count_ones())
-                        .sum::<u32>()
-                        & 1;
-                    plain[r / WIDTH] |= u64::from(parity) << (r % WIDTH);
-                }
-                assert_eq!(fast, plain, "{of} words");
-            }
-        }
-    }
-
     /// The iteration's own invariant, at one word and at two: every settled
-    /// column, at its nominal degree, annihilates the terms from that degree
-    /// to the end.
+    /// column of `F`, at its `δ`, annihilates the terms from `δ` to the end.
     #[test]
     fn a_settled_column_annihilates_the_sequence_from_its_nominal_degree() {
         let matrix = sieve_like(900, 850, 6, 21);
@@ -1341,11 +1114,20 @@ mod tests {
                 }
                 term
             };
-            let mut iteration = Iteration::new(of);
-            for k in 0..terms {
-                iteration.take(&term(k), 1);
-            }
-            let settled: Vec<&Column> = iteration.generators().collect();
+            let by_slice: Vec<&Sequence> = slices.iter().collect();
+            let mut state = Degrees {
+                degrees: vec![1; 2 * rows],
+                quiet: vec![0; 2 * rows],
+            };
+            let pi = steps(
+                &initial_e(&by_slice, of),
+                &mut state,
+                halves_from(2 * rows, of),
+            );
+            let settled: Vec<(usize, Vec<Vec<u64>>)> = (0..2 * rows)
+                .filter(|&column| state.quiet[column] >= SPARE_TERMS)
+                .map(|column| (state.degrees[column], f_column(&pi, column, of)))
+                .collect();
             assert!(
                 settled.len() >= WIDTH,
                 "{of} words: {} settled",
@@ -1365,16 +1147,18 @@ mod tests {
                 }
                 out
             };
-            for column in settled {
-                let degree = column.reversed.len() / of - 1;
+            for (degree, f) in settled {
+                assert!(
+                    f.iter()
+                        .skip(degree + 1)
+                        .all(|coefficient| !any(coefficient)),
+                    "{of} words: a column of F past its δ {degree}"
+                );
                 let mut failed = Vec::new();
                 for k in degree..terms {
                     let mut sum = vec![0u64; of];
-                    for (i, coefficient) in column.reversed.chunks(of).enumerate() {
-                        for (s, a) in sum
-                            .iter_mut()
-                            .zip(apply(&term(k - degree + i), coefficient))
-                        {
+                    for (i, coefficient) in f.iter().enumerate().take(degree + 1) {
+                        for (s, a) in sum.iter_mut().zip(apply(&term(k - i), coefficient)) {
                             *s ^= a;
                         }
                     }
