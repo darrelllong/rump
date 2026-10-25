@@ -45,7 +45,7 @@
 
 use std::sync::Arc;
 
-use super::generator::{halves_from, steps, transpose, Degrees, Polynomials};
+use super::generator::{halves_from, product, steps, transpose, Degrees, Polynomials};
 use super::{any, lane, Block, SmallProduct, Sparse, SparseMatrix, WIDTH};
 use crate::random::RandomSource;
 
@@ -89,7 +89,7 @@ const MAGIC: &[u8; 3] = b"GFW";
 /// caller's rows, or `None` when none was found. The matrix may have more
 /// columns than rows, or fewer. The stages below, with one slice.
 ///
-/// `None` is any of: no rows or no columns; the sequence passing three
+/// `None` is any of: no rows or no columns; the sequence reaching three
 /// times `N/64` terms (`TERMS_MOST`) without its generators settling; no
 /// lane of the solution a null vector within sixteen products (`POWERS`);
 /// or every candidate failing the check. Another random source may do
@@ -111,10 +111,10 @@ pub fn block_wiedemann_dependencies_sparse<R: RandomSource + ?Sized>(
     let seed = u64::from_le_bytes(bytes);
     // The terms the generators should settle within, and more if they do
     // not, up to the most.
-    let dimension = dimension_of(matrix);
-    let most = TERMS_MOST * dimension.div_ceil(WIDTH) + 2 * SPARE_TERMS;
+    let most = wiedemann_terms_most(matrix, 1);
     let mut terms = wiedemann_terms(matrix, 1).min(most);
     let mut sequence: Option<Sequence> = None;
+    let mut iterated: Option<Iterated> = None;
     let trace = std::env::var_os("WIEDEMANN_TRACE").is_some();
     loop {
         let began = std::time::Instant::now();
@@ -123,14 +123,28 @@ pub fn block_wiedemann_dependencies_sparse<R: RandomSource + ?Sized>(
             eprintln!("trace: sequence to {terms} terms in {:?}", began.elapsed());
         }
         let began = std::time::Instant::now();
-        let generators = wiedemann_generators(std::slice::from_ref(&next), threads);
+        let generated =
+            wiedemann_generators(std::slice::from_ref(&next), iterated.take(), threads)?;
         if trace {
             eprintln!(
-                "trace: generators {} in {:?}",
-                generators.is_some(),
+                "trace: generators to {terms} terms in {:?}",
                 began.elapsed()
             );
         }
+        let generators = match generated {
+            Generated::Settled(generators) => Some(generators),
+            Generated::Short {
+                terms: wanted,
+                iterated: stopped,
+            } => {
+                if terms >= most {
+                    return None;
+                }
+                terms = wanted.min(most);
+                iterated = Some(stopped);
+                None
+            }
+        };
         if let Some(generators) = generators {
             let began = std::time::Instant::now();
             let partial = wiedemann_solution(matrix, &generators, 0, threads)?;
@@ -144,21 +158,29 @@ pub fn block_wiedemann_dependencies_sparse<R: RandomSource + ?Sized>(
             }
             return found;
         }
-        if terms >= most {
-            return None;
-        }
-        terms = (terms + terms / 8).min(most);
         sequence = Some(next);
     }
 }
 
 /// The terms a slice of the sequence should have first for `of` slices over
-/// `matrix`: `2N/(64·of)`, where the generators settle when `x` and `z` see
-/// all of `B`, and a block's width twice over for the settling. Where they
-/// do not settle, the slices want more, a quarter more at a time.
+/// `matrix`: the fewest with which the generators can settle. From `t = 1`
+/// each step multiplies `m` of the `m + n` columns by `X`, so their gap
+/// `t − δ` grows by `n/(m + n)`, a half, a step; a column is a generator
+/// once its gap reaches `λ = ⌈N/m⌉` (Thomé's habilitation, §12.1.3), at
+/// `t = 2λ + 1`, and settled `SPARE_TERMS` steps after. A column of `F`
+/// that goes to zero takes its share of the steps from the rest; how many
+/// do is known only from the iteration, and the generator stage then names
+/// the terms it wants ([`Generated::Short`]).
 #[must_use]
 pub fn wiedemann_terms(matrix: &SparseMatrix, of: usize) -> usize {
-    2 * dimension_of(matrix).div_ceil(WIDTH * of.max(1)) + 2 * SPARE_TERMS
+    2 * dimension_of(matrix).div_ceil(WIDTH * of.max(1)) + SPARE_TERMS + 1
+}
+
+/// The most terms a slice of `of` is taken to before a solve is given up:
+/// `TERMS_MOST` times `N/(64·of)`, and the settling.
+#[must_use]
+pub fn wiedemann_terms_most(matrix: &SparseMatrix, of: usize) -> usize {
+    TERMS_MOST * dimension_of(matrix).div_ceil(WIDTH * of.max(1)) + 2 * SPARE_TERMS
 }
 
 /// `N`: the greater of the rows and the live columns, those some row sets.
@@ -507,13 +529,164 @@ pub fn wiedemann_sequence(
     })
 }
 
+/// Where the generator's iteration stopped: `A·F = G + Xᵗ·E` at `t`, with
+/// `F` of `2·64·of` columns of polynomials over `64·of` bits, each column's
+/// `δ`, and the steps each has gone without being multiplied by `X`. More
+/// terms resume it from here, for `E`'s coefficients are those of `A·F`
+/// from `t` on: what the iteration did over the terms it had is not done
+/// again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Iterated {
+    seed: u64,
+    of: usize,
+    dimension: usize,
+    columns: usize,
+    /// The sequence's first term, folded: what ties the iteration to the
+    /// sequence and not only to its seed and shape.
+    fingerprint: u64,
+    t: usize,
+    degrees: Vec<usize>,
+    quiet: Vec<usize>,
+    f: Polynomials,
+}
+
+impl Iterated {
+    /// At `t = 1`, for the sequence of the slices: `F = [I | X·I]`, every
+    /// `δ` one.
+    fn start(by_slice: &[&Sequence]) -> Self {
+        let first = by_slice[0];
+        let n = WIDTH * first.of;
+        let mut f = Polynomials::zero(first.of, 2 * n, 2);
+        for c in 0..n {
+            f.column_mut(0, c)[c / WIDTH] = 1u64 << (c % WIDTH);
+            f.column_mut(1, n + c)[c / WIDTH] = 1u64 << (c % WIDTH);
+        }
+        Self {
+            seed: first.seed,
+            of: first.of,
+            dimension: first.dimension,
+            columns: first.columns,
+            fingerprint: fingerprint(by_slice),
+            t: 1,
+            degrees: vec![1; 2 * n],
+            quiet: vec![0; 2 * n],
+            f,
+        }
+    }
+
+    /// The terms of the sequence the iteration has taken.
+    #[must_use]
+    pub fn terms(&self) -> usize {
+        self.t
+    }
+
+    /// The iteration as bytes: `GFWI`, the fields, `F`'s length, each
+    /// column's `δ` and quiet steps, and `F`'s words.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(8 * (8 + 2 * self.degrees.len() + self.f.words().len()));
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(b'I');
+        for word in [
+            self.seed,
+            self.of as u64,
+            self.dimension as u64,
+            self.columns as u64,
+            self.fingerprint,
+            self.t as u64,
+            self.f.length() as u64,
+        ] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        let counts = self
+            .degrees
+            .iter()
+            .chain(&self.quiet)
+            .map(|&count| count as u64);
+        for word in counts.chain(self.f.words().iter().copied()) {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// An iteration from its bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, WiedemannBytesError> {
+        let mut words = Words::of(bytes, b'I')?;
+        let seed = words.next()?;
+        let of = words.index()?;
+        let dimension = words.index()?;
+        let columns = words.index()?;
+        let fingerprint = words.next()?;
+        let t = words.index()?;
+        let length = words.index()?;
+        let count = of
+            .checked_mul(2 * WIDTH)
+            .ok_or(WiedemannBytesError::Shape)?;
+        let f_words = length
+            .checked_mul(count)
+            .and_then(|words| words.checked_mul(of))
+            .ok_or(WiedemannBytesError::Shape)?;
+        if of == 0 || t == 0 || length == 0 {
+            return Err(WiedemannBytesError::Shape);
+        }
+        let mut counts = || -> Result<Vec<usize>, WiedemannBytesError> {
+            (0..count)
+                .map(|_| {
+                    let count = words.index()?;
+                    if count > t {
+                        return Err(WiedemannBytesError::Shape);
+                    }
+                    Ok(count)
+                })
+                .collect()
+        };
+        let degrees = counts()?;
+        let quiet = counts()?;
+        let f = words.take(f_words)?;
+        if !words.bytes.is_empty() {
+            return Err(WiedemannBytesError::Shape);
+        }
+        Ok(Self {
+            seed,
+            of,
+            dimension,
+            columns,
+            fingerprint,
+            t,
+            degrees,
+            quiet,
+            f: Polynomials::from_words(of, count, f),
+        })
+    }
+}
+
+/// What the generator stage made of the terms it had.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Generated {
+    /// The generators.
+    Settled(Generators),
+    /// Not yet.
+    Short {
+        /// The terms each slice should reach, worked out from where the
+        /// columns stand.
+        terms: usize,
+        /// The iteration, to resume over them.
+        iterated: Iterated,
+    },
+}
+
 /// The generators of the sequence the slices make together, every slice of
-/// one seed and length: the 64 lanes of least degree once at least 64
-/// columns of the iteration have settled, or `None` when they have not,
-/// and the slices want more terms; `None` too for slices that are not one
-/// sequence's.
+/// one seed and length, from `prior` where an earlier pass stopped or from
+/// the start: the 64 lanes of least degree once 64 columns of the iteration
+/// have settled, or as many as there are columns that can. `None` for
+/// slices that are not one sequence's, or a `prior` not theirs: of another
+/// seed, shape or first term, or past their length.
 #[must_use]
-pub fn wiedemann_generators(slices: &[Sequence], threads: usize) -> Option<Generators> {
+pub fn wiedemann_generators(
+    slices: &[Sequence],
+    prior: Option<Iterated>,
+    threads: usize,
+) -> Option<Generated> {
     let first = slices.first()?;
     let of = first.of;
     if slices.len() != of
@@ -531,95 +704,171 @@ pub fn wiedemann_generators(slices: &[Sequence], threads: usize) -> Option<Gener
         by_slice[slice.slice] = Some(slice);
     }
     let by_slice: Vec<&Sequence> = by_slice.into_iter().collect::<Option<_>>()?;
-    let n = WIDTH * of;
-    let e = initial_e(&by_slice, of);
-    let mut state = Degrees {
-        degrees: vec![1; 2 * n],
-        quiet: vec![0; 2 * n],
+    let iterated = match prior {
+        Some(prior) => {
+            if (
+                prior.seed,
+                prior.of,
+                prior.dimension,
+                prior.columns,
+                prior.fingerprint,
+            ) != (
+                first.seed,
+                of,
+                first.dimension,
+                first.columns,
+                fingerprint(&by_slice),
+            ) || prior.t > first.terms()
+            {
+                return None;
+            }
+            prior
+        }
+        None => Iterated::start(&by_slice),
     };
-    let pi =
-        crate::parallel::with_budget(threads, || steps(&e, &mut state, halves_from(2 * n, of)));
-    if state
-        .quiet
-        .iter()
-        .filter(|&&steps| steps >= SPARE_TERMS)
-        .count()
-        < WIDTH
-    {
-        return None;
-    }
-    // Each settled column from its leading coefficient: a column's δ can
-    // pass its degree, and the powers of B between would be applied to a
-    // vector that may already be a null vector, and take it to zero.
-    let mut lanes: Vec<Vec<u64>> = (0..2 * n)
-        .filter(|&column| state.quiet[column] >= SPARE_TERMS)
-        .filter_map(|column| {
-            let f = f_column(&pi, column, of);
-            let lead = f.iter().rposition(|coefficient| any(coefficient))?;
-            Some(f[..=lead].iter().rev().flatten().copied().collect())
-        })
-        .collect();
-    lanes.sort_by_key(Vec::len);
-    lanes.truncate(WIDTH);
-    if lanes.is_empty() {
-        return None;
-    }
-    Some(Generators {
-        seed: first.seed,
-        of,
-        dimension: first.dimension,
-        columns: first.columns,
-        lanes,
-    })
+    let iterated = crate::parallel::with_budget(threads, || take_terms(&by_slice, iterated));
+    Some(settle(iterated))
 }
 
-/// `E` at `t = 1` for `F = [I | X·I]`, every `δ` one: coefficient `k` is
-/// `[a_{k+1} | a_k]`, a column an `m`-bit vector. Term `k`'s rows are each
-/// slab's words, so a 64-row block of slab `j`, transposed, is that block
-/// of the rows of columns `64·j` onwards.
-fn initial_e(by_slice: &[&Sequence], of: usize) -> Polynomials {
+/// The iteration taken on over the slices' terms from where it stopped.
+fn take_terms(by_slice: &[&Sequence], mut iterated: Iterated) -> Iterated {
+    let of = iterated.of;
     let n = WIDTH * of;
     let terms = by_slice[0].terms();
-    let mut e = Polynomials::zero(of, 2 * n, terms.saturating_sub(1));
-    for k in 0..terms {
+    if terms <= iterated.t {
+        return iterated;
+    }
+    // E's coefficient i is A·F's at t + i, which reaches back over F's
+    // degree.
+    let low = iterated.t.saturating_sub(iterated.f.length() - 1);
+    let a = sequence_terms(by_slice, of, low..terms);
+    let e = product(&a, &iterated.f).coefficients(iterated.t - low..terms - low);
+    let mut state = Degrees {
+        degrees: std::mem::take(&mut iterated.degrees),
+        quiet: std::mem::take(&mut iterated.quiet),
+    };
+    let pi = steps(&e, &mut state, halves_from(2 * n, of));
+    Iterated {
+        t: terms,
+        degrees: state.degrees,
+        quiet: state.quiet,
+        f: product(&iterated.f, &pi).trimmed(),
+        ..iterated
+    }
+}
+
+/// The generators where enough columns have settled, or the terms wanted.
+///
+/// A column of `F` gone to zero never takes a step again and generates
+/// nothing; `r` of them leave `n − r` columns that can settle, the other
+/// `m` taking every step's `m` multiplications by `X`. The columns that can
+/// settle then close their gap at `(n − r)/(m + n − r)` a step, so one whose
+/// gap at its last step was `g` reaches the gap `λ` at which columns stop
+/// after `(λ − g)·(m + n − r)/(n − r)` more, and settles `SPARE_TERMS`
+/// after that; the terms wanted are those that bring the 64th of them
+/// there. For a generic sequence `λ` is `⌈N/m⌉` and a little less (Thomé's
+/// habilitation, §12.1.3); it is taken as the greater of that and the
+/// greatest gap at which any column has been seen to take a step, so that
+/// where `⌈N/m⌉` is short, what the columns did corrects it.
+fn settle(iterated: Iterated) -> Generated {
+    let of = iterated.of;
+    let (m, n) = (WIDTH * of, WIDTH * of);
+    let live: Vec<usize> = (0..m + n)
+        .filter(|&column| !iterated.f.zero_column(column))
+        .collect();
+    let r = m + n - live.len();
+    let need = WIDTH.min(n.saturating_sub(r)).max(1);
+    let settled: Vec<usize> = live
+        .iter()
+        .copied()
+        .filter(|&column| iterated.quiet[column] >= SPARE_TERMS)
+        .collect();
+    if settled.len() >= need {
+        // Each from its leading coefficient: a column's δ can pass its
+        // degree, and the powers of B between would be applied to a vector
+        // that may already be a null vector, and take it to zero.
+        let mut lanes: Vec<Vec<u64>> = settled
+            .iter()
+            .map(|&column| {
+                let f = &iterated.f;
+                let lead = (0..f.length())
+                    .rev()
+                    .find(|&d| any(f.column(d, column)))
+                    .expect("a live column");
+                (0..=lead)
+                    .rev()
+                    .flat_map(|d| f.column(d, column).iter().copied())
+                    .collect()
+            })
+            .collect();
+        lanes.sort_by_key(Vec::len);
+        lanes.truncate(WIDTH);
+        return Generated::Settled(Generators {
+            seed: iterated.seed,
+            of,
+            dimension: iterated.dimension,
+            columns: iterated.columns,
+            lanes,
+        });
+    }
+    // Each live column's gap at its last step.
+    let gaps: Vec<usize> = live
+        .iter()
+        .map(|&column| {
+            (iterated.t - iterated.quiet[column]).saturating_sub(iterated.degrees[column])
+        })
+        .collect();
+    let lambda = gaps
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .max(iterated.dimension.div_ceil(m));
+    let open = n.saturating_sub(r).max(1);
+    let mut more: Vec<usize> = gaps
+        .iter()
+        .map(|&gap| ((lambda - gap) * (m + n - r)).div_ceil(open) + SPARE_TERMS)
+        .collect();
+    more.sort_unstable();
+    let more = more.get(need - 1).copied().unwrap_or(SPARE_TERMS).max(1);
+    Generated::Short {
+        terms: iterated.t + more,
+        iterated,
+    }
+}
+
+/// The slices' first term, folded by FNV-1a a word at a time (Fowler, Noll
+/// and Vo): sequences of one seed and shape from different matrices differ
+/// in it.
+fn fingerprint(by_slice: &[&Sequence]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let rows = WIDTH * by_slice[0].of;
+    by_slice
+        .iter()
+        .flat_map(|slice| slice.terms.iter().take(rows))
+        .fold(OFFSET, |hash, &word| (hash ^ word).wrapping_mul(PRIME))
+}
+
+/// Terms `range` of the sequence the slices make, a column an `m`-bit
+/// vector: term `k`'s rows are each slab's words, so a 64-row block of slab
+/// `j`, transposed, is that block of the rows of columns `64·j` onwards.
+fn sequence_terms(by_slice: &[&Sequence], of: usize, range: std::ops::Range<usize>) -> Polynomials {
+    let n = WIDTH * of;
+    let mut a = Polynomials::zero(of, n, range.len());
+    for (index, k) in range.enumerate() {
         for (j, slice) in by_slice.iter().enumerate() {
             for w in 0..of {
                 let mut block = [0u64; WIDTH];
                 block.copy_from_slice(&slice.terms[k * n + w * WIDTH..][..WIDTH]);
                 transpose(&mut block);
                 for (b, &word) in block.iter().enumerate() {
-                    let column = j * WIDTH + b;
-                    if k >= 1 {
-                        e.column_mut(k - 1, column)[w] = word;
-                    }
-                    if k + 1 < terms {
-                        e.column_mut(k, n + column)[w] = word;
-                    }
+                    a.column_mut(index, j * WIDTH + b)[w] = word;
                 }
             }
         }
     }
-    e
-}
-
-/// Column `column` of `F = [I | X·I]·π`, its coefficients from the
-/// constant up, `of` words each: coefficient `d` is `π`'s rows under `n` at
-/// `d` and those from `n` at `d − 1`.
-fn f_column(pi: &Polynomials, column: usize, of: usize) -> Vec<Vec<u64>> {
-    (0..=pi.length())
-        .map(|d| {
-            let mut word = vec![0u64; of];
-            if d < pi.length() {
-                word.copy_from_slice(&pi.column(d, column)[..of]);
-            }
-            if d >= 1 {
-                for (into, &add) in word.iter_mut().zip(&pi.column(d - 1, column)[of..]) {
-                    *into ^= add;
-                }
-            }
-            word
-        })
-        .collect()
+    a
 }
 
 /// Slice `slice`'s part of the solutions: `w_j = Σᵢ B^{δ−i}·z_j·fᵢ⁽ʲ⁾`, a
@@ -851,9 +1100,9 @@ mod tests {
         of: usize,
         threads: usize,
     ) -> Option<Vec<Vec<usize>>> {
-        let dimension = dimension_of(matrix);
         let mut terms = wiedemann_terms(matrix, of);
         let mut slices: Vec<Option<Sequence>> = vec![None; of];
+        let mut iterated: Option<Iterated> = None;
         loop {
             let mut written = Vec::new();
             for (slice, prior) in slices.iter_mut().enumerate() {
@@ -864,17 +1113,121 @@ mod tests {
                 *prior = Some(next);
             }
             assert!(written.iter().all(|slice| slice.terms() == terms));
-            if let Some(generators) = wiedemann_generators(&written, threads) {
-                let generators = Generators::from_bytes(&generators.to_bytes()).expect("read back");
-                let partials: Vec<Vec<u64>> = (0..of)
-                    .map(|slice| wiedemann_solution(matrix, &generators, slice, threads))
-                    .collect::<Option<_>>()?;
-                return wiedemann_finish(matrix, &partials, threads);
+            match wiedemann_generators(&written, iterated.take(), threads)? {
+                Generated::Settled(generators) => {
+                    let generators =
+                        Generators::from_bytes(&generators.to_bytes()).expect("read back");
+                    let partials: Vec<Vec<u64>> = (0..of)
+                        .map(|slice| wiedemann_solution(matrix, &generators, slice, threads))
+                        .collect::<Option<_>>()?;
+                    return wiedemann_finish(matrix, &partials, threads);
+                }
+                Generated::Short {
+                    terms: wanted,
+                    iterated: stopped,
+                } => {
+                    if wanted > wiedemann_terms_most(matrix, of) {
+                        return None;
+                    }
+                    terms = wanted;
+                    iterated = Some(Iterated::from_bytes(&stopped.to_bytes()).expect("read back"));
+                }
             }
-            if terms > TERMS_MOST * dimension.div_ceil(WIDTH) {
-                return None;
+        }
+    }
+
+    /// The slices of one seed at `terms`, each on from its prior.
+    fn slices_to(
+        matrix: &SparseMatrix,
+        seed: u64,
+        of: usize,
+        terms: usize,
+        prior: Option<&[Sequence]>,
+    ) -> Vec<Sequence> {
+        (0..of)
+            .map(|slice| {
+                let prior = prior.map(|prior| &prior[slice]);
+                wiedemann_sequence(matrix, seed, slice, of, terms, prior, 1).expect("a slice")
+            })
+            .collect()
+    }
+
+    /// The slices and generators of one seed, from the first length and on
+    /// by the terms each short pass wants, with the count of those passes.
+    fn settled(matrix: &SparseMatrix, seed: u64, of: usize) -> (Vec<Sequence>, Generators, usize) {
+        let mut slices = slices_to(matrix, seed, of, wiedemann_terms(matrix, of), None);
+        let mut iterated = None;
+        for short in 0.. {
+            match wiedemann_generators(&slices, iterated.take(), 1).expect("one sequence's") {
+                Generated::Settled(generators) => return (slices, generators, short),
+                Generated::Short {
+                    terms,
+                    iterated: stopped,
+                } => {
+                    assert!(terms > slices[0].terms(), "a short pass wants more terms");
+                    slices = slices_to(matrix, seed, of, terms, Some(&slices));
+                    iterated = Some(stopped);
+                }
             }
-            terms += terms / 4;
+        }
+        unreachable!()
+    }
+
+    /// Passes resumed over more terms, once or twice, make what one pass
+    /// over them all makes; a pass given no new terms wants what it wanted;
+    /// the iteration reads back from its bytes; and it is refused for a
+    /// sequence of another matrix.
+    #[test]
+    fn a_resumed_pass_is_one_pass() {
+        let matrix = sieve_like(1500, 1400, 7, 31);
+        let other = sieve_like(1500, 1400, 7, 32);
+        for of in [1usize, 2] {
+            for seed in [3u64, 4] {
+                let first = wiedemann_terms(&matrix, of) - SPARE_TERMS;
+                let short = slices_to(&matrix, seed, of, first, None);
+                let Some(Generated::Short { terms, iterated }) =
+                    wiedemann_generators(&short, None, 1)
+                else {
+                    panic!("{of} slices, seed {seed}: {first} terms settle");
+                };
+                assert_eq!(
+                    Iterated::from_bytes(&iterated.to_bytes()),
+                    Ok(iterated.clone())
+                );
+                assert_eq!(
+                    wiedemann_generators(&short, Some(iterated.clone()), 1),
+                    Some(Generated::Short {
+                        terms,
+                        iterated: iterated.clone()
+                    }),
+                    "{of} slices, seed {seed}: no new terms"
+                );
+                let elsewhere = slices_to(&other, seed, of, first, None);
+                assert_eq!(
+                    wiedemann_generators(&elsewhere, Some(iterated.clone()), 1),
+                    None,
+                    "{of} slices, seed {seed}: another matrix's sequence"
+                );
+                let whole = slices_to(&matrix, seed, of, terms, None);
+                let one_pass = wiedemann_generators(&whole, None, 1);
+                let longer = slices_to(&matrix, seed, of, terms, Some(&short));
+                assert_eq!(
+                    wiedemann_generators(&longer, Some(iterated.clone()), 1),
+                    one_pass,
+                    "{of} slices, seed {seed}: one resume"
+                );
+                let middle = slices_to(&matrix, seed, of, (first + terms) / 2, Some(&short));
+                let between = match wiedemann_generators(&middle, Some(iterated), 1) {
+                    Some(Generated::Short { iterated, .. }) => iterated,
+                    made => panic!("{of} slices, seed {seed}: halfway made {made:?}"),
+                };
+                let longer = slices_to(&matrix, seed, of, terms, Some(&middle));
+                assert_eq!(
+                    wiedemann_generators(&longer, Some(between), 1),
+                    one_pass,
+                    "{of} slices, seed {seed}: two resumes"
+                );
+            }
         }
     }
 
@@ -1029,15 +1382,9 @@ mod tests {
     #[test]
     fn the_lanes_generate_the_sequence() {
         let matrix = sieve_like(900, 850, 6, 21);
-        let dimension: usize = 900;
         for of in [1, 3] {
-            let terms = 2 * dimension.div_ceil(WIDTH * of) + 2 * SPARE_TERMS;
-            let slices: Vec<Sequence> = (0..of)
-                .map(|slice| {
-                    wiedemann_sequence(&matrix, 5, slice, of, terms, None, 1).expect("a slice")
-                })
-                .collect();
-            let generators = wiedemann_generators(&slices, 1).expect("the generators settle");
+            let (slices, generators, _) = settled(&matrix, 5, of);
+            let terms = slices[0].terms();
             let rows = WIDTH * of;
             let term = |k: usize| -> Vec<u64> {
                 let mut term = vec![0u64; rows * of];
@@ -1098,12 +1445,8 @@ mod tests {
     fn a_settled_column_annihilates_the_sequence_from_its_nominal_degree() {
         let matrix = sieve_like(900, 850, 6, 21);
         for of in [1usize, 2] {
-            let terms = 2 * 900usize.div_ceil(WIDTH * of) + 2 * SPARE_TERMS;
-            let slices: Vec<Sequence> = (0..of)
-                .map(|slice| {
-                    wiedemann_sequence(&matrix, 5, slice, of, terms, None, 1).expect("a slice")
-                })
-                .collect();
+            let (slices, _, _) = settled(&matrix, 5, of);
+            let terms = slices[0].terms();
             let rows = WIDTH * of;
             let term = |k: usize| -> Vec<u64> {
                 let mut term = vec![0u64; rows * of];
@@ -1115,22 +1458,24 @@ mod tests {
                 term
             };
             let by_slice: Vec<&Sequence> = slices.iter().collect();
-            let mut state = Degrees {
-                degrees: vec![1; 2 * rows],
-                quiet: vec![0; 2 * rows],
-            };
-            let pi = steps(
-                &initial_e(&by_slice, of),
-                &mut state,
-                halves_from(2 * rows, of),
-            );
+            let iterated = take_terms(&by_slice, Iterated::start(&by_slice));
             let settled: Vec<(usize, Vec<Vec<u64>>)> = (0..2 * rows)
-                .filter(|&column| state.quiet[column] >= SPARE_TERMS)
-                .map(|column| (state.degrees[column], f_column(&pi, column, of)))
+                .filter(|&column| {
+                    iterated.quiet[column] >= SPARE_TERMS && !iterated.f.zero_column(column)
+                })
+                .map(|column| {
+                    let f = (0..iterated.f.length())
+                        .map(|d| iterated.f.column(d, column).to_vec())
+                        .collect();
+                    (iterated.degrees[column], f)
+                })
                 .collect();
+            let dead = (0..2 * rows)
+                .filter(|&column| iterated.f.zero_column(column))
+                .count();
             assert!(
-                settled.len() >= WIDTH,
-                "{of} words: {} settled",
+                settled.len() >= WIDTH.min(rows - dead),
+                "{of} words: {} settled, {dead} columns of F zero",
                 settled.len()
             );
             let apply = |term: &[u64], v: &[u64]| -> Vec<u64> {

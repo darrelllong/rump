@@ -36,8 +36,8 @@ mod generator;
 mod wiedemann;
 pub use wiedemann::{
     block_wiedemann_dependencies_sparse, wiedemann_finish, wiedemann_generators,
-    wiedemann_sequence, wiedemann_solution, wiedemann_terms, Generators, Sequence,
-    WiedemannBytesError,
+    wiedemann_sequence, wiedemann_solution, wiedemann_terms, wiedemann_terms_most, Generated,
+    Generators, Iterated, Sequence, WiedemannBytesError,
 };
 
 /// Bits per storage word.

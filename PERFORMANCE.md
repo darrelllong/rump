@@ -1086,6 +1086,44 @@ kept:
 
 The same file, 64 generators of degree 20 087.
 
+### The length, and resuming
+
+The sequence's first length was `2N/m + 128` terms, and where the
+generators did not settle the slices were lengthened by a quarter and the
+generators made again from the first term. Both passes short of settling
+fell short for one reason: a column of `F` that goes to zero. `F₀ = [I |
+X·I]` holds each `e_j` twice over; a pivot `e_j` multiplied by `X` is the
+column `X·e_j`, and a reduction that sums the two leaves `F = 0` with
+`G ≠ 0`, whose `E` is zero from then on. It never takes a step again, and
+the other columns close their gap `t − δ` at `(n − r)/(m + n − r)` a step
+for `r` such columns, not a half. Over twelve seeds, three widths and two
+small matrices, `r` was 0 nineteen times in 72, 1 forty-four, 2 eight and
+3 once: no fixed allowance is right.
+
+The first length is now the least that can settle, `2⌈N/m⌉ + 65`; a pass
+that falls short counts its dead columns and names the terms it wants,
+and the next pass resumes from where it stopped, its `E` the coefficients
+of `A·F` from `t` on, making what one pass over all the terms makes bit
+for bit. RSA-120's kept sequence, ten M4 Pro threads:
+
+| RSA-120 | terms | generators |
+|---|---:|---:|
+| before: short, then a quarter more, from the start | 21 184, 23 832 | 139.5 + 168.2 s |
+| now: the first length, then what it wants, resumed | 21 121, 21 290 | 13.5 + 1.1 s |
+
+The same 63 lanes of degree 10 693 as at 23 832 terms, and 2 542 fewer
+terms of the sequence, 11 %. RSA-155's four slices on one GB10, twenty
+threads, the terms truncated from the 50 185 the four-host solve kept:
+
+| RSA-155 | terms | generators |
+|---|---:|---:|
+| the solve of 2026-10-24 | 40 148, 50 185 | 12 840 + 16 714 s |
+| now | 40 085, 40 164 | 468 + 47 s |
+
+64 lanes of degree 20 087 either way, and one pass over the 40 164 terms
+makes the same, in 488 s. The sequence is 10 021 terms shorter a slice,
+20 %, which on the four hosts was 4 059 s of the solve's 59 133.
+
 ## What a read at random costs
 
 `parallelism::gather_costs`, the `gather_costs_timing` probe: nanoseconds a

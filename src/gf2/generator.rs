@@ -88,7 +88,7 @@ impl Polynomials {
     }
 
     /// Coefficients `range`, as a polynomial of their own.
-    fn coefficients(&self, range: std::ops::Range<usize>) -> Self {
+    pub(super) fn coefficients(&self, range: std::ops::Range<usize>) -> Self {
         let stride = self.stride();
         Self {
             words: self.words,
@@ -98,7 +98,24 @@ impl Polynomials {
     }
 
     /// Without the zero coefficients at the top, one kept.
-    fn trimmed(mut self) -> Self {
+    pub(super) fn from_words(words: usize, columns: usize, data: Vec<u64>) -> Self {
+        Self {
+            words,
+            columns,
+            data,
+        }
+    }
+
+    pub(super) fn words(&self) -> &[u64] {
+        &self.data
+    }
+
+    /// Whether column `column` is zero in every coefficient.
+    pub(super) fn zero_column(&self, column: usize) -> bool {
+        (0..self.length()).all(|index| self.column(index, column).iter().all(|&word| word == 0))
+    }
+
+    pub(super) fn trimmed(mut self) -> Self {
         let stride = self.stride();
         let length = self
             .data
