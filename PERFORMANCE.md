@@ -986,6 +986,40 @@ thread, reads and writes them as plain words.
 The same RSA-155 harvest and the same matrix byte for byte. The merge,
 443 s and 492 s in two runs, is now nearly all of it.
 
+### The merge in passes
+
+2026-10-24, after the entry above. The merge took a column at a time from
+a queue of fills, kept every column's list of rows exact as it went, and
+planned stale columns ahead in batches. On RSA-155, of its 471 s, adding
+merged rows to the lists of the columns they gained was 258: one and a
+half thousand million writes into lists that were nearly all of columns
+too heavy ever to be merged, and never read.
+
+It is now Bouillaguet and Zimmermann's (*Parallel structured Gaussian
+elimination for the number field sieve*, Mathematical Cryptology 1
+(2021), 22–39, Algorithm 2): passes, each listing afresh the rows of the
+columns at or under the cap, a transpose counted, laid out and filled
+side by side; planning each one's spanning tree side by side; taking the
+columns, by fill and then number, whose fill lowers `rows · nonzeros`
+and whose rows no column already taken holds; and merging those side by
+side against the rows as the pass began. No list is kept between passes,
+and none of the columns heavier than the cap is ever listed. Where the
+paper ramps its weight and cost limits by pass, by constants it found
+by trial, a pass here takes every column the cost rule admits, by its
+tree's exact fill.
+
+| RSA-155 | one at a time | in passes |
+|---|---:|---:|
+| merge | 471 s | 161 s, 31 passes |
+| all of `filter_merge` | 573 s | 234 s |
+| rows | 5 122 455 | 4 949 893 |
+| nonzeros | 611 767 263 | 635 947 914 |
+| rows · nonzeros | 3.134 · 10¹⁵ | 3.148 · 10¹⁵ |
+
+The matrix is no longer the one-at-a-time merge's, whose every merge was
+planned against the last; it is the same at any number of threads, and
+its solve costs 0.45 % more.
+
 ## What a read at random costs
 
 `parallelism::gather_costs`, the `gather_costs_timing` probe: nanoseconds a
