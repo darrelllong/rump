@@ -681,6 +681,30 @@ M4 and 2.5–3.0 ns on the EPYC, that core's scalar 128-bit multiply.
 Against GMP's Schönhage–Strassen, whose butterflies multiply nothing, the
 M4 is now ahead from 2^26 bits and the EPYC stands at 1.6×.
 
+## The square root by recursion
+
+2026-10-27. `BigUint::sqrt_rem` was Newton's iteration from a one-bit
+seed, a division at the full width for each of its `log₂ bits` steps:
+17.3 s for a 2^24-bit value on an M4 Pro core. It is now the recursion of
+Brent and Zimmermann (*Modern Computer Arithmetic*, Algorithm 1.12,
+`SqrtRem`), the root of the top half of the value, a division of three
+quarters of the width by half, and a square of a quarter, at each level,
+with `k = ⌊(bits + 1)/4⌋` keeping the top part normalized without padding.
+On the same core, one thread:
+
+| bits | `mul` | `sqrt_rem` before | after |
+|---:|---:|---:|---:|
+| 2^20 | 2.4 ms | 685 ms | 17 ms |
+| 2^24 | 46 ms | 17.3 s | 302 ms |
+| 2^28 | 0.94 s | | 6.2 s |
+| 2^30 | 4.1 s | | 27.8 s |
+
+The root costs some 6.7 multiplications of its width: each level's
+division builds its Newton reciprocal afresh. A reciprocal carried from
+the level below, refined, would take it toward three; not done. The
+number field sieve's rational square root is such a root, of the product
+of a dependency's `G(a, b)`, a gigabit at RSA-155.
+
 ## The Hensel lift ends at its target
 
 2026-10-24. `HenselSquareRoot` reached its precisions by squaring,

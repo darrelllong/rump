@@ -1020,60 +1020,77 @@ impl BigUint {
         bit_span(self.limbs.len() - 1, 64) + top_bits
     }
 
-    /// Integer square root: the largest `r` with `r² ≤ self`. The root half
-    /// of [`Self::sqrt_rem`], which documents the Newton iteration; it skips
-    /// the squaring and subtraction that produce the remainder.
+    /// Integer square root: the largest `r` with `r² ≤ self`, the root of
+    /// [`Self::sqrt_rem`].
     #[must_use]
     pub fn sqrt_floor(&self) -> Self {
-        if self.is_zero() || self.is_one() {
-            return self.clone();
-        }
-        self.sqrt_newton()
+        self.sqrt_rem().0
     }
 
     /// Integer square root with remainder: `(r, self − r²)` for the largest
     /// `r` with `r² ≤ self`.
     ///
-    /// Newton's iteration on `x ↦ (x + self/x)/2` from a one-bit seed above
-    /// the root. For any `x > 0` the iterate is at least `⌊√self⌋` (AM–GM:
-    /// `(x + n/x)/2 ≥ √n`, and the floor of the average cannot drop below
-    /// the floor of the root), and from a starting point above the root the
-    /// sequence decreases strictly until it reaches it, so the first
-    /// non-decrease certifies the answer (Cohen, *A Course in Computational
-    /// Algebraic Number Theory*, Algorithm 1.7.1). Each step costs one
-    /// division at the operand's width, and convergence is quadratic, so the
-    /// step count is about log₂ of the bit width.
+    /// By the recursion of Brent and Zimmermann (*Modern Computer
+    /// Arithmetic*, Cambridge, 2010, Algorithm 1.12, `SqrtRem`, after
+    /// Zimmermann, *Karatsuba square root*, INRIA RR-3805, 1999): with
+    /// `β = 2^k` and `n = a·β² + a₁·β + a₀`, `a ≥ β²/4`, the root `s′` and
+    /// remainder `r′` of the top part `a` give `q = ⌊(r′β + a₁)/(2s′)⌋`,
+    /// `s = s′β + q` and `r = uβ + a₀ − q²` with `u` the division's
+    /// remainder; `r < 0` once, at most, is mended by `s − 1` and
+    /// `r + 2s − 1`. The top part has `s′ ≥ β/2` from its bound, so `q ≤ β`
+    /// and one mend suffices (their Theorem 1.5). `k = ⌊(bits + 1)/4⌋`
+    /// keeps `a ≥ β²/4` at every level without padding. A level costs a
+    /// division of `3k` bits by `2k` and a square of `k`, so the whole is a
+    /// few multiplications at the width, where Newton's iteration from a
+    /// one-bit seed was a division at the width for each of its `log₂ bits`
+    /// steps. Below 128 bits the root is taken a bit at a time in a word.
     #[must_use]
     pub fn sqrt_rem(&self) -> (Self, Self) {
-        if self.is_zero() || self.is_one() {
-            return (self.clone(), Self::zero());
+        let bits = self.bits();
+        if bits <= 128 {
+            let (root, remainder) = sqrt_rem_u128(self.low_u128());
+            return (Self::from_u128(root), Self::from_u128(remainder));
         }
-        let root = self.sqrt_newton();
-        let square = root.square();
-        (root, self.sub(&square))
-    }
+        let k = (bits + 1) / 4;
+        let mut top = self.clone();
+        top.shr_bits(2 * k);
+        let mut middle = self.clone();
+        middle.shr_bits(k);
+        let middle = middle.low_bits(k);
+        let low = self.low_bits(k);
+        let (top_root, top_remainder) = top.sqrt_rem();
 
-    /// The Newton core shared by [`Self::sqrt_floor`] and
-    /// [`Self::sqrt_rem`]. Requires `self ≥ 2`.
-    fn sqrt_newton(&self) -> Self {
-        debug_assert!(!self.is_zero() && !self.is_one(), "callers handle 0 and 1");
-        // Seed: 2^⌈bits/2⌉ ≥ ⌈√self⌉, one bit above the root's width.
-        let mut current = Self::zero();
-        current.set_bit(self.bits().div_ceil(2));
-        loop {
-            // next = (current + self/current) / 2
-            let (quotient, _) = self.div_rem(&current);
-            let mut next = current.add(&quotient);
-            next.shr1();
-            if next >= current {
-                debug_assert!(
-                    current.square() <= *self,
-                    "certified root is not above the value"
-                );
-                return current;
-            }
-            current = next;
+        // q = ⌊(r′β + a₁)/(2s′)⌋ and its remainder u.
+        let mut dividend = top_remainder;
+        dividend.shl_bits(k);
+        dividend.add_assign_ref(&middle);
+        let mut twice_root = top_root.clone();
+        twice_root.shl_bits(1);
+        let (q, u) = dividend.div_rem(&twice_root);
+
+        let mut root = top_root;
+        root.shl_bits(k);
+        root.add_assign_ref(&q);
+        let mut remainder = u;
+        remainder.shl_bits(k);
+        remainder.add_assign_ref(&low);
+        let q_square = q.square();
+        if remainder >= q_square {
+            remainder.sub_assign_ref(&q_square);
+        } else {
+            // r + 2s − 1 − q², with s before its decrement, is non-negative.
+            let mut mend = root.clone();
+            mend.shl_bits(1);
+            remainder.add_assign_ref(&mend);
+            remainder.sub_assign_ref(&Self::one());
+            remainder.sub_assign_ref(&q_square);
+            root.sub_assign_ref(&Self::one());
         }
+        debug_assert!(
+            remainder <= root.clone().add(&root),
+            "the remainder is at most 2s"
+        );
+        (root, remainder)
     }
 
     /// Population count: the number of set bits.
@@ -1117,11 +1134,13 @@ impl BigUint {
     /// Floor of the `k`-th root: the largest `r` with `r^k ≤ self`.
     ///
     /// Newton's iteration on `x ↦ ((k−1)·x + self/x^(k−1))/k` from a
-    /// one-bit seed above the root; as with [`Self::sqrt_rem`], every
-    /// iterate stays at or above the true floor and the sequence decreases
-    /// strictly until it certifies itself (Cohen, Algorithm 1.7.1 for the
-    /// square case; the general `k` is the same argument through the
-    /// arithmetic–geometric mean inequality on `k` terms).
+    /// one-bit seed above the root: every iterate stays at or above the true
+    /// floor and the sequence decreases strictly until it certifies itself
+    /// (Cohen, *A Course in Computational Algebraic Number Theory*,
+    /// Algorithm 1.7.1 for the square case; the general `k` is the same
+    /// argument through the arithmetic–geometric mean inequality on `k`
+    /// terms). Each step is a division at the width, so this is for small
+    /// roots; the square root has its own recursion ([`Self::sqrt_rem`]).
     ///
     /// # Panics
     ///
@@ -2866,6 +2885,27 @@ fn low_u64(value: u128) -> u64 {
 ///
 /// `shift` is below 64 and `len` is at least `value.len()`; this is the
 /// Algorithm D normalization step, which never needs a whole-limb shift.
+/// `(⌊√n⌋, n − ⌊√n⌋²)` for a double word, a bit of the root at a time from
+/// the top: the root's next bit is set when the square stays within `n`.
+fn sqrt_rem_u128(n: u128) -> (u128, u128) {
+    let mut root = 0u128;
+    let mut remainder = n;
+    let mut bit = 1u128 << 126;
+    while bit > n {
+        bit >>= 2;
+    }
+    while bit != 0 {
+        if remainder >= root + bit {
+            remainder -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    (root, remainder)
+}
+
 fn shl_into(value: &[u64], shift: u32, len: usize) -> Vec<u64> {
     debug_assert!(shift < 64, "normalization shift stays within one limb");
     debug_assert!(len >= value.len(), "destination must hold the source");
@@ -4637,8 +4677,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "timing probe for the Newton/bisection square-root comparison; run with --ignored"]
-    fn sqrt_newton_vs_bisection_timing() {
+    #[ignore = "timing probe for the square root against bisection; run with --ignored"]
+    fn sqrt_rem_vs_bisection_timing() {
         use std::hint::black_box;
         use std::time::Instant;
         // Best of nine runs: the minimum sheds scheduler interference; the
@@ -4647,7 +4687,7 @@ mod tests {
         // Arbitrary, fixed so a failure reproduces.
         const SEED: u64 = 0x0bad_5eed_0000_0001;
         let mut seed = SEED;
-        eprintln!("{:>8} {:>12} {:>12}", "bits", "newton_us", "bisect_us");
+        eprintln!("{:>8} {:>12} {:>12}", "bits", "sqrt_us", "bisect_us");
         // From 1 kbit to 64 kbit.
         for &words in &[16usize, 64, 128, 1024] {
             let n = seeded_biguint(words, &mut seed);
