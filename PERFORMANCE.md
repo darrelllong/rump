@@ -509,27 +509,60 @@ read against that grouping:
 ## NTT and the ladder
 
 rump's multiplication ladder is schoolbook, Karatsuba from 96 limbs, Toom-3
-from 128, Toom-4 from 4096, and an exact number-theoretic transform from
-131,072 limbs on one execution context, or from 8192 limbs when four or more
-execution contexts are available to it. Squaring has its own schoolbook kernel
-from 8 limbs and Karatsuba squaring to 1024 limbs, then the multiplication
-ladder.
+from 128, and an exact number-theoretic transform from 1 024 limbs, the same
+at any number of threads. Squaring has its own schoolbook kernel from 8
+limbs and Karatsuba squaring to 1 024 limbs, then the transform's square.
 
-No table in this document measures any of those upper rungs. The primitives
-tables stop at 64 limbs, below the first Karatsuba split, and the gcd sweep
-below tops out at 16,384 limbs, below the single-context NTT threshold, so
-its matrix products stay on the Toom rungs and below. The crossovers themselves are
-set by the ignored timing probes in the crate's test suite, one per rung
+The crossovers are constants, set by the ignored timing probes in the
+crate's test suite and re-set when a kernel changes
 (`karatsuba_crossover_timing`, `toom_crossover_timing`,
 `squaring_crossover_timing`, `ntt_crossover_timing`, and the gcd-family
 `hgcd_crossover_timing`, `hgcd_ext_crossover_timing`,
-`jacobi_hgcd_crossover_timing`); each prints its own comparison when run with
+`jacobi_hgcd_crossover_timing`); each prints its own comparison when run
+with
 
 ```sh
 cargo test --release --lib <probe_name> -- --ignored --nocapture
 ```
 
-and their output is not reproduced here.
+### The transform's crossover, and Toom-4's end
+
+2026-10-27, with the transform of limb digits ("Digits of a limb" below).
+`ntt_crossover_timing` and `toom_crossover_timing`, one core, microseconds
+a product of two values of the width:
+
+| limbs | M4 Pro: Toom-3 | Toom-4 | transform | EPYC 7702: Toom-4 | transform |
+|---:|---:|---:|---:|---:|---:|
+| 384 | 56 | 57 | 96 | 105 | 195 |
+| 512 | 89 | 88 | 87 | 164 | 200 |
+| 768 | 180 | 166 | 143 | 297 | 364 |
+| 1 024 | 256 | 271 | 148 | 457 | 374 |
+| 1 536 | 476 | 456 | 262 | 887 | 724 |
+| 2 048 | 762 | 699 | 276 | 1 337 | 796 |
+| 4 096 | 2 020 | 1 934 | 527 | 3 711 | 1 714 |
+| 16 384 | 10 000 | 10 033 | 2 834 | 36 186 | 6 682 |
+
+The transform is ahead from 512 limbs on the M4 and from 1 024 on the
+EPYC, and at every width past; the threshold is 1 024, the width past
+which no measured machine prefers the ladder. It was 131 072, set against
+the transform of 16-bit digits, which built its twiddle tables a call. Toom-4
+overtook Toom-3 only from 4 096 limbs on either machine, which is past the
+transform now, so the four-way kernel is gone.
+
+### Polynomial products by substitution
+
+2026-10-27. The square root's polynomials — the product tree's and the
+lift's, four or five coefficients of millions of bits — were multiplied a
+coefficient pair at a time, `d²` products of the coefficients' width.
+Where those products are the transform's, the polynomial is packed into
+one integer, a coefficient a slot of whole limbs wide enough for a
+coefficient of the product, and one product of `d` slots replaces the
+`d²`: Kronecker substitution (`poly::kronecker`), about `2/d` of the cost
+under a quasi-linear kernel, with signed coefficients recovered from the
+slots' top bits. It is taken only where the packed operands would go to the
+transform on one thread, since under Karatsuba or schoolbook the larger
+operand costs more than the pairs. On RSA-155's roots, see bench/README.md
+in factoring.
 
 ### A stage's twiddles as a table
 
@@ -613,6 +646,40 @@ coefficients, up to `p₀·p₁`, into a `u64` buffer of their own.
 | 2^28 | 2.72 s | 1.17 s | 7.69 s | 5.35 s |
 
 GMP 6.3.0 on a Cortex core: 0.060 s at 2^24 bits and 1.37 s at 2^28.
+
+### Digits of a limb
+
+2026-10-27, after the entry above. The transform's digits were sixteen bits
+under two primes below 2^31, so that a coefficient of the convolution fit
+their product; a transform was four times as long as the operands in
+limbs, capped at 2^26 values, and past the cache it ran at memory's pace.
+The digits are now the limbs themselves, under three primes just under
+2^62 (`29·2^57 + 1`, `69·2^55 + 1`, `57·2^55 + 1`), whose product is above
+2^183 and holds `n·(2^64 − 1)²` for transforms to 2^55 values; a twiddle
+product is Shoup's, a product of two variables Barrett's on a 128-bit
+product, both without a division (`ntt.rs`, module header). Nine
+transforms a quarter as long replace six: a third of the butterflies,
+each twice the bytes, half the traffic through memory; the cap is gone,
+which the square root's packed products need (`poly::kronecker`). Each
+stage's twiddle table is now built once a process and kept: built a
+transform, the tables of a 2^16-value transform cost as much as its
+butterflies.
+
+One core, the fastest of three, a product of two values of the width;
+GMP 6.3.0 is `mpz_mul` on the same core:
+
+| bits | M4 Pro, before | after | GMP | EPYC 7702, before | after | GMP |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2^24 | 64.6 ms | 54.8 ms | 48.3 ms | 266 ms | 154 ms | 80 ms |
+| 2^26 | 266 ms | 217 ms | 303 ms | 1.17 s | 0.69 s | 0.43 s |
+| 2^28 | 1.16 s | 0.92 s | 1.08 s | 5.24 s | 3.08 s | 1.93 s |
+
+The EPYC gains 1.7× and the M4 1.2×: the old `u32` butterflies ran four
+lanes wide on the M4, where memory was never the limit, and the new
+128-bit products run one at a time. A butterfly costs 0.85–0.95 ns on the
+M4 and 2.5–3.0 ns on the EPYC, that core's scalar 128-bit multiply.
+Against GMP's Schönhage–Strassen, whose butterflies multiply nothing, the
+M4 is now ahead from 2^26 bits and the EPYC stands at 1.6×.
 
 ## The Hensel lift ends at its target
 

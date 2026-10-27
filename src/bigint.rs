@@ -3,7 +3,7 @@
 //! The representation uses little-endian `u64` limbs because the algorithms
 //! are naturally word-oriented. The kernels come straight from the literature
 //! so they are auditable against their sources: schoolbook (Knuth's
-//! Algorithm M), Karatsuba, Toom–Cook three- and four-way multiplication, and
+//! Algorithm M), Karatsuba, three-way Toom–Cook multiplication, and
 //! exact number-theoretic-transform convolution at very large sizes; division
 //! is Knuth's Algorithm D. Everything is Rust with no external arithmetic
 //! backend.
@@ -55,16 +55,15 @@ const KARATSUBA_THRESHOLD_LIMBS: usize = 96;
 // from the same boundary upward; the two gates partition the shapes between
 // them, which is why one constant serves both.
 const KARATSUBA_MAX_IMBALANCE: usize = 2;
-// Length ratio the balanced kernels — Toom-3, Toom-4 and the NTT — accept,
-// as `long ≤ 3/2·short`, taken in integers as `short + short / 2`.
-// Toom-3 splits at a third of the longer operand, so past this ratio the
-// shorter operand's top third is empty and the five-point evaluation is
-// spent on a two-part number. Toom-4 splits at a quarter, where the top
-// part is empty already past 4/3, and the NTT does not split at all; both
-// keep Toom-3's ceiling as policy, so one shape decision routes a pair
-// through the whole ladder. Pairs past it fall to Karatsuba below 2× and to
-// block decomposition from 2×. No measurement compares this ceiling with a
-// tighter one for Toom-4 or a looser one for the NTT.
+// Length ratio the balanced kernels — Toom-3 and the NTT — accept, as
+// `long ≤ 3/2·short`, taken in integers as `short + short / 2`. Toom-3
+// splits at a third of the longer operand, so past this ratio the shorter
+// operand's top third is empty and the five-point evaluation is spent on a
+// two-part number. The NTT does not split at all, and keeps Toom-3's
+// ceiling as policy, so one shape decision routes a pair through the whole
+// ladder. Pairs past it fall to Karatsuba below 2× and to block
+// decomposition from 2×. No measurement compares this ceiling with a looser
+// one for the NTT.
 fn within_balanced_ratio(short: usize, long: usize) -> bool {
     long <= short + short / 2
 }
@@ -74,33 +73,20 @@ fn within_balanced_ratio(short: usize, long: usize) -> bool {
 // the EPYC 7452: Karatsuba leads at 96 limbs (12.1 µs against 16.4), Toom-3
 // from 128 (21.4 against 25.6).
 const TOOM3_THRESHOLD_LIMBS: usize = 128;
-// Toom-4 crossover. Its exponent (log 7 / log 4 ≈ 1.404) beats Toom-3's
-// (1.465), but the seven-point interpolation carries a much larger constant,
-// so it overtakes Toom-3 only in the thousands of limbs.
-// `toom_crossover_timing` puts the last width where a machine still prefers
-// Toom-3 at 3072 (EPYC 7452: 2.75 ms against Toom-4's 2.97) and has both
-// machines on Toom-4 from 4096 (EPYC 4.06 ms against 4.43; Cortex-A76
-// 6.46 ms against 6.73) and above.
-const TOOM4_THRESHOLD_LIMBS: usize = 4096;
-// Exact NTT multiplication crossover on one execution context. The transform
-// works in base 2^16 under two 31-bit primes and reconstructs every
-// convolution coefficient by CRT. `ntt_crossover_timing` puts the crossover
-// at 131,072 limbs on both measured machines and nowhere below it: on the
-// EPYC 7452 a serial transform loses to Toom-4 at every narrower width in
-// the sweep (180 ms against 156 ms at 65,536) and wins at 131,072 (379 ms
-// against 448 ms); on the M4 it wins at 32,768, loses again at 65,536 — the
-// padding staircase — and wins from 131,072 on. The threshold is the width
-// past which no measured machine prefers Toom-4, not the first width where
-// one of them does. Correctness is independent of it.
-const NTT_SERIAL_THRESHOLD_LIMBS: usize = 131_072;
-// The same kernel crosses earlier when its transform stages run on
-// independent execution contexts: `ntt_crossover_timing` measures two
-// contexts ahead of Toom-4 from 32,768 limbs on the M4 and from 8,192 on the
-// EPYC, and four or more ahead from 8,192 on both, so each threshold is the
-// wider of the two machines. `ntt::automatic_worker_count` never exceeds the
-// reported machine parallelism and returns one if detection fails.
-const NTT_TWO_WORKER_THRESHOLD_LIMBS: usize = 32_768;
-const NTT_PARALLEL_THRESHOLD_LIMBS: usize = 8_192;
+// Exact NTT multiplication crossover, on one thread. `ntt_crossover_timing`
+// and `toom_crossover_timing` on the M4 Pro and deepcore's EPYC 7702, the
+// transform of limb digits under three primes: on the M4 the transform is
+// ahead of Toom-3 from 512 limbs (87 µs against 89, and 148 against 256 at
+// 1 024); on the EPYC the ladder holds at 768 (Toom-4 297 µs against 364,
+// Toom-3 within 3 % of Toom-4 from 768 to 1 024) and the transform is ahead
+// from 1 024 (374 against 457) and at every width past it. The threshold
+// is the width past which no measured machine prefers the ladder. Four-way
+// Toom–Cook, which overtook Toom-3 only from 4 096 limbs, is past this and
+// is gone. The threshold is the same at any number of threads: a transform
+// admitted runs on the caller's budget, but is not admitted earlier for
+// having threads, which would be spent, not saved. Correctness is
+// independent of it.
+const NTT_SERIAL_THRESHOLD_LIMBS: usize = 1024;
 // Block-decomposition crossover for lopsided products (long ≥ 2·short): the
 // shorter length from which cutting the longer operand into short-sized
 // digits and multiplying each pair through the balanced kernels beats one
@@ -1569,13 +1555,12 @@ impl BigUint {
     /// Multiply two big integers, choosing the kernel by the shorter
     /// operand's length: schoolbook (Knuth's Algorithm M) by default,
     /// Karatsuba from `KARATSUBA_THRESHOLD_LIMBS`, three-way Toom–Cook from
-    /// `TOOM3_THRESHOLD_LIMBS`, four-way from `TOOM4_THRESHOLD_LIMBS`, and
-    /// an exact number-theoretic transform from `NTT_SERIAL_THRESHOLD_LIMBS`
-    /// on one execution context, `NTT_TWO_WORKER_THRESHOLD_LIMBS` with two
-    /// and `NTT_PARALLEL_THRESHOLD_LIMBS` with four or more; each constant
-    /// carries the measurement that set it. The NTT never uses more contexts than
-    /// [`std::thread::available_parallelism`] reports. Toom and NTT require
-    /// `long ≤ 1.5·short`, Karatsuba `long < 2·short`. A lopsided pair
+    /// `TOOM3_THRESHOLD_LIMBS`, and an exact number-theoretic transform from
+    /// `NTT_SERIAL_THRESHOLD_LIMBS`; each constant carries the measurement
+    /// that set it. The NTT runs on the caller's thread budget and never
+    /// more contexts than [`std::thread::available_parallelism`] reports.
+    /// Toom and NTT require `long ≤ 1.5·short`, Karatsuba `long < 2·short`.
+    /// A lopsided pair
     /// (`long ≥ 2·short`) whose shorter operand has at least 256 limbs takes
     /// `mul_unbalanced_ref`, block decomposition into balanced products;
     /// smaller lopsided pairs stay schoolbook. The module header cites each
@@ -1596,10 +1581,6 @@ impl BigUint {
             return self.mul_ntt_ref(other);
         }
 
-        if Self::should_use_toom4(self, other) {
-            return self.mul_toom4_ref(other);
-        }
-
         if Self::should_use_toom3(self, other) {
             return self.mul_toom3_ref(other);
         }
@@ -1615,46 +1596,30 @@ impl BigUint {
         Self::mul_schoolbook_ref(self, other)
     }
 
-    /// Exact NTT admission: large, approximately balanced operands whose
-    /// base-2^16 convolution fits both transform primes.
+    /// Whether a product of `short` by `long` limbs would go to the
+    /// transform on one thread: what makes the integer product quasi-linear
+    /// and a polynomial product cheaper packed (`poly::kronecker`).
+    pub(crate) fn transform_admits(short: usize, long: usize) -> bool {
+        ntt::transform_len(short, long).is_some()
+            && short >= NTT_SERIAL_THRESHOLD_LIMBS
+            && within_balanced_ratio(short, long)
+    }
+
+    /// Transform admission: the shorter operand at `NTT_SERIAL_THRESHOLD_LIMBS`
+    /// or past it, the pair within 1.5× in length, and a transform long
+    /// enough for the product. Padding is not a reason to refuse: a radix-2
+    /// transform rounds the convolution up to a power of two, so the work a
+    /// limb depends on where a width falls in that staircase, and the
+    /// threshold is the width past which the transform is ahead at every
+    /// rounding on every measured machine.
     fn should_use_ntt(lhs: &Self, rhs: &Self) -> bool {
-        let Some(transform_len) = ntt::transform_len(lhs.limbs.len(), rhs.limbs.len()) else {
-            return false;
-        };
-        Self::should_use_ntt_with_workers(lhs, rhs, ntt::automatic_worker_count(transform_len))
+        Self::transform_admits(
+            lhs.limbs.len().min(rhs.limbs.len()),
+            lhs.limbs.len().max(rhs.limbs.len()),
+        )
     }
 
-    /// Deterministic form of NTT admission, parameterized for its tests.
-    #[cfg(test)]
-    fn should_use_ntt_with_contexts(lhs: &Self, rhs: &Self, max_contexts: usize) -> bool {
-        let Some(transform_len) = ntt::transform_len(lhs.limbs.len(), rhs.limbs.len()) else {
-            return false;
-        };
-        let workers = ntt::worker_count(transform_len, max_contexts.max(1));
-        Self::should_use_ntt_with_workers(lhs, rhs, workers)
-    }
-
-    fn should_use_ntt_with_workers(lhs: &Self, rhs: &Self, workers: usize) -> bool {
-        let short = lhs.limbs.len().min(rhs.limbs.len());
-        let long = lhs.limbs.len().max(rhs.limbs.len());
-        let threshold = match workers {
-            1 => NTT_SERIAL_THRESHOLD_LIMBS,
-            2 => NTT_TWO_WORKER_THRESHOLD_LIMBS,
-            _ => NTT_PARALLEL_THRESHOLD_LIMBS,
-        };
-        // Padding is not a reason to refuse. A radix-2 transform rounds the
-        // convolution up to a power of two, so the work per limb depends on
-        // where a width falls in that staircase — 16,384 limbs pad to 8
-        // coefficients per limb, 20,410 to 12.8 — but `ntt_padding_gate_timing`
-        // has the transform ahead at every width and every ratio it measures
-        // on both machines: at the worst ratio, 12.84, by 43% on the EPYC 7452
-        // and 13% on the Cortex-A76, and never behind at the friendlier ones.
-        // The NFS square root lifts at 1.3 Mbit — 20,410 limbs, ratio 12.84 —
-        // so a gate on padding would send its widest products to Toom-4.
-        short >= threshold && within_balanced_ratio(short, long)
-    }
-
-    /// Exact large multiplication through two modular transforms and CRT.
+    /// Exact large multiplication through three modular transforms and CRT.
     fn mul_ntt_ref(&self, other: &Self) -> Self {
         ntt::multiply(self, other)
     }
@@ -2066,143 +2031,6 @@ impl BigUint {
             debug_assert!(
                 coefficient.sign() != Sign::Negative,
                 "Toom-3 product digits are non-negative"
-            );
-            acc.shl_bits(shift);
-            acc.add_assign_ref(coefficient.magnitude());
-        }
-        acc
-    }
-
-    /// Toom-4 admission (four-way Toom–Cook: Toom, Soviet Physics–Doklady 3
-    /// (1963), 714–716; Cook, *On the minimum computation time of
-    /// functions*, Harvard thesis, 1966; the interpolation after Bodrato,
-    /// WAIFI 2007), on the same shape as [`Self::should_use_toom3`]:
-    /// both operands past `TOOM4_THRESHOLD_LIMBS` and within 1.5× in length.
-    fn should_use_toom4(lhs: &Self, rhs: &Self) -> bool {
-        let short = lhs.limbs.len().min(rhs.limbs.len());
-        let long = lhs.limbs.len().max(rhs.limbs.len());
-        short >= TOOM4_THRESHOLD_LIMBS && within_balanced_ratio(short, long)
-    }
-
-    /// Split into four little-endian chunks of `k` limbs; the top chunk holds
-    /// whatever remains and may be shorter than `k`, or empty.
-    fn split4_at(&self, k: usize) -> (Self, Self, Self, Self) {
-        let n = self.limbs.len();
-        let piece = |lo: usize, hi: usize| {
-            if lo >= n {
-                Self::zero()
-            } else {
-                let mut part = Self {
-                    limbs: self.limbs[lo..hi.min(n)].to_vec(),
-                };
-                part.normalize();
-                part
-            }
-        };
-        (
-            piece(0, k),
-            piece(k, 2 * k),
-            piece(2 * k, 3 * k),
-            piece(3 * k, n),
-        )
-    }
-
-    /// Toom–Cook four-way multiplication: split into four base-`B = 2^{64k}`
-    /// digits (degree-3 polynomials), evaluate at `{0, 1, -1, 2, -2, 3, ∞}`,
-    /// multiply the seven pairs recursively, then interpolate the seven product
-    /// digits (divisions by 2, 3, 4, 5, 8, 12, all exact). Exponent
-    /// `log 7 / log 4 ≈ 1.404`, below Toom-3's `1.465`.
-    fn mul_toom4_ref(&self, other: &Self) -> Self {
-        let n = self.limbs.len().max(other.limbs.len());
-        let k = n.div_ceil(4);
-        let (a0, a1, a2, a3) = self.split4_at(k);
-        let (b0, b1, b2, b3) = other.split4_at(k);
-
-        // Evaluate a degree-3 digit polynomial at 1, -1, 2, -2, 3 (the ∞ and 0
-        // points are the top and bottom digits themselves). Points -1, -2 can
-        // go negative, so those live in signed arithmetic.
-        let eval4 = |c0: &Self, c1: &Self, c2: &Self, c3: &Self| {
-            let mut two_c1 = c1.clone();
-            two_c1.shl_bits(1);
-            let mut four_c2 = c2.clone();
-            four_c2.shl_bits(2);
-            let mut eight_c3 = c3.clone();
-            eight_c3.shl_bits(3);
-
-            let at_1 = c0.add(c1).add(c2).add(c3); // c(1)
-            let even = c0.add(c2); // c0 + c2
-            let odd = c1.add(c3); // c1 + c3
-            let at_m1 = BigInt::from_biguint(even).sub(&BigInt::from_biguint(odd)); // c(-1)
-            let at_2 = c0.add(&two_c1).add(&four_c2).add(&eight_c3); // c(2)
-            let even2 = c0.add(&four_c2); // c0 + 4c2
-            let odd2 = two_c1.add(&eight_c3); // 2c1 + 8c3
-            let at_m2 = BigInt::from_biguint(even2).sub(&BigInt::from_biguint(odd2)); // c(-2)
-
-            // c(3) = c0 + 3c1 + 9c2 + 27c3, by Horner at x = 3.
-            let three = BigUint::from_u64(3);
-            let mut at_3 = c3.mul(&three);
-            at_3.add_assign_ref(c2);
-            at_3 = at_3.mul(&three);
-            at_3.add_assign_ref(c1);
-            at_3 = at_3.mul(&three);
-            at_3.add_assign_ref(c0);
-            (at_1, at_m1, at_2, at_m2, at_3)
-        };
-        let (a_1, a_m1, a_2, a_m2, a_3) = eval4(&a0, &a1, &a2, &a3);
-        let (b_1, b_m1, b_2, b_m2, b_3) = eval4(&b0, &b1, &b2, &b3);
-
-        // Seven pointwise products (each a recursive multiplication).
-        let w0 = BigInt::from_biguint(a0.mul(&b0)); // W(0)
-        let w1 = BigInt::from_biguint(a_1.mul(&b_1)); // W(1)
-        let w2 = bigint_mul(&a_m1, &b_m1); // W(-1)
-        let w3 = BigInt::from_biguint(a_2.mul(&b_2)); // W(2)
-        let w4 = bigint_mul(&a_m2, &b_m2); // W(-2)
-        let w5 = BigInt::from_biguint(a_3.mul(&b_3)); // W(3)
-        let w6 = BigInt::from_biguint(a3.mul(&b3)); // W(∞)
-
-        // Powers of two shift; the odd weights (9, 81, 729, 5, 3) go through
-        // the general multiply.
-        let scale = |x: &BigInt, m: u64| {
-            if m.is_power_of_two() {
-                bigint_shl_exact(x, m.trailing_zeros() as usize)
-            } else {
-                x.mul_biguint(&BigUint::from_u64(m))
-            }
-        };
-        let c0 = w0;
-        let c6 = w6;
-
-        // Even coefficients c2, c4 from the symmetric sums.
-        let e1 = bigint_div_exact(&w1.add(&w2), 2); // c2 + c4 + c0 + c6
-        let e2 = bigint_div_exact(&w3.add(&w4), 2); // 4c2 + 16c4 + c0 + 64c6
-        let sum24 = e1.sub(&c0).sub(&c6); // c2 + c4
-        let weighted24 = e2.sub(&c0).sub(&scale(&c6, 64)); // 4c2 + 16c4
-        let c4 = bigint_div_exact(&weighted24.sub(&scale(&sum24, 4)), 12);
-        let c2 = sum24.sub(&c4);
-
-        // Odd coefficients c1, c3, c5 from the antisymmetric sums and W(3).
-        let o1 = bigint_div_exact(&w1.sub(&w2), 2); // c1 + c3 + c5
-        let o2 = bigint_div_exact(&w3.sub(&w4), 4); // c1 + 4c3 + 16c5
-        let o3 = bigint_div_exact(
-            &w5.sub(&c0)
-                .sub(&scale(&c2, 9))
-                .sub(&scale(&c4, 81))
-                .sub(&scale(&c6, 729)),
-            3,
-        ); // c1 + 9c3 + 81c5
-        let p = bigint_div_exact(&o2.sub(&o1), 3); // c3 + 5c5
-        let q = bigint_div_exact(&o3.sub(&o1), 8); // c3 + 10c5
-        let c5 = bigint_div_exact(&q.sub(&p), 5);
-        let c3 = p.sub(&scale(&c5, 5));
-        let c1 = o1.sub(&c3).sub(&c5);
-
-        // Recompose Σ cᵢ·B^{ik}; the product digits are all non-negative.
-        let shift = bit_span(k, 64);
-        let mut acc = BigUint::zero();
-        for coefficient in [&c6, &c5, &c4, &c3, &c2, &c1, &c0] {
-            debug_assert!(
-                coefficient.sign() != Sign::Negative,
-                "Toom-4 product digits are non-negative"
             );
             acc.shl_bits(shift);
             acc.add_assign_ref(coefficient.magnitude());
@@ -3085,7 +2913,7 @@ fn bigint_mul(a: &BigInt, b: &BigInt) -> BigInt {
 }
 
 /// `x / divisor` where `divisor` is known to divide `x` — the interpolation
-/// steps of Toom-3 and Toom-4 (dividing by 2, 3, 4, 5, 8, 12).
+/// steps of Toom-3 (dividing by 2 and 3).
 ///
 /// Each quotient in the interpolation is an integer because the product
 /// polynomial's coefficients are integers, so the remainder is checked only
@@ -3699,7 +3527,7 @@ mod tests {
         BarrettContext, BigInt, BigUint, MontgomeryContext, Sign, KARATSUBA_THRESHOLD_LIMBS,
         NTT_SERIAL_THRESHOLD_LIMBS, RADIX_FROM_DC_THRESHOLD_DIGITS, RADIX_TO_DC_THRESHOLD_BITS,
         SQR_KARATSUBA_MAX_LIMBS, SQR_SCHOOLBOOK_MIN_LIMBS, TOOM3_THRESHOLD_LIMBS,
-        TOOM4_THRESHOLD_LIMBS, UNBALANCED_THRESHOLD_LIMBS,
+        UNBALANCED_THRESHOLD_LIMBS,
     };
     use super::{ModulusError, MontgomeryScratch};
     use core::num::NonZeroU64;
@@ -5608,56 +5436,32 @@ mod tests {
     }
 
     #[test]
-    fn toom4_matches_schoolbook_across_shapes() {
+    fn dispatch_matches_schoolbook_between_toom3_and_the_transform() {
         // Arbitrary, fixed so a failure reproduces.
         const SEED: u64 = 0x0f0f_1e1e_2d2d_3c3c;
         let mut seed = SEED;
-        // The Toom-4 kernel directly: sizes not divisible by four and heavy
-        // imbalance (a short operand collapsing to fewer Toom parts), against
-        // the schoolbook oracle.
-        let sizes = [4usize, 5, 6, 7, 9, 13, 16, 33, 64, 128, 256, 260, 384, 500];
-        // Two random pairs per shape; the schoolbook oracle at 500 limbs is
-        // the cost that caps it.
-        for &la in &sizes {
-            for &lb in &sizes {
-                for _ in 0..2 {
-                    let a = seeded_biguint(la, &mut seed);
-                    let b = seeded_biguint(lb, &mut seed);
-                    assert_eq!(
-                        a.mul_toom4_ref(&b),
-                        BigUint::mul_schoolbook_ref(&a, &b),
-                        "toom4 != schoolbook for {la}x{lb} words"
-                    );
-                }
-            }
-        }
-        // Public dispatch at and past the Toom-4 threshold, below the NTT's:
-        // equal lengths, the widest admitted imbalance (1.5×), and squaring.
-        let t = TOOM4_THRESHOLD_LIMBS;
-        for &(la, lb) in &[(t, t), (t + t / 2, t), (t + 77, t + 5)] {
+        // Full dispatch and squaring at Toom-3 sizes, from twice its
+        // threshold to the transform's, and at the transform's edges: equal
+        // lengths, the widest admitted imbalance (1.5×), and squaring.
+        let t = NTT_SERIAL_THRESHOLD_LIMBS;
+        for &(la, lb) in &[
+            (256usize, 256usize),
+            (300, 300),
+            (512, 512),
+            (768, 768),
+            (t - 1, t - 1),
+            (t, t),
+            (t + t / 2, t),
+            (t + 77, t + 5),
+        ] {
             let a = seeded_biguint(la, &mut seed);
             let b = seeded_biguint(lb, &mut seed);
-            assert!(BigUint::should_use_toom4(&a, &b), "{la}x{lb} is Toom-4's");
-            assert!(
-                !BigUint::should_use_ntt(&a, &b),
-                "{la}x{lb} is not the NTT's"
-            );
             assert_eq!(a.mul(&b), BigUint::mul_schoolbook_ref(&a, &b), "{la}x{lb}");
             assert_eq!(
                 a.square(),
                 BigUint::mul_schoolbook_ref(&a, &a),
                 "{la} squared"
             );
-        }
-        // Full dispatch and squaring at Toom-3 sizes, from twice its
-        // threshold to below Toom-4's; three random pairs each.
-        for &words in &[256usize, 300, 512, 768] {
-            for _ in 0..3 {
-                let a = seeded_biguint(words, &mut seed);
-                let b = seeded_biguint(words, &mut seed);
-                assert_eq!(a.mul(&b), BigUint::mul_schoolbook_ref(&a, &b));
-                assert_eq!(a.square(), BigUint::mul_schoolbook_ref(&a, &a));
-            }
         }
     }
 
@@ -5688,7 +5492,7 @@ mod tests {
     /// Every multiplication and squaring threshold, one limb either side,
     /// against schoolbook: each pattern against itself, against the random
     /// operand, and against its predecessor (nearly equal operands); at the
-    /// 2:1 unbalanced edge and the 1.5× Toom-4 edge the lopsided shapes too.
+    /// 2:1 unbalanced edge and the 1.5× balanced edge the lopsided shapes too.
     #[test]
     fn products_agree_with_schoolbook_at_every_dispatch_boundary() {
         // Arbitrary, fixed so a failure reproduces.
@@ -5746,9 +5550,10 @@ mod tests {
                 );
             }
         }
-        // Toom-4: schoolbook at these widths is costly, so the all-ones and
-        // random patterns, balanced and at the 1.5× admission edge.
-        let t = TOOM4_THRESHOLD_LIMBS;
+        // The transform's edge: schoolbook at these widths is costly, so the
+        // all-ones and random patterns, balanced and at the 1.5× admission
+        // edge.
+        let t = NTT_SERIAL_THRESHOLD_LIMBS;
         for words in [t - 1, t, t + 1] {
             let patterns = boundary_patterns(words, &mut seed);
             for (name, value) in patterns.iter().take(2) {
@@ -5921,7 +5726,7 @@ mod tests {
             }
         }
 
-        // The one-coefficient transform and partial top base-2^16 digits.
+        // The one-coefficient transform and partial top limbs.
         for value in [1u64, 2, 65_535, 65_536, 65_537, u32::MAX as u64] {
             let value = BigUint::from_u64(value);
             assert_eq!(
@@ -5930,7 +5735,7 @@ mod tests {
             );
         }
 
-        // Every base-2^16 convolution coefficient and every carry is maximal,
+        // Every convolution coefficient and every carry is maximal,
         // from one limb to past 512, with 129 and 513 one limb past a
         // doubling of the transform length.
         for words in [1usize, 2, 7, 32, 129, 513] {
@@ -5960,38 +5765,24 @@ mod tests {
         assert_eq!(all_ones.mul(&all_ones), expected);
         assert_eq!(all_ones.square(), expected);
 
-        // Admission is by width and balance, not by where the width falls in
-        // the radix-2 padding staircase. The NFS square root lifts at
-        // 1.3 Mbit — 20,410 limbs, whose convolution pads to 12.8
-        // coefficients per limb, the worst ratio the staircase produces —
-        // and the transform is ahead there on every machine measured, so
-        // the dispatcher must take it.
+        // Admission is by width and balance alone, not by where the width
+        // falls in the radix-2 padding staircase: the threshold is the width
+        // past which the transform is ahead at every rounding. The NFS
+        // square root lifts at 1.3 Mbit, 20 410 limbs, whose convolution
+        // pads to 12.8 coefficients a limb, the worst ratio the staircase
+        // produces.
         const NFS_LIFT_LIMBS: usize = 20_410;
-        let at_8k = BigUint::from_limbs(vec![u64::MAX; 8_192]);
+        let t = NTT_SERIAL_THRESHOLD_LIMBS;
+        let below = BigUint::from_limbs(vec![u64::MAX; t - 1]);
+        let at = BigUint::from_limbs(vec![u64::MAX; t]);
+        let lopsided = BigUint::from_limbs(vec![u64::MAX; t + t / 2 + 1]);
         let at_worst_padding = BigUint::from_limbs(vec![u64::MAX; NFS_LIFT_LIMBS]);
-        let at_16k = BigUint::from_limbs(vec![u64::MAX; 16_384]);
-        let at_98k = BigUint::from_limbs(vec![u64::MAX; 98_304]);
-        let at_114k = BigUint::from_limbs(vec![u64::MAX; 114_688]);
-        assert!(!BigUint::should_use_ntt_with_contexts(&at_8k, &at_8k, 1));
-        assert!(BigUint::should_use_ntt_with_contexts(&at_8k, &at_8k, 4));
-        assert!(BigUint::should_use_ntt_with_contexts(
+        assert!(!BigUint::should_use_ntt(&below, &below));
+        assert!(BigUint::should_use_ntt(&at, &at));
+        assert!(!BigUint::should_use_ntt(&at, &lopsided));
+        assert!(BigUint::should_use_ntt(
             &at_worst_padding,
-            &at_worst_padding,
-            4
-        ));
-        assert!(BigUint::should_use_ntt_with_contexts(&at_16k, &at_16k, 4));
-        assert!(!BigUint::should_use_ntt_with_contexts(&at_98k, &at_98k, 1));
-        assert!(BigUint::should_use_ntt_with_contexts(&at_98k, &at_98k, 4));
-        // One context takes the transform only past its own threshold.
-        assert!(!BigUint::should_use_ntt_with_contexts(
-            &at_114k, &at_114k, 1
-        ));
-        assert!(BigUint::should_use_ntt_with_contexts(&at_114k, &at_114k, 4));
-        let at_serial_threshold = BigUint::from_limbs(vec![u64::MAX; NTT_SERIAL_THRESHOLD_LIMBS]);
-        assert!(BigUint::should_use_ntt_with_contexts(
-            &at_serial_threshold,
-            &at_serial_threshold,
-            1
+            &at_worst_padding
         ));
     }
 
@@ -6626,9 +6417,9 @@ mod tests {
                 }
                 best
             };
-            let toom = time(&|| a.mul_toom4_ref(&b));
+            let toom = time(&|| a.mul_toom3_ref(&b));
             let ntt = time(&|| a.mul_ntt_ref(&b));
-            let best = if toom <= ntt { "toom4" } else { "ntt" };
+            let best = if toom <= ntt { "toom3" } else { "ntt" };
             let saving = (toom - ntt) / toom * 100.0;
             eprintln!("{words:8} {ratio:7.2} {toom:11.1} {ntt:11.1} {saving:+7.1}%  {best}");
         }
@@ -6653,11 +6444,8 @@ mod tests {
         // Arbitrary, fixed so a failure reproduces.
         const SEED: u64 = 0xC0FF_EE00_1234_5678;
         let mut seed = SEED;
-        eprintln!(
-            "{:>6} {:>11} {:>11} {:>11}  best",
-            "words", "kara_us", "toom3_us", "toom4_us"
-        );
-        // Past the shipped Toom-4 threshold as well as up to it: a sweep that
+        eprintln!("{:>6} {:>11} {:>11}  best", "words", "kara_us", "toom3_us");
+        // Past the transform's threshold as well as up to it: a sweep that
         // stops at a crossover cannot show one.
         for &words in &[
             96usize, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288,
@@ -6689,15 +6477,8 @@ mod tests {
             };
             let kara = time(&|a, b| BigUint::mul_karatsuba_ref(a, b));
             let toom3 = time(&|a, b| a.mul_toom3_ref(b));
-            let toom4 = time(&|a, b| a.mul_toom4_ref(b));
-            let best = if kara <= toom3 && kara <= toom4 {
-                "kara"
-            } else if toom3 <= toom4 {
-                "toom3"
-            } else {
-                "toom4"
-            };
-            eprintln!("{words:6} {kara:11.4} {toom3:11.4} {toom4:11.4}  {best}");
+            let best = if kara <= toom3 { "kara" } else { "toom3" };
+            eprintln!("{words:6} {kara:11.4} {toom3:11.4}  {best}");
         }
     }
 
@@ -6723,7 +6504,7 @@ mod tests {
         eprintln!("available contexts: {available}");
         eprintln!(
             "{:>7} {:>12} {:>12} {:>12} {:>12} {:>12}  best",
-            "words", "toom4_us", "serial_us", "two_us", "auto_us", "square_us"
+            "words", "toom3_us", "serial_us", "two_us", "auto_us", "square_us"
         );
         // From 2,048 limbs to the serial threshold, 131,072: every doubling
         // plus points between them (3/2 of the lower, 7/8 and 15/16 of the
@@ -6778,14 +6559,14 @@ mod tests {
                 }
                 total / operands.len() as f64
             };
-            let toom4 = time(&|lhs, rhs| lhs.mul_toom4_ref(rhs));
+            let toom3 = time(&|lhs, rhs| lhs.mul_toom3_ref(rhs));
             let serial = time(&|lhs, rhs| lhs.mul_ntt_serial_ref(rhs));
             let two = time(&|lhs, rhs| lhs.mul_ntt_with_contexts_ref(rhs, 2));
             let automatic = time(&|lhs, rhs| lhs.mul_ntt_ref(rhs));
             let square = time(&|lhs, _| lhs.sqr_ntt_ref());
-            let best = if toom4 <= automatic { "toom4" } else { "ntt" };
+            let best = if toom3 <= automatic { "toom3" } else { "ntt" };
             eprintln!(
-                "{words:7} {toom4:12.3} {serial:12.3} {two:12.3} {automatic:12.3} {square:12.3}  {best}"
+                "{words:7} {toom3:12.3} {serial:12.3} {two:12.3} {automatic:12.3} {square:12.3}  {best}"
             );
         }
     }

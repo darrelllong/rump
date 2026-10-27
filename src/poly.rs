@@ -16,6 +16,7 @@ use crate::bigint::{BarrettContext, BigInt, BigUint, Sign, NEWTON_DIVISION_THRES
 use crate::number_theory_impl as number_theory;
 
 mod hensel_sqrt;
+mod kronecker;
 pub use hensel_sqrt::HenselSquareRoot;
 
 /// Coefficient count at or above which [`PolyZ`](crate::polynomial::PolyZ) multiplication splits
@@ -2097,6 +2098,12 @@ impl PolyZ {
 /// lopsided pair whose shorter side lies entirely below the split point has
 /// an empty high half and gains nothing, so it falls back to schoolbook.
 fn convolve_z(a: &[BigInt], b: &[BigInt]) -> Vec<BigInt> {
+    // Wide coefficients: one product of the packed operands, by the
+    // transform, in place of a product a coefficient pair.
+    let widest = |side: &[BigInt]| side.iter().map(|c| c.magnitude().bits()).max().unwrap_or(0);
+    if kronecker::pays(a.len(), widest(a), b.len(), widest(b), true) {
+        return kronecker::convolve_signed(a, b);
+    }
     if !poly_split_admitted(
         a.len().min(b.len()),
         a.len().max(b.len()),

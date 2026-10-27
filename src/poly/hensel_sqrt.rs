@@ -676,10 +676,15 @@ impl<'a> HenselSquareRoot<'a> {
         coefficients
     }
 
-    /// The convolution `a ⋆ b` over `ℕ`, `2d − 1` coefficients, its `d²`
-    /// products spread over the worker budget.
+    /// The convolution `a ⋆ b` over `ℕ`, `2d − 1` coefficients: one product
+    /// of the packed operands where they are wide enough for the transform
+    /// (`kronecker`), else its `d²` products spread over the worker budget.
     fn multiply(&self, a: &[BigUint], b: &[BigUint]) -> Vec<BigUint> {
         let degree = a.len();
+        let widest = |side: &[BigUint]| side.iter().map(BigUint::bits).max().unwrap_or(0);
+        if super::kronecker::pays(degree, widest(a), b.len(), widest(b), false) {
+            return super::kronecker::convolve(a, b);
+        }
         let pairs: Vec<(usize, usize)> = (0..degree)
             .flat_map(|i| (0..degree).map(move |j| (i, j)))
             .collect();
@@ -691,9 +696,14 @@ impl<'a> HenselSquareRoot<'a> {
         out
     }
 
-    /// The convolution `a ⋆ a`, forming each cross product once.
+    /// The convolution `a ⋆ a`: one square of the packed value where it is
+    /// wide enough for the transform, else each cross product once.
     fn square(&self, a: &[BigUint]) -> Vec<BigUint> {
         let degree = a.len();
+        let widest = a.iter().map(BigUint::bits).max().unwrap_or(0);
+        if super::kronecker::pays(degree, widest, degree, widest, false) {
+            return super::kronecker::square(a);
+        }
         let pairs: Vec<(usize, usize)> = (0..degree)
             .flat_map(|i| (i..degree).map(move |j| (i, j)))
             .collect();
