@@ -713,8 +713,9 @@ pub enum Generated {
 /// one seed and length, from `prior` where an earlier pass stopped or from
 /// the start: the 64 lanes of least degree once 64 columns of the iteration
 /// have settled, or as many as there are columns that can. `None` for
-/// slices that are not one sequence's, or a `prior` not theirs: of another
-/// seed, shape or first term, or past their length.
+/// slices that are not one sequence's (of another seed, matrix or length),
+/// or a `prior` not theirs: of another seed, shape or first term, or past
+/// their length.
 #[must_use]
 pub fn wiedemann_generators(
     slices: &[Sequence],
@@ -728,6 +729,7 @@ pub fn wiedemann_generators(
             slice.seed != first.seed
                 || slice.of != of
                 || slice.dimension != first.dimension
+                || slice.matrix != first.matrix
                 || slice.terms() != first.terms()
         })
     {
@@ -1226,6 +1228,17 @@ mod tests {
             "the same matrix's are"
         );
         assert_eq!(Sequence::from_bytes(&same.to_bytes()), Ok(same));
+    }
+
+    #[test]
+    fn slices_of_two_matrices_are_not_one_sequence() {
+        let matrix = sieve_like(96, 96, 7, 31);
+        let other = sieve_like(96, 96, 7, 32);
+        let ours = wiedemann_sequence(&matrix, 42, 0, 2, 8, None, 1).expect("a slice");
+        let theirs = wiedemann_sequence(&other, 42, 1, 2, 8, None, 1).expect("a slice");
+        assert_eq!(wiedemann_generators(&[ours.clone(), theirs], None, 1), None);
+        let second = wiedemann_sequence(&matrix, 42, 1, 2, 8, None, 1).expect("a slice");
+        assert!(wiedemann_generators(&[ours, second], None, 1).is_some());
     }
 
     #[test]
