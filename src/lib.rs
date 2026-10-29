@@ -103,7 +103,7 @@ pub mod gf2 {
         block_lanczos_dependencies, block_lanczos_dependencies_sparse,
         block_wiedemann_dependencies_sparse, dense_null_space, filter_merge, prune_singletons,
         wiedemann_finish, wiedemann_generators, wiedemann_sequence, wiedemann_solution,
-        wiedemann_terms, wiedemann_terms_most, FilteredMatrix, Generated, Generators, Iterated,
+        wiedemann_terms, wiedemann_terms_most, wiedemann_terms_most_of, FilteredMatrix, Generated, Generators, Iterated,
         MatrixBytesError, PrunedMatrix, Sequence, SparseMatrix, WiedemannBytesError,
     };
 }

@@ -180,7 +180,15 @@ pub fn wiedemann_terms(matrix: &SparseMatrix, of: usize) -> usize {
 /// `TERMS_MOST` times `N/(64·of)`, and the settling.
 #[must_use]
 pub fn wiedemann_terms_most(matrix: &SparseMatrix, of: usize) -> usize {
-    TERMS_MOST * dimension_of(matrix).div_ceil(WIDTH * of.max(1)) + 2 * SPARE_TERMS
+    wiedemann_terms_most_of(dimension_of(matrix), of)
+}
+
+/// [`wiedemann_terms_most`] from the dimension a slice carries
+/// ([`Sequence::dimension`]), for a stage that holds the sequences and not
+/// the matrix.
+#[must_use]
+pub fn wiedemann_terms_most_of(dimension: usize, of: usize) -> usize {
+    TERMS_MOST * dimension.div_ceil(WIDTH * of.max(1)) + 2 * SPARE_TERMS
 }
 
 /// `N`: the greater of the rows and the live columns, those some row sets.
@@ -227,6 +235,13 @@ impl Sequence {
     #[must_use]
     pub fn slice(&self) -> (usize, usize) {
         (self.slice, self.of)
+    }
+
+    /// `N` of the matrix the slice is of: the greater of its rows and its
+    /// live columns, what [`wiedemann_terms_most_of`] takes.
+    #[must_use]
+    pub fn dimension(&self) -> usize {
+        self.dimension
     }
 
     /// The slice as bytes: `GFWS`, then the fields and the words, each
@@ -1228,6 +1243,21 @@ mod tests {
             "the same matrix's are"
         );
         assert_eq!(Sequence::from_bytes(&same.to_bytes()), Ok(same));
+    }
+
+    #[test]
+    fn a_slice_carries_the_dimension_the_limit_takes() {
+        for (rows, columns, weight) in [(96, 96, 7), (3, 192, 1), (1500, 1400, 7)] {
+            let matrix = sieve_like(rows, columns, weight, 31);
+            for of in [1, 2] {
+                let slice = wiedemann_sequence(&matrix, 42, 0, of, 2, None, 1).expect("a slice");
+                assert_eq!(
+                    wiedemann_terms_most_of(slice.dimension(), of),
+                    wiedemann_terms_most(&matrix, of),
+                    "{rows}×{columns} of {of}"
+                );
+            }
+        }
     }
 
     #[test]
