@@ -207,6 +207,9 @@ pub struct Sequence {
     of: usize,
     dimension: usize,
     columns: usize,
+    /// [`matrix_fingerprint`] of the matrix the terms are of: a slice kept from
+    /// one matrix is never continued against another.
+    matrix: u64,
     /// `terms · 64 · of` words: term by term, the slab's rows.
     terms: Vec<u64>,
     /// `dimension` words.
@@ -230,7 +233,7 @@ impl Sequence {
     /// eight bytes little-endian.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(8 * (8 + self.terms.len() + self.last.len()));
+        let mut bytes = Vec::with_capacity(8 * (9 + self.terms.len() + self.last.len()));
         bytes.extend_from_slice(MAGIC);
         bytes.push(b'S');
         for word in [
@@ -239,6 +242,7 @@ impl Sequence {
             self.of as u64,
             self.dimension as u64,
             self.columns as u64,
+            self.matrix,
             self.terms.len() as u64,
             self.last.len() as u64,
         ] {
@@ -258,6 +262,7 @@ impl Sequence {
         let of = words.index()?;
         let dimension = words.index()?;
         let columns = words.index()?;
+        let matrix = words.next()?;
         let terms = words.index()?;
         let last = words.index()?;
         if of == 0 || slice >= of || !terms.is_multiple_of(WIDTH * of) || last != dimension {
@@ -271,6 +276,7 @@ impl Sequence {
             of,
             dimension,
             columns,
+            matrix,
             terms,
             last,
         })
@@ -468,10 +474,35 @@ fn advance(matrix: &Sparse, v: &mut Arc<Block>, image: &mut Arc<Block>) {
     core::mem::swap(v, image);
 }
 
+/// The matrix's identity for a kept slice: FNV-1a over its shape and
+/// every entry, so that a slice of one matrix is not continued against
+/// another of the same shape, which would give terms of neither.
+fn matrix_fingerprint(matrix: &SparseMatrix) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0100_0000_01b3;
+    let mut hash = OFFSET;
+    let mut mix = |word: u64| {
+        for byte in word.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    };
+    mix(matrix.rows().len() as u64);
+    mix(matrix.columns() as u64);
+    for row in matrix.rows() {
+        mix(row.len() as u64);
+        for &column in row {
+            mix(u64::from(column));
+        }
+    }
+    hash
+}
+
 /// Slice `slice` of `of` of the sequence, `terms` terms long: from the
-/// start, or on from `from`, a shorter slice of the same seed and place,
-/// whose terms are kept. `None` for a matrix with no rows or no columns, or
-/// a slice out of range.
+/// start, or on from `from`, a shorter slice of the same matrix, seed and
+/// place, whose terms are kept; a slice of another matrix is not continued
+/// and the terms start afresh. `None` for a matrix with no rows or no
+/// columns, or a slice out of range.
 #[must_use]
 pub fn wiedemann_sequence(
     matrix: &SparseMatrix,
@@ -488,11 +519,13 @@ pub fn wiedemann_sequence(
     let sparse = Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads);
     let (count, columns) = (sparse.relations(), sparse.columns());
     let dimension = count.max(columns);
+    let fingerprint = matrix_fingerprint(matrix);
     let supports = supports(seed, of, columns);
     let mut image = Block::zeroed(dimension);
     let (mut v, mut slabs, done) = match from {
         Some(from)
-            if from.seed == seed
+            if from.matrix == fingerprint
+                && from.seed == seed
                 && from.slice == slice
                 && from.of == of
                 && from.dimension == dimension =>
@@ -524,6 +557,7 @@ pub fn wiedemann_sequence(
         of,
         dimension,
         columns,
+        matrix: fingerprint,
         terms: slabs,
         last: v.words().collect(),
     })
@@ -1177,6 +1211,23 @@ mod tests {
     /// over them all makes; a pass given no new terms wants what it wanted;
     /// the iteration reads back from its bytes; and it is refused for a
     /// sequence of another matrix.
+    #[test]
+    fn another_matrix_is_not_continued() {
+        let matrix = sieve_like(96, 96, 7, 31);
+        let other = sieve_like(96, 96, 7, 32);
+        let three = wiedemann_sequence(&matrix, 42, 0, 1, 3, None, 1).expect("a slice");
+        let resumed = wiedemann_sequence(&other, 42, 0, 1, 8, Some(&three), 1).expect("a slice");
+        let fresh = wiedemann_sequence(&other, 42, 0, 1, 8, None, 1).expect("a slice");
+        assert_eq!(resumed, fresh, "another matrix's terms are not kept");
+        let same = wiedemann_sequence(&matrix, 42, 0, 1, 8, Some(&three), 1).expect("a slice");
+        assert_eq!(
+            same,
+            wiedemann_sequence(&matrix, 42, 0, 1, 8, None, 1).expect("a slice"),
+            "the same matrix's are"
+        );
+        assert_eq!(Sequence::from_bytes(&same.to_bytes()), Ok(same));
+    }
+
     #[test]
     fn a_resumed_pass_is_one_pass() {
         let matrix = sieve_like(1500, 1400, 7, 31);
