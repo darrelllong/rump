@@ -187,27 +187,41 @@ impl SparseMatrix {
     /// # Errors
     ///
     /// The bytes are not such a matrix: no header, fewer bytes than the
-    /// rows claim, or a row not strictly ascending below the width.
+    /// rows claim, a row not strictly ascending below the width, or bytes
+    /// beyond the rows the header counts.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, MatrixBytesError> {
-        let mut words = bytes
+        let mut chunks = bytes
             .strip_prefix(MATRIX_MAGIC)
             .ok_or(MatrixBytesError::Header)?
-            .chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("four bytes")) as usize);
-        let count = words.next().ok_or(MatrixBytesError::Header)?;
-        let columns = words.next().ok_or(MatrixBytesError::Header)?;
-        let mut rows = Vec::with_capacity(count);
+            .chunks_exact(4);
+        let mut word = || {
+            chunks
+                .next()
+                .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("four bytes")) as usize)
+        };
+        let count = word().ok_or(MatrixBytesError::Header)?;
+        let columns = word().ok_or(MatrixBytesError::Header)?;
+        // A row takes a word at least, so a count beyond the words present
+        // is a lie not worth the allocation; the loop refuses it as Short.
+        let words = bytes.len() / 4;
+        let mut rows = Vec::with_capacity(count.min(words));
         for index in 0..count {
-            let length = words.next().ok_or(MatrixBytesError::Short)?;
-            let mut row = Vec::with_capacity(length);
+            let length = word().ok_or(MatrixBytesError::Short)?;
+            let mut row = Vec::with_capacity(length.min(words));
             for _ in 0..length {
-                let column = words.next().ok_or(MatrixBytesError::Short)?;
+                let column = word().ok_or(MatrixBytesError::Short)?;
                 if column >= columns || row.last().is_some_and(|&last| column <= last as usize) {
                     return Err(MatrixBytesError::Row(index));
                 }
                 row.push(column as u32);
             }
             rows.push(row);
+        }
+        // The header counts the rows, so bytes past them are not the matrix
+        // it describes: a tail, or rows the count understates.
+        let more = word().is_some();
+        if more || !chunks.remainder().is_empty() {
+            return Err(MatrixBytesError::Long);
         }
         Ok(Self { columns, rows })
     }
@@ -243,6 +257,8 @@ pub enum MatrixBytesError {
     Short,
     /// The row at this index is not strictly ascending below the width.
     Row(usize),
+    /// Bytes beyond the rows the header counts.
+    Long,
 }
 
 impl core::fmt::Display for MatrixBytesError {
@@ -254,6 +270,9 @@ impl core::fmt::Display for MatrixBytesError {
                 f,
                 "not a GF(2) matrix: row {index} is not ascending below the width"
             ),
+            Self::Long => {
+                f.write_str("not a GF(2) matrix: bytes beyond the rows its header counts")
+            }
         }
     }
 }
@@ -1344,6 +1363,23 @@ mod tests {
         assert_eq!(
             SparseMatrix::from_bytes(&bytes[..bytes.len() - 4]),
             Err(MatrixBytesError::Short)
+        );
+        assert_eq!(
+            SparseMatrix::from_bytes(&bytes[..bytes.len() - 1]),
+            Err(MatrixBytesError::Short)
+        );
+        // Bytes beyond the rows: a tail short of a word, a word, another
+        // matrix, and a count that leaves a row of this one unread.
+        for tail in [&[1u8][..], &[0u8; 4], &bytes] {
+            let mut long = bytes.clone();
+            long.extend_from_slice(tail);
+            assert_eq!(SparseMatrix::from_bytes(&long), Err(MatrixBytesError::Long));
+        }
+        let mut understated = bytes.clone();
+        understated[4..8].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(
+            SparseMatrix::from_bytes(&understated),
+            Err(MatrixBytesError::Long)
         );
         let mut descending = bytes.clone();
         descending[16..20].copy_from_slice(&4u32.to_le_bytes());
