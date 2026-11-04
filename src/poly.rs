@@ -1053,13 +1053,15 @@ impl PolyZ {
         acc
     }
 
-    /// The homogeneous value `∑ cᵢ·aⁱ·b^{d−i}` at integers: `bᵈ·f(a/b)`,
-    /// the number field sieve's norm of `a − bα` up to sign, which it asks
-    /// for every pair it sieves. Horner in `a` with a running power of
-    /// `b`, three multiplications and an addition a coefficient below the
-    /// leading one and no polynomial in between, where
-    /// [`Self::homogeneous_substitution`] at constant arguments would
-    /// build two ladders of constant polynomials. Zero for the zero
+    /// The homogeneous value `∑ cᵢ·aⁱ·b^{d−i}` at integers: `bᵈ·f(a/b)`.
+    /// For `f` irreducible with leading coefficient `c_d` and a root `α`
+    /// this is `c_d` times the norm of `a − bα`, up to sign, which the
+    /// number field sieve asks for every pair it sieves; for any `f` it is
+    /// the resultant of `f` and `bx − a`, up to sign. Horner in `a` with a
+    /// running power of `b`, three multiplications and an addition a
+    /// coefficient below the leading one and no polynomial in between,
+    /// where [`Self::homogeneous_substitution`] at constant arguments
+    /// would build two ladders of constant polynomials. Zero for the zero
     /// polynomial.
     #[must_use]
     pub fn homogeneous_at(&self, a: &BigInt, b: &BigInt) -> BigInt {
