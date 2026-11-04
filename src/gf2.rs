@@ -673,6 +673,11 @@ struct Blocked {
 /// this much and sum into no output.
 const RUN_OUTPUTS: usize = 255;
 
+/// The most words a slice holds: a place in a slice is packed above its
+/// output in a word while the entries are dealt out, twenty-four bits.
+/// A slice is a share of what a cache holds, far below this.
+const PLACE_LIMIT: usize = 1 << 24;
+
 /// The entries that sum into one part of the outputs.
 struct Part {
     /// The runs: the first output of each, and how many it has.
@@ -687,7 +692,7 @@ impl Blocked {
     /// `parts` parts of about as many entries each and slices of `slice`
     /// words. The parts are made side by side.
     fn new(lists: &Lists, inputs: usize, parts: usize, slice: usize) -> Self {
-        let slice = slice.max(1);
+        let slice = slice.clamp(1, PLACE_LIMIT);
         let slices = inputs.div_ceil(slice).max(1);
         let cuts = lists.cuts(parts);
         let bounds: Vec<&[usize]> = cuts.windows(2).collect();
@@ -696,40 +701,78 @@ impl Blocked {
                 .step_by(RUN_OUTPUTS)
                 .map(|first| (first, RUN_OUTPUTS.min(bounds[1] - first)))
                 .collect();
-            // Each entry by its slice, its run, its place in the slice and
-            // its output of the run, and in that order.
-            let mut entries: Vec<(u32, u32, u32, u8)> = Vec::new();
-            for (run, &(first, outputs)) in runs.iter().enumerate() {
-                for output in 0..outputs {
-                    for &input in lists.list(first + output) {
-                        let (slice, place) = (input as usize / slice, input as usize % slice);
-                        entries.push((slice as u32, run as u32, place as u32, output as u8));
+            // Each entry dealt into its group, a slice's run, by a count
+            // of the groups and a pass over the lists: a word an entry,
+            // its place in the slice above its output, and the groups'
+            // bounds; then each group's entries in the order of their
+            // places. One request of the entries' count, where a tuple
+            // an entry grown by pushes and sorted whole held four times
+            // as much and more.
+            let groups = slices * runs.len();
+            let group = |input: u32, run: usize| (input as usize / slice) * runs.len() + run;
+            let mut starts = vec![0usize; groups + 1];
+            let entries = |each: &mut dyn FnMut(u32, usize, u8)| {
+                for (run, &(first, outputs)) in runs.iter().enumerate() {
+                    for output in 0..outputs {
+                        for &input in lists.list(first + output) {
+                            each(input, run, output as u8);
+                        }
                     }
                 }
+            };
+            entries(&mut |input, run, _| starts[group(input, run) + 1] += 1);
+            for g in 0..groups {
+                starts[g + 1] += starts[g];
             }
-            entries.sort_unstable();
-            let mut bytes = Vec::with_capacity(2 * entries.len() + 4 * slices * runs.len());
-            let mut entries = entries.into_iter().peekable();
-            for slice in 0..slices as u32 {
-                for run in 0..runs.len() as u32 {
-                    let count = bytes.len();
-                    bytes.extend_from_slice(&[0; 4]);
-                    let (mut place, mut written) = (0u32, 0u32);
-                    while let Some((_, _, at, output)) =
-                        entries.next_if(|entry| (entry.0, entry.1) == (slice, run))
-                    {
-                        while at - place >= RUN_OUTPUTS as u32 {
-                            bytes.extend_from_slice(&[RUN_OUTPUTS as u8; 2]);
-                            place += RUN_OUTPUTS as u32;
-                            written += 1;
-                        }
-                        bytes.extend_from_slice(&[(at - place) as u8, output]);
+            let mut packed = vec![0u32; starts[groups]];
+            let mut next = starts.clone();
+            entries(&mut |input, run, output| {
+                let g = group(input, run);
+                packed[next[g]] = ((input as usize % slice) as u32) << 8 | u32::from(output);
+                next[g] += 1;
+            });
+            drop(next);
+            for g in 0..groups {
+                packed[starts[g]..starts[g + 1]].sort_unstable();
+            }
+            // The bytes, counted before they are written: a count a group,
+            // and an entry's two bytes with two more for each run's worth
+            // of places skipped before it.
+            let gaps = |entries: &[u32]| {
+                let mut place = 0u32;
+                entries
+                    .iter()
+                    .map(|&entry| {
+                        let at = entry >> 8;
+                        let skipped = ((at - place) / RUN_OUTPUTS as u32) as usize;
                         place = at;
+                        2 * (skipped + 1)
+                    })
+                    .sum::<usize>()
+            };
+            let needed = 4 * groups
+                + (0..groups)
+                    .map(|g| gaps(&packed[starts[g]..starts[g + 1]]))
+                    .sum::<usize>();
+            let mut bytes = Vec::with_capacity(needed);
+            for g in 0..groups {
+                let count = bytes.len();
+                bytes.extend_from_slice(&[0; 4]);
+                let (mut place, mut written) = (0u32, 0u32);
+                for &entry in &packed[starts[g]..starts[g + 1]] {
+                    let (at, output) = (entry >> 8, (entry & 0xff) as u8);
+                    while at - place >= RUN_OUTPUTS as u32 {
+                        bytes.extend_from_slice(&[RUN_OUTPUTS as u8; 2]);
+                        place += RUN_OUTPUTS as u32;
                         written += 1;
                     }
-                    bytes[count..count + 4].copy_from_slice(&written.to_le_bytes());
+                    bytes.extend_from_slice(&[(at - place) as u8, output]);
+                    place = at;
+                    written += 1;
                 }
+                bytes[count..count + 4].copy_from_slice(&written.to_le_bytes());
             }
+            debug_assert_eq!(bytes.len(), needed, "the bytes were counted wrong");
             Part { runs, bytes }
         });
         Self { slice, parts }
