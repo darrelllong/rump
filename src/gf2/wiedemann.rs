@@ -302,7 +302,7 @@ impl Sequence {
         bytes
     }
 
-    /// A slice from its bytes: exactly one frame ([`Words`]), its terms a
+    /// A slice from its bytes: exactly one frame and nothing after it, its terms a
     /// multiple of `64·of` words and its last vector `dimension` words.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WiedemannBytesError> {
         let mut words = Words::of(bytes, b'S')?;
@@ -402,7 +402,7 @@ impl Generators {
         bytes
     }
 
-    /// The generators from their bytes: exactly one frame ([`Words`]), at
+    /// The generators from their bytes: exactly one frame and nothing after it, at
     /// most 64 lanes, each a positive multiple of `of` words.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WiedemannBytesError> {
         let mut words = Words::of(bytes, b'G')?;
@@ -751,7 +751,7 @@ impl Iterated {
         bytes
     }
 
-    /// An iteration from its bytes: exactly one frame ([`Words`]), `2·64·of`
+    /// An iteration from its bytes: exactly one frame and nothing after it, `2·64·of`
     /// columns' degrees and quiet steps at most `t`, and `F`'s
     /// `length·columns·of` words.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WiedemannBytesError> {
