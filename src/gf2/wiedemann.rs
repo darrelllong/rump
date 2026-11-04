@@ -449,8 +449,8 @@ pub enum WiedemannBytesError {
     /// Bytes past the frame the fields describe: a tail, or another frame.
     Long,
     /// This stage's bytes in the earlier layout, before the matrix's
-    /// identity was carried: remove the file, and the stage is computed
-    /// again.
+    /// identity was carried; what becomes of a stage kept so is its
+    /// keeper's to say.
     Layout,
 }
 
@@ -463,7 +463,7 @@ impl std::fmt::Display for WiedemannBytesError {
             Self::Long => write!(f, "the bytes go on past the stage they describe"),
             Self::Layout => write!(
                 f,
-                "a stage kept in an earlier layout, before the matrix's identity was carried; remove it and the stage is computed again"
+                "a stage kept in an earlier layout, before the matrix's identity was carried"
             ),
         }
     }
