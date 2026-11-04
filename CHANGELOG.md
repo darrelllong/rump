@@ -7,6 +7,11 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **`gf2::matrix_fingerprint`, `Sequence::seed`, `Sequence::matrix`,
+  `Sequence::continues` and `Generators::matrix`.** The identity a kept
+  stage carries, and the question whether a kept slice is the one a
+  sequence would go on from, for a caller to ask before the work.
+
 - **`number_theory::is_strong_probable_prime_u64`.** One Miller–Rabin
   round on a word to a chosen base, the round `is_prime_u64` takes twelve
   of: for a caller that refuses what is probably prime and need not prove
@@ -129,6 +134,20 @@ what a consumer must change, not everything that moved.
 
 ### Breaking
 
+- **`gf2::Iterated` and `gf2::Generators` carry the matrix's fingerprint,
+  and `wiedemann_sequence` refuses a prior that is not its own.** An
+  iteration knew its sequence by the first projected term, which two
+  matrices can share while their next terms differ, so a pass over one
+  matrix's terms resumed another's and the recurrence's invariant failed;
+  generators knew no matrix at all, so the solution of a same-shaped
+  matrix took another's. Both carry `matrix_fingerprint` now, the
+  generator pass refuses an iteration of another matrix and the solution
+  refuses generators of another, before any product. The frames gain a
+  word after `columns`: iterations and generators kept before are refused
+  and the stage is computed again. A slice given as `from` of another
+  matrix, seed or place was silently begun again; it is `None` now,
+  `Sequence::continues` being the question a caller asks first.
+
 - **`number_theory::ln_gamma`, `regularized_incomplete_beta`,
   `student_t_quantile` and `NumericalError` are gone.** They are floating
   statistical kernels, not arithmetic, and they now live in `entropy::math`
@@ -153,6 +172,17 @@ what a consumer must change, not everything that moved.
   implicit cap was 50 000 000) and read `.into_vectors()`.
 
 ### Fixed
+
+- **`gf2::Sequence::from_bytes`, `Generators::from_bytes` and
+  `Iterated::from_bytes` take exactly one frame.** The sequence reader
+  formed `64·of` unchecked, so a header claiming `of = 2⁵⁸` overflowed, a
+  panic under overflow checks, where the fields should have been refused;
+  and the sequence and generator readers stopped at the words their fields
+  count, so a byte, a word or a whole second frame after them passed as the
+  stage. Every shape product is now checked before use, and each reader
+  ends at the frame's end: bytes past it are `WiedemannBytesError::Long`, a
+  new variant beside `Header`, `Short` and `Shape`, as `MatrixBytesError`
+  already has. A consumer matching the error exhaustively gains an arm.
 
 - **`number_theory::gcd`, `gcd_extended`, `mod_inverse` and `jacobi` above
   the Half-GCD crossover could answer wrongly.** The base case of the

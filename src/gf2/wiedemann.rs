@@ -244,6 +244,31 @@ impl Sequence {
         self.dimension
     }
 
+    /// The seed `x` and `z` were drawn from.
+    #[must_use]
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// [`matrix_fingerprint`] of the matrix the terms are of.
+    #[must_use]
+    pub fn matrix(&self) -> u64 {
+        self.matrix
+    }
+
+    /// Whether [`wiedemann_sequence`] for `matrix`, `seed`, `slice` and
+    /// `of` goes on from this slice: the same matrix by its fingerprint,
+    /// a pass over the entries, and the same seed and place. What a caller
+    /// keeping slices asks before the work, and the sequence asks itself.
+    #[must_use]
+    pub fn continues(&self, matrix: &SparseMatrix, seed: u64, slice: usize, of: usize) -> bool {
+        self.is_of(matrix_fingerprint(matrix), seed, slice, of)
+    }
+
+    fn is_of(&self, matrix: u64, seed: u64, slice: usize, of: usize) -> bool {
+        self.matrix == matrix && self.seed == seed && self.slice == slice && self.of == of
+    }
+
     /// The slice as bytes: `GFWS`, then the fields and the words, each
     /// eight bytes little-endian.
     #[must_use]
@@ -269,7 +294,8 @@ impl Sequence {
         bytes
     }
 
-    /// A slice from its bytes.
+    /// A slice from its bytes: exactly one frame ([`Words`]), its terms a
+    /// multiple of `64·of` words and its last vector `dimension` words.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WiedemannBytesError> {
         let mut words = Words::of(bytes, b'S')?;
         let seed = words.next()?;
@@ -280,11 +306,13 @@ impl Sequence {
         let matrix = words.next()?;
         let terms = words.index()?;
         let last = words.index()?;
-        if of == 0 || slice >= of || !terms.is_multiple_of(WIDTH * of) || last != dimension {
+        let rows = WIDTH.checked_mul(of).ok_or(WiedemannBytesError::Shape)?;
+        if of == 0 || slice >= of || !terms.is_multiple_of(rows) || last != dimension {
             return Err(WiedemannBytesError::Shape);
         }
         let terms = words.take(terms)?;
         let last = words.take(last)?;
+        words.finish()?;
         Ok(Self {
             seed,
             slice,
@@ -308,6 +336,9 @@ pub struct Generators {
     of: usize,
     dimension: usize,
     columns: usize,
+    /// [`matrix_fingerprint`] of the matrix the sequence was of: the
+    /// solution is that matrix's alone.
+    matrix: u64,
     /// Each lane's coefficients, `(degree + 1) · of` words, the leading
     /// coefficient first.
     lanes: Vec<Vec<u64>>,
@@ -331,8 +362,14 @@ impl Generators {
             - 1
     }
 
-    /// The generators as bytes: `GFWG`, the fields, each lane's length and
-    /// its words.
+    /// [`matrix_fingerprint`] of the matrix the generators are of.
+    #[must_use]
+    pub fn matrix(&self) -> u64 {
+        self.matrix
+    }
+
+    /// The generators as bytes: `GFWG`, the fields, the matrix's
+    /// fingerprint, each lane's length and its words.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -343,6 +380,7 @@ impl Generators {
             self.of as u64,
             self.dimension as u64,
             self.columns as u64,
+            self.matrix,
             self.lanes.len() as u64,
         ] {
             bytes.extend_from_slice(&word.to_le_bytes());
@@ -356,13 +394,15 @@ impl Generators {
         bytes
     }
 
-    /// The generators from their bytes.
+    /// The generators from their bytes: exactly one frame ([`Words`]), at
+    /// most 64 lanes, each a positive multiple of `of` words.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WiedemannBytesError> {
         let mut words = Words::of(bytes, b'G')?;
         let seed = words.next()?;
         let of = words.index()?;
         let dimension = words.index()?;
         let columns = words.index()?;
+        let matrix = words.next()?;
         let count = words.index()?;
         if of == 0 || count > WIDTH {
             return Err(WiedemannBytesError::Shape);
@@ -375,11 +415,13 @@ impl Generators {
             }
             lanes.push(words.take(len)?);
         }
+        words.finish()?;
         Ok(Self {
             seed,
             of,
             dimension,
             columns,
+            matrix,
             lanes,
         })
     }
@@ -392,8 +434,12 @@ pub enum WiedemannBytesError {
     Header,
     /// Fewer bytes than the fields claim.
     Short,
-    /// Fields that do not describe a slice or a set of generators.
+    /// Fields that do not describe a slice, a set of generators or an
+    /// iteration: a count of zero or out of step with the others, or one
+    /// past what its shape product holds.
     Shape,
+    /// Bytes past the frame the fields describe: a tail, or another frame.
+    Long,
 }
 
 impl std::fmt::Display for WiedemannBytesError {
@@ -402,13 +448,17 @@ impl std::fmt::Display for WiedemannBytesError {
             Self::Header => write!(f, "not a Wiedemann stage's bytes"),
             Self::Short => write!(f, "the bytes end before their fields say"),
             Self::Shape => write!(f, "the fields do not describe a stage"),
+            Self::Long => write!(f, "the bytes go on past the stage they describe"),
         }
     }
 }
 
 impl std::error::Error for WiedemannBytesError {}
 
-/// Words read off a stage's bytes.
+/// Words read off a stage's bytes: the magic and the stage's letter, then
+/// eight-byte little-endian words. Every reader takes exactly one frame:
+/// its fields, the words they count, with each product checked before it
+/// is used, and [`Self::finish`] at the end.
 struct Words<'a> {
     bytes: &'a [u8],
 }
@@ -440,6 +490,15 @@ impl<'a> Words<'a> {
             return Err(WiedemannBytesError::Short);
         }
         (0..count).map(|_| self.next()).collect()
+    }
+
+    /// The frame's end: nothing follows what its fields describe.
+    fn finish(self) -> Result<(), WiedemannBytesError> {
+        if self.bytes.is_empty() {
+            Ok(())
+        } else {
+            Err(WiedemannBytesError::Long)
+        }
     }
 }
 
@@ -489,10 +548,13 @@ fn advance(matrix: &Sparse, v: &mut Arc<Block>, image: &mut Arc<Block>) {
     core::mem::swap(v, image);
 }
 
-/// The matrix's identity for a kept slice: FNV-1a over its shape and
-/// every entry, so that a slice of one matrix is not continued against
-/// another of the same shape, which would give terms of neither.
-fn matrix_fingerprint(matrix: &SparseMatrix) -> u64 {
+/// The matrix's identity for a kept stage: FNV-1a over its shape and every
+/// entry, a pass over them. A slice, an iteration and the generators carry
+/// it, so that a stage of one matrix is not continued or solved against
+/// another of the same shape, which would give terms of neither; a caller
+/// keeping stages compares it before the work.
+#[must_use]
+pub fn matrix_fingerprint(matrix: &SparseMatrix) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0100_0000_01b3;
     let mut hash = OFFSET;
@@ -515,9 +577,11 @@ fn matrix_fingerprint(matrix: &SparseMatrix) -> u64 {
 
 /// Slice `slice` of `of` of the sequence, `terms` terms long: from the
 /// start, or on from `from`, a shorter slice of the same matrix, seed and
-/// place, whose terms are kept; a slice of another matrix is not continued
-/// and the terms start afresh. `None` for a matrix with no rows or no
-/// columns, or a slice out of range.
+/// place ([`Sequence::continues`]), whose terms are kept. `None` for a
+/// matrix with no rows or no columns, a slice out of range, or a `from`
+/// that is not this slice's: a prior of another matrix, seed or place is
+/// refused, not silently begun again, so that a caller keeping slices
+/// learns of the mismatch before the work.
 #[must_use]
 pub fn wiedemann_sequence(
     matrix: &SparseMatrix,
@@ -538,20 +602,17 @@ pub fn wiedemann_sequence(
     let supports = supports(seed, of, columns);
     let mut image = Block::zeroed(dimension);
     let (mut v, mut slabs, done) = match from {
-        Some(from)
-            if from.matrix == fingerprint
-                && from.seed == seed
-                && from.slice == slice
-                && from.of == of
-                && from.dimension == dimension =>
-        {
+        Some(from) => {
+            if !from.is_of(fingerprint, seed, slice, of) || from.dimension != dimension {
+                return None;
+            }
             (
                 Block::of(from.last.iter().copied()),
                 from.terms.clone(),
                 from.terms(),
             )
         }
-        _ => {
+        None => {
             let mut v = z_slice(seed, slice, dimension);
             advance(&sparse, &mut v, &mut image);
             (v, Vec::new(), 0)
@@ -590,8 +651,12 @@ pub struct Iterated {
     of: usize,
     dimension: usize,
     columns: usize,
-    /// The sequence's first term, folded: what ties the iteration to the
-    /// sequence and not only to its seed and shape.
+    /// [`matrix_fingerprint`] of the matrix the sequence is of: what ties
+    /// the iteration to the sequence, with its seed and shape.
+    matrix: u64,
+    /// The sequence's first term, folded ([`fingerprint`]): besides the
+    /// matrix's identity, it catches a kept slice whose first term is not
+    /// the one this iteration began from.
     fingerprint: u64,
     t: usize,
     degrees: Vec<usize>,
@@ -615,6 +680,7 @@ impl Iterated {
             of: first.of,
             dimension: first.dimension,
             columns: first.columns,
+            matrix: first.matrix,
             fingerprint: fingerprint(by_slice),
             t: 1,
             degrees: vec![1; 2 * n],
@@ -629,11 +695,12 @@ impl Iterated {
         self.t
     }
 
-    /// The iteration as bytes: `GFWI`, the fields, `F`'s length, each
-    /// column's `δ` and quiet steps, and `F`'s words.
+    /// The iteration as bytes: `GFWI`, the fields, the matrix's
+    /// fingerprint and the first term's, `F`'s length, each column's `δ`
+    /// and quiet steps, and `F`'s words.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(8 * (8 + 2 * self.degrees.len() + self.f.words().len()));
+        let mut bytes = Vec::with_capacity(8 * (9 + 2 * self.degrees.len() + self.f.words().len()));
         bytes.extend_from_slice(MAGIC);
         bytes.push(b'I');
         for word in [
@@ -641,6 +708,7 @@ impl Iterated {
             self.of as u64,
             self.dimension as u64,
             self.columns as u64,
+            self.matrix,
             self.fingerprint,
             self.t as u64,
             self.f.length() as u64,
@@ -658,13 +726,16 @@ impl Iterated {
         bytes
     }
 
-    /// An iteration from its bytes.
+    /// An iteration from its bytes: exactly one frame ([`Words`]), `2·64·of`
+    /// columns' degrees and quiet steps at most `t`, and `F`'s
+    /// `length·columns·of` words.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WiedemannBytesError> {
         let mut words = Words::of(bytes, b'I')?;
         let seed = words.next()?;
         let of = words.index()?;
         let dimension = words.index()?;
         let columns = words.index()?;
+        let matrix = words.next()?;
         let fingerprint = words.next()?;
         let t = words.index()?;
         let length = words.index()?;
@@ -692,14 +763,13 @@ impl Iterated {
         let degrees = counts()?;
         let quiet = counts()?;
         let f = words.take(f_words)?;
-        if !words.bytes.is_empty() {
-            return Err(WiedemannBytesError::Shape);
-        }
+        words.finish()?;
         Ok(Self {
             seed,
             of,
             dimension,
             columns,
+            matrix,
             fingerprint,
             t,
             degrees,
@@ -762,12 +832,14 @@ pub fn wiedemann_generators(
                 prior.of,
                 prior.dimension,
                 prior.columns,
+                prior.matrix,
                 prior.fingerprint,
             ) != (
                 first.seed,
                 of,
                 first.dimension,
                 first.columns,
+                first.matrix,
                 fingerprint(&by_slice),
             ) || prior.t > first.terms()
             {
@@ -859,6 +931,7 @@ fn settle(iterated: Iterated) -> Generated {
             of,
             dimension: iterated.dimension,
             columns: iterated.columns,
+            matrix: iterated.matrix,
             lanes,
         });
     }
@@ -889,8 +962,9 @@ fn settle(iterated: Iterated) -> Generated {
 }
 
 /// The slices' first term, folded by FNV-1a a word at a time (Fowler, Noll
-/// and Vo): sequences of one seed and shape from different matrices differ
-/// in it.
+/// and Vo). It does not identify the matrix, which [`matrix_fingerprint`]
+/// does: two matrices can share a first projected term and differ in the
+/// next.
 fn fingerprint(by_slice: &[&Sequence]) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -927,7 +1001,8 @@ fn sequence_terms(by_slice: &[&Sequence], of: usize, range: std::ops::Range<usiz
 /// coefficient meets `B` the fewest times, `fᵢ⁽ʲ⁾` being word `j` of each
 /// lane's coefficient `i`. The sum over the
 /// slices is `w`. `dimension` words, or `None` for a slice out of range or a
-/// matrix not the generators'.
+/// matrix not the generators', by its [`matrix_fingerprint`], before any
+/// power of `B` is taken.
 #[must_use]
 pub fn wiedemann_solution(
     matrix: &SparseMatrix,
@@ -941,7 +1016,10 @@ pub fn wiedemann_solution(
     let sparse = Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads);
     let (count, columns) = (sparse.relations(), sparse.columns());
     let dimension = count.max(columns);
-    if dimension != generators.dimension || columns != generators.columns {
+    if dimension != generators.dimension
+        || columns != generators.columns
+        || matrix_fingerprint(matrix) != generators.matrix
+    {
         return None;
     }
     let (of, degree) = (generators.of, generators.degree());
@@ -1224,18 +1302,25 @@ mod tests {
         unreachable!()
     }
 
-    /// Passes resumed over more terms, once or twice, make what one pass
-    /// over them all makes; a pass given no new terms wants what it wanted;
-    /// the iteration reads back from its bytes; and it is refused for a
-    /// sequence of another matrix.
+    /// A slice goes on from its own prior and makes what one pass makes,
+    /// reads back from its bytes, and says what it continues; a prior of
+    /// another matrix or seed is refused, not begun again.
     #[test]
     fn another_matrix_is_not_continued() {
         let matrix = sieve_like(96, 96, 7, 31);
         let other = sieve_like(96, 96, 7, 32);
         let three = wiedemann_sequence(&matrix, 42, 0, 1, 3, None, 1).expect("a slice");
-        let resumed = wiedemann_sequence(&other, 42, 0, 1, 8, Some(&three), 1).expect("a slice");
-        let fresh = wiedemann_sequence(&other, 42, 0, 1, 8, None, 1).expect("a slice");
-        assert_eq!(resumed, fresh, "another matrix's terms are not kept");
+        assert!(three.continues(&matrix, 42, 0, 1));
+        assert!(!three.continues(&other, 42, 0, 1), "another matrix");
+        assert!(!three.continues(&matrix, 43, 0, 1), "another seed");
+        assert!(!three.continues(&matrix, 42, 1, 2), "another place");
+        assert_eq!(three.matrix(), matrix_fingerprint(&matrix));
+        assert_eq!(three.seed(), 42);
+        assert_eq!(
+            wiedemann_sequence(&other, 42, 0, 1, 8, Some(&three), 1),
+            None,
+            "another matrix's slice is refused as a prior"
+        );
         let same = wiedemann_sequence(&matrix, 42, 0, 1, 8, Some(&three), 1).expect("a slice");
         assert_eq!(
             same,
@@ -1243,6 +1328,67 @@ mod tests {
             "the same matrix's are"
         );
         assert_eq!(Sequence::from_bytes(&same.to_bytes()), Ok(same));
+    }
+
+    /// The first projected term does not identify the matrix: `P` with row
+    /// `r = {(r + 1) mod 96}` and `Q`, `P` with column 72's entry moved
+    /// from row 71 to row 72, give the same first term at seed 42 and
+    /// differ in the second. An iteration over `P`'s terms is refused for
+    /// `Q`'s, while `P`'s own longer terms resume it as a fresh pass over
+    /// them; generators settled over one matrix are refused by the
+    /// solution of another of the same shape, and carry their matrix
+    /// through their bytes.
+    #[test]
+    fn an_iteration_and_generators_are_their_matrixs_alone() {
+        let p = SparseMatrix::new(96, (0..96u32).map(|r| vec![(r + 1) % 96]).collect());
+        let mut rows = p.rows().to_vec();
+        assert_eq!(rows[71], vec![72]);
+        rows[71].clear();
+        rows[72] = vec![72, 73];
+        let q = SparseMatrix::new(96, rows);
+        let p_two = wiedemann_sequence(&p, 42, 0, 1, 2, None, 1).expect("a slice");
+        let q_three = wiedemann_sequence(&q, 42, 0, 1, 3, None, 1).expect("a slice");
+        assert_eq!(
+            p_two.terms[..WIDTH],
+            q_three.terms[..WIDTH],
+            "the first terms agree"
+        );
+        assert_ne!(
+            p_two.terms[WIDTH..2 * WIDTH],
+            q_three.terms[WIDTH..2 * WIDTH],
+            "the second terms differ"
+        );
+        let Some(Generated::Short { iterated, .. }) =
+            wiedemann_generators(std::slice::from_ref(&p_two), None, 1)
+        else {
+            panic!("two terms settle nothing")
+        };
+        let iterated = Iterated::from_bytes(&iterated.to_bytes()).expect("its own bytes");
+        assert_eq!(
+            wiedemann_generators(std::slice::from_ref(&q_three), Some(iterated.clone()), 1),
+            None,
+            "Q's terms with P's iteration"
+        );
+        let p_three = wiedemann_sequence(&p, 42, 0, 1, 3, Some(&p_two), 1).expect("a slice");
+        assert_eq!(
+            wiedemann_generators(std::slice::from_ref(&p_three), Some(iterated), 1),
+            wiedemann_generators(std::slice::from_ref(&p_three), None, 1),
+            "P's own iteration resumes as a fresh pass"
+        );
+        let a = SparseMatrix::new(3, vec![vec![0], vec![1], vec![2], vec![0, 1, 2]]);
+        let b = SparseMatrix::new(3, vec![vec![0, 1], vec![1, 2], vec![0, 2], vec![0, 1, 2]]);
+        let (_, generators, _) = settled(&a, 7, 1);
+        let generators = Generators::from_bytes(&generators.to_bytes()).expect("its own bytes");
+        assert_eq!(generators.matrix(), matrix_fingerprint(&a));
+        assert!(
+            wiedemann_solution(&a, &generators, 0, 1).is_some(),
+            "its own matrix's solution"
+        );
+        assert_eq!(
+            wiedemann_solution(&b, &generators, 0, 1),
+            None,
+            "another matrix's solution, of the same shape"
+        );
     }
 
     #[test]
@@ -1613,13 +1759,19 @@ mod tests {
         }
     }
 
-    /// Bytes that are not a stage's are refused for their reason.
+    /// Bytes that are not a stage's are refused for their reason, and each
+    /// stage's reader takes exactly one frame: its own bytes give the stage
+    /// back, a truncation is `Short`, a byte, a word or a second frame
+    /// after it is `Long`, and an `of` no shape product holds is `Shape`,
+    /// not an overflow.
     #[test]
     fn a_stage_refuses_bytes_that_are_not_its_own() {
         let matrix = sieve_like(200, 180, 5, 2);
-        let slice = wiedemann_sequence(&matrix, 9, 0, 2, 20, None, 1).expect("a slice");
+        let (slices, generators, _) = settled(&matrix, 9, 2);
+        let by_slice: Vec<&Sequence> = slices.iter().collect();
+        let iterated = Iterated::start(&by_slice);
+        let slice = &slices[0];
         let bytes = slice.to_bytes();
-        assert_eq!(Sequence::from_bytes(&bytes).as_ref(), Ok(&slice));
         assert_eq!(
             Generators::from_bytes(&bytes),
             Err(WiedemannBytesError::Header)
@@ -1633,6 +1785,45 @@ mod tests {
         assert_eq!(
             Sequence::from_bytes(&wrong),
             Err(WiedemannBytesError::Shape)
+        );
+        let mut vast = bytes.clone();
+        vast[4 + 16..4 + 24].copy_from_slice(&(1u64 << 58).to_le_bytes());
+        assert_eq!(Sequence::from_bytes(&vast), Err(WiedemannBytesError::Shape));
+        fn exactly_one_frame<T: PartialEq + std::fmt::Debug>(
+            stage: &str,
+            value: &T,
+            bytes: &[u8],
+            decode: impl Fn(&[u8]) -> Result<T, WiedemannBytesError>,
+        ) {
+            assert_eq!(decode(bytes).as_ref(), Ok(value), "{stage}: its own bytes");
+            assert_eq!(
+                decode(&bytes[..bytes.len() - 1]),
+                Err(WiedemannBytesError::Short),
+                "{stage}: a byte short"
+            );
+            for tail in [&[1u8][..], &[0u8; 8], bytes] {
+                let mut long = bytes.to_vec();
+                long.extend_from_slice(tail);
+                assert_eq!(
+                    decode(&long),
+                    Err(WiedemannBytesError::Long),
+                    "{stage}: {} bytes past the frame",
+                    tail.len()
+                );
+            }
+        }
+        exactly_one_frame("slice", slice, &bytes, Sequence::from_bytes);
+        exactly_one_frame(
+            "generators",
+            &generators,
+            &generators.to_bytes(),
+            Generators::from_bytes,
+        );
+        exactly_one_frame(
+            "iteration",
+            &iterated,
+            &iterated.to_bytes(),
+            Iterated::from_bytes,
         );
     }
 }

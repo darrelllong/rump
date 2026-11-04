@@ -35,9 +35,10 @@ mod generator;
 #[path = "gf2/wiedemann.rs"]
 mod wiedemann;
 pub use wiedemann::{
-    block_wiedemann_dependencies_sparse, wiedemann_finish, wiedemann_generators,
-    wiedemann_sequence, wiedemann_solution, wiedemann_terms, wiedemann_terms_most,
-    wiedemann_terms_most_of, Generated, Generators, Iterated, Sequence, WiedemannBytesError,
+    block_wiedemann_dependencies_sparse, matrix_fingerprint, wiedemann_finish,
+    wiedemann_generators, wiedemann_sequence, wiedemann_solution, wiedemann_terms,
+    wiedemann_terms_most, wiedemann_terms_most_of, Generated, Generators, Iterated, Sequence,
+    WiedemannBytesError,
 };
 
 /// Bits per storage word.
