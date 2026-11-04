@@ -142,9 +142,11 @@ what a consumer must change, not everything that moved.
   generators knew no matrix at all, so the solution of a same-shaped
   matrix took another's. Both carry `matrix_fingerprint` now, the
   generator pass refuses an iteration of another matrix and the solution
-  refuses generators of another, before any product. The frames gain a
-  word after `columns`: iterations and generators kept before are refused
-  and the stage is computed again. A slice given as `from` of another
+  refuses generators of another, before any product. The family tag is
+  `GFW2` now, the iteration's and generators' frames gaining the matrix's
+  word after `columns`; a frame under the earlier `GFW` tag is
+  `WiedemannBytesError::Layout`, whose message says to remove it, the
+  stage then being computed again. A slice given as `from` of another
   matrix, seed or place was silently begun again; it is `None` now,
   `Sequence::continues` being the question a caller asks first.
 

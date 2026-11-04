@@ -75,9 +75,17 @@ const TERMS_MOST: usize = 3;
 /// hand.
 const POWERS: usize = 16;
 
-/// The magic that begins a stage's bytes, and the stage's own letter after
-/// it.
-const MAGIC: &[u8; 3] = b"GFW";
+/// The family tag that begins a stage's bytes, GF(2) Wiedemann in its
+/// second layout, and the stage's own letter after it: `GFW2S`, `GFW2G`,
+/// `GFW2I`.
+const MAGIC: &[u8; 4] = b"GFW2";
+
+/// The family tag of the first layout, whose iteration and generators
+/// carried no matrix identity. A frame under it with this stage's letter
+/// is refused as [`WiedemannBytesError::Layout`], never read as the
+/// second's: the two differ by a word, and a frame of one can parse as the
+/// other.
+const EARLIER_MAGIC: &[u8; 3] = b"GFW";
 
 // `WIDTH` is the machine word, `u64::BITS`: a block is a word a coordinate
 // and a bit a vector, so one XOR advances sixty-four vectors. Nothing here
@@ -269,7 +277,7 @@ impl Sequence {
         self.matrix == matrix && self.seed == seed && self.slice == slice && self.of == of
     }
 
-    /// The slice as bytes: `GFWS`, then the fields and the words, each
+    /// The slice as bytes: `GFW2S`, then the fields and the words, each
     /// eight bytes little-endian.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -368,7 +376,7 @@ impl Generators {
         self.matrix
     }
 
-    /// The generators as bytes: `GFWG`, the fields, the matrix's
+    /// The generators as bytes: `GFW2G`, the fields, the matrix's
     /// fingerprint, each lane's length and its words.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -440,6 +448,10 @@ pub enum WiedemannBytesError {
     Shape,
     /// Bytes past the frame the fields describe: a tail, or another frame.
     Long,
+    /// This stage's bytes in the earlier layout, before the matrix's
+    /// identity was carried: remove the file, and the stage is computed
+    /// again.
+    Layout,
 }
 
 impl std::fmt::Display for WiedemannBytesError {
@@ -449,6 +461,10 @@ impl std::fmt::Display for WiedemannBytesError {
             Self::Short => write!(f, "the bytes end before their fields say"),
             Self::Shape => write!(f, "the fields do not describe a stage"),
             Self::Long => write!(f, "the bytes go on past the stage they describe"),
+            Self::Layout => write!(
+                f,
+                "a stage kept in an earlier layout, before the matrix's identity was carried; remove it and the stage is computed again"
+            ),
         }
     }
 }
@@ -465,11 +481,20 @@ struct Words<'a> {
 
 impl<'a> Words<'a> {
     fn of(bytes: &'a [u8], stage: u8) -> Result<Self, WiedemannBytesError> {
-        let rest = bytes
+        if let Some(rest) = bytes
             .strip_prefix(MAGIC)
             .and_then(|rest| rest.strip_prefix(&[stage]))
-            .ok_or(WiedemannBytesError::Header)?;
-        Ok(Self { bytes: rest })
+        {
+            return Ok(Self { bytes: rest });
+        }
+        let earlier = bytes
+            .strip_prefix(EARLIER_MAGIC)
+            .is_some_and(|rest| rest.first() == Some(&stage));
+        Err(if earlier {
+            WiedemannBytesError::Layout
+        } else {
+            WiedemannBytesError::Header
+        })
     }
 
     fn next(&mut self) -> Result<u64, WiedemannBytesError> {
@@ -695,7 +720,7 @@ impl Iterated {
         self.t
     }
 
-    /// The iteration as bytes: `GFWI`, the fields, the matrix's
+    /// The iteration as bytes: `GFW2I`, the fields, the matrix's
     /// fingerprint and the first term's, `F`'s length, each column's `δ`
     /// and quiet steps, and `F`'s words.
     #[must_use]
@@ -1781,14 +1806,42 @@ mod tests {
             Err(WiedemannBytesError::Short)
         );
         let mut wrong = bytes.clone();
-        wrong[4 + 8..4 + 16].copy_from_slice(&7u64.to_le_bytes());
+        wrong[5 + 8..5 + 16].copy_from_slice(&7u64.to_le_bytes());
         assert_eq!(
             Sequence::from_bytes(&wrong),
             Err(WiedemannBytesError::Shape)
         );
         let mut vast = bytes.clone();
-        vast[4 + 16..4 + 24].copy_from_slice(&(1u64 << 58).to_le_bytes());
+        vast[5 + 16..5 + 24].copy_from_slice(&(1u64 << 58).to_le_bytes());
         assert_eq!(Sequence::from_bytes(&vast), Err(WiedemannBytesError::Shape));
+        // The earlier layout is refused as such, not read: this frame was
+        // two lanes of degree 0 under it and would be one lane of degree 1
+        // with matrix identity 2 under the second.
+        let mut earlier = b"GFWG".to_vec();
+        for word in [7u64, 1, 4, 3, 2, 1, 2, 1, 9] {
+            earlier.extend_from_slice(&word.to_le_bytes());
+        }
+        assert_eq!(
+            Generators::from_bytes(&earlier),
+            Err(WiedemannBytesError::Layout)
+        );
+        assert_eq!(
+            Iterated::from_bytes(b"GFWI"),
+            Err(WiedemannBytesError::Layout)
+        );
+        assert_eq!(
+            Sequence::from_bytes(b"GFWS"),
+            Err(WiedemannBytesError::Layout)
+        );
+        assert_eq!(
+            Generators::from_bytes(b"GFWS"),
+            Err(WiedemannBytesError::Header),
+            "another stage's earlier frame is not this stage's"
+        );
+        assert_eq!(
+            Sequence::from_bytes(b"GFW2X"),
+            Err(WiedemannBytesError::Header)
+        );
         fn exactly_one_frame<T: PartialEq + std::fmt::Debug>(
             stage: &str,
             value: &T,
