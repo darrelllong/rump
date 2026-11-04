@@ -1661,7 +1661,8 @@ pub fn filter_floor(
         .iter()
         .map(|&weight| u64::from(weight))
         .filter(|&weight| {
-            !(weight * UNTRACKED_SHARE as u64 > rows && weight > UNTRACKED_SHARE as u64 * cap)
+            !(weight * UNTRACKED_SHARE as u64 > rows
+                && weight > (UNTRACKED_SHARE as u64).saturating_mul(cap))
         })
         .sum();
     let set = weights.iter().filter(|&&weight| weight > 0).count() as u64;

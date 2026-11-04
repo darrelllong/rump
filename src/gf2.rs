@@ -568,7 +568,9 @@ impl Sparse {
 /// are below a word, which the statement's enumerated terms miss either
 /// way, 128 bytes under them on macOS and 64 over them on Linux at the
 /// sequence stage; on one thread the solver holds six locks and a pass
-/// four, so a kibibyte covers either way.
+/// four, so a kibibyte covers either way. The statements count a word as
+/// eight bytes and a vector's header as three: on a narrower word they
+/// stay bounds, by the headers' difference looser.
 pub const RECORDS: u64 = 1024;
 
 /// Lists of indices stored flat: the indices of list `i` are

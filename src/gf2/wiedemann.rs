@@ -606,10 +606,12 @@ pub fn matrix_fingerprint(matrix: &SparseMatrix) -> u64 {
 /// start, or on from `from`, a shorter slice of the same matrix, seed and
 /// place ([`Sequence::continues`]), whose terms are kept. `None` for a
 /// matrix with no rows or no columns, a slice out of range, a slab of
-/// `terms · 64 · of` words past `usize`, or a `from` that is not this
-/// slice's: a prior of another matrix, seed or place is refused, not
-/// silently begun again, so that a caller keeping slices learns of the
-/// mismatch before the work; each refusal comes before any request.
+/// `terms · 64 · of` words whose words or bytes pass `usize`, or a `from`
+/// that is not this slice's: a prior of another matrix, seed or place is
+/// refused, not silently begun again, so that a caller keeping slices
+/// learns of the mismatch before the work; each refusal comes before any
+/// request, but for a prior of this matrix whose dimension is not its
+/// own, a damaged frame, refused once the products are built.
 #[must_use]
 pub fn wiedemann_sequence(
     matrix: &SparseMatrix,
@@ -623,23 +625,31 @@ pub fn wiedemann_sequence(
     if matrix.rows().is_empty() || matrix.columns() == 0 || of == 0 || slice >= of {
         return None;
     }
-    let sparse = Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads);
-    let (count, columns) = (sparse.relations(), sparse.columns());
-    let dimension = count.max(columns);
+    // Refused before any request: a prior of another matrix, seed or place,
+    // by the fingerprint, a pass over the matrix; and a slab whose words
+    // or bytes pass `usize`.
     let fingerprint = matrix_fingerprint(matrix);
-    let supports = supports(seed, of, columns);
-    if from.is_some_and(|from| {
-        !from.is_of(fingerprint, seed, slice, of) || from.dimension != dimension
-    }) {
+    if from.is_some_and(|from| !from.is_of(fingerprint, seed, slice, of)) {
         return None;
     }
-    // The slab at its whole length from the start, one request, so that
-    // what the stage holds is what it says; a length past `usize` is no
-    // slab.
     let length = terms
         .max(from.map_or(0, Sequence::terms))
         .checked_mul(WIDTH)?
         .checked_mul(of)?;
+    if length.checked_mul(size_of::<u64>())? > isize::MAX as usize {
+        return None;
+    }
+    let sparse = Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads);
+    let (count, columns) = (sparse.relations(), sparse.columns());
+    let dimension = count.max(columns);
+    // A prior of this matrix has its dimension; one that has not is a
+    // damaged frame, refused once the products are built.
+    if from.is_some_and(|from| from.dimension != dimension) {
+        return None;
+    }
+    let supports = supports(seed, of, columns);
+    // The slab at its whole length from the start, one request, so that
+    // what the stage holds is what it says.
     let mut slabs = Vec::with_capacity(length);
     let mut image = Block::zeroed(dimension);
     let (mut v, done) = match from {

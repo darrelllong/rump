@@ -1056,8 +1056,10 @@ impl PolyZ {
     /// The homogeneous value `∑ cᵢ·aⁱ·b^{d−i}` at integers: `bᵈ·f(a/b)`.
     /// For `f` irreducible with leading coefficient `c_d` and a root `α`
     /// this is `c_d` times the norm of `a − bα`, up to sign, which the
-    /// number field sieve asks for every pair it sieves; for any `f` it is
-    /// the resultant of `f` and `bx − a`, up to sign. Horner in `a` with a
+    /// number field sieve asks for every pair it sieves; for any `f` and
+    /// `b ≠ 0` it is the resultant of `f` and `bx − a`, up to sign, and at
+    /// `b = 0` it is `c_d·aᵈ`, where the resultant of `f` with the constant
+    /// `−a` is `(−a)ᵈ`. Horner in `a` with a
     /// running power of `b`, three multiplications and an addition a
     /// coefficient below the leading one and no polynomial in between,
     /// where [`Self::homogeneous_substitution`] at constant arguments

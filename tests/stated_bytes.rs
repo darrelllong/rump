@@ -3,7 +3,8 @@
 //! memory before the work, is run here on one thread under a counting
 //! allocator, and the peak of the requests live on that thread is within
 //! the statement, whose enumerated terms, `RECORDS` below it, are within
-//! `RECORDS` of the peak either way.
+//! `RECORDS` of the peak either way on a 64-bit word, the word the
+//! statements count by; on a narrower word they stay bounds.
 //!
 //! Requests are counted, not resident pages: an allocation counts from its
 //! request, a reallocation by its change and a release by its size, on
@@ -100,15 +101,23 @@ fn sieve_like(rows: usize, columns: usize, weight: usize, mut state: u64) -> Spa
     SparseMatrix::new(columns, lists)
 }
 
-/// The peak within the statement, and the statement's enumerated terms,
-/// which are `RECORDS` below it, within `RECORDS` of the peak either way.
+/// Whether the statements are tight here: they count a word as eight
+/// bytes and a vector's header as three, which is what a 64-bit word
+/// gives; on a narrower word the headers are smaller and the statements
+/// stay bounds, looser.
+const TIGHT: bool = usize::BITS == 64;
+
+/// The peak within the statement; and, on a 64-bit word, the statement's
+/// enumerated terms, which are `RECORDS` below it, within `RECORDS` of
+/// the peak either way.
 fn within(peak: u64, stated: u64, what: &str) {
     eprintln!(
         "{what}: {peak} requested, {stated} stated, {}",
         stated as i64 - peak as i64
     );
+    assert!(peak <= stated, "{what}: {peak} requested, {stated} stated");
     assert!(
-        peak <= stated && stated - peak <= 2 * RECORDS,
+        !TIGHT || stated - peak <= 2 * RECORDS,
         "{what}: {peak} requested, {stated} stated"
     );
 }
@@ -154,8 +163,19 @@ fn refusals_come_before_requests() {
     let prior = wiedemann_sequence(&matrix, 7, 0, 2, 4, None, 1).expect("a slice");
     assert!(wiedemann_sequence(&matrix, 8, 0, 2, usize::MAX / 64, Some(&prior), 1).is_none());
     assert!(wiedemann_sequence(&matrix, 7, 0, 2, usize::MAX / 64, Some(&prior), 1).is_none());
-    assert!(wiedemann_sequence_bytes(&matrix, 2, 8, usize::MAX).is_none());
-    assert!(filter_floor(&matrix, 8, 32, usize::MAX).is_none());
+    let one = wiedemann_sequence(&matrix, 7, 0, 1, 4, None, 1).expect("a slice of one");
+    assert!(wiedemann_sequence(&matrix, 7, 0, 1, usize::MAX / 64, Some(&one), 1).is_none());
+    let (_, peak) = with_budget(1, || {
+        peak_while(|| wiedemann_sequence(&matrix, 8, 0, 2, 4, Some(&prior), 1))
+    });
+    assert_eq!(peak, 0, "a foreign prior is refused before any request");
+    // A thread count whose runs pass `u64` is no statement; on a word
+    // narrower than sixty-four bits no `usize` count does.
+    if usize::BITS >= 64 {
+        assert!(wiedemann_sequence_bytes(&matrix, 2, 8, usize::MAX).is_none());
+        assert!(filter_floor(&matrix, 8, 32, usize::MAX).is_none());
+    }
+    assert!(filter_floor(&matrix, usize::MAX, 32, 1).is_some());
     let (_, peak) = with_budget(1, || {
         peak_while(|| wiedemann_sequence_bytes(&matrix, 2, 8, 1))
     });
@@ -207,7 +227,8 @@ fn the_filter_keeps_within_its_limit_on_the_reviewers_matrices() {
             "{what} at the floor: {peak} requested, {floor} stated"
         );
         assert!(
-            peak <= at_floor.peak_bytes() && at_floor.peak_bytes() - peak <= 2 * RECORDS,
+            peak <= at_floor.peak_bytes()
+                && (!TIGHT || at_floor.peak_bytes() - peak <= 2 * RECORDS),
             "{what} at the floor: {peak} requested, {} reported",
             at_floor.peak_bytes()
         );
@@ -219,7 +240,7 @@ fn the_filter_keeps_within_its_limit_on_the_reviewers_matrices() {
             merged.peak_bytes()
         );
         assert!(
-            peak <= merged.peak_bytes() && merged.peak_bytes() - peak <= 2 * RECORDS,
+            peak <= merged.peak_bytes() && (!TIGHT || merged.peak_bytes() - peak <= 2 * RECORDS),
             "{what} unlimited: {peak} requested, {} reported",
             merged.peak_bytes()
         );
@@ -257,7 +278,8 @@ fn the_filter_holds_what_it_states() {
             "{rows}×{columns} at the floor: {peak} requested, {floor} stated"
         );
         assert!(
-            peak <= at_floor.peak_bytes() && at_floor.peak_bytes() - peak <= 2 * RECORDS,
+            peak <= at_floor.peak_bytes()
+                && (!TIGHT || at_floor.peak_bytes() - peak <= 2 * RECORDS),
             "{rows}×{columns} at the floor: {peak} requested, {} reported",
             at_floor.peak_bytes()
         );
@@ -272,7 +294,7 @@ fn the_filter_holds_what_it_states() {
             merged.peak_bytes()
         );
         assert!(
-            peak <= merged.peak_bytes() && merged.peak_bytes() - peak <= 2 * RECORDS,
+            peak <= merged.peak_bytes() && (!TIGHT || merged.peak_bytes() - peak <= 2 * RECORDS),
             "{rows}×{columns} unlimited: {peak} requested, {} reported",
             merged.peak_bytes()
         );
