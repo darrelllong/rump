@@ -164,6 +164,68 @@ fn refusals_come_before_requests() {
     assert_eq!(peak, 4 * 40, "the query's scratch");
 }
 
+/// Two matrices of the reviewer's: two hundred rows of three entries over
+/// three hundred columns, every column held by two rows, at a cap of
+/// two, where the merge's lists were made before they were admitted; and
+/// a chain of a thousand and twenty-four rows at a cap of one, where the
+/// pruning's rounds went uncounted. At the floor as the limit the peak is
+/// within the floor and the report; unlimited, within the report.
+#[test]
+fn the_filter_keeps_within_its_limit_on_the_reviewers_matrices() {
+    let two_by_two = || {
+        SparseMatrix::new(
+            300,
+            (0..200u32)
+                .map(|i| {
+                    let mut row = vec![(i + 199) % 200, i, 200 + i % 100];
+                    row.sort_unstable();
+                    row
+                })
+                .collect(),
+        )
+    };
+    let chain = || SparseMatrix::new(1_025, (0..1_024u32).map(|i| vec![i, i + 1]).collect());
+    for (make, cap, excess, what) in [
+        (
+            &two_by_two as &dyn Fn() -> SparseMatrix,
+            2usize,
+            32usize,
+            "two by two",
+        ),
+        (&chain, 1, 32, "chain"),
+    ] {
+        let floor = filter_floor(&make(), cap, excess, 1).expect("fits");
+        let (at_floor, peak) = with_budget(1, || {
+            peak_while(|| filter_merge_within(make(), cap, excess, floor).expect("at the floor"))
+        });
+        eprintln!(
+            "{what} at the floor: {peak} requested, {floor} stated, {} reported",
+            at_floor.peak_bytes()
+        );
+        assert!(
+            peak <= floor,
+            "{what} at the floor: {peak} requested, {floor} stated"
+        );
+        assert!(
+            peak <= at_floor.peak_bytes() && at_floor.peak_bytes() - peak <= 2 * RECORDS,
+            "{what} at the floor: {peak} requested, {} reported",
+            at_floor.peak_bytes()
+        );
+        let (merged, peak) = with_budget(1, || {
+            peak_while(|| filter_merge_within(make(), cap, excess, u64::MAX).expect("no limit"))
+        });
+        eprintln!(
+            "{what} unlimited: {peak} requested, {} reported",
+            merged.peak_bytes()
+        );
+        assert!(
+            peak <= merged.peak_bytes() && merged.peak_bytes() - peak <= 2 * RECORDS,
+            "{what} unlimited: {peak} requested, {} reported",
+            merged.peak_bytes()
+        );
+    }
+}
+
 /// The filter: at its floor as the limit the requests' peak is within the
 /// floor and within what it reports it held; with no limit, within what it
 /// reports, and that within `RECORDS` above the requests; below the floor

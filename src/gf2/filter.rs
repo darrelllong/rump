@@ -1073,21 +1073,19 @@ impl Filter {
     /// starting from the columns in `singletons`: in rounds, each the rows
     /// the singletons pin, retired side by side, and the columns they left
     /// singletons the next. Which rows go does not depend on the order they
-    /// go in. Returns the columns left at two along the way, a list a
-    /// round, each as it was made.
-    fn prune(&mut self, mut singletons: Vec<u32>) -> Vec<Vec<u32>> {
-        let mut twos: Vec<Vec<u32>> = Vec::new();
+    /// go in. The columns left at two along the way go onto `twos`, which
+    /// the caller sized for them: a column is left at two once, the
+    /// weights only falling here, so a column's worth of room holds them.
+    fn prune(&mut self, mut singletons: Vec<u32>, twos: &mut Vec<u32>) {
         while !singletons.is_empty() {
-            // The round holds its singletons and the rounds' twos so far.
-            let kept: u64 = twos.iter().map(|two| 4 * two.capacity() as u64).sum();
-            self.beside += 4 * singletons.capacity() as u64 + kept;
+            // The round holds its singletons beside the twos' list.
+            self.beside += 4 * singletons.capacity() as u64;
             let rows = self.pinned(&singletons);
             let (next, two) = self.retire_all(&rows);
-            self.beside -= 4 * singletons.capacity() as u64 + kept;
-            twos.push(two);
+            self.beside -= 4 * singletons.capacity() as u64;
+            twos.extend_from_slice(&two);
             singletons = next;
         }
-        twos
     }
 
     /// Every column of `columns` that two rows hold binds them. The pairs
@@ -1190,20 +1188,16 @@ impl Filter {
             }
             let lists = 4 * (roots.capacity() + rows.capacity()) as u64;
             self.beside += lists;
-            let (singletons, twos) = self.retire_all(&rows);
+            let (singletons, mut twos) = self.retire_all(&rows);
             drop(rows);
             self.beside -= lists;
+            // The twos of the retirement and of the pruning it sets off, one
+            // list with a column's worth of room, bound together in order.
+            twos.reserve_exact(self.columns.saturating_sub(twos.len()));
             self.beside += 4 * twos.capacity() as u64;
+            self.prune(singletons, &mut twos);
             self.bind(&mut cliques, &twos);
-            let rounds = self.prune(singletons);
             self.beside -= 4 * twos.capacity() as u64;
-            drop(twos);
-            let kept: u64 = rounds.iter().map(|two| 4 * two.capacity() as u64).sum();
-            self.beside += kept;
-            for round in &rounds {
-                self.bind(&mut cliques, round);
-            }
-            self.beside -= kept;
         }
         self.beside -= components;
     }
@@ -1236,26 +1230,29 @@ impl Filter {
         self.beside += 4 * self.columns as u64 + self.work.len() as u64;
         self.note(0);
         loop {
-            let light = self.light(cap, threads);
-            if light.is_empty() {
+            // The pass's lists, bounded from the weights before any is
+            // made: the light columns, twice while they are joined, then
+            // their rows transposed, a slot a row and a cut a column, with
+            // a cursor and a piece a column while they are made; then an
+            // index and a plan a column with the plans' edges, a column's
+            // weight less one each, a place in the order and a chosen
+            // plan's room for each column at most, and a tree's members
+            // and planning while it is planned.
+            let (count, weights) = self.light_measure(cap, threads);
+            if count == 0 {
                 break;
             }
-            // The pass's lists: the light columns, made, and their rows
-            // transposed, a slot a row and a cut a column, with a cursor
-            // and a piece a column while they are made; then an index and
-            // a plan a column with the plans' edges, a column's weight
-            // less one each, and a tree's members and planning while it
-            // is planned.
-            let count = light.len() as u64;
-            let weights: u64 = light.iter().map(|&c| self.weight(c) as u64).sum();
-            let listing = 4 * count + 4 * weights + 8 * (count + 1);
-            let transposing = 4 * count + 16 * count;
-            let planning = 8 * count + 40 * count + 16 * (weights - count) + 25 * u64::from(cap);
+            let standing = 4 * count + 4 * weights + 8 * (count + 1);
+            let making = 8 * count;
+            let transposing = standing + 4 * count + 16 * count;
+            let planned = standing + 8 * count + 40 * count + 16 * (weights - count);
+            let choosing = planned + 48 * count + 8 * u64::from(cap);
             let held = self.held() + self.beside;
-            if held + listing + transposing.max(planning) > limit {
+            if held + making.max(transposing).max(choosing) > limit {
                 break;
             }
-            self.peak = self.peak.max(held + listing + transposing.max(planning));
+            self.peak = self.peak.max(held + making.max(transposing));
+            let light = self.light(cap, threads);
             let (start, rows_of) = self.transpose(&light, &mut place, threads);
             let members = |k: usize| -> Vec<usize> {
                 rows_of[start[k]..start[k + 1]]
@@ -1264,6 +1261,9 @@ impl Filter {
                     .collect()
             };
             let indices: Vec<usize> = (0..light.len()).collect();
+            // Planning holds a tree's members and its working, seventeen
+            // bytes a member, beside the plans so far.
+            self.peak = self.peak.max(held + planned + 25 * u64::from(cap));
             let mut plans: Vec<Option<Plan>> =
                 crate::parallel::map_ordered(&indices, threads, |_, &k| match members(k)[..] {
                     [only] => Some(Plan {
@@ -1278,8 +1278,14 @@ impl Filter {
             let gaining = || indices.iter().copied().filter(|&k| gains(fill(k)));
             let mut order: Vec<usize> = Vec::with_capacity(gaining().count());
             order.extend(gaining());
+            let order_room = order.capacity() as u64;
             order.sort_unstable_by_key(|&k| (fill(k), light[k]));
             let mut chosen: Vec<Plan> = Vec::with_capacity(order.len());
+            // Choosing holds the order and the chosen's room beside the
+            // plans, and a column's members while they are looked at.
+            self.peak = self
+                .peak
+                .max(held + planned + 8 * order_room + 40 * order_room + 8 * u64::from(cap));
             for k in order {
                 let rows = members(k);
                 if rows.iter().any(|&r| busy[r]) {
@@ -1327,7 +1333,7 @@ impl Filter {
                         .sum::<u64>()
                 })
                 .sum();
-            let pass = listing + planning + 40 * chosen.capacity() as u64 + merging;
+            let pass = planned + 40 * chosen.capacity() as u64 + merging;
             if held + pass > limit {
                 break;
             }
@@ -1346,6 +1352,22 @@ impl Filter {
                 self.live_columns = self.live_columns + one.revived - one.emptied;
             }
         }
+    }
+
+    /// How many columns one to `cap` rows hold, and their weights' sum,
+    /// found side by side: what a pass's lists come to, before they are
+    /// made.
+    fn light_measure(&self, cap: u32, threads: usize) -> (u64, u64) {
+        let length = self.columns.div_ceil(threads * CHUNKS_PER_THREAD).max(1);
+        let chunks: Vec<usize> = (0..self.columns.div_ceil(length)).collect();
+        crate::parallel::map_ordered(&chunks, threads, |_, &chunk| {
+            (chunk * length..((chunk + 1) * length).min(self.columns))
+                .map(|c| u64::from(self.weight(c as u32)))
+                .filter(|&weight| (1..=u64::from(cap)).contains(&weight))
+                .fold((0, 0), |(count, sum), weight| (count + 1, sum + weight))
+        })
+        .into_iter()
+        .fold((0, 0), |(count, sum), (c, w)| (count + c, sum + w))
     }
 
     /// The columns held by one to `cap` rows, ascending, found side by side.
@@ -1580,8 +1602,12 @@ fn filter_run(
 ) -> FilteredMatrix {
     let mut filter = Filter::new(matrix, weight_cap.max(1));
     let singletons = filter.all_singletons();
+    let mut twos = Vec::with_capacity(filter.columns);
+    filter.beside += 4 * twos.capacity() as u64;
     filter.note(4 * singletons.capacity() as u64);
-    filter.prune(singletons);
+    filter.prune(singletons, &mut twos);
+    filter.beside -= 4 * twos.capacity() as u64;
+    drop(twos);
     filter.purge(excess);
     filter.release();
     filter.merge(weight_cap, limit);
@@ -1602,12 +1628,14 @@ fn filter_run(
 ///   the slots `4S` and the rows added with a header a column, `24C`;
 /// - the pruning, at a round: the rows pinned and the runs' claimed rows,
 ///   `8R`, and the columns left at one and at two, listed by the runs and
-///   joined, `16C`, with the singletons the rounds began from, `4C`;
+///   joined, `16C`, with the singletons the rounds began from, `4C`, and
+///   the twos of every round, one list with a column's worth of room,
+///   `4C`;
 /// - the purge, where `E` passes `excess`: the components, `52R` (a
 ///   parent, a next, a tail, a weight a row and a heap with room for a
 ///   push a bind), every column `4C`, the pairs a column at two binds
 ///   `8C`, and a round's roots and rows `8R` beside a retirement's `8R +
-///   16C`;
+///   16C` and the twos' list, `4C`;
 /// - the finish, with no merge: the kept rows and compositions, a header
 ///   each, and a composition of one a row, `56R`.
 ///
@@ -1653,7 +1681,7 @@ pub fn filter_floor(
         columns.checked_mul(24),
     ])?;
     let retiring = sum([rows.checked_mul(8), columns.checked_mul(16)])?;
-    let pruning = retiring.checked_add(columns.checked_mul(4)?)?;
+    let pruning = retiring.checked_add(columns.checked_mul(8)?)?;
     let purging = if rows.saturating_sub(set) > excess as u64 {
         sum([
             rows.checked_mul(52),
@@ -1661,6 +1689,7 @@ pub fn filter_floor(
             columns.checked_mul(8),
             rows.checked_mul(8),
             Some(retiring),
+            columns.checked_mul(4),
         ])?
     } else {
         0
@@ -2102,7 +2131,7 @@ mod tests {
                 .flat_map(|&root| rows_of[root].iter().map(|&row| row as u32))
                 .collect();
             let (pending, _) = filter.retire_all(&taken);
-            filter.prune(pending);
+            filter.prune(pending, &mut Vec::with_capacity(filter.columns));
         }
     }
 
@@ -2140,7 +2169,9 @@ mod tests {
                 for threads in [1, 4] {
                     let mut filter = Filter::new(matrix.clone(), 32);
                     let singletons = filter.all_singletons();
-                    crate::parallel::with_budget(threads, || filter.prune(singletons));
+                    crate::parallel::with_budget(threads, || {
+                        filter.prune(singletons, &mut Vec::with_capacity(filter.columns));
+                    });
                     let kept: Vec<bool> = (0..live.len()).map(|row| filter.is_live(row)).collect();
                     assert_eq!(
                         kept, live,
@@ -2170,7 +2201,7 @@ mod tests {
                 let pruned = || {
                     let mut filter = Filter::new(matrix.clone(), 32);
                     let singletons = filter.all_singletons();
-                    filter.prune(singletons);
+                    filter.prune(singletons, &mut Vec::with_capacity(filter.columns));
                     filter
                 };
                 // Targets: all but one dependency purged, and two between.
