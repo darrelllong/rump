@@ -153,6 +153,42 @@ where
     blocks.into_iter().flat_map(|(_, mapped)| mapped).collect()
 }
 
+/// `work` over `items` in place, a run of them at a time with the index of
+/// the run's first item, on as many threads as `workers` names, the budget
+/// allows and there are items for; each thread's budget is its share of
+/// the caller's, as in [`map_ordered`]. The runs are [`BLOCKS_PER_WORKER`]
+/// to a thread's share, taken from a shared cursor. One thread, or one
+/// item, runs on the caller's, the whole of `items` as one run.
+pub(crate) fn each_run_mut<T, F>(items: &mut [T], workers: usize, work: F)
+where
+    T: Send,
+    F: Fn(usize, &mut [T]) + Sync,
+{
+    let whole = budget();
+    let workers = workers.min(whole).min(items.len());
+    if workers <= 1 {
+        if !items.is_empty() {
+            work(0, items);
+        }
+        return;
+    }
+    let share = (whole / workers).max(1);
+    let block = items.len().div_ceil(workers * BLOCKS_PER_WORKER);
+    let runs = std::sync::Mutex::new(items.chunks_mut(block).enumerate());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let (runs, work) = (&runs, &work);
+            scope.spawn(move || {
+                with_budget(share, || loop {
+                    let next = runs.lock().expect("a fan-out's worker panicked").next();
+                    let Some((number, run)) = next else { break };
+                    work(number * block, run);
+                })
+            });
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +302,66 @@ mod tests {
             with_budget(8, || map_ordered(&[()], 4, |_, ()| budget())),
             [whole]
         );
+    }
+
+    /// The in-place fan-out: every item given its own index once, its
+    /// threads no more than the workers, the budget and the items, each
+    /// with the share, none of them the caller's; nothing or one item on
+    /// the caller's thread with the caller's budget.
+    #[test]
+    fn an_in_place_fan_out_is_bounded_and_shares_its_budget() {
+        for asked in [1usize, 2, 3, 8] {
+            for workers in [1usize, 2, 4, 64] {
+                for items in [0usize, 1, 2, 7, 50] {
+                    let mut seen = vec![(0u64, 0usize, usize::MAX); items];
+                    let whole = with_budget(asked, || {
+                        each_run_mut(&mut seen, workers, |first, run| {
+                            for (offset, slot) in run.iter_mut().enumerate() {
+                                *slot = (thread_key(), budget(), first + offset);
+                            }
+                        });
+                        budget()
+                    });
+                    let context = format!("budget {asked}, workers {workers}, items {items}");
+                    assert!(
+                        seen.iter()
+                            .enumerate()
+                            .all(|(index, &(_, _, at))| at == index),
+                        "{context}: an item was given another's index"
+                    );
+                    let mut by_thread = std::collections::BTreeMap::new();
+                    for &(thread, share, _) in &seen {
+                        let known = by_thread.entry(thread).or_insert(share);
+                        assert_eq!(*known, share, "{context}");
+                    }
+                    let running = workers.min(whole).min(items);
+                    if items == 0 {
+                        assert!(by_thread.is_empty(), "{context}");
+                        continue;
+                    }
+                    if running <= 1 {
+                        assert_eq!(
+                            by_thread.into_iter().collect::<Vec<_>>(),
+                            [(thread_key(), whole)],
+                            "{context}: on the caller's thread with its budget"
+                        );
+                        continue;
+                    }
+                    assert!(
+                        by_thread.len() <= running,
+                        "{context}: too many threads ran"
+                    );
+                    assert!(
+                        !by_thread.contains_key(&thread_key()),
+                        "{context}: the caller's thread took a run"
+                    );
+                    for share in by_thread.values() {
+                        assert_eq!(*share, (whole / running).max(1), "{context}");
+                    }
+                    assert!(by_thread.values().sum::<usize>() <= whole, "{context}");
+                }
+            }
+        }
     }
 
     #[test]

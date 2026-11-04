@@ -173,6 +173,14 @@ what a consumer must change, not everything that moved.
 
 ### Fixed
 
+- **Two of `gf2::filter_merge`'s fan-outs kept the caller's budget.** The
+  release of retired rows' entries and the sorting of the transposed lists
+  cut their work into eight runs a thread and spawned a thread for every
+  run, up to eight times the budget, each run's thread seeing the
+  machine's count rather than a share. Both go through the bounded
+  in-place fan-out now, at most the budget's threads, each with its
+  share, one worker inline, the runs taken from a cursor as before.
+
 - **`gf2::Sequence::from_bytes`, `Generators::from_bytes` and
   `Iterated::from_bytes` take exactly one frame.** The sequence reader
   formed `64·of` unchecked, so a header claiming `of = 2⁵⁸` overflowed, a

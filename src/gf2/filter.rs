@@ -880,17 +880,12 @@ impl Filter {
     /// The entries of the rows retired side by side, given back.
     fn release(&mut self) {
         let threads = crate::parallel::budget();
-        let length = self.work.len().div_ceil(threads * CHUNKS_PER_THREAD).max(1);
         let live = &self.live;
-        std::thread::scope(|scope| {
-            for (number, rows) in self.work.chunks_mut(length).enumerate() {
-                scope.spawn(move || {
-                    for (index, row) in rows.iter_mut().enumerate() {
-                        if !live[number * length + index].load(Ordering::Relaxed) {
-                            *row = Vec::new();
-                        }
-                    }
-                });
+        crate::parallel::each_run_mut(&mut self.work, threads, |first, rows| {
+            for (index, row) in rows.iter_mut().enumerate() {
+                if !live[first + index].load(Ordering::Relaxed) {
+                    *row = Vec::new();
+                }
             }
         });
     }
@@ -1154,14 +1149,9 @@ impl Filter {
             pieces.push(piece);
             rest = after;
         }
-        let length = pieces.len().div_ceil(threads * CHUNKS_PER_THREAD).max(1);
-        std::thread::scope(|scope| {
-            for run in pieces.chunks_mut(length) {
-                scope.spawn(move || {
-                    for piece in run {
-                        piece.sort_unstable();
-                    }
-                });
+        crate::parallel::each_run_mut(&mut pieces, threads, |_, run| {
+            for piece in run {
+                piece.sort_unstable();
             }
         });
         (start, held)
