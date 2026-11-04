@@ -218,10 +218,15 @@ impl PrunedMatrix {
 /// every prime in the base appears in less than one relation, and those
 /// columns are singletons and empties the solver would pay for cubically.
 ///
-/// The pass itself is linear in the set bits. Per column it keeps how many
-/// live rows set it and the XOR of their indices; while the count is one that
-/// XOR *is* the surviving index, which makes finding a singleton's row a
-/// lookup rather than a scan.
+/// The pass reads every row's words once for the counts, `⌈C/64⌉` words a
+/// row for `C` declared columns whatever the row holds, once more for each
+/// row removed, and once more for each row repacked, so at most
+/// `2·R·⌈C/64⌉` word reads for `R` rows and a constant per set bit besides;
+/// it holds three words a column, the occupant count, the XOR of the
+/// occupants' indices and the new number, with a flag a row, and writes the
+/// surviving rows at the new width. While a column's count is one that XOR
+/// *is* the surviving index, which makes finding a singleton's row a lookup
+/// rather than a scan.
 #[must_use]
 pub fn prune_singletons(rows: &[Vec<u64>], columns: usize) -> PrunedMatrix {
     let count = rows.len();
@@ -3274,6 +3279,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// No column has an occupant, so no row is a singleton's and none goes;
+    /// every column is empty and goes, so the rows come back at width zero,
+    /// each a row of no words. The pass is a read of every word of every
+    /// row, a hundred thousand here, with nothing set in them.
+    #[test]
+    fn empty_rows_all_survive_and_every_column_goes() {
+        let columns = 65_536;
+        let rows = vec![vec![0u64; words_for(columns)]; 100];
+        let pruned = prune_singletons(&rows, columns);
+        assert_eq!(pruned.original(), (0..100).collect::<Vec<_>>().as_slice());
+        assert_eq!(pruned.columns(), 0);
+        assert!(pruned.rows().iter().all(Vec::is_empty));
     }
 
     #[test]
