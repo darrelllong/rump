@@ -98,11 +98,17 @@ const BLOCKS_PER_WORKER: usize = 8;
 /// Each thread's budget is its share of the caller's, so what `map` fans out
 /// in its turn stays within the whole.
 ///
+/// The contract: `map` is called once on each item, with its index, and
+/// the result is `items.iter().enumerate().map(..).collect()` whatever the
+/// schedule, provided `map` depends on nothing the threads share mutably;
+/// a panic in `map` ends every worker and is raised again on the caller's
+/// thread. One thread, or one item, runs on the caller's thread under the
+/// caller's budget.
+///
 /// The threads take the items from a shared cursor a block at a time,
-/// [`BLOCKS_PER_WORKER`] blocks to a thread's share: the items of a tree's
-/// level can differ in cost by the width of their operands. One thread, or
-/// one item, runs on the caller's.
-pub(crate) fn map_ordered<T, R, F>(items: &[T], workers: usize, map: F) -> Vec<R>
+/// `BLOCKS_PER_WORKER` (eight) blocks to a thread's share: the items of a
+/// tree's level can differ in cost by the width of their operands.
+pub fn map_ordered<T, R, F>(items: &[T], workers: usize, map: F) -> Vec<R>
 where
     T: Sync,
     R: Send,

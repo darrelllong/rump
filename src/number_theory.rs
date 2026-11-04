@@ -1652,6 +1652,25 @@ pub fn product_tree(values: &[BigUint]) -> ProductTree {
     ProductTree { levels }
 }
 
+/// The product of `values` alone: the root of their [`product_tree`] with
+/// the tree's work, `O(M(N) log n)` for total input size `N`, and a level's
+/// space, the level being read and the one being built, where the tree
+/// keeps every level for [`remainder_tree`]. One for no values, zero if any
+/// is zero. Each level is spread over the caller's
+/// [`budget`](crate::parallelism::budget) as the tree's are.
+#[must_use]
+pub fn product(values: &[BigUint]) -> BigUint {
+    let mut level = match values {
+        [] => return BigUint::one(),
+        [only] => return only.clone(),
+        many => products_of_pairs(many, crate::parallel::threads_for(product_work(many))),
+    };
+    while level.len() > 1 {
+        level = products_of_pairs(&level, crate::parallel::threads_for(product_work(&level)));
+    }
+    level.pop().expect("a level of one")
+}
+
 /// The work of the level above `below`, in products of two limbs.
 fn product_work(below: &[BigUint]) -> usize {
     below
@@ -7049,6 +7068,34 @@ mod tests {
         // part over {2}, so the error must not claim "not a prime".
         assert!(super::SmoothnessBase::new(&[4]).is_ok());
         assert!(super::SmoothnessBase::new(&[2, 3, 5]).is_ok());
+    }
+
+    /// The product alone is the tree's root at every budget, one of nothing,
+    /// a lone value itself, and zero with a zero among the values.
+    #[test]
+    fn product_is_the_root_of_the_tree() {
+        use super::product;
+        use crate::parallelism::with_budget;
+        const SEED: u64 = 0x9c3b_0d41_2a7f;
+        let mut rng = SplitMix64 { state: SEED };
+        assert_eq!(product(&[]), BigUint::one());
+        let lone = BigUint::from_u64(0x1234_5678_9abc);
+        assert_eq!(product(std::slice::from_ref(&lone)), lone);
+        for count in [2usize, 3, 7, 64, 1001] {
+            let values: Vec<BigUint> = (0..count)
+                .map(|_| draw_below(&mut rng, &pow2(200)))
+                .collect();
+            let root = product_tree(&values).root().expect("non-empty").clone();
+            for budget in [1usize, 2, 8] {
+                assert_eq!(
+                    with_budget(budget, || product(&values)),
+                    root,
+                    "{count} values at a budget of {budget}"
+                );
+            }
+        }
+        let with_zero = [BigUint::from_u64(6), BigUint::zero(), BigUint::from_u64(5)];
+        assert!(product(&with_zero).is_zero());
     }
 
     #[test]

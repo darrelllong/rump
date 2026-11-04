@@ -82,9 +82,10 @@ pub mod number_theory {
         crt_combine, crt_combine_balanced, crt_combine_u64, gcd, gcd_extended, gcd_u128, gcd_u64,
         is_lucas_probable_prime, is_prime_aks, is_probable_prime, is_probable_prime_bpsw,
         is_strong_lucas_probable_prime, jacobi, jacobi_u64, kronecker, lcm, legendre,
-        miller_rabin_with_bases, miller_rabin_witness, primes_below, primes_past, product_tree,
-        rational_reconstruct, rational_reconstruct_bounded, remainder_tree, remove_factor,
-        smooth_parts, valuation, CrtBasis, ProductTree, SmoothnessBase, SmoothnessBaseError,
+        miller_rabin_with_bases, miller_rabin_witness, primes_below, primes_past, product,
+        product_tree, rational_reconstruct, rational_reconstruct_bounded, remainder_tree,
+        remove_factor, smooth_parts, valuation, CrtBasis, ProductTree, SmoothnessBase,
+        SmoothnessBaseError,
     };
 }
 
@@ -133,7 +134,7 @@ pub mod lattice {
 /// threads can do together.
 pub mod parallelism {
     pub use crate::machine::{gather_costs, GatherCosts};
-    pub use crate::parallel::{budget, with_budget};
+    pub use crate::parallel::{budget, map_ordered, with_budget};
 }
 
 /// Sampling, driven entirely by a caller-supplied byte source.
