@@ -1053,6 +1053,47 @@ impl PolyZ {
         acc
     }
 
+    /// The homogeneous value `∑ cᵢ·aⁱ·b^{d−i}` at integers: `bᵈ·f(a/b)`,
+    /// the number field sieve's norm of `a − bα` up to sign, which it asks
+    /// for every pair it sieves. Horner in `a` with a running power of
+    /// `b`, three multiplications and an addition a coefficient below the
+    /// leading one and no polynomial in between, where
+    /// [`Self::homogeneous_substitution`] at constant arguments would
+    /// build two ladders of constant polynomials. Zero for the zero
+    /// polynomial.
+    #[must_use]
+    pub fn homogeneous_at(&self, a: &BigInt, b: &BigInt) -> BigInt {
+        let Some(degree) = self.degree() else {
+            return BigInt::zero();
+        };
+        let mut acc = self.coeffs[degree].clone();
+        let mut b_power = BigInt::one();
+        for coeff in self.coeffs[..degree].iter().rev() {
+            b_power = b_power.mul(b);
+            acc = acc.mul(a).add(&coeff.mul(&b_power));
+        }
+        acc
+    }
+
+    /// `f(x + t)`, exactly, by Horner's synthetic division: `d` passes of
+    /// division by `x − t`, each leaving a remainder that is the next
+    /// coefficient of the translate (Taylor's expansion at `t`),
+    /// `d(d + 1)/2` multiplications by `t` and no polynomial product,
+    /// where [`Self::homogeneous_substitution`] at `x + t` and one would
+    /// raise `x + t` to every power.
+    #[must_use]
+    pub fn translate(&self, t: &BigInt) -> Self {
+        let mut coeffs = self.coeffs.clone();
+        let degree = coeffs.len().saturating_sub(1);
+        for pass in 0..degree {
+            for j in (pass..degree).rev() {
+                let carry = coeffs[j + 1].mul(t);
+                coeffs[j] = coeffs[j].add(&carry);
+            }
+        }
+        Self::new(coeffs)
+    }
+
     /// The formal derivative `∑ i·cᵢ·xⁱ⁻¹` — formal in that it is defined by
     /// the coefficient rule rather than by a limit, so it exists over any
     /// coefficient ring and obeys the product rule algebraically. Computed
@@ -5781,6 +5822,74 @@ mod tests {
             PolyZ::constant(BigInt::one())
         );
         assert!(PolyZ::product_mod_monic(&[], &PolyZ::from_i64_slice(&[1])).is_zero());
+    }
+
+    /// The value at integers is the substitution's at constants, and `bᵈ·f(q)`
+    /// at `a = q·b`; the sign of `b` is carried by the powers.
+    #[test]
+    fn homogeneous_at_is_the_substitution_at_constants() {
+        const CASES: usize = 150;
+        const SEED: u64 = 0x7a19_4c02_e5d3;
+        let mut rng = SplitMix64 { state: SEED };
+        assert!(PolyZ::zero()
+            .homogeneous_at(&BigInt::from_i64(3), &BigInt::from_i64(5))
+            .is_zero());
+        for _ in 0..CASES {
+            let f = rng.poly_z(6, 30);
+            let Some(degree) = f.degree() else { continue };
+            let a = rng.coeff(20);
+            let b = rng.coeff(20);
+            assert_eq!(
+                PolyZ::constant(f.homogeneous_at(&a, &b)),
+                f.homogeneous_substitution(
+                    &PolyZ::constant(a.clone()),
+                    &PolyZ::constant(b.clone())
+                ),
+                "at constants"
+            );
+            assert_eq!(
+                f.homogeneous_at(&a, &BigInt::one()),
+                f.evaluate(&a),
+                "b = 1"
+            );
+            assert_eq!(
+                f.homogeneous_at(&BigInt::one(), &BigInt::zero()),
+                f.leading_coefficient(),
+                "b = 0"
+            );
+            let q = rng.coeff(12);
+            if !b.is_zero() {
+                let mut want = f.evaluate(&q);
+                for _ in 0..degree {
+                    want = want.mul(&b);
+                }
+                assert_eq!(f.homogeneous_at(&q.mul(&b), &b), want, "bᵈ·f(q) at a = q·b");
+            }
+        }
+    }
+
+    /// `f(x + t)` is the substitution at `x + t` and one, agrees with `f`
+    /// at shifted points, translates back by `−t`, and is `f` at `t = 0`.
+    #[test]
+    fn translate_is_the_substitution_at_a_shifted_variable() {
+        const CASES: usize = 150;
+        const SEED: u64 = 0x2d8e_90f1_7b64;
+        let mut rng = SplitMix64 { state: SEED };
+        let one = PolyZ::constant(BigInt::one());
+        assert!(PolyZ::zero().translate(&BigInt::from_i64(7)).is_zero());
+        for _ in 0..CASES {
+            let f = rng.poly_z(6, 30);
+            let t = rng.coeff(20);
+            let shifted = PolyZ::new(vec![t.clone(), BigInt::one()]);
+            let translated = f.translate(&t);
+            assert_eq!(translated, f.homogeneous_substitution(&shifted, &one));
+            assert_eq!(f.translate(&BigInt::zero()), f);
+            assert_eq!(translated.translate(&t.negated()), f, "back by −t");
+            for _ in 0..3 {
+                let x = rng.coeff(20);
+                assert_eq!(translated.evaluate(&x), f.evaluate(&x.add(&t)));
+            }
+        }
     }
 
     #[test]
