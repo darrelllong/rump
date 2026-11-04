@@ -46,7 +46,9 @@
 use std::sync::Arc;
 
 use super::generator::{halves_from, product, steps, transpose, Degrees, Polynomials};
-use super::{any, lane, Block, SmallProduct, Sparse, SparseMatrix, WIDTH};
+use std::mem::size_of;
+
+use super::{any, lane, sum, Block, Shape, SmallProduct, Sparse, SparseMatrix, RECORDS, WIDTH};
 use crate::random::RandomSource;
 
 /// The coordinates each vector of `x` sums: a row of `aₖ` is then the XOR
@@ -603,10 +605,11 @@ pub fn matrix_fingerprint(matrix: &SparseMatrix) -> u64 {
 /// Slice `slice` of `of` of the sequence, `terms` terms long: from the
 /// start, or on from `from`, a shorter slice of the same matrix, seed and
 /// place ([`Sequence::continues`]), whose terms are kept. `None` for a
-/// matrix with no rows or no columns, a slice out of range, or a `from`
-/// that is not this slice's: a prior of another matrix, seed or place is
-/// refused, not silently begun again, so that a caller keeping slices
-/// learns of the mismatch before the work.
+/// matrix with no rows or no columns, a slice out of range, a slab of
+/// `terms · 64 · of` words past `usize`, or a `from` that is not this
+/// slice's: a prior of another matrix, seed or place is refused, not
+/// silently begun again, so that a caller keeping slices learns of the
+/// mismatch before the work; each refusal comes before any request.
 #[must_use]
 pub fn wiedemann_sequence(
     matrix: &SparseMatrix,
@@ -625,25 +628,31 @@ pub fn wiedemann_sequence(
     let dimension = count.max(columns);
     let fingerprint = matrix_fingerprint(matrix);
     let supports = supports(seed, of, columns);
+    if from.is_some_and(|from| {
+        !from.is_of(fingerprint, seed, slice, of) || from.dimension != dimension
+    }) {
+        return None;
+    }
+    // The slab at its whole length from the start, one request, so that
+    // what the stage holds is what it says; a length past `usize` is no
+    // slab.
+    let length = terms
+        .max(from.map_or(0, Sequence::terms))
+        .checked_mul(WIDTH)?
+        .checked_mul(of)?;
+    let mut slabs = Vec::with_capacity(length);
     let mut image = Block::zeroed(dimension);
-    let (mut v, mut slabs, done) = match from {
+    let (mut v, done) = match from {
         Some(from) => {
-            if !from.is_of(fingerprint, seed, slice, of) || from.dimension != dimension {
-                return None;
-            }
-            (
-                Block::of(from.last.iter().copied()),
-                from.terms.clone(),
-                from.terms(),
-            )
+            slabs.extend_from_slice(&from.terms);
+            (Block::of(from.last.iter().copied()), from.terms())
         }
         None => {
             let mut v = z_slice(seed, slice, dimension);
             advance(&sparse, &mut v, &mut image);
-            (v, Vec::new(), 0)
+            (v, 0)
         }
     };
-    slabs.reserve(terms.saturating_sub(done) * WIDTH * of);
     for term in done..terms {
         if term > 0 {
             advance(&sparse, &mut v, &mut image);
@@ -662,6 +671,61 @@ pub fn wiedemann_sequence(
         terms: slabs,
         last: v.words().collect(),
     })
+}
+
+/// The bytes [`wiedemann_sequence`] holds at its peak on `threads`
+/// threads, over the matrix and the prior its caller holds, for a slice
+/// of `of` to `terms` terms, for a caller to admit the stage against a
+/// memory before the work; `None` where a term passes `u64`. For `R` rows,
+/// `Z` entries, `C` declared columns, `C′` columns some row sets, `D` the
+/// dense columns taken as masks (128, or the columns rounded down to a
+/// byte's worth when fewer), `Zₛ` the entries outside them and
+/// `M = max(R, C′)`, the greater of:
+///
+/// - taking the matrix apart for `M·x`: the rows' clone, `24R + 4Z`, and
+///   what that holds beside it, the numbering of the declared columns
+///   `4C`, the set columns' weights, order, number and bit `28C′`, the
+///   masks `R·D/8` and the lists by column `24(C′ − D) + 4Zₛ`;
+/// - the recurrence, at its last term: the flat lists by column
+///   `8(C′ − D + 1) + 4Zₛ`, the masks, the cuts and the solver's records,
+///   the blocks `v` and its image with their arcs `16M + 80`, the
+///   supports `2048·of`, the slab `512·of·terms` and the last block's
+///   copy `8M`; and at a term before, in place of that copy, the pass's
+///   own requests: the fold's sums, `2 KiB` a run, or the dense tables
+///   and columns, `264·D` a thread, each with its closure's arc.
+///
+/// The cuts are one run on one thread and eight a thread otherwise, and
+/// the pool has a handle and a parker a thread beyond the first;
+/// `threads` is the count the stage is given, which it only lowers. The
+/// sizes are the allocation requests the stage makes, which the allocator
+/// may round, plus [`RECORDS`] for the platform's locks and a pass's
+/// records below a word. The query itself holds `4C` bytes, a weight a
+/// column, while it runs, and reads every entry once.
+#[must_use]
+pub fn wiedemann_sequence_bytes(
+    matrix: &SparseMatrix,
+    of: usize,
+    terms: usize,
+    threads: usize,
+) -> Option<u64> {
+    let shape = Shape::of(matrix);
+    let (of, terms) = (of as u64, terms as u64);
+    let threads = threads.max(1);
+    let dimension = shape.rows.max(shape.set);
+    let taking = sum([
+        Shape::vectors(shape.rows, shape.entries),
+        Sparse::build_bytes(&shape, false),
+    ])?;
+    let standing = sum([
+        Sparse::held_bytes(&shape, false, threads),
+        dimension.checked_mul(16),
+        Some(2 * (16 + size_of::<Block>() as u64)),
+        of.checked_mul(WIDTH as u64 * (X_WEIGHT as u64) * 8),
+        of.checked_mul(terms)?.checked_mul(WIDTH as u64 * 8),
+    ])?;
+    let last = standing.checked_add(dimension.checked_mul(8)?)?;
+    let passing = standing.checked_add(Sparse::forward_pass_bytes(&shape, threads)?)?;
+    taking.max(last).max(passing).checked_add(RECORDS)
 }
 
 /// Where the generator's iteration stopped: `A·F = G + Xᵗ·E` at `t`, with

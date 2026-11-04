@@ -1,0 +1,239 @@
+//! What a stage says it holds is what it requests. A stage that states
+//! its peak bytes from its inputs, for a caller to admit it against a
+//! memory before the work, is run here on one thread under a counting
+//! allocator, and the peak of the requests live on that thread is within
+//! the statement, whose enumerated terms, `RECORDS` below it, are within
+//! `RECORDS` of the peak either way.
+//!
+//! Requests are counted, not resident pages: an allocation counts from its
+//! request, a reallocation by its change and a release by its size, on
+//! the thread that makes it and only while that thread is measuring; a
+//! release there of what was allocated before the measure began is not
+//! let take the count below zero.
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+
+use rump::gf2::{
+    filter_floor, filter_merge_within, wiedemann_sequence, wiedemann_sequence_bytes,
+    wiedemann_terms_most_of, SparseMatrix, RECORDS,
+};
+use rump::parallelism::with_budget;
+
+struct Counting;
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+thread_local! {
+    static MEASURING: Cell<bool> = const { Cell::new(false) };
+    static LIVE: Cell<usize> = const { Cell::new(0) };
+    static PEAK: Cell<usize> = const { Cell::new(0) };
+}
+
+fn note(change: isize) {
+    let _ = MEASURING.try_with(|measuring| {
+        if !measuring.get() {
+            return;
+        }
+        let _ = LIVE.try_with(|live| {
+            let now = live.get().saturating_add_signed(change);
+            live.set(now);
+            let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
+        });
+    });
+}
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() {
+            note(layout.size() as isize);
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+        note(-(layout.size() as isize));
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let moved = unsafe { System.realloc(pointer, layout, new_size) };
+        if !moved.is_null() {
+            note(new_size as isize - layout.size() as isize);
+        }
+        moved
+    }
+}
+
+/// `work`'s result, and the peak of the bytes requested and not yet
+/// released on this thread while it ran, over what it held at the start.
+fn peak_while<R>(work: impl FnOnce() -> R) -> (R, u64) {
+    LIVE.with(|live| live.set(0));
+    PEAK.with(|peak| peak.set(0));
+    MEASURING.with(|measuring| measuring.set(true));
+    let result = work();
+    MEASURING.with(|measuring| measuring.set(false));
+    (result, PEAK.with(Cell::get) as u64)
+}
+
+/// A matrix as a sieve's is: `rows` relations of up to `weight` columns
+/// each among `columns`, from a xorshift state.
+fn sieve_like(rows: usize, columns: usize, weight: usize, mut state: u64) -> SparseMatrix {
+    let mut draw = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let lists = (0..rows)
+        .map(|_| {
+            let mut row: Vec<u32> = (0..weight)
+                .map(|_| (draw() % columns as u64) as u32)
+                .collect();
+            row.sort_unstable();
+            row.dedup();
+            row
+        })
+        .collect();
+    SparseMatrix::new(columns, lists)
+}
+
+/// The peak within the statement, and the statement's enumerated terms,
+/// which are `RECORDS` below it, within `RECORDS` of the peak either way.
+fn within(peak: u64, stated: u64, what: &str) {
+    eprintln!(
+        "{what}: {peak} requested, {stated} stated, {}",
+        stated as i64 - peak as i64
+    );
+    assert!(
+        peak <= stated && stated - peak <= 2 * RECORDS,
+        "{what}: {peak} requested, {stated} stated"
+    );
+}
+
+/// The sequence stage, from the start and on from a prior, on matrices
+/// with and without dense columns and with more columns than rows.
+#[test]
+fn the_sequence_stage_holds_what_it_states() {
+    const OF: usize = 2;
+    for (rows, columns, weight) in [(700usize, 600usize, 12usize), (300, 1_000, 5), (64, 40, 3)] {
+        let matrix = sieve_like(rows, columns, weight, 0x5eed_0000 + rows as u64);
+        let whole = wiedemann_terms_most_of(rows.max(columns), OF);
+        let first = whole / 3;
+        let stated = |terms| wiedemann_sequence_bytes(&matrix, OF, terms, 1).expect("fits");
+        let (prior, peak) = with_budget(1, || {
+            peak_while(|| wiedemann_sequence(&matrix, 7, 1, OF, first, None, 1).expect("a slice"))
+        });
+        within(
+            peak,
+            stated(first),
+            &format!("{rows}×{columns} from the start"),
+        );
+        let (_, peak) = with_budget(1, || {
+            peak_while(|| {
+                wiedemann_sequence(&matrix, 7, 1, OF, whole, Some(&prior), 1).expect("a slice")
+            })
+        });
+        within(
+            peak,
+            stated(whole),
+            &format!("{rows}×{columns} on from a prior"),
+        );
+    }
+}
+
+/// Refusals come before any request: a prior of another seed with a slab
+/// past `usize` is refused, not a capacity overflow; a thread count past
+/// the arithmetic is no statement; and a query's own scratch is a weight
+/// a column, stated.
+#[test]
+fn refusals_come_before_requests() {
+    let matrix = sieve_like(64, 40, 3, 0x5eed_0040);
+    let prior = wiedemann_sequence(&matrix, 7, 0, 2, 4, None, 1).expect("a slice");
+    assert!(wiedemann_sequence(&matrix, 8, 0, 2, usize::MAX / 64, Some(&prior), 1).is_none());
+    assert!(wiedemann_sequence(&matrix, 7, 0, 2, usize::MAX / 64, Some(&prior), 1).is_none());
+    assert!(wiedemann_sequence_bytes(&matrix, 2, 8, usize::MAX).is_none());
+    assert!(filter_floor(&matrix, 8, 32, usize::MAX).is_none());
+    let (_, peak) = with_budget(1, || {
+        peak_while(|| wiedemann_sequence_bytes(&matrix, 2, 8, 1))
+    });
+    assert_eq!(peak, 4 * 40, "the query's scratch");
+    let (_, peak) = with_budget(1, || peak_while(|| filter_floor(&matrix, 8, 32, 1)));
+    assert_eq!(peak, 4 * 40, "the query's scratch");
+}
+
+/// The filter: at its floor as the limit the requests' peak is within the
+/// floor and within what it reports it held; with no limit, within what it
+/// reports, and that within `RECORDS` above the requests; below the floor
+/// it is refused with the floor, and where the whole merge needed more
+/// than the floor, the merge at the floor stopped short. The matrix is
+/// made inside the measure, since the filter takes it.
+#[test]
+fn the_filter_holds_what_it_states() {
+    const CAP: usize = 8;
+    for (rows, columns, weight, excess) in [
+        (2_000usize, 4_000usize, 10usize, 32usize),
+        (2_000, 1_200, 4, 400),
+    ] {
+        let seed = 0xf11e_0000 + rows as u64;
+        let floor =
+            filter_floor(&sieve_like(rows, columns, weight, seed), CAP, excess, 1).expect("fits");
+        let (at_floor, peak) = with_budget(1, || {
+            peak_while(|| {
+                let matrix = sieve_like(rows, columns, weight, seed);
+                filter_merge_within(matrix, CAP, excess, floor).expect("at the floor")
+            })
+        });
+        eprintln!(
+            "{rows}×{columns} at the floor: {peak} requested, {floor} stated, {} reported",
+            at_floor.peak_bytes()
+        );
+        assert!(
+            peak <= floor,
+            "{rows}×{columns} at the floor: {peak} requested, {floor} stated"
+        );
+        assert!(
+            peak <= at_floor.peak_bytes() && at_floor.peak_bytes() - peak <= 2 * RECORDS,
+            "{rows}×{columns} at the floor: {peak} requested, {} reported",
+            at_floor.peak_bytes()
+        );
+        let (merged, peak) = with_budget(1, || {
+            peak_while(|| {
+                let matrix = sieve_like(rows, columns, weight, seed);
+                filter_merge_within(matrix, CAP, excess, u64::MAX).expect("no limit")
+            })
+        });
+        eprintln!(
+            "{rows}×{columns} unlimited: {peak} requested, {} reported",
+            merged.peak_bytes()
+        );
+        assert!(
+            peak <= merged.peak_bytes() && merged.peak_bytes() - peak <= 2 * RECORDS,
+            "{rows}×{columns} unlimited: {peak} requested, {} reported",
+            merged.peak_bytes()
+        );
+        // A limit binds: below the floor the filter is refused with it,
+        // and where the whole merge needed more than the floor, the merge
+        // at the floor stopped short of it.
+        let refused = with_budget(1, || {
+            filter_merge_within(
+                sieve_like(rows, columns, weight, seed),
+                CAP,
+                excess,
+                floor - 1,
+            )
+            .map(|_| ())
+            .expect_err("below the floor")
+        });
+        assert_eq!(refused, floor);
+        assert!(merged.rows().len() <= at_floor.rows().len());
+        if merged.peak_bytes() > floor {
+            assert!(
+                merged.rows().len() < at_floor.rows().len(),
+                "the limit did not bind"
+            );
+        }
+    }
+}

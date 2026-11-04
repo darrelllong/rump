@@ -20,6 +20,7 @@
 //! is arithmetic *in* the field GF(2^m); here GF(2) is the field the linear
 //! algebra happens over.
 
+use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 use std::thread::Thread;
@@ -29,16 +30,18 @@ use crate::random::RandomSource;
 
 #[path = "gf2/filter.rs"]
 mod filter;
-pub use filter::{filter_merge, FilteredMatrix, MatrixBytesError, SparseMatrix};
+pub use filter::{
+    filter_floor, filter_merge, filter_merge_within, FilteredMatrix, MatrixBytesError, SparseMatrix,
+};
 #[path = "gf2/generator.rs"]
 mod generator;
 #[path = "gf2/wiedemann.rs"]
 mod wiedemann;
 pub use wiedemann::{
     block_wiedemann_dependencies_sparse, matrix_fingerprint, wiedemann_finish,
-    wiedemann_generators, wiedemann_sequence, wiedemann_solution, wiedemann_terms,
-    wiedemann_terms_most, wiedemann_terms_most_of, Generated, Generators, Iterated, Sequence,
-    WiedemannBytesError,
+    wiedemann_generators, wiedemann_sequence, wiedemann_sequence_bytes, wiedemann_solution,
+    wiedemann_terms, wiedemann_terms_most, wiedemann_terms_most_of, Generated, Generators,
+    Iterated, Sequence, WiedemannBytesError,
 };
 
 /// Bits per storage word.
@@ -369,6 +372,205 @@ const WIDTH: usize = 64;
 /// A dense `64 × 64` matrix over `GF(2)`, one word per row.
 type Small = [u64; WIDTH];
 
+/// What a matrix comes to in the solver's hands, for the bytes a stage
+/// states before it runs: the rows and their entries, the declared
+/// columns, the columns some row sets (the rest are numbered away), the
+/// dense columns taken as masks and the entries outside them. One pass
+/// over the entries and a selection of the heaviest columns.
+struct Shape {
+    rows: u64,
+    entries: u64,
+    declared: u64,
+    set: u64,
+    dense: u64,
+    sparse_entries: u64,
+}
+
+impl Shape {
+    /// Holds a weight a column, `4C` bytes, while it runs: a column's
+    /// weight is below the rows, which the solver counts in thirty-two
+    /// bits. The dense columns are the heaviest among all, which are among
+    /// the set, there being no more of them than set columns.
+    fn of(matrix: &SparseMatrix) -> Self {
+        let mut weights = vec![0u32; matrix.columns()];
+        for &column in matrix.rows().iter().flatten() {
+            weights[column as usize] += 1;
+        }
+        let set = weights.iter().filter(|&&weight| weight > 0).count();
+        let entries: u64 = weights.iter().map(|&weight| u64::from(weight)).sum();
+        let dense = Dense::count_for(set);
+        let in_dense: u64 = if dense == 0 {
+            0
+        } else {
+            let from = weights.len() - dense;
+            weights.select_nth_unstable(from);
+            weights[from..]
+                .iter()
+                .map(|&weight| u64::from(weight))
+                .sum()
+        };
+        Self {
+            rows: matrix.rows().len() as u64,
+            entries,
+            declared: matrix.columns() as u64,
+            set: set as u64,
+            dense: dense as u64,
+            sparse_entries: entries - in_dense,
+        }
+    }
+
+    /// The columns outside the dense.
+    fn sparse(&self) -> u64 {
+        self.set - self.dense
+    }
+
+    /// The masks, a byte of every eight dense columns a row.
+    fn masks(&self) -> Option<u64> {
+        self.rows.checked_mul(self.dense / 8)
+    }
+
+    /// A list of `lists` lists of `indices` entries, as [`Lists`] holds
+    /// it: the offsets and the indices.
+    fn flat(lists: u64, indices: u64) -> Option<u64> {
+        (lists + 1)
+            .checked_mul(8)?
+            .checked_add(indices.checked_mul(4)?)
+    }
+
+    /// `lists` vectors of `indices` entries in all: a header and the
+    /// entries each.
+    fn vectors(lists: u64, indices: u64) -> Option<u64> {
+        lists.checked_mul(24)?.checked_add(indices.checked_mul(4)?)
+    }
+}
+
+/// A sum of sizes, `None` past `u64`.
+fn sum(terms: impl IntoIterator<Item = Option<u64>>) -> Option<u64> {
+    terms
+        .into_iter()
+        .try_fold(0u64, |total, term| total.checked_add(term?))
+}
+
+impl Sparse {
+    /// The bytes [`Self::build`] holds at its peak on one thread, over the
+    /// rows it is given: the greater of its two moments. Taking the dense
+    /// columns out holds the numbering of the declared columns, `4C`; the
+    /// weights, order, number and bit of the set columns, `28C′`; the
+    /// masks, `R·D/8`; and the lists by column of the entries outside the
+    /// dense, `24(C′ − D) + 4Zₛ`. Flattening then holds the numbering,
+    /// the weights, the masks and those lists beside the flat lists by
+    /// column, `8(C′ − D + 1) + 4Zₛ`, and, for both products, the flat
+    /// lists by relation, `8(R + 1) + 4Zₛ`, which are made first and held
+    /// through it; for one product the relations' offsets alone, `8(R +
+    /// 1)`, while the rows are still held, for the dense pass's runs.
+    fn build_bytes(shape: &Shape, both: bool) -> Option<u64> {
+        let numbering = shape.declared.checked_mul(4)?;
+        let by_column = Shape::vectors(shape.sparse(), shape.sparse_entries)?;
+        let taking = sum([
+            Some(numbering),
+            shape.set.checked_mul(28),
+            shape.masks(),
+            Some(by_column),
+        ])?;
+        let flattening = sum([
+            Some(numbering),
+            shape.set.checked_mul(8),
+            shape.masks(),
+            Some(by_column),
+            Shape::flat(shape.sparse(), shape.sparse_entries),
+            if both {
+                Shape::flat(shape.rows, shape.sparse_entries)
+            } else {
+                Some(0)
+            },
+        ])?;
+        // For one product the relations' runs are cut from their offsets,
+        // `8(R + 1)`, made while the rows are still held.
+        let cutting = if both {
+            0
+        } else {
+            sum([
+                Some(numbering),
+                shape.set.checked_mul(8),
+                shape.masks(),
+                Some(by_column),
+                (shape.rows + 1).checked_mul(8),
+            ])?
+        };
+        Some(taking.max(flattening).max(cutting))
+    }
+
+    /// The runs the lists are cut into for `threads`: one on one thread,
+    /// [`RUNS_PER_THREAD`] a thread otherwise; `None` past `u64`.
+    fn runs_for(threads: usize) -> Option<u64> {
+        if threads == 1 {
+            Some(1)
+        } else {
+            (threads as u64).checked_mul(RUNS_PER_THREAD as u64)
+        }
+    }
+
+    /// The bytes a built `Sparse` holds on `threads` threads: the flat
+    /// lists by column, `8(C′ − D + 1) + 4Zₛ`, and by relation too for both
+    /// products, `8(R + 1) + 4Zₛ`, or for one product the empty lists'
+    /// offset, `8`; the masks, `R·D/8`; the two lists of cuts, `8(r + 1)`
+    /// each for `r` runs; and its records, the arcs over the lists, the
+    /// cuts, the masks and the pool's shared state, with the pool's handle
+    /// and parker a thread beyond the first. What the platform's locks
+    /// allocate on first use is outside this, as [`RECORDS`] says.
+    fn held_bytes(shape: &Shape, both: bool, threads: usize) -> Option<u64> {
+        let runs = Self::runs_for(threads)?;
+        let arc = |inner: usize| 16 + inner as u64;
+        let relation = if both {
+            Shape::flat(shape.rows, shape.sparse_entries)
+        } else {
+            Some(8)
+        };
+        sum([
+            Shape::flat(shape.sparse(), shape.sparse_entries),
+            relation,
+            shape.masks(),
+            runs.checked_add(1)?.checked_mul(16),
+            Some(2 * arc(size_of::<Lists>())),
+            Some(2 * arc(size_of::<Vec<usize>>())),
+            Some(arc(size_of::<Dense>())),
+            Some(arc(size_of::<Shared>())),
+            (threads as u64 - 1).checked_mul(
+                (size_of::<std::thread::JoinHandle<()>>() + size_of::<std::thread::Thread>())
+                    as u64,
+            ),
+        ])
+    }
+
+    /// The bytes a pass of `M·x` requests and releases, the greater of its
+    /// two halves, each with the arc over its closure: the fold's sums,
+    /// `2 KiB` a run, on each thread; then the dense pass's tables,
+    /// `256·D`, beside the thread's columns, `8D`, on each thread, with
+    /// the arc over the threads' shares and a share's lock each.
+    fn forward_pass_bytes(shape: &Shape, threads: usize) -> Option<u64> {
+        let threads = threads as u64;
+        let closure = 16 + 6 * size_of::<usize>() as u64;
+        let sums = Self::runs_for(threads as usize)?
+            .checked_mul(8 * (RUN_OUTPUTS as u64 + 1))?
+            .checked_add(closure)?;
+        let dense = sum([
+            shape.dense.checked_mul(256 + 8)?.checked_mul(threads),
+            Some(closure),
+            Some(16 + size_of::<Vec<Mutex<Vec<u64>>>>() as u64),
+            threads.checked_mul(size_of::<Mutex<Vec<u64>>>() as u64),
+        ])?;
+        Some(sums.max(dense))
+    }
+}
+
+/// What a stage's statement adds for the platform's records: its locks,
+/// which may allocate on their first use, and the records of a pass that
+/// are below a word, which the statement's enumerated terms miss either
+/// way, 128 bytes under them on macOS and 64 over them on Linux at the
+/// sequence stage; on one thread the solver holds six locks and a pass
+/// four, so a kibibyte covers either way.
+pub const RECORDS: u64 = 1024;
+
 /// Lists of indices stored flat: the indices of list `i` are
 /// `indices[offsets[i]..offsets[i + 1]]`. One allocation read in order, so
 /// the matrix product, which dominates a Lanczos run, takes no cache miss per
@@ -390,6 +592,7 @@ impl Lists {
         Self { offsets, indices }
     }
 
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.offsets.len() - 1
     }
@@ -404,20 +607,41 @@ impl Lists {
     /// has most of its entries in the columns of its smallest primes, so
     /// runs of as many lists each would give one worker most of the work.
     fn cuts(&self, parts: usize) -> Vec<usize> {
-        let total = self.indices.len();
-        let parts = parts.clamp(1, self.len().max(1));
-        let mut cuts = vec![0];
+        Self::cuts_from(&self.offsets, parts)
+    }
+
+    /// [`Self::cuts`] for lists of these lengths, which are not held: their
+    /// offsets are made, `8(n + 1)` bytes for `n` lists, and let go.
+    fn cuts_of(lengths: impl ExactSizeIterator<Item = usize>, parts: usize) -> Vec<usize> {
+        let mut offsets = Vec::with_capacity(lengths.len() + 1);
+        offsets.push(0);
+        let mut end = 0;
+        for length in lengths {
+            end += length;
+            offsets.push(end);
+        }
+        Self::cuts_from(&offsets, parts)
+    }
+
+    /// The cuts of lists whose `offsets` these are, into at most `parts`
+    /// runs: one request of `parts + 1` words.
+    fn cuts_from(offsets: &[usize], parts: usize) -> Vec<usize> {
+        let count = offsets.len() - 1;
+        let total = offsets[count];
+        let parts = parts.clamp(1, count.max(1));
+        let mut cuts = Vec::with_capacity(parts + 1);
+        cuts.push(0);
         for part in 1..parts {
             // The first list that ends past this part's share.
             let share = total / parts * part + total % parts * part / parts;
-            let cut = self.offsets.partition_point(|&offset| offset < share);
-            let cut = cut.min(self.len());
+            let cut = offsets.partition_point(|&offset| offset < share);
+            let cut = cut.min(count);
             if cut > *cuts.last().expect("non-empty") {
                 cuts.push(cut);
             }
         }
-        if self.len() > *cuts.last().expect("non-empty") {
-            cuts.push(self.len());
+        if count > *cuts.last().expect("non-empty") {
+            cuts.push(count);
         }
         cuts
     }
@@ -615,7 +839,7 @@ impl Dense {
     /// dense columns are numbered after them, heaviest first.
     fn take(by_relation: &mut [Vec<u32>], weights: &[usize]) -> (Self, Vec<Vec<u32>>) {
         let columns = weights.len();
-        let count = DENSE_COLUMNS.min(columns / 8 * 8);
+        let count = Self::count_for(columns);
         let sparse = columns - count;
         let mut order: Vec<usize> = (0..columns).collect();
         order.sort_unstable_by_key(|&c| core::cmp::Reverse((weights[c], c)));
@@ -665,6 +889,12 @@ impl Dense {
             masks,
         };
         (dense, by_column)
+    }
+
+    /// How many of `columns` are taken as masks: [`DENSE_COLUMNS`], or
+    /// the columns rounded down to a byte's worth when they are fewer.
+    fn count_for(columns: usize) -> usize {
+        DENSE_COLUMNS.min(columns / 8 * 8)
     }
 
     fn bytes(&self) -> usize {
@@ -798,12 +1028,15 @@ impl Sparse {
             let runs = Arc::new(lists.cuts(runs));
             (Arc::new(lists), runs)
         };
-        let (relation_lists, relation_runs) = listed(&by_relation);
-        let relation_lists = if both {
-            relation_lists
+        let (relation_lists, relation_runs) = if both {
+            listed(&by_relation)
         } else {
+            // The dense pass takes the relations in these runs whether or
+            // not `Mᵀ·y` is to be called, so the cuts are made from the
+            // lists' lengths alone, without the lists.
+            let runs = Arc::new(Lists::cuts_of(by_relation.iter().map(Vec::len), runs));
             drop(by_relation);
-            Arc::new(Lists::from_lists(&[]))
+            (Arc::new(Lists::from_lists(&[])), runs)
         };
         let (column_lists, column_runs) = listed(&by_column);
         Self {
