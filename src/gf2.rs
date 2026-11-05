@@ -92,14 +92,19 @@ fn borrow_two(rows: &mut [Vec<u64>], first: usize, second: usize) -> (&mut [u64]
 /// `rows.len() − rank` of them — so a caller whose first dependency is useless
 /// has genuinely different ones to try next.
 ///
-/// Gauss–Jordan with an appended identity block: each working row records
+/// Forward elimination with an appended identity block: each working row records
 /// which original rows have been folded into it, so when a row's matrix part
-/// reaches zero the identity part names the dependent set. Full reduction
-/// rather than echelon form, which is the same order of work and leaves the
-/// dependent rows exactly zero.
+/// reaches zero the identity part names the dependent set. Earlier pivot
+/// rows cannot become zero: later pivots are zero in every earlier pivot
+/// column. Only rows below a pivot need updating. Their values and order
+/// are the same as in full reduction, so the dependencies are the same.
 ///
-/// Cost is `O(columns · rows · (rows + columns)/64)` word operations, cubic
-/// and blind to sparsity. [`prune_singletons`] first, and
+/// For `r` rows, `c` columns, rank `p` and `w = ceil(c/64) + ceil(r/64)`,
+/// elimination costs at most `O(c·r + p·r·w)` word operations. Initialization
+/// costs `O(r·w)` and reading the dependencies costs `O(r·(r−p))` bit tests.
+/// The augmented workspace holds `r·w` words, beside the input and returned
+/// dependencies. This is still cubic in the worst case and blind to sparsity.
+/// [`prune_singletons`] first, and
 /// [`block_lanczos_dependencies`] instead once the matrix is large.
 #[must_use]
 pub fn dense_null_space(rows: &[Vec<u64>], columns: usize) -> Vec<Vec<usize>> {
@@ -128,7 +133,8 @@ pub fn dense_null_space(rows: &[Vec<u64>], columns: usize) -> Vec<Vec<usize>> {
         work.push(augmented);
     }
 
-    // Forward elimination: one pivot per column, cleared from every other row.
+    // Clear each pivot only from the unprocessed suffix. Earlier pivot
+    // rows cannot become zero and their final values are not returned.
     let mut pivot = 0usize;
     for column in 0..columns {
         let word = column / WORD;
@@ -139,8 +145,8 @@ pub fn dense_null_space(rows: &[Vec<u64>], columns: usize) -> Vec<Vec<usize>> {
         };
         work.swap(pivot, found);
 
-        for row in 0..count {
-            if row != pivot && work[row][word] & mask != 0 {
+        for row in pivot + 1..count {
+            if work[row][word] & mask != 0 {
                 let (source, target) = borrow_two(&mut work, pivot, row);
                 for (t, s) in target.iter_mut().zip(source.iter()) {
                     *t ^= *s;
@@ -299,7 +305,7 @@ pub fn prune_singletons(rows: &[Vec<u64>], columns: usize) -> PrunedMatrix {
 // ─── Block Lanczos ─────────────────────────────────────────────────────
 // Block Lanczos over GF(2).
 //
-// [`dense_null_space`] is Gauss–Jordan, which costs
+// [`dense_null_space`] uses dense elimination, which costs
 // `O(columns · rows · (rows + columns)/64)` and is blind to sparsity. Relation
 // matrices, such as a sieve's, carry a few dozen set bits per row across many
 // thousands of columns, and at that size elimination dominates.
@@ -3484,6 +3490,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every small matrix, checked by enumerating its dependent subsets.
+    /// Comparing the entire span also checks independence of the basis.
+    #[test]
+    fn dense_null_space_spans_every_small_binary_matrix() {
+        for rows_n in 0usize..=4 {
+            for columns in 0usize..=4 {
+                for matrix in 0u64..(1 << (rows_n * columns)) {
+                    let rows: Vec<Vec<u64>> = (0..rows_n)
+                        .map(|row| vec![(matrix >> (row * columns)) & ((1 << columns) - 1)])
+                        .collect();
+                    let expected: Vec<usize> = (0..(1 << rows_n))
+                        .filter(|&subset| {
+                            let mut sum = 0;
+                            for (index, row) in rows.iter().enumerate() {
+                                if subset & (1 << index) != 0 {
+                                    sum ^= row[0];
+                                }
+                            }
+                            sum == 0
+                        })
+                        .collect();
+                    let mut span = vec![0usize];
+                    for dependency in dense_null_space(&rows, columns) {
+                        let mask = dependency
+                            .iter()
+                            .fold(0usize, |mask, &row| mask ^ (1 << row));
+                        assert_ne!(mask, 0);
+                        let previous = span.clone();
+                        span.extend(previous.into_iter().map(|subset| subset ^ mask));
+                    }
+                    span.sort_unstable();
+                    assert_eq!(span, expected, "{rows_n} by {columns}, bits {matrix:x}");
+                }
+            }
+        }
+    }
+
+    /// A fixed basis order across a word edge, with duplicate and zero rows.
+    /// Extra words and bits are padding; missing words are zero.
+    #[test]
+    fn dense_null_space_keeps_order_with_short_and_padded_rows() {
+        let rows = vec![
+            vec![3, 1],
+            vec![2, 1],
+            vec![1],
+            vec![3, 1, u64::MAX],
+            vec![],
+            vec![0, 2],
+        ];
+        assert_eq!(
+            dense_null_space(&rows, 65),
+            vec![vec![0, 1, 2], vec![0, 3], vec![4], vec![5]]
+        );
     }
 
     /// Bits above the declared width are not columns and must not be counted.
