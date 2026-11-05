@@ -108,6 +108,7 @@ path is the contract; physical splitting follows after names settle.
 | BigUint::mul_ref / BigInt::mul_ref | mul | done | |
 | BigUint::square_ref | square | done | |
 | BigInt::mul_biguint_ref | mul_biguint | done | |
+| crate-private BigInt::into_magnitude | BigInt::into_magnitude | pending public exposure | consumes the signed value and transfers its absolute-value limb buffer without copying; Rump owns storage, QS evaluation is the consumer. Distinct from borrowing magnitude() and cloning abs(). |
 | add_assign_ref / sub_assign_ref | removed; use += &rhs / -= &rhs | done | operator traits own receiver mutation |
 | assign_add / assign_sub | add_into / sub_into | done | caller-owned reusable output |
 | BigUint::modulo | rem | done | aligns with div_rem and rem_u64 |
