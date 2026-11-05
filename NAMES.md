@@ -235,7 +235,7 @@ prime-field promise.
 | gauss_reduce_weighted returning Option | return Result<_, ReductionError> | done | invalid basis/range is bad input |
 | no public lattice reduction error | lattice::ReductionError { DependentBasis, OutOfRange } | done | no weight variant after NonZeroU64 |
 | factoring dense null space | gf2::dense_null_space | done in Rump; consumer transfer | `(rows, columns) -> Vec<Vec<usize>>`; rows bit-packed little-endian, `u64` per word |
-| sparse-input dense null space | gf2::dense_null_space_sparse | pending | `(&SparseMatrix) -> Vec<Vec<usize>>`; pack only live columns in ascending order, preserving original row indices and the packed solver's ordered basis; Rump owns representation and elimination, callers own solver selection |
+| sparse-input dense null space | gf2::dense_null_space_sparse | done | `(&SparseMatrix) -> Vec<Vec<usize>>`; pack only live columns in ascending order, preserving original row indices and the packed solver's ordered basis; Rump owns representation and elimination, callers own solver selection |
 | factoring singleton peel | gf2::prune_singletons | done in Rump; consumer transfer | returns `PrunedMatrix` |
 | factoring `Reduced` | gf2::PrunedMatrix | done in Rump; consumer transfer | the result type the transfer needs; fields private behind `rows()`, `columns()`, `original()` |
 | factoring Block Lanczos | gf2::block_lanczos_dependencies | done in Rump; consumer transfer | takes `&mut R: RandomSource` rather than a `u64` seed — rump chooses no entropy source |

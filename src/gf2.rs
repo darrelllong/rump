@@ -133,6 +133,78 @@ pub fn dense_null_space(rows: &[Vec<u64>], columns: usize) -> Vec<Vec<usize>> {
         work.push(augmented);
     }
 
+    dense_dependencies(work, columns)
+}
+
+/// Dense row dependencies of a sparse matrix, omitting its empty columns.
+///
+/// Returns the same ordered basis of original row indices as
+/// `dense_null_space(&matrix.packed_rows(), matrix.columns())`. Live columns
+/// retain their ascending order, so removing empty columns changes neither
+/// the selected pivots nor the row operations. No row is removed or reordered
+/// during packing. This is still dense elimination; callers choose when the
+/// matrix is small enough for it.
+///
+/// For `r` rows, `C` original columns, `c` live columns and `z` nonzeros,
+/// packing costs `O(ceil(C/64) + z + r·w)` operations, where
+/// `w = ceil(c/64) + ceil(r/64)`. It builds the augmented workspace directly:
+/// `r·w` u64s, with no separate packed input copy. The column map holds one
+/// u64 mask and one usize prefix count per original word, and is released
+/// before elimination. The sparse input and returned dependencies are
+/// additional space. Elimination has [`dense_null_space`]'s cost with `c`
+/// columns; the identity block and output costs still depend on `r`.
+#[must_use]
+pub fn dense_null_space_sparse(matrix: &SparseMatrix) -> Vec<Vec<usize>> {
+    let count = matrix.rows().len();
+    if count == 0 {
+        return Vec::new();
+    }
+
+    // For each original word: its live-column mask and the number of live
+    // columns in earlier words. A column's new index is its rank in this set.
+    let mut live = vec![(0u64, 0usize); words_for(matrix.columns())];
+    for row in matrix.rows() {
+        for &column in row {
+            let column = column as usize;
+            live[column / WORD].0 |= 1u64 << (column % WORD);
+        }
+    }
+    let mut columns = 0;
+    for (mask, prefix) in &mut live {
+        *prefix = columns;
+        columns += mask.count_ones() as usize;
+    }
+
+    let matrix_words = words_for(columns);
+    let total_words = matrix_words + words_for(count);
+    let work = matrix
+        .rows()
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let mut augmented = vec![0u64; total_words];
+            for &column in row {
+                let column = column as usize;
+                let (mask, prefix) = live[column / WORD];
+                let earlier = mask & ((1u64 << (column % WORD)) - 1);
+                let compact = prefix + earlier.count_ones() as usize;
+                augmented[compact / WORD] |= 1u64 << (compact % WORD);
+            }
+            augmented[matrix_words + index / WORD] |= 1u64 << (index % WORD);
+            augmented
+        })
+        .collect();
+    drop(live);
+    dense_dependencies(work, columns)
+}
+
+/// Eliminate augmented rows whose matrix occupies `ceil(columns/64)` words
+/// and whose trailing identity records the original rows. Both constructors
+/// initialize that identity in the unchanged input row order.
+fn dense_dependencies(mut work: Vec<Vec<u64>>, columns: usize) -> Vec<Vec<usize>> {
+    let count = work.len();
+    let matrix_words = words_for(columns);
+
     // Clear each pivot only from the unprocessed suffix. Earlier pivot
     // rows cannot become zero and their final values are not returned.
     let mut pivot = 0usize;
@@ -2419,10 +2491,10 @@ fn lanczos_observed<R: RandomSource + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{
-        block_lanczos_dependencies, borrow_two, dense_null_space, fold_range, lanczos_observed,
-        prune_singletons, words_for, Block, Blocked, Entries, FoldPool, Lists, Looking, Pace,
-        Recurrence, Small, SmallProduct, Sparse, DENSE_COLUMNS, PACE_HOLD, PACE_WINDOW, WIDTH,
-        WORD,
+        block_lanczos_dependencies, borrow_two, dense_null_space, dense_null_space_sparse,
+        fold_range, lanczos_observed, prune_singletons, words_for, Block, Blocked, Entries,
+        FoldPool, Lists, Looking, Pace, Recurrence, Small, SmallProduct, Sparse, SparseMatrix,
+        DENSE_COLUMNS, PACE_HOLD, PACE_WINDOW, WIDTH, WORD,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -3513,8 +3585,25 @@ mod tests {
                             sum == 0
                         })
                         .collect();
+                    let basis = dense_null_space(&rows, columns);
+                    // Embed the same columns across word edges and a large
+                    // empty gap. Ascending compaction must preserve the exact
+                    // basis, not just its dimension or parity.
+                    let positions = [0, 63, 64, 1023];
+                    let sparse = SparseMatrix::new(
+                        1024,
+                        rows.iter()
+                            .map(|row| {
+                                (0..columns)
+                                    .filter(|&column| row[0] & (1 << column) != 0)
+                                    .map(|column| positions[column])
+                                    .collect()
+                            })
+                            .collect(),
+                    );
+                    assert_eq!(dense_null_space_sparse(&sparse), basis);
                     let mut span = vec![0usize];
-                    for dependency in dense_null_space(&rows, columns) {
+                    for dependency in basis {
                         let mask = dependency
                             .iter()
                             .fold(0usize, |mask, &row| mask ^ (1 << row));
@@ -3527,6 +3616,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Both the original and compact column widths cross word boundaries;
+    /// 73 rows also force more than one word of row identities.
+    #[test]
+    fn dense_null_space_sparse_preserves_order_at_word_boundaries() {
+        for columns in [0, 1, 63, 64, 65, 127, 128, 129, 1024, 16_384] {
+            let matrix = SparseMatrix::new(
+                columns,
+                (0..73)
+                    .map(|row| {
+                        (0..columns)
+                            .filter(|&column| {
+                                (column < 130 || column + 1 == columns)
+                                    && row % 11 != 0
+                                    && (column + row) % 7 < 3
+                            })
+                            .map(|column| column as u32)
+                            .collect()
+                    })
+                    .collect(),
+            );
+            let packed = matrix.packed_rows();
+            let dependencies = dense_null_space_sparse(&matrix);
+            assert_eq!(dependencies, dense_null_space(&packed, columns));
+            for dependency in dependencies {
+                assert!(sums_to_zero(&packed, columns, &dependency));
+            }
+        }
+        assert!(dense_null_space_sparse(&SparseMatrix::new(16_384, vec![])).is_empty());
+        assert_eq!(
+            dense_null_space_sparse(&SparseMatrix::new(16_384, vec![vec![]])),
+            vec![vec![0]]
+        );
     }
 
     /// A fixed basis order across a word edge, with duplicate and zero rows.

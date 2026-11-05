@@ -102,12 +102,12 @@ pub mod polynomial {
 pub mod gf2 {
     pub use crate::gf2_impl::{
         block_lanczos_dependencies, block_lanczos_dependencies_sparse,
-        block_wiedemann_dependencies_sparse, dense_null_space, filter_floor, filter_merge,
-        filter_merge_within, matrix_fingerprint, prune_singletons, wiedemann_finish,
-        wiedemann_generators, wiedemann_sequence, wiedemann_sequence_bytes, wiedemann_solution,
-        wiedemann_terms, wiedemann_terms_most, wiedemann_terms_most_of, FilteredMatrix, Generated,
-        Generators, Iterated, MatrixBytesError, PrunedMatrix, Sequence, SparseMatrix,
-        WiedemannBytesError, RECORDS,
+        block_wiedemann_dependencies_sparse, dense_null_space, dense_null_space_sparse,
+        filter_floor, filter_merge, filter_merge_within, matrix_fingerprint, prune_singletons,
+        wiedemann_finish, wiedemann_generators, wiedemann_sequence, wiedemann_sequence_bytes,
+        wiedemann_solution, wiedemann_terms, wiedemann_terms_most, wiedemann_terms_most_of,
+        FilteredMatrix, Generated, Generators, Iterated, MatrixBytesError, PrunedMatrix, Sequence,
+        SparseMatrix, WiedemannBytesError, RECORDS,
     };
 }
 
