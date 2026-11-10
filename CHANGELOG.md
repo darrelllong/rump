@@ -5,6 +5,16 @@ what a consumer must change, not everything that moved.
 
 ## Unreleased
 
+### Changed
+
+- **`PolyZ::factor_real` and `PolyZ::real_roots` test one prime before the
+  gcd ladder.** A polynomial squarefree modulo `2⁶¹ − 1`, the prime not
+  dividing its leading coefficient, is squarefree, and is its own
+  squarefree decomposition; only one not so shown takes the remainder
+  sequence over ℤ. The results are the same. A caller that factors many
+  squarefree polynomials of small degree, as a polynomial search does
+  for each candidate's skew, spends most of that time in the sequence.
+
 ### Added
 
 - **`PolyZ::roots_mod_u64_power` and `Montgomery64::mul_plain`.** The

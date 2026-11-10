@@ -1733,14 +1733,28 @@ impl PolyZ {
     ///
     /// Dividing by `g` repeatedly instead is wrong: for `(x − 2)²` it emits
     /// the root once at multiplicity one and again at multiplicity two.
+    ///
+    /// A polynomial that one prime shows to be squarefree
+    /// ([`Self::is_seen_squarefree`]) is its own decomposition, and is
+    /// spared the remainder sequence over ℤ, which is most of the ladder's
+    /// cost and ends in a constant for it.
     fn squarefree_decomposition(&self) -> Vec<(usize, Self)> {
         let f = self.primitive_part();
         if f.degree().unwrap_or(0) == 0 {
             return Vec::new();
         }
+        if f.is_seen_squarefree() {
+            return vec![(1, f)];
+        }
+        Self::squarefree_ladder(&f)
+    }
+
+    /// The decomposition of a primitive `f` of degree one or more, by the
+    /// gcd ladder ([`Self::squarefree_decomposition`]).
+    fn squarefree_ladder(f: &Self) -> Vec<(usize, Self)> {
         let mut g = f.gcd_over_z(&f.derivative());
         let Some(mut w) = f.exact_div(&g) else {
-            return vec![(1, f)];
+            return vec![(1, f.clone())];
         };
 
         let mut out = Vec::new();
@@ -6311,6 +6325,46 @@ mod real_root_tests {
                 "at x = {x} the factorization gives {modelled}, f gives {exact}"
             );
         }
+    }
+
+    /// The squarefree decomposition is the gcd ladder's, however it is
+    /// reached. A polynomial one prime shows to be squarefree comes back
+    /// whole, as the ladder gives it; one with a repeated factor is not
+    /// so shown, and neither is a squarefree one whose leading
+    /// coefficient the prime divides, and both go to the ladder.
+    #[test]
+    fn the_squarefree_decomposition_is_the_ladders() {
+        let from = PolyZ::from_i64_slice;
+        for f in [
+            from(&[-2, 0, 1]),
+            from(&[6, -11, 6, -1]),
+            from(&[7, 0, -3, 0, 0, 12]),
+            // Content two over 2x² − 45.
+            from(&[-90, 0, 4]),
+        ] {
+            let primitive = f.primitive_part();
+            assert!(primitive.is_seen_squarefree(), "{f:?}");
+            assert_eq!(
+                f.squarefree_decomposition(),
+                PolyZ::squarefree_ladder(&primitive)
+            );
+            assert_eq!(f.squarefree_decomposition(), vec![(1, primitive)]);
+        }
+        for f in [
+            // (x − 2)²(x + 1) and (x² + 1)²(x − 5).
+            from(&[4, 0, -3, 1]),
+            from(&[-5, 1, -10, 2, -5, 1]),
+        ] {
+            assert!(!f.is_seen_squarefree(), "{f:?}");
+            let found = f.squarefree_decomposition();
+            assert_eq!(found, PolyZ::squarefree_ladder(&f));
+            assert!(found.iter().any(|&(multiplicity, _)| multiplicity == 2));
+        }
+        // (2⁶¹ − 1)x² − 1, squarefree, with the test's prime for its
+        // leading coefficient.
+        let hidden = from(&[-1, 0, (1 << 61) - 1]);
+        assert!(!hidden.is_seen_squarefree());
+        assert_eq!(hidden.squarefree_decomposition(), vec![(1, hidden.clone())]);
     }
 
     #[test]

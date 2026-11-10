@@ -167,6 +167,59 @@ impl PolyZ {
 }
 
 /// The least non-negative residue of `coefficient` modulo `modulus`.
+/// The prime a polynomial is tested for squarefreeness modulo
+/// ([`PolyZ::is_seen_squarefree`]): the Mersenne prime `2⁶¹ − 1`. Any odd
+/// prime of a word serves, and a large one divides a given leading
+/// coefficient or discriminant least often.
+const SQUAREFREE_TEST_PRIME: u64 = (1 << 61) - 1;
+
+impl PolyZ {
+    /// Whether the reduction modulo one word-sized prime shows the
+    /// polynomial, of degree one or more, to be squarefree: the reduction
+    /// keeps the degree and is coprime to its derivative.
+    ///
+    /// That is sufficient. A repeated factor `g` of `f` over the
+    /// rationals may be taken primitive, and then divides `f` in `ℤ[x]`
+    /// as far as content, by Gauss's lemma, so its leading coefficient
+    /// divides `f`'s. Modulo a prime that does not divide `f`'s leading
+    /// coefficient it keeps its degree, and its square still divides the
+    /// reduction, which then shares it with its derivative.
+    ///
+    /// `false` settles nothing: the prime may divide the leading
+    /// coefficient, or the discriminant of a squarefree polynomial.
+    pub(super) fn is_seen_squarefree(&self) -> bool {
+        let prime = SQUAREFREE_TEST_PRIME;
+        let reduced: Vec<u64> = self
+            .coeffs
+            .iter()
+            .map(|coefficient| residue(coefficient, prime))
+            .collect();
+        let Some((&leading, lower)) = reduced.split_last() else {
+            return false;
+        };
+        if leading == 0 || lower.is_empty() {
+            return false;
+        }
+        let field = Montgomery64::new(prime).expect("an odd prime");
+        let inverse = field
+            .enter(mod_inverse_u64(leading, prime).expect("a nonzero residue of a prime inverts"));
+        // The monic associate without its leading one, and its derivative
+        // whole: `i·cᵢ` at `x^{i−1}`, the leading one's the degree.
+        let monic: Vec<Residue64> = lower
+            .iter()
+            .map(|&coefficient| field.mul(field.enter(coefficient), inverse))
+            .collect();
+        let mut derivative: Vec<Residue64> = monic
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(power, &coefficient)| field.mul(field.enter(power as u64), coefficient))
+            .collect();
+        derivative.push(field.enter(lower.len() as u64));
+        monic_gcd(&field, monic, derivative).is_empty()
+    }
+}
+
 fn residue(coefficient: &BigInt, modulus: u64) -> u64 {
     let magnitude = coefficient.magnitude().rem_u64(modulus);
     if coefficient.sign() == Sign::Negative && magnitude != 0 {
