@@ -3721,8 +3721,12 @@ impl PolyMod {
     /// `q ≡ 3 (mod 4)`; at even `d` every `q^d` is `1 (mod 4)` and the shortcut
     /// is unavailable, which is the case this exists for.
     ///
-    /// Deterministic: the non-residue search walks a fixed sequence of field
-    /// elements, so the same input yields the same root in every run.
+    /// Deterministic: the non-residue search walks the field's elements in a
+    /// fixed order, so the same input yields the same root in every run. It
+    /// has no bound of its own: in a field it ends at a non-residue, and
+    /// `None` is the verdict that `self` is not a square. Under a
+    /// `modulus_poly` that is not irreducible the search may pass through
+    /// every element before it returns `None`.
     #[must_use]
     pub fn sqrt_in_field(&self, modulus_poly: &Self, degree: usize) -> Option<Self> {
         let prime = self.modulus().clone();
@@ -3753,31 +3757,36 @@ impl PolyMod {
             let root = self.mod_pow(&exponent, modulus_poly);
             return (root.mul(&root).rem(modulus_poly) == *self).then_some(root);
         }
-        // A quadratic non-residue, by deterministic search over the linear
-        // elements x, x + 1, x + 2, …. Not the constants: for even `d` the
-        // field contains 𝔽_{q²}, in which every element of 𝔽_q is a square,
-        // so no constant can serve — and even `d` is the case this routine
-        // exists for. A linear element is a non-residue about half the time
-        // in every degree, so this stops almost at once. The bound keeps a
-        // mis-supplied field from looping forever: in a genuine field each
-        // try misses with probability ½, so 512 misses is 2⁻⁵¹², and the
-        // bound can only fire when the modulus is not the field it was
-        // claimed to be.
-        const NON_RESIDUE_TRIES: u64 = 512;
+        // A quadratic non-residue, by search through the field's elements in
+        // the order of their coefficients read as a number in base q, from
+        // x on: x, x + 1, …, x + (q − 1), 2x, …, to the last of degree
+        // d − 1. The constants are passed over, since in even degree every
+        // one of them is a square; in degree one they are the field, and the
+        // search starts at 1. Of the q^d − 1 nonzero elements (q^d − 1)/2
+        // are non-residues, more than the q − 1 nonzero constants when
+        // d ≥ 2, so the search finds one. Each try misses half the time if
+        // the character has no regard for the order, which is not proved;
+        // that the search ends is.
         let minus_one = Self::new(vec![prime.sub(&BigUint::one())], &prime);
-        let mut non_residue = None;
-        for candidate in 0..NON_RESIDUE_TRIES {
-            let element = Self::new(vec![BigUint::from_u64(candidate), BigUint::one()], &prime)
-                .rem(modulus_poly);
-            if element.is_zero() {
-                continue;
-            }
+        let mut digits = vec![BigUint::zero(); degree.max(1)];
+        digits[usize::from(degree > 1)] = BigUint::one();
+        let non_residue = loop {
+            let element = Self::new(digits.clone(), &prime);
             if element.mod_pow(&half, modulus_poly) == minus_one {
-                non_residue = Some(element);
-                break;
+                break element;
             }
-        }
-        let non_residue = non_residue?;
+            let mut place = 0;
+            loop {
+                // Every element tried and none a non-residue: no field.
+                let digit = digits.get_mut(place)?;
+                *digit = digit.add(&BigUint::one());
+                if *digit < prime {
+                    break;
+                }
+                *digit = BigUint::zero();
+                place += 1;
+            }
+        };
 
         let mut m = s;
         let mut c = non_residue.mod_pow(&t, modulus_poly);
@@ -6657,6 +6666,52 @@ mod field_sqrt_tests {
                 shortcut == general || shortcut == negated,
                 "seed {seed}: the two routes disagree beyond sign"
             );
+        }
+    }
+
+    /// Every element of three small fields, the first two with every
+    /// `x + c` a square (its norm, the modulus at `−c` up to sign, is 1 for
+    /// every `c`): each square has a root that squares back, each
+    /// non-square is refused, and the squares are half the nonzero elements
+    /// and zero. The third is a prime field.
+    #[test]
+    fn every_element_of_a_small_field_has_its_verdict() {
+        for (coefficients, prime) in [
+            (&[-1i64, -1, 0, 0, 0, 1][..], 5u64),
+            (&[1, 0, 0, 0, -1, 0, 1][..], 3),
+            (&[-2, 1][..], 11),
+        ] {
+            let (modulus_poly, q) = field(coefficients, prime);
+            assert!(modulus_poly.is_irreducible());
+            let degree = coefficients.len() - 1;
+            let order = prime.pow(degree as u32);
+            let mut squares = std::collections::BTreeSet::new();
+            for index in 0..order {
+                let digits: Vec<i64> = (0..degree as u32)
+                    .map(|place| ((index / prime.pow(place)) % prime) as i64)
+                    .collect();
+                let element = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&digits), &q);
+                let square = element.mul(&element).rem(&modulus_poly);
+                squares.insert(format!("{square:?}"));
+            }
+            assert_eq!(squares.len() as u64, order.div_ceil(2));
+            let mut rooted = 0;
+            for index in 0..order {
+                let digits: Vec<i64> = (0..degree as u32)
+                    .map(|place| ((index / prime.pow(place)) % prime) as i64)
+                    .collect();
+                let element = PolyMod::from_poly_z(&PolyZ::from_i64_slice(&digits), &q);
+                let is_square = squares.contains(&format!("{element:?}"));
+                match element.sqrt_in_field(&modulus_poly, degree) {
+                    Some(root) => {
+                        assert!(is_square, "q={prime} index={index}: a non-square rooted");
+                        assert_eq!(root.mul(&root).rem(&modulus_poly), element);
+                        rooted += 1;
+                    }
+                    None => assert!(!is_square, "q={prime} index={index}: a square refused"),
+                }
+            }
+            assert_eq!(rooted, order.div_ceil(2));
         }
     }
 

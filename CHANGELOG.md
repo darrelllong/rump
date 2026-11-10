@@ -175,6 +175,15 @@ what a consumer must change, not everything that moved.
 
 ### Fixed
 
+- **`PolyMod::sqrt_in_field` called squares non-squares in small fields.**
+  Its non-residue search tried `x + c` for `c` below 512 and gave up,
+  returning `None`, the verdict of a non-square. Over a small prime those
+  are only `q` elements, and in `F₅[x]/(x⁵ − x − 1)` and
+  `F₃[x]/(x⁶ − x⁴ + 1)` every one is a square. The search now walks the
+  field's nonconstant elements in base-`q` order from `x`, with no bound,
+  and in a field it ends; for a prime above 512 the order, and so the
+  root returned, is as before.
+
 - **Two of `gf2::filter_merge`'s fan-outs kept the caller's budget.** The
   release of retired rows' entries and the sorting of the transposed lists
   cut their work into eight runs a thread and spawned a thread for every
