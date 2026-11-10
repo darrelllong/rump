@@ -7,6 +7,15 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **`PolyZ::roots_mod_u64_power` and `Montgomery64::mul_plain`.** The
+  roots modulo a prime power that fits a word, as words: simple roots
+  lifted by Newton's iteration in word arithmetic, and the branching
+  cases left to `roots_mod_prime_power`, whose set it returns. And the
+  product of a plain word and a residue as a plain integer, by one
+  reduction. Both for a polynomial search's collision stage, which takes
+  the roots of `x^d − ñ` modulo `p²` for each prime and multiplies a
+  table of inverses by many plain integers.
+
 - **`PolyZ::roots_mod_u64`.** The roots of an integer polynomial modulo a
   prime that fits a word, as words: the set `PolyMod::roots` gives for the
   same reduction, found with word-sized Montgomery residues and no

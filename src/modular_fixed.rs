@@ -138,6 +138,17 @@ impl Montgomery64 {
         self.mul(a, a)
     }
 
+    /// `plain · b` as a plain integer, by one reduction: a residue is its
+    /// value times `2⁶⁴`, and the reduction divides that out. `plain` is any
+    /// word, reduced or not. For a loop that multiplies many plain integers
+    /// by one residue and wants plain products, where entering each and
+    /// leaving again would be three reductions.
+    #[inline]
+    #[must_use]
+    pub fn mul_plain(&self, plain: u64, b: Residue64) -> u64 {
+        self.redc(u128::from(plain) * u128::from(b.0))
+    }
+
     /// `a + b` in the domain.
     #[inline]
     #[must_use]
@@ -519,6 +530,35 @@ mod tests {
         u64::MAX - 2,
         u64::MAX,
     ];
+
+    /// A plain word times a residue, by one reduction, is their product
+    /// modulo the modulus: checked against a `u128` remainder for plain
+    /// words below each edge modulus, at it, and anywhere in the word.
+    #[test]
+    fn a_plain_word_times_a_residue_is_their_product() {
+        for &modulus in &EDGE_MODULI_64 {
+            let field = Montgomery64::new(modulus).expect("an odd modulus");
+            let mut state = PRODUCT_SEED ^ modulus;
+            for round in 0..PRODUCT_SAMPLES {
+                state = state
+                    .wrapping_mul(STREAM_MULTIPLIER)
+                    .wrapping_add(STREAM_INCREMENT);
+                let b = state.rotate_left(PARTNER_ROTATION) % modulus;
+                let plain = match round % 4 {
+                    0 => state,
+                    1 => state % modulus,
+                    2 => modulus,
+                    _ => u64::MAX - state % 7,
+                };
+                let expected = (u128::from(plain) * u128::from(b) % u128::from(modulus)) as u64;
+                assert_eq!(
+                    field.mul_plain(plain, field.enter(b)),
+                    expected,
+                    "{plain} times {b} modulo {modulus}"
+                );
+            }
+        }
+    }
 
     const EDGE_MODULI_128: [u128; 9] = [
         3,

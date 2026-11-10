@@ -17,7 +17,7 @@
 //! with `r + a` a nonzero square and at no other.
 
 use super::PolyZ;
-use crate::bigint::Sign;
+use crate::bigint::{BigInt, BigUint, Sign};
 use crate::modular_fixed::{Montgomery64, Residue64};
 use crate::number_theory_impl::mod_inverse_u64;
 use crate::random_impl::RandomSource;
@@ -45,14 +45,7 @@ impl PolyZ {
         let mut reduced: Vec<u64> = self
             .coeffs
             .iter()
-            .map(|coefficient| {
-                let residue = coefficient.magnitude().rem_u64(prime);
-                if coefficient.sign() == Sign::Negative && residue != 0 {
-                    prime - residue
-                } else {
-                    residue
-                }
-            })
+            .map(|coefficient| residue(coefficient, prime))
             .collect();
         while reduced.last() == Some(&0) {
             reduced.pop();
@@ -86,6 +79,100 @@ impl PolyZ {
         split_into_roots(&field, linear, rng, &mut roots);
         roots.sort_unstable();
         roots
+    }
+}
+
+impl PolyZ {
+    /// The roots of the polynomial modulo `prime^exponent`, a modulus that
+    /// fits a word, ascending: the set [`Self::roots_mod_prime_power`]
+    /// gives, as words.
+    ///
+    /// Where every root modulo `prime` is simple, each is lifted by
+    /// Newton's iteration in words, which Hensel's lemma makes the one
+    /// root above it, and the precision doubles a step. A root at which
+    /// the derivative vanishes modulo `prime` branches, and that case,
+    /// the prime two and a polynomial that vanishes modulo `prime` are
+    /// left whole to the multiprecision routine.
+    ///
+    /// `prime` must be prime; over a composite the result is unspecified.
+    ///
+    /// # Panics
+    ///
+    /// When `exponent` is zero or `prime^exponent` does not fit a word,
+    /// and where [`Self::roots_mod_prime_power`] or
+    /// [`Self::roots_mod_u64`] does.
+    #[must_use]
+    pub fn roots_mod_u64_power<R: RandomSource + ?Sized>(
+        &self,
+        prime: u64,
+        exponent: u32,
+        rng: &mut R,
+    ) -> Vec<u64> {
+        assert!(exponent >= 1, "a prime power needs a positive exponent");
+        let modulus = prime
+            .checked_pow(exponent)
+            .expect("the prime power fits a word");
+        if exponent == 1 {
+            return self.roots_mod_u64(prime, rng);
+        }
+        let whole = |rng: &mut R| -> Vec<u64> {
+            self.roots_mod_prime_power(&BigUint::from_u64(prime), exponent, rng)
+                .iter()
+                .map(|root| root.to_u64().expect("a residue of a word fits a word"))
+                .collect()
+        };
+        let vanishes = self.coeffs.iter().all(|c| residue(c, prime) == 0);
+        let Some(field) = Montgomery64::new(modulus).filter(|_| !vanishes) else {
+            return whole(rng);
+        };
+        let coefficients: Vec<Residue64> = self
+            .coeffs
+            .iter()
+            .map(|c| field.enter(residue(c, modulus)))
+            .collect();
+        // The value and the derivative at `x`, by Horner's rule on both.
+        let at = |x: u64| -> (u64, u64) {
+            let x = field.enter(x);
+            let (mut value, mut slope) = (field.zero(), field.zero());
+            for &coefficient in coefficients.iter().rev() {
+                slope = field.add(field.mul(slope, x), value);
+                value = field.add(field.mul(value, x), coefficient);
+            }
+            (field.exit(value), field.exit(slope))
+        };
+        let mut roots = Vec::new();
+        for base in self.roots_mod_u64(prime, rng) {
+            let mut root = base;
+            let mut precision = 1u32;
+            while precision < exponent {
+                let (value, slope) = at(root);
+                if slope % prime == 0 {
+                    return whole(rng);
+                }
+                let inverse =
+                    mod_inverse_u64(slope, modulus).expect("a unit modulo the prime inverts");
+                let step = (u128::from(value) * u128::from(inverse) % u128::from(modulus)) as u64;
+                root = if root >= step {
+                    root - step
+                } else {
+                    root + (modulus - step)
+                };
+                precision *= 2;
+            }
+            roots.push(root);
+        }
+        roots.sort_unstable();
+        roots
+    }
+}
+
+/// The least non-negative residue of `coefficient` modulo `modulus`.
+fn residue(coefficient: &BigInt, modulus: u64) -> u64 {
+    let magnitude = coefficient.magnitude().rem_u64(modulus);
+    if coefficient.sign() == Sign::Negative && magnitude != 0 {
+        modulus - magnitude
+    } else {
+        magnitude
     }
 }
 
@@ -452,6 +539,73 @@ mod tests {
         // The comparison is of something: a polynomial has a root modulo
         // a prime about once a prime.
         assert!(found > 1_000, "{found} roots compared");
+    }
+
+    /// Modulo a prime power the roots are those of the multiprecision
+    /// routine: for polynomials whose roots modulo the prime are simple,
+    /// which are lifted in words, and for the cases left to that routine,
+    /// a double root, the prime two and a content the prime divides.
+    #[test]
+    fn the_roots_modulo_a_prime_power_are_those_of_the_multiprecision_routine() {
+        let by_big = |f: &PolyZ, prime: u64, exponent: u32, rng: &mut Sequence| -> Vec<u64> {
+            f.roots_mod_prime_power(&BigUint::from_u64(prime), exponent, rng)
+                .iter()
+                .map(|root| root.to_u64().expect("a residue of a word"))
+                .collect()
+        };
+        let mut rng = Sequence(21);
+        // With each polynomial, the largest prime it is tried at: a double
+        // root branches into as many candidates as the prime, which the
+        // multiprecision routine lists only for small ones.
+        let polynomials = [
+            (polynomial(&[-6, 11, -6, 1]), u64::MAX),
+            (polynomial(&[-7, 0, 0, 0, 0, 1]), u64::MAX),
+            (polynomial(&[7, -3, 0, 2, 5, 9]), u64::MAX),
+            // (x − 1)²(x + 2): a double root at every prime.
+            (polynomial(&[2, -3, 0, 1]), 61),
+            // Three times a cubic: a content the prime three divides.
+            (polynomial(&[-18, 33, -18, 3]), u64::MAX),
+        ];
+        let mut found = 0usize;
+        for (f, largest) in &polynomials {
+            for (prime, exponents) in [
+                (2u64, &[2u32, 5][..]),
+                (3, &[2, 3, 7]),
+                (5, &[2, 4]),
+                (61, &[2, 3]),
+                (65_537, &[2, 3]),
+                (1_000_003, &[2, 3]),
+                (4_294_967_291, &[2]),
+            ] {
+                if prime > *largest {
+                    continue;
+                }
+                for &exponent in exponents {
+                    let expected = by_big(f, prime, exponent, &mut rng);
+                    found += expected.len();
+                    assert_eq!(
+                        f.roots_mod_u64_power(prime, exponent, &mut rng),
+                        expected,
+                        "{:?} modulo {prime}^{exponent}",
+                        f.coefficients()
+                    );
+                }
+            }
+            for prime in primes_below(2_000).into_iter().skip(200) {
+                if prime > *largest {
+                    break;
+                }
+                let expected = by_big(f, prime, 2, &mut rng);
+                found += expected.len();
+                assert_eq!(
+                    f.roots_mod_u64_power(prime, 2, &mut rng),
+                    expected,
+                    "{:?} modulo {prime}^2",
+                    f.coefficients()
+                );
+            }
+        }
+        assert!(found > 500, "{found} roots compared");
     }
 
     #[test]
