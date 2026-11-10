@@ -7,6 +7,14 @@ what a consumer must change, not everything that moved.
 
 ### Added
 
+- **`PolyZ::roots_mod_u64`.** The roots of an integer polynomial modulo a
+  prime that fits a word, as words: the set `PolyMod::roots` gives for the
+  same reduction, found with word-sized Montgomery residues and no
+  multiprecision integer. For a caller that wants the roots modulo every
+  prime below a bound, as a sieve's factor base does; a quintic's roots
+  modulo each prime below eight million take about a twentieth of the
+  time on one thread.
+
 - **`gf2::matrix_fingerprint`, `Sequence::seed`, `Sequence::matrix`,
   `Sequence::continues` and `Generators::matrix`.** The identity a kept
   stage carries, and the question whether a kept slice is the one a

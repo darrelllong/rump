@@ -17,6 +17,7 @@ use crate::number_theory_impl as number_theory;
 
 mod hensel_sqrt;
 mod kronecker;
+mod word_roots;
 pub use hensel_sqrt::HenselSquareRoot;
 
 /// Coefficient count at or above which [`PolyZ`](crate::polynomial::PolyZ) multiplication splits
