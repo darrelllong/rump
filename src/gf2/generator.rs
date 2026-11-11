@@ -339,26 +339,22 @@ fn tables(coefficient: &[u64], shape: Shape) -> Vec<u64> {
 }
 
 /// A coefficient of `a`, by its tables, times one of `b`, XORed into one of
-/// `out`: each column of `b` selects `a`'s columns a byte at a time.
+/// `out`: each column of `b` selects `a`'s columns a byte at a time. A
+/// table at a time, over every column of `b`: the tables of a wide
+/// coefficient are more than a cache holds, and one of them is not.
 fn apply(tables: &[u64], b: &[u64], out: &mut [u64], shape: Shape) {
     let words = shape.words;
     let inner = shape.inner / WIDTH;
-    for (column, out) in b
-        .chunks_exact(inner)
-        .zip(out.chunks_exact_mut(words))
-        .take(shape.columns)
-    {
-        for (j, &word) in column.iter().enumerate() {
-            let mut value = word;
-            let mut byte = j * 8;
-            while value != 0 {
-                let selector = (value & 0xff) as usize;
-                if selector != 0 {
-                    let at = (byte * 256 + selector) * words;
-                    xor(out, &tables[at..at + words]);
-                }
-                value >>= 8;
-                byte += 1;
+    for (byte, table) in tables.chunks_exact(256 * words).enumerate() {
+        let (word, shift) = (byte / 8, 8 * (byte % 8));
+        for (column, out) in b
+            .chunks_exact(inner)
+            .zip(out.chunks_exact_mut(words))
+            .take(shape.columns)
+        {
+            let selector = ((column[word] >> shift) & 0xff) as usize;
+            if selector != 0 {
+                xor(out, &table[selector * words..][..words]);
             }
         }
     }

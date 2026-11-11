@@ -1215,6 +1215,37 @@ threads, the terms truncated from the 50 185 the four-host solve kept:
 makes the same, in 488 s. The sequence is 10 021 terms shorter a slice,
 20 %, which on the four hosts was 4 059 s of the solve's 59 133.
 
+### The tables, a table at a time
+
+2026-11-11. A product's leaf looks a coefficient of `a` up in its tables,
+256 entries a byte of its columns, once for each byte of each column of
+`b`. It went a column of `b` at a time, through every table. One
+coefficient's tables are `columns/8 · 256 · words` words: 1 MB at four
+slices, 4 MB at eight and 16.8 MB at sixteen, where they are in no cache
+and a lookup is a read at random from memory. It goes a table at a time
+now, over every column of `b`: one table is 64 KB at sixteen slices. The
+products are the same bit for bit.
+
+RSA-120's kept matrix, 673 757 rows, solved in slices on one M4 Pro,
+twelve threads (`wiedemann_cost_probe`, `WIEDEMANN_ONLY=sliced`), each
+stage's wall time from a sample of the whole run at 10 ms:
+
+| slices | generators before | now | sequences | solutions | the solve before | now |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | | 14.0 s | 85.6 s | 48.0 s | | 148.6 s |
+| 2 | | 24.0 s | 88.2 s | 46.7 s | | 159.8 s |
+| 4 | 41.5 s | 31.1 s | 91.2 s | 49.0 s | 182.9 s | 172.2 s |
+| 8 | 61.2 s | 39.5 s | 91.8 s | 50.8 s | 213.6 s | 183.1 s |
+| 16 | 357.0 s | 105.9 s | 102.1 s | 58.0 s | 516.4 s | 267.1 s |
+| 32 | | 275.2 s | 111.5 s | 69.4 s | | 457.3 s |
+
+Every solve found its 64 dependencies, 63 in one slice. From eight slices
+to sixteen the generators took 5.8 times as long and now take 2.7 times,
+which is the products' own growth: a coefficient's product is eight times
+the work and the polynomials are half as long. The lookup's cost in the
+model above, measured at one to eight words an entry, was not measured
+again.
+
 ## What a read at random costs
 
 `parallelism::gather_costs`, the `gather_costs_timing` probe: nanoseconds a

@@ -7,6 +7,14 @@ what a consumer must change, not everything that moved.
 
 ### Changed
 
+- **The Wiedemann generator's products look their tables up a table at a
+  time.** A leaf of a product of polynomial matrices went a column at a
+  time through every table of a coefficient, which at sixteen slices are
+  16.8 MB and in no cache; it goes a table at a time over every column.
+  The generators are the same bit for bit, and on a matrix of 674 k rows
+  in sixteen slices they take 106 s where they took 357 s
+  (PERFORMANCE.md, "The tables, a table at a time").
+
 - **`PolyZ::factor_real` and `PolyZ::real_roots` test one prime before the
   gcd ladder.** A polynomial squarefree modulo `2⁶¹ − 1`, the prime not
   dividing its leading coefficient, is squarefree, and is its own
