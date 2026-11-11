@@ -12,9 +12,16 @@ what a consumer must change, not everything that moved.
   `wiedemann_finish_with`.** A product `M·x` cut into strips, each holding
   the entries of a range of the columns and making those words of the
   image; the strips of one cut make the image one host makes, bit for
-  bit. The cut follows from the matrix and the count of parts alone. The
-  Wiedemann stages take a caller's product, so a host that holds the
-  blocks has its products made elsewhere.
+  bit. The cut follows from the matrix and the count of parts alone.
+  `Strip::apply_into` writes a strip's words into its caller's and
+  allocates nothing. The Wiedemann stages take a caller's product, so a
+  host that holds the blocks has its products made elsewhere.
+
+- **`gf2::StripPart::to_bytes`, `from_bytes` and `BYTES`, and
+  `gf2::Dimensions::to_bytes` and `from_bytes`.** A strip's part and a
+  matrix's dimensions as frames of the Wiedemann family (`GFW2P`,
+  `GFW2D`), a part's of a stated length, so a host reads each strip's
+  part off a stream and checks the cut before the first product.
 
 ### Fixed
 
