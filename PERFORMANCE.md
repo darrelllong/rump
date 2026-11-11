@@ -1246,6 +1246,34 @@ the work and the polynomials are half as long. The lookup's cost in the
 model above, measured at one to eight words an entry, was not measured
 again.
 
+Where the generators' time goes at sixteen slices, from a build with a
+timer about each product and each run of steps one at a time, 97 s of the
+106 timed so:
+
+| level of the recursion | `E·π_L` | `π_L·π_R` |
+|---|---:|---:|
+| 0 | 15.5 s, 1 036 coefficients by 347 | 11.5 s, 347 by 379 |
+| 1 | 10.5 s | 7.8 s |
+| 2 | 6.8 s | 5.4 s |
+| 3 | 4.6 s | 3.1 s |
+| 4 | 3.1 s | 2.0 s |
+| 5 to 10 | 7.3 s | 7.9 s |
+
+and 11.9 s in the steps one at a time, 1 380 runs of one step each, the
+halves beginning at two steps at this shape. A level costs two thirds of
+the one above it, as Karatsuba's exponent has it, and none stands out.
+With the halves forced to begin later:
+
+| halves from | 2, the model's | 4 | 8 | 16 | 32 |
+|---|---:|---:|---:|---:|---:|
+| products and steps | 97.2 s | 92.1 s | 90.5 s | 92.8 s | 96.1 s |
+
+The model's crossover is within 7 per cent of the best here and is left.
+A split that wrote its low and high products where they stand in the
+whole, and recombined in two passes where there are five with one vector
+aside where there are three, was 3 per cent quicker at sixteen slices and
+2 at eight, and is not kept; its test of a split at every length is.
+
 ## What a read at random costs
 
 `parallelism::gather_costs`, the `gather_costs_timing` probe: nanoseconds a
