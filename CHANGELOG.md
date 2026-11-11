@@ -273,10 +273,12 @@ what a consumer must change, not everything that moved.
 
 - **CI runs the tests on every platform GitHub hosts.** Linux, macOS and
   Windows, each on x86_64 and aarch64, where it ran Linux and Apple
-  silicon; the 32-bit leg runs the tests on `i686-unknown-linux-gnu` where
-  it checked only that they compiled. The crate has no dependencies and no
-  platform code, and nothing in it had to change; `scripts/check_manual_tex.sh`
-  and the extractor it calls now run under Git Bash on Windows too. A
+  silicon; the 32-bit leg runs the tests on `i686-unknown-linux-musl`,
+  linked by the toolchain's own linker so that nothing is installed on
+  the runner, where it checked only that they compiled. The crate has no
+  dependencies and no platform code, and nothing in it had to change;
+  `scripts/check_manual_tex.sh` and the extractor it calls now run under
+  Git Bash on Windows too. A
   test of the fan-out's budgets summed its shares by item rather than by
   thread and failed on a runner of three cores; it counts each thread
   once, and the shape is now tested at every budget on every machine.

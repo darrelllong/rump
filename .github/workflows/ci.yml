@@ -101,29 +101,33 @@ jobs:
 
   # The 32-bit leg the crate root promises: every limb-count-to-bit-index
   # conversion is checked, and i686 is where that boundary is reachable.
-  # An x86_64 Linux runner executes i686 binaries, so with a 32-bit linker
-  # (gcc-multilib) the tests run rather than merely compile. In release, as
-  # the release gate's test-release leg: the suite takes twenty minutes
-  # unoptimized on a 64-bit runner and 32-bit code is slower still.
+  # An x86_64 Linux runner executes i686 binaries, so the tests run rather
+  # than merely compile. The musl target carries its own C runtime and the
+  # toolchain its own linker, rust-lld, so nothing is installed from the
+  # runner's package mirrors: the job needs rustup's servers and no
+  # others. In release, as the release gate's test-release leg: the suite
+  # takes twenty minutes unoptimized on a 64-bit runner and 32-bit code is
+  # slower still.
   cross-32bit:
-    name: i686-unknown-linux-gnu / stable
+    name: i686-unknown-linux-musl / stable
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust with the i686 target and a 32-bit linker
+      - name: Install Rust with the i686 musl target
         run: |
           rustup toolchain install stable --profile minimal && rustup default stable
-          rustup target add i686-unknown-linux-gnu
-          sudo apt-get update -q && sudo apt-get install -y -q gcc-multilib
+          rustup target add i686-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
       - name: check (default)
-        run: cargo check --target i686-unknown-linux-gnu --all-targets
+        run: cargo check --target i686-unknown-linux-musl --all-targets
       - name: check (wipe)
-        run: cargo check --target i686-unknown-linux-gnu --all-targets --features wipe
+        run: cargo check --target i686-unknown-linux-musl --all-targets --features wipe
       - name: test (default, release)
-        run: cargo test --release --target i686-unknown-linux-gnu --all-targets && cargo test --release --target i686-unknown-linux-gnu --doc
+        run: cargo test --release --target i686-unknown-linux-musl --all-targets && cargo test --release --target i686-unknown-linux-musl --doc
       - name: test (wipe, release)
-        run: cargo test --release --target i686-unknown-linux-gnu --all-targets --features wipe
+        run: cargo test --release --target i686-unknown-linux-musl --all-targets --features wipe
 
   # A breaking push should turn THIS repository's CI red, not the consumers'
   # next push. The downstream crates build and test against the exact rump
