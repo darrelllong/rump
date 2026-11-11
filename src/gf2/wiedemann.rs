@@ -259,6 +259,11 @@ impl Dimensions {
         self.fingerprint
     }
 
+    /// `N`, the greater of the relations and the columns.
+    fn dimension(&self) -> usize {
+        self.relations.max(self.columns)
+    }
+
     /// Those a strip finds as it is cut, which are [`Self::of`]'s.
     pub(super) fn new(relations: usize, columns: usize, fingerprint: u64) -> Self {
         Self {
@@ -614,19 +619,98 @@ fn z_slice(seed: u64, slice: usize, dimension: usize) -> Arc<Block> {
     Block::of((0..dimension).map(|_| draw.next()))
 }
 
+/// `M·x` for the stages, whoever makes it: the matrix taken apart on this
+/// host, or a caller who has it made elsewhere.
+trait Product {
+    /// The relations, a word of `x` each.
+    fn relations(&self) -> usize;
+
+    /// The columns some relation sets, a word of the image each.
+    fn columns(&self) -> usize;
+
+    /// `M·x` into the first words of `image`, a word a column, from the
+    /// first words of `x`, a word a relation; `false` when it could not be
+    /// made, `image` then holding nothing to be read.
+    fn forward(&mut self, x: &Arc<Block>, image: &Arc<Block>) -> bool;
+}
+
+impl Product for Sparse {
+    fn relations(&self) -> usize {
+        Sparse::relations(self)
+    }
+
+    fn columns(&self) -> usize {
+        Sparse::columns(self)
+    }
+
+    fn forward(&mut self, x: &Arc<Block>, image: &Arc<Block>) -> bool {
+        Sparse::forward(self, x, image);
+        true
+    }
+}
+
+/// A caller's product as the stages take one. The stages' blocks are
+/// shared with the threads of a pass and a caller's product is given plain
+/// words, so the block's words are copied out for it and its image's
+/// copied in: a word a relation and a word a column are held here for
+/// that, and a product copies as many.
+struct Outside<F> {
+    product: F,
+    x: Vec<u64>,
+    image: Vec<u64>,
+}
+
+impl<F: FnMut(&[u64], &mut [u64]) -> bool> Outside<F> {
+    /// For a matrix of `relations` relations and `columns` columns that
+    /// some relation sets.
+    fn new(relations: usize, columns: usize, product: F) -> Self {
+        Self {
+            product,
+            x: vec![0; relations],
+            image: vec![0; columns],
+        }
+    }
+}
+
+impl<F: FnMut(&[u64], &mut [u64]) -> bool> Product for Outside<F> {
+    fn relations(&self) -> usize {
+        self.x.len()
+    }
+
+    fn columns(&self) -> usize {
+        self.image.len()
+    }
+
+    fn forward(&mut self, x: &Arc<Block>, image: &Arc<Block>) -> bool {
+        for (word, from) in self.x.iter_mut().zip(x.words()) {
+            *word = from;
+        }
+        self.image.fill(0);
+        let made = (self.product)(&self.x, &mut self.image);
+        if made {
+            image.write(0, &self.image);
+        }
+        made
+    }
+}
+
 /// `B·v` as the next `v`: `M·v` over the columns, which are the first of the
 /// block's coordinates, into `image`, its words past the columns zero; then
 /// the two change places, the old `v` the next image. Each block is `N`
 /// words, the greater of the relations and the columns; `M` reads the
 /// first of them up to the relations. The words past the columns are the
 /// excess of relations, a few hundred, where copying the image into `v`
-/// was every word.
-fn advance(matrix: &Sparse, v: &mut Arc<Block>, image: &mut Arc<Block>) {
-    matrix.forward(v, image);
+/// was every word. `None`, the blocks as they were but for the image's
+/// words, when the product could not be made.
+fn advance(matrix: &mut impl Product, v: &mut Arc<Block>, image: &mut Arc<Block>) -> Option<()> {
+    if !matrix.forward(v, image) {
+        return None;
+    }
     for index in matrix.columns()..image.len() {
         image.set(index, 0);
     }
     core::mem::swap(v, image);
+    Some(())
 }
 
 /// The matrix's identity for a kept stage: FNV-1a over its shape and every
@@ -679,10 +763,63 @@ pub fn wiedemann_sequence(
     if matrix.rows().iter().all(Vec::is_empty) || of == 0 || slice >= of {
         return None;
     }
+    sequence_by(
+        matrix_fingerprint(matrix),
+        (seed, slice, of),
+        terms,
+        from,
+        || Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads),
+    )
+}
+
+/// [`wiedemann_sequence`] for a matrix known by its [`Dimensions`], whose
+/// products `product` makes: for a host that holds the blocks and has `M·x`
+/// made elsewhere, as by the strips of a cut on other hosts.
+///
+/// `product(x, image)` is given `x`, a word a relation, and `image`, a
+/// word a column that some relation sets, all zero; it writes `M·x` there
+/// and returns `true`, or returns `false` when it could not make it. The
+/// columns' order is the product's, one order at every call and in every
+/// stage of a solve, `B` being the matrix with its columns so ordered; in
+/// the order the matrix's strips have them ([`Strip`](super::Strip)) the
+/// slice is the one [`wiedemann_sequence`] makes, bit for bit. A slice of
+/// `terms` terms begun from no prior costs as many calls, and one that
+/// goes on from a prior a call a new term. `None` as
+/// [`wiedemann_sequence`] returns it, and when a product could not be
+/// made: nothing is kept of the call then, so a caller that would lose
+/// fewer products asks for fewer terms at a time, each call on from the
+/// last.
+#[must_use]
+pub fn wiedemann_sequence_with(
+    matrix: &Dimensions,
+    product: impl FnMut(&[u64], &mut [u64]) -> bool,
+    seed: u64,
+    slice: usize,
+    of: usize,
+    terms: usize,
+    from: Option<&Sequence>,
+) -> Option<Sequence> {
+    if matrix.relations == 0 || matrix.columns == 0 || of == 0 || slice >= of {
+        return None;
+    }
+    sequence_by(matrix.fingerprint, (seed, slice, of), terms, from, || {
+        Outside::new(matrix.relations, matrix.columns, product)
+    })
+}
+
+/// Slice `slice` of `of` of the sequence of the matrix of this
+/// `fingerprint`, to `terms` terms, by the product `matrix` builds, which
+/// is not built before the refusals that need none.
+fn sequence_by<P: Product>(
+    fingerprint: u64,
+    (seed, slice, of): (u64, usize, usize),
+    terms: usize,
+    from: Option<&Sequence>,
+    matrix: impl FnOnce() -> P,
+) -> Option<Sequence> {
     // Refused before any request: a prior of another matrix, seed or place,
     // by the fingerprint, a pass over the matrix; and a slab whose words
     // or bytes pass `usize`.
-    let fingerprint = matrix_fingerprint(matrix);
     if from.is_some_and(|from| !from.is_of(fingerprint, seed, slice, of)) {
         return None;
     }
@@ -693,8 +830,8 @@ pub fn wiedemann_sequence(
     if length.checked_mul(size_of::<u64>())? > isize::MAX as usize {
         return None;
     }
-    let sparse = Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads);
-    let (count, columns) = (sparse.relations(), sparse.columns());
+    let mut matrix = matrix();
+    let (count, columns) = (matrix.relations(), matrix.columns());
     let dimension = count.max(columns);
     // A prior of this matrix has its dimension; one that has not is a
     // damaged frame, refused once the products are built.
@@ -713,13 +850,13 @@ pub fn wiedemann_sequence(
         }
         None => {
             let mut v = z_slice(seed, slice, dimension);
-            advance(&sparse, &mut v, &mut image);
+            advance(&mut matrix, &mut v, &mut image)?;
             (v, 0)
         }
     };
     for term in done..terms {
         if term > 0 {
-            advance(&sparse, &mut v, &mut image);
+            advance(&mut matrix, &mut v, &mut image)?;
         }
         for support in &supports {
             slabs.push(support.iter().fold(0, |sum, &at| sum ^ v.word(at)));
@@ -1166,7 +1303,7 @@ pub fn wiedemann_solution(
     if slice >= generators.of || matrix.rows().is_empty() || matrix.columns() == 0 {
         return None;
     }
-    let sparse = Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads);
+    let mut sparse = Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads);
     let (count, columns) = (sparse.relations(), sparse.columns());
     let dimension = count.max(columns);
     if dimension != generators.dimension
@@ -1175,6 +1312,48 @@ pub fn wiedemann_solution(
     {
         return None;
     }
+    solution_by(&mut sparse, generators, slice, threads)
+}
+
+/// [`wiedemann_solution`] for a matrix known by its [`Dimensions`], whose
+/// products `product` makes as [`wiedemann_sequence_with`] has them made:
+/// a call a power of `B`, the generators' degree of them. `None` as
+/// [`wiedemann_solution`] returns it, before any product, and when a
+/// product could not be made, nothing then kept.
+#[must_use]
+pub fn wiedemann_solution_with(
+    matrix: &Dimensions,
+    product: impl FnMut(&[u64], &mut [u64]) -> bool,
+    generators: &Generators,
+    slice: usize,
+    threads: usize,
+) -> Option<Vec<u64>> {
+    if slice >= generators.of
+        || matrix.relations == 0
+        || matrix.columns == 0
+        || matrix.dimension() != generators.dimension
+        || matrix.columns != generators.columns
+        || matrix.fingerprint != generators.matrix
+    {
+        return None;
+    }
+    solution_by(
+        &mut Outside::new(matrix.relations, matrix.columns, product),
+        generators,
+        slice,
+        threads,
+    )
+}
+
+/// Slice `slice`'s part of the solutions of `generators`, which are of the
+/// matrix whose product `matrix` is.
+fn solution_by(
+    matrix: &mut impl Product,
+    generators: &Generators,
+    slice: usize,
+    threads: usize,
+) -> Option<Vec<u64>> {
+    let dimension = matrix.relations().max(matrix.columns());
     let (of, degree) = (generators.of, generators.degree());
     let z = z_slice(generators.seed, slice, dimension);
     let mut image = Block::zeroed(dimension);
@@ -1182,7 +1361,7 @@ pub fn wiedemann_solution(
     let runs = word_runs(dimension, threads);
     for power in (0..=degree).rev() {
         if power < degree {
-            advance(&sparse, &mut w, &mut image);
+            advance(matrix, &mut w, &mut image)?;
         }
         // Row k of the table's matrix: the lanes whose coefficient at this
         // power, in this slice's word, has bit k. Coefficient `p` of the
@@ -1253,8 +1432,43 @@ pub fn wiedemann_finish(
     if matrix.rows().is_empty() || matrix.columns() == 0 || partials.is_empty() {
         return None;
     }
-    let sparse = Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads);
-    let (count, columns) = (sparse.relations(), sparse.columns());
+    let mut sparse = Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads);
+    finish_by(&mut sparse, matrix, partials, threads)
+}
+
+/// [`wiedemann_finish`] with the products of `matrix` made by `product`,
+/// as [`wiedemann_sequence_with`] has them made: sixteen calls at the most
+/// (`POWERS`). The matrix is still given, for every vector returned is
+/// checked against its rows here, by a sum that shares nothing with the
+/// product. `None` as [`wiedemann_finish`] returns it, and when a product
+/// could not be made.
+#[must_use]
+pub fn wiedemann_finish_with(
+    matrix: &SparseMatrix,
+    product: impl FnMut(&[u64], &mut [u64]) -> bool,
+    partials: &[Vec<u64>],
+    threads: usize,
+) -> Option<Vec<Vec<usize>>> {
+    if matrix.rows().is_empty() || matrix.columns() == 0 || partials.is_empty() {
+        return None;
+    }
+    finish_by(
+        &mut Outside::new(matrix.rows().len(), live_columns(matrix), product),
+        matrix,
+        partials,
+        threads,
+    )
+}
+
+/// The dependencies of `matrix` from the slices' parts of the solutions,
+/// by `product`, which is its product.
+fn finish_by(
+    product: &mut impl Product,
+    matrix: &SparseMatrix,
+    partials: &[Vec<u64>],
+    threads: usize,
+) -> Option<Vec<Vec<usize>>> {
+    let (count, columns) = (product.relations(), product.columns());
     let dimension = count.max(columns);
     if partials.iter().any(|partial| partial.len() != dimension) {
         return None;
@@ -1270,7 +1484,9 @@ pub fn wiedemann_finish(
     // them is no part of a dependency.
     let mut candidates: Vec<Vec<u64>> = Vec::new();
     for _ in 0..POWERS {
-        sparse.forward(&w, &image);
+        if !product.forward(&w, &image) {
+            return None;
+        }
         let unfinished = image.words().fold(0u64, |lanes, word| lanes | word);
         let alive = w.range(0, count).fold(0u64, |lanes, word| lanes | word);
         let mut done = alive & !unfinished;
@@ -1325,6 +1541,8 @@ pub fn wiedemann_finish(
 mod tests {
     use super::*;
     use crate::gf2_impl::block_lanczos_dependencies_sparse;
+    use crate::gf2_impl::{Strip, StripPart};
+    use std::cell::Cell;
 
     /// Knuth's MMIX linear congruential generator (TAOCP vol. 2, §3.3.4),
     /// its high bytes.
@@ -2008,6 +2226,185 @@ mod tests {
         );
     }
 
+    /// Every strip of the cut of `matrix` into `of`, which is checked to
+    /// be one.
+    fn cut(matrix: &SparseMatrix, of: usize, threads: usize) -> Vec<Strip> {
+        let strips: Vec<Strip> = (0..of)
+            .map(|part| Strip::of(matrix, part, of, threads).expect("a part of the cut"))
+            .collect();
+        let parts: Vec<StripPart> = strips.iter().map(|strip| strip.part().clone()).collect();
+        assert!(StripPart::are_cut_of(&parts, &Dimensions::of(matrix)));
+        strips
+    }
+
+    /// The product the strips of a cut make between them, as a host that
+    /// holds the blocks would have it made, each call counted.
+    fn by_strips<'a>(
+        strips: &'a mut [Strip],
+        calls: &'a Cell<usize>,
+    ) -> impl FnMut(&[u64], &mut [u64]) -> bool + 'a {
+        move |x, image| {
+            calls.set(calls.get() + 1);
+            strips.iter_mut().all(|strip| {
+                strip.apply(x).is_some_and(|words| {
+                    image[strip.part().columns()].copy_from_slice(&words);
+                    true
+                })
+            })
+        }
+    }
+
+    /// The stages through the strips of a cut are the stages: each slice
+    /// of the sequence, which is all the generators are made from, each
+    /// slice's part of the solution and the dependencies are those one
+    /// host makes, bit for bit, through one strip, two, three and five,
+    /// and through more strips than the matrix has columns, some of them
+    /// empty. And the products are counted: a call a term, of the new
+    /// terms alone when a slice goes on from a prior; a call a power of
+    /// the solution; and no more than the finish's powers.
+    #[test]
+    fn the_stages_through_strips_are_the_stages() {
+        let calls = Cell::new(0);
+        for (rows, columns, weight, seed, cuts) in [
+            (900, 850, 6, 21, &[1, 2, 3, 5][..]),
+            (40, 30, 3, 1, &[37][..]),
+        ] {
+            let matrix = sieve_like(rows, columns, weight, seed);
+            let dimensions = Dimensions::of(&matrix);
+            for of in [1, 2] {
+                let (slices, generators, _) = settled(&matrix, seed, of);
+                let partials: Vec<Vec<u64>> = (0..of)
+                    .map(|slice| wiedemann_solution(&matrix, &generators, slice, 1))
+                    .collect::<Option<_>>()
+                    .expect("each slice's part");
+                let found = wiedemann_finish(&matrix, &partials, 1).expect("dependencies");
+                for &parts in cuts {
+                    let label = format!("{rows} rows, {of} slices, {parts} strips");
+                    let mut strips = cut(&matrix, parts, 1);
+                    let empty = strips.iter().any(|strip| strip.part().columns().is_empty());
+                    assert_eq!(empty, parts > dimensions.columns(), "{label}");
+                    for (slice, plain) in slices.iter().enumerate() {
+                        let (terms, half) = (plain.terms(), plain.terms() / 2);
+                        let product = by_strips(&mut strips, &calls);
+                        let place = (seed, slice, of);
+                        let first = sequence_with(&dimensions, product, place, half, None);
+                        assert_eq!(calls.take(), half, "{label}");
+                        let product = by_strips(&mut strips, &calls);
+                        let whole = sequence_with(&dimensions, product, place, terms, Some(&first));
+                        assert_eq!(calls.take(), terms - half, "{label}");
+                        assert_eq!(&whole, plain, "{label}: slice {slice}");
+                    }
+                    for (slice, plain) in partials.iter().enumerate() {
+                        let product = by_strips(&mut strips, &calls);
+                        let part =
+                            wiedemann_solution_with(&dimensions, product, &generators, slice, 1)
+                                .expect("a part");
+                        assert_eq!(calls.take(), generators.degree(), "{label}");
+                        assert_eq!(&part, plain, "{label}: slice {slice}");
+                    }
+                    let product = by_strips(&mut strips, &calls);
+                    let finished = wiedemann_finish_with(&matrix, product, &partials, 1);
+                    assert!((1..=POWERS).contains(&calls.take()), "{label}");
+                    assert_eq!(finished.as_ref(), Some(&found), "{label}");
+                }
+            }
+        }
+    }
+
+    /// [`wiedemann_sequence_with`] for a slice that is to be made.
+    fn sequence_with(
+        matrix: &Dimensions,
+        product: impl FnMut(&[u64], &mut [u64]) -> bool,
+        (seed, slice, of): (u64, usize, usize),
+        terms: usize,
+        from: Option<&Sequence>,
+    ) -> Sequence {
+        wiedemann_sequence_with(matrix, product, seed, slice, of, terms, from).expect("a slice")
+    }
+
+    /// A slice is the same through strips cut and run on one thread and on
+    /// four, and the same as one host's on either, on a matrix large
+    /// enough that a pool of four is kept and with more columns than
+    /// relations.
+    #[test]
+    fn a_slice_through_strips_is_the_same_on_any_threads() {
+        const ROWS: usize = 4 * 4_096 + 2 * WIDTH;
+        const TERMS: usize = 6;
+        let (matrix, seed) = (sieve_like(ROWS, ROWS + 700, 6, 29), 29);
+        let dimensions = Dimensions::of(&matrix);
+        assert!(dimensions.columns() > dimensions.relations());
+        let plain = wiedemann_sequence(&matrix, seed, 1, 2, TERMS, None, 1).expect("a slice");
+        let calls = Cell::new(0);
+        for threads in [1, 4] {
+            let made = crate::parallel::with_budget(threads, || {
+                assert_eq!(
+                    wiedemann_sequence(&matrix, seed, 1, 2, TERMS, None, threads).as_ref(),
+                    Some(&plain)
+                );
+                let mut strips = cut(&matrix, 3, threads);
+                let product = by_strips(&mut strips, &calls);
+                wiedemann_sequence_with(&dimensions, product, seed, 1, 2, TERMS, None)
+            });
+            assert_eq!(made.as_ref(), Some(&plain), "{threads} threads");
+            assert_eq!(calls.take(), TERMS);
+        }
+    }
+
+    /// What a stage refuses it refuses before any product: a matrix that
+    /// is not the prior's or the generators', a slice out of range, parts
+    /// of the solution that are not the matrix's. And a product that
+    /// cannot be made ends its stage with nothing returned.
+    #[test]
+    fn a_stage_refuses_before_any_product_and_stops_at_one_not_made() {
+        let (matrix, seed) = (sieve_like(900, 850, 6, 21), 21);
+        // Another matrix of the same dimensions: the same rows, two of
+        // them in each other's places.
+        let mut rows = matrix.rows().to_vec();
+        rows.swap(0, 1);
+        let other = SparseMatrix::new(matrix.columns(), rows);
+        let (dimensions, others) = (Dimensions::of(&matrix), Dimensions::of(&other));
+        assert_eq!(
+            (dimensions.relations(), dimensions.columns()),
+            (others.relations(), others.columns())
+        );
+        assert_ne!(dimensions.fingerprint(), others.fingerprint());
+        let (slices, generators, _) = settled(&matrix, seed, 1);
+        let terms = slices[0].terms();
+        let partial = wiedemann_solution(&matrix, &generators, 0, 1).expect("a part");
+        let calls = Cell::new(0);
+        // A product that is made at its first so many calls, each counted.
+        let made_at = |most: usize| {
+            let calls = &calls;
+            move |_: &[u64], image: &mut [u64]| {
+                calls.set(calls.get() + 1);
+                image.fill(1);
+                calls.get() <= most
+            }
+        };
+
+        let (every, from) = (usize::MAX, Some(&slices[0]));
+        let refused = wiedemann_sequence_with(&others, made_at(every), seed, 0, 1, terms + 1, from);
+        assert!(refused.is_none(), "a prior of another matrix");
+        let refused = wiedemann_sequence_with(&dimensions, made_at(every), seed, 1, 1, 4, None);
+        assert!(refused.is_none(), "a slice out of range");
+        let refused = wiedemann_solution_with(&others, made_at(every), &generators, 0, 1);
+        assert!(refused.is_none(), "generators of another matrix");
+        let refused = wiedemann_solution_with(&dimensions, made_at(every), &generators, 1, 1);
+        assert!(refused.is_none(), "a slice out of range");
+        let short = vec![partial[1..].to_vec()];
+        let refused = wiedemann_finish_with(&matrix, made_at(every), &short, 1);
+        assert!(refused.is_none(), "a part that is not of the matrix");
+        assert_eq!(calls.take(), 0, "a refusal made a product");
+
+        // The third product of each stage is not made.
+        let stopped = wiedemann_sequence_with(&dimensions, made_at(2), seed, 0, 1, 8, None);
+        assert_eq!((stopped, calls.take()), (None, 3));
+        let stopped = wiedemann_solution_with(&dimensions, made_at(2), &generators, 0, 1);
+        assert_eq!((stopped, calls.take()), (None, 3));
+        let stopped = wiedemann_finish_with(&matrix, made_at(2), &[partial], 1);
+        assert_eq!((stopped, calls.take()), (None, 3));
+    }
+
     /// A matrix none of whose rows sets a column has no sequence: it is
     /// declined as one with no columns is.
     #[test]
@@ -2015,5 +2412,9 @@ mod tests {
         let matrix = SparseMatrix::new(3, vec![Vec::new(), Vec::new()]);
         assert!(wiedemann_sequence(&matrix, 5, 0, 1, 4, None, 1).is_none());
         assert!(block_wiedemann_dependencies_sparse(&matrix, &mut Lcg(5), 1).is_none());
+        let made = |_: &[u64], _: &mut [u64]| true;
+        assert!(
+            wiedemann_sequence_with(&Dimensions::of(&matrix), made, 5, 0, 1, 4, None).is_none()
+        );
     }
 }

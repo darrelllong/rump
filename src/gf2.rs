@@ -42,9 +42,10 @@ pub use strip::{Strip, StripPart};
 mod wiedemann;
 pub use wiedemann::{
     block_wiedemann_dependencies_sparse, matrix_fingerprint, wiedemann_finish,
-    wiedemann_generators, wiedemann_sequence, wiedemann_sequence_bytes, wiedemann_solution,
-    wiedemann_terms, wiedemann_terms_most, wiedemann_terms_most_of, Dimensions, Generated,
-    Generators, Iterated, Sequence, WiedemannBytesError,
+    wiedemann_finish_with, wiedemann_generators, wiedemann_sequence, wiedemann_sequence_bytes,
+    wiedemann_sequence_with, wiedemann_solution, wiedemann_solution_with, wiedemann_terms,
+    wiedemann_terms_most, wiedemann_terms_most_of, Dimensions, Generated, Generators, Iterated,
+    Sequence, WiedemannBytesError,
 };
 
 /// Bits per storage word.

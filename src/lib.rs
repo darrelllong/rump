@@ -104,8 +104,9 @@ pub mod gf2 {
         block_lanczos_dependencies, block_lanczos_dependencies_sparse,
         block_wiedemann_dependencies_sparse, dense_null_space, dense_null_space_sparse,
         filter_floor, filter_merge, filter_merge_within, matrix_fingerprint, prune_singletons,
-        wiedemann_finish, wiedemann_generators, wiedemann_sequence, wiedemann_sequence_bytes,
-        wiedemann_solution, wiedemann_terms, wiedemann_terms_most, wiedemann_terms_most_of,
+        wiedemann_finish, wiedemann_finish_with, wiedemann_generators, wiedemann_sequence,
+        wiedemann_sequence_bytes, wiedemann_sequence_with, wiedemann_solution,
+        wiedemann_solution_with, wiedemann_terms, wiedemann_terms_most, wiedemann_terms_most_of,
         Dimensions, FilteredMatrix, Generated, Generators, Iterated, MatrixBytesError,
         PrunedMatrix, Sequence, SparseMatrix, Strip, StripPart, WiedemannBytesError, RECORDS,
     };
