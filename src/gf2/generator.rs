@@ -634,6 +634,27 @@ mod tests {
         out
     }
 
+    /// A split at every length from two to nineteen, down to leaves of one
+    /// coefficient, is the plain product: the lengths that are odd and
+    /// even, and the short ones whose high product ends before the terms
+    /// at `X^h` do.
+    #[test]
+    fn a_split_at_every_length_is_the_plain_product() {
+        let mut draw = Draw(5);
+        for n in 2..20 {
+            let a = draw.polynomials(1, 2 * WIDTH, n);
+            let b = draw.polynomials(2, 2 * WIDTH, n);
+            let shape = Shape {
+                words: a.words,
+                inner: a.columns,
+                columns: b.columns,
+            };
+            let mut out = Polynomials::zero(shape.words, shape.columns, 2 * n - 1);
+            karatsuba(&a.data, &b.data, &mut out.data, shape, 2);
+            assert_eq!(out, plain(&a, &b), "{n} coefficients");
+        }
+    }
+
     /// Balanced and not, odd lengths and even, either side the longer, at
     /// the shapes the recursion makes: `E` by `π` and `π` by `π`.
     #[test]
