@@ -79,8 +79,9 @@ const POWERS: usize = 16;
 
 /// The family tag that begins a stage's bytes, GF(2) Wiedemann in its
 /// second layout, and the stage's own letter after it: `GFW2S`, `GFW2G`,
-/// `GFW2I`.
-const MAGIC: &[u8; 4] = b"GFW2";
+/// `GFW2I`. What a product in strips passes between hosts is of the
+/// family: a matrix's dimensions are `GFW2D` and a strip's part `GFW2P`.
+pub(super) const MAGIC: &[u8; 4] = b"GFW2";
 
 /// The family tag of the first layout, whose iteration and generators
 /// carried no matrix identity. A frame under it with this stage's letter
@@ -257,6 +258,51 @@ impl Dimensions {
     #[must_use]
     pub fn fingerprint(&self) -> u64 {
         self.fingerprint
+    }
+
+    /// The dimensions as bytes: `GFW2D`, then the relations, the columns
+    /// and the fingerprint, each eight bytes little-endian.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(MAGIC.len() + 1 + 8 * Self::WORDS);
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(b'D');
+        self.write(&mut bytes);
+        bytes
+    }
+
+    /// Dimensions from their bytes: exactly one frame and nothing after
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// The bytes are not [`Self::to_bytes`]'s: another tag, too few, a
+    /// count past this host's words, or bytes after the frame.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, WiedemannBytesError> {
+        let mut words = Words::of(bytes, b'D')?;
+        let dimensions = Self::read(&mut words)?;
+        words.finish()?;
+        Ok(dimensions)
+    }
+
+    /// The words [`Self::write`] adds and [`Self::read`] takes.
+    pub(super) const WORDS: usize = 3;
+
+    /// The three words of the dimensions, at the end of `bytes`: what a
+    /// frame that carries a matrix's dimensions among its fields writes.
+    pub(super) fn write(&self, bytes: &mut Vec<u8>) {
+        for word in [self.relations as u64, self.columns as u64, self.fingerprint] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+    }
+
+    /// The dimensions [`Self::write`] wrote, as the next words of a frame.
+    pub(super) fn read(words: &mut Words<'_>) -> Result<Self, WiedemannBytesError> {
+        Ok(Self {
+            relations: words.index()?,
+            columns: words.index()?,
+            fingerprint: words.next()?,
+        })
     }
 
     /// `N`, the greater of the relations and the columns.
@@ -496,16 +542,18 @@ impl Generators {
     }
 }
 
-/// What a stage's bytes could not be read as.
+/// What the bytes of a stage, of a matrix's dimensions or of a strip's
+/// part could not be read as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WiedemannBytesError {
     /// Not the magic of this stage.
     Header,
     /// Fewer bytes than the fields claim.
     Short,
-    /// Fields that do not describe a slice, a set of generators or an
-    /// iteration: a count of zero or out of step with the others, or one
-    /// past what its shape product holds.
+    /// Fields that do not describe a slice, a set of generators, an
+    /// iteration, a matrix's dimensions or a strip's part: a count of zero
+    /// or out of step with the others, or one past what its shape product
+    /// or this host's words hold.
     Shape,
     /// Bytes past the frame the fields describe: a tail, or another frame.
     Long,
@@ -536,12 +584,12 @@ impl std::error::Error for WiedemannBytesError {}
 /// eight-byte little-endian words. Every reader takes exactly one frame:
 /// its fields, the words they count, with each product checked before it
 /// is used, and [`Self::finish`] at the end.
-struct Words<'a> {
+pub(super) struct Words<'a> {
     bytes: &'a [u8],
 }
 
 impl<'a> Words<'a> {
-    fn of(bytes: &'a [u8], stage: u8) -> Result<Self, WiedemannBytesError> {
+    pub(super) fn of(bytes: &'a [u8], stage: u8) -> Result<Self, WiedemannBytesError> {
         if let Some(rest) = bytes
             .strip_prefix(MAGIC)
             .and_then(|rest| rest.strip_prefix(&[stage]))
@@ -558,7 +606,7 @@ impl<'a> Words<'a> {
         })
     }
 
-    fn next(&mut self) -> Result<u64, WiedemannBytesError> {
+    pub(super) fn next(&mut self) -> Result<u64, WiedemannBytesError> {
         let (word, rest) = self
             .bytes
             .split_first_chunk::<8>()
@@ -567,7 +615,7 @@ impl<'a> Words<'a> {
         Ok(u64::from_le_bytes(*word))
     }
 
-    fn index(&mut self) -> Result<usize, WiedemannBytesError> {
+    pub(super) fn index(&mut self) -> Result<usize, WiedemannBytesError> {
         usize::try_from(self.next()?).map_err(|_| WiedemannBytesError::Shape)
     }
 
@@ -579,7 +627,7 @@ impl<'a> Words<'a> {
     }
 
     /// The frame's end: nothing follows what its fields describe.
-    fn finish(self) -> Result<(), WiedemannBytesError> {
+    pub(super) fn finish(self) -> Result<(), WiedemannBytesError> {
         if self.bytes.is_empty() {
             Ok(())
         } else {
@@ -2246,10 +2294,8 @@ mod tests {
         move |x, image| {
             calls.set(calls.get() + 1);
             strips.iter_mut().all(|strip| {
-                strip.apply(x).is_some_and(|words| {
-                    image[strip.part().columns()].copy_from_slice(&words);
-                    true
-                })
+                let own = strip.part().columns();
+                strip.apply_into(x, &mut image[own])
             })
         }
     }

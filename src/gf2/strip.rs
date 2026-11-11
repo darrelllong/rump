@@ -25,7 +25,7 @@
 use core::ops::Range;
 use std::sync::Arc;
 
-use super::wiedemann::{matrix_fingerprint, Dimensions};
+use super::wiedemann::{matrix_fingerprint, Dimensions, WiedemannBytesError, Words, MAGIC};
 use super::{Block, Sparse, SparseMatrix};
 
 /// What a strip is a part of, and which words of the image are its own.
@@ -56,6 +56,53 @@ impl StripPart {
     #[must_use]
     pub fn columns(&self) -> Range<usize> {
         self.columns.clone()
+    }
+
+    /// The length of [`Self::to_bytes`]: the tag's five bytes, the matrix's
+    /// three words and the part's four, so that a host reading a part off
+    /// a stream knows how much to read.
+    pub const BYTES: usize = MAGIC.len() + 1 + 8 * (Dimensions::WORDS + 4);
+
+    /// The part as bytes: `GFW2P`, then its matrix's relations, columns
+    /// and fingerprint, its index, the count of parts, and its range's
+    /// start and end, each eight bytes little-endian. What a strip tells
+    /// the host that puts the image together, before any product.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(Self::BYTES);
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(b'P');
+        self.matrix.write(&mut bytes);
+        for word in [self.index, self.of, self.columns.start, self.columns.end] {
+            bytes.extend_from_slice(&(word as u64).to_le_bytes());
+        }
+        bytes
+    }
+
+    /// A part from its bytes: exactly one frame and nothing after it, its
+    /// index below its count of parts and its range within the matrix's
+    /// columns. That it is a part of the reader's matrix and in its place
+    /// is [`Self::are_cut_of`]'s to say.
+    ///
+    /// # Errors
+    ///
+    /// The bytes are not [`Self::to_bytes`]'s: another tag, too few, bytes
+    /// after the frame, or fields that are no part of a cut.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, WiedemannBytesError> {
+        let mut words = Words::of(bytes, b'P')?;
+        let matrix = Dimensions::read(&mut words)?;
+        let (index, of) = (words.index()?, words.index()?);
+        let columns = words.index()?..words.index()?;
+        words.finish()?;
+        if index >= of || columns.start > columns.end || columns.end > matrix.columns() {
+            return Err(WiedemannBytesError::Shape);
+        }
+        Ok(Self {
+            matrix,
+            index,
+            of,
+            columns,
+        })
     }
 
     /// Whether `parts`, in their order, are the whole of one cut of the
@@ -93,7 +140,7 @@ impl StripPart {
 /// bit a relation each, a byte a relation for every eight of them.
 /// Beside the entries it holds the block it reads, a word a relation, and
 /// its words of the image, a word a column, each copied once a product,
-/// and its pool of threads.
+/// and its pool of threads. A product allocates nothing.
 ///
 /// While it is made it holds besides, each for a part of the making: the
 /// places of the matrix's columns, four bytes a declared column and
@@ -150,17 +197,22 @@ impl Strip {
         &self.part
     }
 
-    /// The strip's words of `M·x`, in the order of [`StripPart::columns`], for
-    /// `x` a word a relation; `None` when `x` is not as many words as the
-    /// matrix has relations, before anything is read of it.
+    /// The strip's words of `M·x` into `image`, in the order of
+    /// [`StripPart::columns`], for `x` a word a relation. `false`, with
+    /// nothing read of `x` and nothing written, when `x` is not as many
+    /// words as the matrix has relations or `image` not as many as the
+    /// strip has columns.
     #[must_use]
-    pub fn apply(&mut self, x: &[u64]) -> Option<Vec<u64>> {
-        if x.len() != self.part.matrix.relations() {
-            return None;
+    pub fn apply_into(&mut self, x: &[u64], image: &mut [u64]) -> bool {
+        if x.len() != self.part.matrix.relations() || image.len() != self.part.columns.len() {
+            return false;
         }
         self.x.write(0, x);
         self.product.forward(&self.x, &self.image);
-        Some(self.image.words().collect())
+        for (word, made) in image.iter_mut().zip(self.image.words()) {
+            *word = made;
+        }
+        true
     }
 }
 
@@ -229,6 +281,13 @@ mod tests {
         strips
     }
 
+    /// A strip's words of `M·x`, for `x` a block of the relations.
+    fn words(strip: &mut Strip, x: &[u64]) -> Vec<u64> {
+        let mut image = vec![0; strip.part.columns.len()];
+        assert!(strip.apply_into(x, &mut image), "a block of the relations");
+        image
+    }
+
     /// `M·x` as one host makes it.
     fn whole(matrix: &SparseMatrix, x: &[u64], threads: usize) -> Vec<u64> {
         let product = Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads);
@@ -282,7 +341,7 @@ mod tests {
                 );
                 let made: Vec<u64> = strips
                     .iter_mut()
-                    .flat_map(|strip| strip.apply(&x).expect("a block of the relations"))
+                    .flat_map(|strip| words(strip, &x))
                     .collect();
                 assert_eq!(made, image, "{rows} by {columns} in {of} strips");
             }
@@ -330,8 +389,8 @@ mod tests {
         let strips = cut(&small, 17, 1);
         assert!(strips.iter().any(|strip| strip.part.columns.is_empty()));
         for mut strip in strips {
-            let made = strip.apply(&[0; 40]).expect("a block of the relations");
-            assert_eq!(made.len(), strip.part.columns.len());
+            let own = strip.part.columns.len();
+            assert!(strip.apply_into(&[0; 40], &mut vec![0; own]));
         }
     }
 
@@ -349,12 +408,9 @@ mod tests {
             let mut four = crate::parallel::with_budget(4, || cut(&matrix, of, 4));
             for (one, four) in alone.iter_mut().zip(&mut four) {
                 assert_eq!(one.part(), four.part());
-                assert_eq!(one.apply(&x), four.apply(&x));
+                assert_eq!(words(one, &x), words(four, &x));
             }
-            let made: Vec<u64> = four
-                .iter_mut()
-                .flat_map(|strip| strip.apply(&x).expect("a block of the relations"))
-                .collect();
+            let made: Vec<u64> = four.iter_mut().flat_map(|strip| words(strip, &x)).collect();
             assert_eq!(made, image);
         }
     }
@@ -399,10 +455,85 @@ mod tests {
         assert!(Strip::of(&matrix, 0, 0, 1).is_none());
         assert!(Strip::of(&SparseMatrix::new(4, Vec::new()), 0, 1, 1).is_none());
         assert!(Strip::of(&SparseMatrix::new(0, vec![Vec::new()]), 0, 1, 1).is_none());
+        // A block that is not the relations', or an image that is not the
+        // strip's columns', is refused with nothing written.
         let mut strip = Strip::of(&matrix, 1, 3, 1).expect("a part");
-        assert_eq!(strip.apply(&[0; 299]), None);
-        assert_eq!(strip.apply(&[0; 301]), None);
-        assert!(strip.apply(&[0; 300]).is_some());
+        let own = strip.part.columns.len();
+        let mut image = vec![7; own];
+        assert!(!strip.apply_into(&[0; 299], &mut image));
+        assert!(!strip.apply_into(&[0; 301], &mut image));
+        assert!(!strip.apply_into(&[0; 300], &mut image[1..]));
+        assert!(!strip.apply_into(&[0; 300], &mut vec![7; own + 1]));
+        assert_eq!(image, vec![7; own]);
+        assert!(strip.apply_into(&[0; 300], &mut image));
+        assert_eq!(image, vec![0; own]);
+    }
+
+    /// A part and its matrix's dimensions are read back from their bytes,
+    /// a part's of the stated length; and bytes that are not one frame of
+    /// them, or whose fields are no part of a cut, are refused by name.
+    #[test]
+    fn a_part_and_its_dimensions_are_read_back_from_their_bytes() {
+        let matrix = sieve_like(300, 720, 4, 3);
+        let dimensions = Dimensions::of(&matrix);
+        let bytes = dimensions.to_bytes();
+        assert_eq!(Dimensions::from_bytes(&bytes), Ok(dimensions));
+        assert_eq!(
+            Dimensions::from_bytes(&bytes[..bytes.len() - 1]),
+            Err(WiedemannBytesError::Short)
+        );
+        let long = [&bytes[..], &[0]].concat();
+        assert_eq!(
+            Dimensions::from_bytes(&long),
+            Err(WiedemannBytesError::Long)
+        );
+        for of in [1, 3, 400] {
+            for strip in cut(&matrix, of, 1) {
+                let bytes = strip.part.to_bytes();
+                assert_eq!(bytes.len(), StripPart::BYTES);
+                assert_eq!(StripPart::from_bytes(&bytes).as_ref(), Ok(&strip.part));
+            }
+        }
+        let part = cut(&matrix, 3, 1).remove(1).part;
+        let bytes = part.to_bytes();
+        assert_eq!(
+            StripPart::from_bytes(&bytes[..bytes.len() - 1]),
+            Err(WiedemannBytesError::Short)
+        );
+        let long = [&bytes[..], &[0]].concat();
+        assert_eq!(StripPart::from_bytes(&long), Err(WiedemannBytesError::Long));
+        // One tag is not the other's.
+        assert_eq!(
+            StripPart::from_bytes(&dimensions.to_bytes()),
+            Err(WiedemannBytesError::Header)
+        );
+        assert_eq!(
+            Dimensions::from_bytes(&bytes),
+            Err(WiedemannBytesError::Header)
+        );
+        // An index that is not below its count, a range that ends before
+        // it begins, and one past the matrix's columns.
+        let shapeless = [
+            StripPart {
+                index: 3,
+                ..part.clone()
+            },
+            StripPart {
+                columns: part.columns.end + 1..part.columns.end,
+                ..part.clone()
+            },
+            StripPart {
+                columns: part.columns.start..dimensions.columns() + 1,
+                ..part.clone()
+            },
+        ];
+        for part in shapeless {
+            assert_eq!(
+                StripPart::from_bytes(&part.to_bytes()),
+                Err(WiedemannBytesError::Shape),
+                "{part:?}"
+            );
+        }
     }
 
     /// A matrix none of whose rows sets a column has no image, and its
@@ -412,7 +543,7 @@ mod tests {
         let matrix = SparseMatrix::new(5, vec![Vec::new(), Vec::new()]);
         let mut strips = cut(&matrix, 2, 1);
         for strip in &mut strips {
-            assert_eq!(strip.apply(&[1, 2]), Some(Vec::new()));
+            assert!(strip.apply_into(&[1, 2], &mut []));
         }
     }
 }
