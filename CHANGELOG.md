@@ -3,25 +3,25 @@
 Releases are git tags; nothing here is published to crates.io. Entries record
 what a consumer must change, not everything that moved.
 
-## Unreleased
+## 0.4.0 — tagged `v0.4.0`
 
-### Changed
+### Breaking
 
-- **The Wiedemann generator's products look their tables up a table at a
-  time.** A leaf of a product of polynomial matrices went a column at a
-  time through every table of a coefficient, which at sixteen slices are
-  16.8 MB and in no cache; it goes a table at a time over every column.
-  The generators are the same bit for bit, and on a matrix of 674 k rows
-  in sixteen slices they take 106 s where they took 357 s
-  (PERFORMANCE.md, "The tables, a table at a time").
-
-- **`PolyZ::factor_real` and `PolyZ::real_roots` test one prime before the
-  gcd ladder.** A polynomial squarefree modulo `2⁶¹ − 1`, the prime not
-  dividing its leading coefficient, is squarefree, and is its own
-  squarefree decomposition; only one not so shown takes the remainder
-  sequence over ℤ. The results are the same. A caller that factors many
-  squarefree polynomials of small degree, as a polynomial search does
-  for each candidate's skew, spends most of that time in the sequence.
+- **`gf2::Iterated` and `gf2::Generators` carry the matrix's fingerprint,
+  and `wiedemann_sequence` refuses a prior that is not its own.** An
+  iteration knew its sequence by the first projected term, which two
+  matrices can share while their next terms differ, so a pass over one
+  matrix's terms resumed another's and the recurrence's invariant failed;
+  generators knew no matrix at all, so the solution of a same-shaped
+  matrix took another's. Both carry `matrix_fingerprint` now, the
+  generator pass refuses an iteration of another matrix and the solution
+  refuses generators of another, before any product. The family tag is
+  `GFW2` now, the iteration's and generators' frames gaining the matrix's
+  word after `columns`; a frame under the earlier `GFW` tag is
+  `WiedemannBytesError::Layout`, whose message says to remove it, the
+  stage then being computed again. A slice given as `from` of another
+  matrix, seed or place was silently begun again; it is `None` now,
+  `Sequence::continues` being the question a caller asks first.
 
 ### Added
 
@@ -66,6 +66,159 @@ what a consumer must change, not everything that moved.
   byte, `M·x` as each thread's relations summed into tables of its own.
   RSA-120's solve is a tenth shorter on an M4 Pro and on two EPYC 7452,
   and the dependencies are the same.
+
+### Changed
+
+- **The Wiedemann generator's products look their tables up a table at a
+  time.** A leaf of a product of polynomial matrices went a column at a
+  time through every table of a coefficient, which at sixteen slices are
+  16.8 MB and in no cache; it goes a table at a time over every column.
+  The generators are the same bit for bit, and on a matrix of 674 k rows
+  in sixteen slices they take 106 s where they took 357 s
+  (PERFORMANCE.md, "The tables, a table at a time").
+
+- **`PolyZ::factor_real` and `PolyZ::real_roots` test one prime before the
+  gcd ladder.** A polynomial squarefree modulo `2⁶¹ − 1`, the prime not
+  dividing its leading coefficient, is squarefree, and is its own
+  squarefree decomposition; only one not so shown takes the remainder
+  sequence over ℤ. The results are the same. A caller that factors many
+  squarefree polynomials of small degree, as a polynomial search does
+  for each candidate's skew, spends most of that time in the sequence.
+
+- **CI runs the tests on every platform GitHub hosts.** Linux, macOS and
+  Windows, each on x86_64 and aarch64, where it ran Linux and Apple
+  silicon; the 32-bit leg runs the tests on `i686-unknown-linux-musl`,
+  linked by the toolchain's own linker so that nothing is installed on
+  the runner, where it checked only that they compiled. The crate has no
+  dependencies and no platform code, and nothing in it had to change;
+  `scripts/check_manual_tex.sh` and the extractor it calls now run under
+  Git Bash on Windows too. A
+  test of the fan-out's budgets summed its shares by item rather than by
+  thread and failed on a runner of three cores; it counts each thread
+  once, and the shape is now tested at every budget on every machine.
+
+### Fixed
+
+- **`PolyMod::sqrt_in_field` called squares non-squares in small fields.**
+  Its non-residue search tried `x + c` for `c` below 512 and gave up,
+  returning `None`, the verdict of a non-square. Over a small prime those
+  are only `q` elements, and in `F₅[x]/(x⁵ − x − 1)` and
+  `F₃[x]/(x⁶ − x⁴ + 1)` every one is a square. The search now walks the
+  field's nonconstant elements in base-`q` order from `x`, with no bound,
+  and in a field it ends; for a prime above 512 the order, and so the
+  root returned, is as before.
+
+- **Two of `gf2::filter_merge`'s fan-outs kept the caller's budget.** The
+  release of retired rows' entries and the sorting of the transposed lists
+  cut their work into eight runs a thread and spawned a thread for every
+  run, up to eight times the budget, each run's thread seeing the
+  machine's count rather than a share. Both go through the bounded
+  in-place fan-out now, at most the budget's threads, each with its
+  share, one worker inline, the runs taken from a cursor as before.
+
+- **`gf2::Sequence::from_bytes`, `Generators::from_bytes` and
+  `Iterated::from_bytes` take exactly one frame.** The sequence reader
+  formed `64·of` unchecked, so a header claiming `of = 2⁵⁸` overflowed, a
+  panic under overflow checks, where the fields should have been refused;
+  and the sequence and generator readers stopped at the words their fields
+  count, so a byte, a word or a whole second frame after them passed as the
+  stage. Every shape product is now checked before use, and each reader
+  ends at the frame's end: bytes past it are `WiedemannBytesError::Long`, a
+  new variant beside `Header`, `Short` and `Shape`, as `MatrixBytesError`
+  already has. A consumer matching the error exhaustively gains an arm.
+
+## 0.3.0 — tagged `v0.3.0` (`e2a957c`)
+
+### Breaking
+
+- **`number_theory::ln_gamma`, `regularized_incomplete_beta`,
+  `student_t_quantile` and `NumericalError` are gone.** They are floating
+  statistical kernels, not arithmetic, and they now live in `entropy::math`
+  (entropy 0.6.0), unchanged in signature and behaviour and on the same
+  reference fixtures. A caller depends on entropy and changes the path;
+  entropy compiles that module with or without its default features, so it
+  does not drag in a generator. rump keeps no forwarding wrapper: entropy
+  depends on rump, so a wrapper would close a cycle. The reference generators
+  `scripts/lanczos_coefficients.py` and `scripts/incomplete_beta_reference.py`
+  and the fixtures under `tests/data/` moved with them.
+
+- **`lattice::short_vectors_form` and `closest_vectors_form` return
+  `lattice::Enumeration` and take `visit_limit: u64`.** Both panicked on
+  valid forms whose scales differ widely — under `diag(1, 2¹⁰⁰⁰)` the
+  common shift into doubles rounded the entry 1 to zero — and returned a
+  truncated search indistinguishable from a complete one. The Gram–Schmidt
+  data are now exact, pruning uses outward-rounded enclosures, and
+  `Enumeration::outcome()` says whether the search was `Exhausted`, stopped
+  at its `VisitLimit`, or met a `NumericalLimit`; only `Exhausted` certifies
+  that nothing within the bound was missed. A negative bound is an empty,
+  exhausted search for both functions. Callers add the visit limit (the old
+  implicit cap was 50 000 000) and read `.into_vectors()`.
+
+- **`BarrettContext::add_mod` and `sub_mod` are gone; the rest of the family is
+  renamed to the crate's `mod_*` order.** `add_mod`/`sub_mod` were one-line
+  forwarders to `BigUint::mod_add`/`mod_sub` — the same operation under the
+  same two words in the opposite order, and `μ` plays no part in modular
+  addition. Call `BigUint::mod_add(a, b, ctx.modulus())`. The operations that
+  do use the context are now `mod_mul`, `mod_square`, and `mod_pow`, matching
+  `BigUint::mod_mul` and the free `mod_pow` rather than inverting them.
+
+- **No public constructor added or touched in 0.3.0 panics on bad input.**
+  Invalid input is a typed error; `Option` is reserved for legitimate
+  mathematical absence.
+
+  - `BarrettContext::new` and `MontgomeryContext::new` return
+    `Result<Self, modular::ModulusError>`, whose `Zero`, `One` and `Even`
+    variants describe the rejected value rather than the context that
+    refused it. Barrett returns `Zero` or `One`; Montgomery returns `Zero`
+    or `Even`, and still accepts a modulus of one, which is odd.
+  - `SmoothnessBase::new` returns
+    `Result<Self, number_theory::SmoothnessBaseError>`, reporting the first
+    entry below two through `index()` and `value()`. A composite entry is
+    still accepted deliberately, so neither the type nor its message calls
+    the rejected value non-prime.
+  - `gauss_reduce_weighted` returns
+    `Result<_, lattice::ReductionError>` with `DependentBasis` and
+    `OutOfRange`, and takes `weights: [NonZeroU64; 2]` — positivity moved
+    into the type, so there is no weight variant to report.
+  - `WordReciprocal::new` takes `NonZeroU64` and is total: non-zero is the
+    entire precondition, so nothing is left for a return type to describe.
+
+  All three error types are `#[non_exhaustive]`, `Copy`, and implement
+  `Display` and `std::error::Error`. The pre-existing panicking surface is
+  unchanged in this release.
+
+- **`product_tree` and `remainder_tree` take and return a typed
+  `ProductTree`.** Previously:
+
+  ```text
+  product_tree(&[BigUint]) -> Vec<Vec<BigUint>>
+  remainder_tree(&[Vec<BigUint>], &BigUint) -> Vec<BigUint>
+  ```
+
+  Now:
+
+  ```text
+  product_tree(&[BigUint]) -> ProductTree
+  remainder_tree(&ProductTree, &BigUint) -> Vec<BigUint>
+  ```
+
+  The change makes a structural precondition unrepresentable: a caller can no
+  longer hand `remainder_tree` a `Vec<Vec<BigUint>>` of the wrong shape, and
+  the function can rely on the layout `product_tree` established rather than
+  re-deriving or trusting it. `ProductTree` is exported as `number_theory::ProductTree`.
+
+  A caller that only pipes one into the other is unaffected apart from the
+  type name. A caller that *inspected* the levels must go through
+  `ProductTree`'s accessors.
+
+  This is a source-breaking change to a public signature. It landed on `main`
+  above the `v0.2.2` tag while the crate version still read `0.2.2`, which a
+  second reviewer correctly flagged: the tagged `v0.2.2` and the `main` that
+  followed it exported incompatible signatures under one version number. The
+  version is bumped here so the break carries a number, rather than being
+  corrected retroactively in the tagged release.
+
+### Added
 
 - **Block Lanczos blocks its products' entries by the slice of the block
   they gather from, where that is faster here.** A thread keeps a part of
@@ -167,121 +320,113 @@ what a consumer must change, not everything that moved.
   is another draw; `NoKernel` is the matrix, and the answer is different
   rows.
 
-### Breaking
+- **`modular::MontgomeryContext::gcd_with_modulus`.** `gcd(v, n)` for the
+  value a residue encodes, taken from the encoded limbs: for odd `n` the
+  Montgomery radix is a unit, so encoding does not change the gcd. A caller
+  that multiplies in the domain and tests for a factor, as Pollard's rho
+  does, no longer decodes first. A foreign residue is `ContextMismatch`.
 
-- **`gf2::Iterated` and `gf2::Generators` carry the matrix's fingerprint,
-  and `wiedemann_sequence` refuses a prior that is not its own.** An
-  iteration knew its sequence by the first projected term, which two
-  matrices can share while their next terms differ, so a pass over one
-  matrix's terms resumed another's and the recurrence's invariant failed;
-  generators knew no matrix at all, so the solution of a same-shaped
-  matrix took another's. Both carry `matrix_fingerprint` now, the
-  generator pass refuses an iteration of another matrix and the solution
-  refuses generators of another, before any product. The family tag is
-  `GFW2` now, the iteration's and generators' frames gaining the matrix's
-  word after `columns`; a frame under the earlier `GFW` tag is
-  `WiedemannBytesError::Layout`, whose message says to remove it, the
-  stage then being computed again. A slice given as `from` of another
-  matrix, seed or place was silently begun again; it is `None` now,
-  `Sequence::continues` being the question a caller asks first.
+- **`modular::mod_inverse_u128` and `number_theory::crt_combine_u64`.** The
+  double-word inverse is total over every `u128` modulus, including those past
+  `2¹²⁷` where signed cofactors run out of bits; the word CRT combines two
+  congruences into the residue below their product as a `u128`, with
+  `crt_combine`'s `None` for zero or non-coprime moduli. Both replace
+  factoring-local copies that were narrower than their types.
 
-- **`number_theory::ln_gamma`, `regularized_incomplete_beta`,
-  `student_t_quantile` and `NumericalError` are gone.** They are floating
-  statistical kernels, not arithmetic, and they now live in `entropy::math`
-  (entropy 0.6.0), unchanged in signature and behaviour and on the same
-  reference fixtures. A caller depends on entropy and changes the path;
-  entropy compiles that module with or without its default features, so it
-  does not drag in a generator. rump keeps no forwarding wrapper: entropy
-  depends on rump, so a wrapper would close a cycle. The reference generators
-  `scripts/lanczos_coefficients.py` and `scripts/incomplete_beta_reference.py`
-  and the fixtures under `tests/data/` moved with them.
+- **Little-endian bytes: `BigUint::from_le_bytes`, `to_le_bytes`, and
+  `to_le_bytes_padded`.** The exact mirror of the big-endian trio: the empty
+  slice decodes to zero, zero encodes as one `0x00`, the minimal encoding
+  drops high zero bytes, and the padded form zero-fills the high end and
+  panics when the value does not fit. Each writes its output directly, with
+  no reversed intermediate. A consumer that reversed a big-endian encoding,
+  and wiped the reversed copy, calls these instead.
 
-- **`lattice::short_vectors_form` and `closest_vectors_form` return
-  `lattice::Enumeration` and take `visit_limit: u64`.** Both panicked on
-  valid forms whose scales differ widely — under `diag(1, 2¹⁰⁰⁰)` the
-  common shift into doubles rounded the entry 1 to zero — and returned a
-  truncated search indistinguishable from a complete one. The Gram–Schmidt
-  data are now exact, pruning uses outward-rounded enclosures, and
-  `Enumeration::outcome()` says whether the search was `Exhausted`, stopped
-  at its `VisitLimit`, or met a `NumericalLimit`; only `Exhausted` certifies
-  that nothing within the bound was missed. A negative bound is an empty,
-  exhausted search for both functions. Callers add the visit limit (the old
-  implicit cap was 50 000 000) and read `.into_vectors()`.
+- **`BigUint::mod_neg`.** One-shot modular negation on `mod_add`'s
+  contract: any operand, non-zero modulus (panic otherwise), result in
+  `[0, modulus)`. It replaces `BigUint::mod_sub(&BigUint::zero(), x, m)`.
 
-### Fixed
+- **`number_theory::is_lucas_probable_prime`.** The general Lucas
+  probable-prime test of FIPS 186-4, Appendix C.3.3, step for step: a
+  perfect square is composite, `D` is the first of 5, −7, 9, −11, … with
+  Jacobi symbol −1 and a zero symbol means composite, and the candidate is
+  accepted exactly when `U_0 = 0` at the end of the left-to-right ladder over
+  the bits of `n + 1`. It is not an alias of
+  `is_strong_lucas_probable_prime`, whose acceptance condition is stronger:
+  323 passes this test and fails that one. One reading is documented rather
+  than silent. A zero symbol from a `D` the candidate itself divides proves
+  nothing, and only a prime reaches one, so it is passed over instead of
+  reporting the primes 5 and 11 composite; for every candidate larger than
+  the `|D|` its search reaches, the result is the standard's exactly. `0`,
+  `1`, and even values, outside C.3.3's odd domain, get the true answer.
+  Every integer below 10⁵ is checked against an independent sieve and
+  OEIS A217120.
 
-- **`PolyMod::sqrt_in_field` called squares non-squares in small fields.**
-  Its non-residue search tried `x + c` for `c` below 512 and gave up,
-  returning `None`, the verdict of a non-square. Over a small prime those
-  are only `q` elements, and in `F₅[x]/(x⁵ − x − 1)` and
-  `F₃[x]/(x⁶ − x⁴ + 1)` every one is a square. The search now walks the
-  field's nonconstant elements in base-`q` order from `x`, with no bound,
-  and in a field it ends; for a prime above 512 the order, and so the
-  root returned, is as before.
+- **`number_theory::is_prime_aks`.** An exact, unconditional deterministic
+  implementation of the Agrawal–Kayal–Saxena primality test. The polynomial
+  stage uses a dedicated cyclic `X^r − 1` reduction in Rump's `PolyMod`
+  engine, differentially checked against general monic polynomial reduction
+  over both prime and composite coefficient moduli, and against a separate
+  scalar repeated-multiplication oracle. An ignored parallel stress test checks
+  arbitrary exhaustive ranges against an independent sieve while never using
+  more workers than the machine reports. This is the proof-oriented AKS
+  algorithm, not a replacement for the much faster probable-prime APIs.
 
-- **Two of `gf2::filter_merge`'s fan-outs kept the caller's budget.** The
-  release of retired rows' entries and the sorting of the transposed lists
-  cut their work into eight runs a thread and spawned a thread for every
-  run, up to eight times the budget, each run's thread seeing the
-  machine's count rather than a share. Both go through the bounded
-  in-place fan-out now, at most the budget's threads, each with its
-  share, one worker inline, the runs taken from a cursor as before.
+- **`number_theory::crt_combine_balanced`.** It has the same exact validation
+  and canonical result as `crt_combine`, but combines equal-width partial
+  products through a balanced tree and can run independent pairs on a bounded
+  number of scoped workers, never exceeding the machine's reported parallelism.
+  This is the reusable machine needed by NFS
+  coefficient reconstruction; Rump owns the CRT, while the consumer owns what
+  its residues mean.
 
-- **`gf2::Sequence::from_bytes`, `Generators::from_bytes` and
-  `Iterated::from_bytes` take exactly one frame.** The sequence reader
-  formed `64·of` unchecked, so a header claiming `of = 2⁵⁸` overflowed, a
-  panic under overflow checks, where the fields should have been refused;
-  and the sequence and generator readers stopped at the words their fields
-  count, so a byte, a word or a whole second frame after them passed as the
-  stage. Every shape product is now checked before use, and each reader
-  ends at the frame's end: bytes past it are `WiedemannBytesError::Long`, a
-  new variant beside `Header`, `Short` and `Shape`, as `MatrixBytesError`
-  already has. A consumer matching the error exhaustively gains an arm.
+- **`wipe` cargo feature — the option to wipe is back.** 0.3.0 removed the
+  drop-time scrub to reach `forbid(unsafe_code)`; that traded away a guarantee
+  the parent cryptography crate depended on. The scrub returns as an opt-in
+  feature: `BigUint` volatile-wipes its live limbs on drop, `clone_from` /
+  `add_into` / `sub_into` and the shift/cancellation paths wipe the limbs
+  their in-place shrinks strand in spare capacity, the exponentiation ladder
+  wipes its table and temporaries on exit, the Montgomery workspaces and
+  `MontgomeryScratch` wipe theirs, and the samplers wipe drawn byte buffers.
+  The raw read-back test that proves the shrink paths scrub returns with it.
+  Under the feature the crate attribute relaxes to `deny(unsafe_code)` with
+  exactly those two audited `unsafe` sites; the default build is unchanged —
+  `forbid(unsafe_code)`, nothing wiped. The old caveats are restated rather
+  than improved: spare capacity and buffers freed by reallocation are not
+  wiped, and nothing becomes constant-time.
 
-- **`number_theory::gcd`, `gcd_extended`, `mod_inverse` and `jacobi` above
-  the Half-GCD crossover could answer wrongly.** The base case of the
-  recursion applied Lehmer batches without checking where they landed, on
-  the assumption that a batch reading a 124-bit window removes about that
-  many bits. It bounds each quotient, not each remainder: a pair whose
-  leading digits certify `A = 2·B + 2` drops the smaller element to two in
-  one step, past the boundary the recursion's splice relies on. On such a
-  pair at 131,072 bits `gcd` returned 2 where the true gcd had a thousand
-  bits (the debug build stopped at an assertion instead). A batch is now
-  committed only if its result keeps both elements above the boundary, the
-  rule the guarded single divisions already obey; the pair is a test.
+- **`WordReciprocal`** — division by a `u64` divisor that does not change, with
+  the reciprocal precomputed once (Möller & Granlund, IEEE ToC 60 (2011),
+  Algorithm 4). `rem`, `div_rem`, `rem_euclid_i64`, and
+  `BigUint::rem_reciprocal` / `div_rem_reciprocal` for multi-limb dividends.
+  Worth reaching for at two limbs and above; measured *slower* than the
+  hardware divide for word-sized dividends on Apple silicon, and the module
+  documentation carries the numbers.
 
-- **`poly::PolyZ::real_roots` decides every sign exactly, and its brackets
-  hold every root.** Signs came from `f64` Horner evaluation and the search
-  ran a fixed 200 bisections. Both fail at wide coefficient ranges: for
-  `x² + 10³⁰⁰x − 10³⁰⁰` the value at the Cauchy bound is `+1` but evaluates
-  to `−10³⁰⁰`, hiding the sign change that brackets the root near `−10³⁰⁰`,
-  and 200 halvings of a `10³⁰⁰`-wide bracket leave it `10²³⁹` wide, so the
-  root near `1` was returned as `1.56·10²³⁹`. That polynomial now returns
-  `[-1e300, 1.0]`. Signs are the exact signs of the integer polynomial at
-  dyadic points, the bound is rounded outward (adding to a rounded ratio does
-  not move it: the float gap at `10²⁰` is 16384), and bisection runs until the
-  bracket is one float wide. Callers that read the returned values keep
-  reading them; the values are now correct.
+- **`SmoothnessBase`** — Bernstein batch smoothness with the primes' product built
+  once, so the caller chooses the batch size rather than the setup cost
+  choosing it. The free `smooth_parts` is now the one-shot form over this
+  type, so there is one algorithm rather than two.
 
-- **`number_theory::dickman_rho` and `number_theory::semismooth_probability`.**
-  Both existed only to rank a sieve's expected relation yield, and their one
-  consumer was the factoring crate, which now owns them. Callers that want
-  Dickman's function or the Bach–Peralta semismoothness estimate take them
-  from factoring or carry their own.
+- **`gauss_reduce_weighted`** — exact two-dimensional Lagrange–Gauss reduction
+  under a diagonal form `(w₀x)² + (w₁y)²`, in `i128`. For a skewed metric
+  `(x/√s)² + (y√s)²` with rational `s = p/q`, pass `weights = [q, p]`.
+
+- **Portable: no target-width restriction.** Earlier 0.3.0 work added a
+  `compile_error!` refusing non-64-bit targets, on the ground that `bits()`
+  scales a limb count by 64 and the `R²` and Karatsuba paths by 128, products
+  that overflow a 32-bit `usize` for operands in the hundreds of megabytes.
+  The gate is gone and the arithmetic is checked instead: every limb-count to
+  bit-index conversion goes through one checked multiplication that refuses an
+  unrepresentable index rather than wrapping. 32-bit builds are supported and
+  the release gate cross-checks `i686-unknown-linux-gnu`.
+
+- **`#![forbid(unsafe_code)]`, no exceptions.** The volatile scrub helper, the
+  `Drop` policy that called it, and the raw read-back test that verified it are
+  removed. Nothing is wiped now: values live in ordinary heap buffers and
+  freed memory keeps its contents. A consumer handling key material brings its
+  own representation.
 
 ### Changed
-
-- **CI runs the tests on every platform GitHub hosts.** Linux, macOS and
-  Windows, each on x86_64 and aarch64, where it ran Linux and Apple
-  silicon; the 32-bit leg runs the tests on `i686-unknown-linux-musl`,
-  linked by the toolchain's own linker so that nothing is installed on
-  the runner, where it checked only that they compiled. The crate has no
-  dependencies and no platform code, and nothing in it had to change;
-  `scripts/check_manual_tex.sh` and the extractor it calls now run under
-  Git Bash on Windows too. A
-  test of the fan-out's budgets summed its shares by item rather than by
-  thread and failed on a runner of three cores; it counts each thread
-  once, and the shape is now tested at every budget on every machine.
 
 - **Block Lanczos finds how many threads pay.** Each kind of pass times
   itself on the pool's whole and on half, and half again while it is no
@@ -369,177 +514,38 @@ what a consumer must change, not everything that moved.
   capacity equals its length. The output is unchanged; a consumer that wipes
   the returned bytes now reaches every heap copy these functions made.
 
-### Added
+### Fixed
 
-- **`modular::MontgomeryContext::gcd_with_modulus`.** `gcd(v, n)` for the
-  value a residue encodes, taken from the encoded limbs: for odd `n` the
-  Montgomery radix is a unit, so encoding does not change the gcd. A caller
-  that multiplies in the domain and tests for a factor, as Pollard's rho
-  does, no longer decodes first. A foreign residue is `ContextMismatch`.
+- **`number_theory::gcd`, `gcd_extended`, `mod_inverse` and `jacobi` above
+  the Half-GCD crossover could answer wrongly.** The base case of the
+  recursion applied Lehmer batches without checking where they landed, on
+  the assumption that a batch reading a 124-bit window removes about that
+  many bits. It bounds each quotient, not each remainder: a pair whose
+  leading digits certify `A = 2·B + 2` drops the smaller element to two in
+  one step, past the boundary the recursion's splice relies on. On such a
+  pair at 131,072 bits `gcd` returned 2 where the true gcd had a thousand
+  bits (the debug build stopped at an assertion instead). A batch is now
+  committed only if its result keeps both elements above the boundary, the
+  rule the guarded single divisions already obey; the pair is a test.
 
-- **`modular::mod_inverse_u128` and `number_theory::crt_combine_u64`.** The
-  double-word inverse is total over every `u128` modulus, including those past
-  `2¹²⁷` where signed cofactors run out of bits; the word CRT combines two
-  congruences into the residue below their product as a `u128`, with
-  `crt_combine`'s `None` for zero or non-coprime moduli. Both replace
-  factoring-local copies that were narrower than their types.
+- **`poly::PolyZ::real_roots` decides every sign exactly, and its brackets
+  hold every root.** Signs came from `f64` Horner evaluation and the search
+  ran a fixed 200 bisections. Both fail at wide coefficient ranges: for
+  `x² + 10³⁰⁰x − 10³⁰⁰` the value at the Cauchy bound is `+1` but evaluates
+  to `−10³⁰⁰`, hiding the sign change that brackets the root near `−10³⁰⁰`,
+  and 200 halvings of a `10³⁰⁰`-wide bracket leave it `10²³⁹` wide, so the
+  root near `1` was returned as `1.56·10²³⁹`. That polynomial now returns
+  `[-1e300, 1.0]`. Signs are the exact signs of the integer polynomial at
+  dyadic points, the bound is rounded outward (adding to a rounded ratio does
+  not move it: the float gap at `10²⁰` is 16384), and bisection runs until the
+  bracket is one float wide. Callers that read the returned values keep
+  reading them; the values are now correct.
 
-- **Little-endian bytes: `BigUint::from_le_bytes`, `to_le_bytes`, and
-  `to_le_bytes_padded`.** The exact mirror of the big-endian trio: the empty
-  slice decodes to zero, zero encodes as one `0x00`, the minimal encoding
-  drops high zero bytes, and the padded form zero-fills the high end and
-  panics when the value does not fit. Each writes its output directly, with
-  no reversed intermediate. A consumer that reversed a big-endian encoding,
-  and wiped the reversed copy, calls these instead.
-
-- **`BigUint::mod_neg`.** One-shot modular negation on `mod_add`'s
-  contract: any operand, non-zero modulus (panic otherwise), result in
-  `[0, modulus)`. It replaces `BigUint::mod_sub(&BigUint::zero(), x, m)`.
-
-- **`number_theory::is_lucas_probable_prime`.** The general Lucas
-  probable-prime test of FIPS 186-4, Appendix C.3.3, step for step: a
-  perfect square is composite, `D` is the first of 5, −7, 9, −11, … with
-  Jacobi symbol −1 and a zero symbol means composite, and the candidate is
-  accepted exactly when `U_0 = 0` at the end of the left-to-right ladder over
-  the bits of `n + 1`. It is not an alias of
-  `is_strong_lucas_probable_prime`, whose acceptance condition is stronger:
-  323 passes this test and fails that one. One reading is documented rather
-  than silent. A zero symbol from a `D` the candidate itself divides proves
-  nothing, and only a prime reaches one, so it is passed over instead of
-  reporting the primes 5 and 11 composite; for every candidate larger than
-  the `|D|` its search reaches, the result is the standard's exactly. `0`,
-  `1`, and even values, outside C.3.3's odd domain, get the true answer.
-  Every integer below 10⁵ is checked against an independent sieve and
-  OEIS A217120.
-
-- **`number_theory::is_prime_aks`.** An exact, unconditional deterministic
-  implementation of the Agrawal–Kayal–Saxena primality test. The polynomial
-  stage uses a dedicated cyclic `X^r − 1` reduction in Rump's `PolyMod`
-  engine, differentially checked against general monic polynomial reduction
-  over both prime and composite coefficient moduli, and against a separate
-  scalar repeated-multiplication oracle. An ignored parallel stress test checks
-  arbitrary exhaustive ranges against an independent sieve while never using
-  more workers than the machine reports. This is the proof-oriented AKS
-  algorithm, not a replacement for the much faster probable-prime APIs.
-
-- **`number_theory::crt_combine_balanced`.** It has the same exact validation
-  and canonical result as `crt_combine`, but combines equal-width partial
-  products through a balanced tree and can run independent pairs on a bounded
-  number of scoped workers, never exceeding the machine's reported parallelism.
-  This is the reusable machine needed by NFS
-  coefficient reconstruction; Rump owns the CRT, while the consumer owns what
-  its residues mean.
-
-- **`wipe` cargo feature — the option to wipe is back.** 0.3.0 removed the
-  drop-time scrub to reach `forbid(unsafe_code)`; that traded away a guarantee
-  the parent cryptography crate depended on. The scrub returns as an opt-in
-  feature: `BigUint` volatile-wipes its live limbs on drop, `clone_from` /
-  `add_into` / `sub_into` and the shift/cancellation paths wipe the limbs
-  their in-place shrinks strand in spare capacity, the exponentiation ladder
-  wipes its table and temporaries on exit, the Montgomery workspaces and
-  `MontgomeryScratch` wipe theirs, and the samplers wipe drawn byte buffers.
-  The raw read-back test that proves the shrink paths scrub returns with it.
-  Under the feature the crate attribute relaxes to `deny(unsafe_code)` with
-  exactly those two audited `unsafe` sites; the default build is unchanged —
-  `forbid(unsafe_code)`, nothing wiped. The old caveats are restated rather
-  than improved: spare capacity and buffers freed by reallocation are not
-  wiped, and nothing becomes constant-time.
-
-## 0.3.0 — unreleased
-
-### Breaking
-
-- **`BarrettContext::add_mod` and `sub_mod` are gone; the rest of the family is
-  renamed to the crate's `mod_*` order.** `add_mod`/`sub_mod` were one-line
-  forwarders to `BigUint::mod_add`/`mod_sub` — the same operation under the
-  same two words in the opposite order, and `μ` plays no part in modular
-  addition. Call `BigUint::mod_add(a, b, ctx.modulus())`. The operations that
-  do use the context are now `mod_mul`, `mod_square`, and `mod_pow`, matching
-  `BigUint::mod_mul` and the free `mod_pow` rather than inverting them.
-- **No public constructor added or touched in 0.3.0 panics on bad input.**
-  Invalid input is a typed error; `Option` is reserved for legitimate
-  mathematical absence.
-
-  - `BarrettContext::new` and `MontgomeryContext::new` return
-    `Result<Self, modular::ModulusError>`, whose `Zero`, `One` and `Even`
-    variants describe the rejected value rather than the context that
-    refused it. Barrett returns `Zero` or `One`; Montgomery returns `Zero`
-    or `Even`, and still accepts a modulus of one, which is odd.
-  - `SmoothnessBase::new` returns
-    `Result<Self, number_theory::SmoothnessBaseError>`, reporting the first
-    entry below two through `index()` and `value()`. A composite entry is
-    still accepted deliberately, so neither the type nor its message calls
-    the rejected value non-prime.
-  - `gauss_reduce_weighted` returns
-    `Result<_, lattice::ReductionError>` with `DependentBasis` and
-    `OutOfRange`, and takes `weights: [NonZeroU64; 2]` — positivity moved
-    into the type, so there is no weight variant to report.
-  - `WordReciprocal::new` takes `NonZeroU64` and is total: non-zero is the
-    entire precondition, so nothing is left for a return type to describe.
-
-  All three error types are `#[non_exhaustive]`, `Copy`, and implement
-  `Display` and `std::error::Error`. The pre-existing panicking surface is
-  unchanged in this release.
-- **`product_tree` and `remainder_tree` take and return a typed
-  `ProductTree`.** Previously:
-
-  ```text
-  product_tree(&[BigUint]) -> Vec<Vec<BigUint>>
-  remainder_tree(&[Vec<BigUint>], &BigUint) -> Vec<BigUint>
-  ```
-
-  Now:
-
-  ```text
-  product_tree(&[BigUint]) -> ProductTree
-  remainder_tree(&ProductTree, &BigUint) -> Vec<BigUint>
-  ```
-
-  The change makes a structural precondition unrepresentable: a caller can no
-  longer hand `remainder_tree` a `Vec<Vec<BigUint>>` of the wrong shape, and
-  the function can rely on the layout `product_tree` established rather than
-  re-deriving or trusting it. `ProductTree` is exported as `number_theory::ProductTree`.
-
-  A caller that only pipes one into the other is unaffected apart from the
-  type name. A caller that *inspected* the levels must go through
-  `ProductTree`'s accessors.
-
-  This is a source-breaking change to a public signature. It landed on `main`
-  above the `v0.2.2` tag while the crate version still read `0.2.2`, which a
-  second reviewer correctly flagged: the tagged `v0.2.2` and the `main` that
-  followed it exported incompatible signatures under one version number. The
-  version is bumped here so the break carries a number, rather than being
-  corrected retroactively in the tagged release.
-
-### Added
-
-- **`WordReciprocal`** — division by a `u64` divisor that does not change, with
-  the reciprocal precomputed once (Möller & Granlund, IEEE ToC 60 (2011),
-  Algorithm 4). `rem`, `div_rem`, `rem_euclid_i64`, and
-  `BigUint::rem_reciprocal` / `div_rem_reciprocal` for multi-limb dividends.
-  Worth reaching for at two limbs and above; measured *slower* than the
-  hardware divide for word-sized dividends on Apple silicon, and the module
-  documentation carries the numbers.
-- **`SmoothnessBase`** — Bernstein batch smoothness with the primes' product built
-  once, so the caller chooses the batch size rather than the setup cost
-  choosing it. The free `smooth_parts` is now the one-shot form over this
-  type, so there is one algorithm rather than two.
-- **`gauss_reduce_weighted`** — exact two-dimensional Lagrange–Gauss reduction
-  under a diagonal form `(w₀x)² + (w₁y)²`, in `i128`. For a skewed metric
-  `(x/√s)² + (y√s)²` with rational `s = p/q`, pass `weights = [q, p]`.
-- **Portable: no target-width restriction.** Earlier 0.3.0 work added a
-  `compile_error!` refusing non-64-bit targets, on the ground that `bits()`
-  scales a limb count by 64 and the `R²` and Karatsuba paths by 128, products
-  that overflow a 32-bit `usize` for operands in the hundreds of megabytes.
-  The gate is gone and the arithmetic is checked instead: every limb-count to
-  bit-index conversion goes through one checked multiplication that refuses an
-  unrepresentable index rather than wrapping. 32-bit builds are supported and
-  the release gate cross-checks `i686-unknown-linux-gnu`.
-- **`#![forbid(unsafe_code)]`, no exceptions.** The volatile scrub helper, the
-  `Drop` policy that called it, and the raw read-back test that verified it are
-  removed. Nothing is wiped now: values live in ordinary heap buffers and
-  freed memory keeps its contents. A consumer handling key material brings its
-  own representation.
+- **`number_theory::dickman_rho` and `number_theory::semismooth_probability`.**
+  Both existed only to rank a sieve's expected relation yield, and their one
+  consumer was the factoring crate, which now owns them. Callers that want
+  Dickman's function or the Bach–Peralta semismoothness estimate take them
+  from factoring or carry their own.
 
 ### Documentation
 
@@ -548,6 +554,7 @@ what a consumer must change, not everything that moved.
   states the exceptions, and the Properties entry says why the crate uses
   `deny(unsafe_code)` rather than `forbid` — `forbid` cannot be lifted by an
   inner `allow`, which is what the scrub helper and its test probe require.
+
 - `REQUESTS.md` is a state machine rather than a diary. Every entry sits in
   exactly one of four states — outstanding; landed in rump with consumer
   migration pending; fully migrated; deliberately downstream — and the file no
