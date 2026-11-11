@@ -99,7 +99,7 @@ const EARLIER_MAGIC: &[u8; 3] = b"GFW";
 /// caller's rows, or `None` when none was found. The matrix may have more
 /// columns than rows, or fewer. The stages below, with one slice.
 ///
-/// `None` is any of: no rows or no columns; the sequence reaching three
+/// `None` is any of: no row that sets a column; the sequence reaching three
 /// times `N/64` terms (`TERMS_MOST`) without its generators settling; no
 /// lane of the solution a null vector within sixteen products (`POWERS`);
 /// or every candidate failing the check. Another random source may do
@@ -605,7 +605,7 @@ pub fn matrix_fingerprint(matrix: &SparseMatrix) -> u64 {
 /// Slice `slice` of `of` of the sequence, `terms` terms long: from the
 /// start, or on from `from`, a shorter slice of the same matrix, seed and
 /// place ([`Sequence::continues`]), whose terms are kept. `None` for a
-/// matrix with no rows or no columns, a slice out of range, a slab of
+/// matrix none of whose rows sets a column, a slice out of range, a slab of
 /// `terms · 64 · of` words whose words or bytes pass `usize`, or a `from`
 /// that is not this slice's: a prior of another matrix, seed or place is
 /// refused, not silently begun again, so that a caller keeping slices
@@ -622,7 +622,7 @@ pub fn wiedemann_sequence(
     from: Option<&Sequence>,
     threads: usize,
 ) -> Option<Sequence> {
-    if matrix.rows().is_empty() || matrix.columns() == 0 || of == 0 || slice >= of {
+    if matrix.rows().iter().all(Vec::is_empty) || of == 0 || slice >= of {
         return None;
     }
     // Refused before any request: a prior of another matrix, seed or place,
@@ -1952,5 +1952,14 @@ mod tests {
             &iterated.to_bytes(),
             Iterated::from_bytes,
         );
+    }
+
+    /// A matrix none of whose rows sets a column has no sequence: it is
+    /// declined as one with no columns is.
+    #[test]
+    fn a_matrix_of_empty_rows_is_declined() {
+        let matrix = SparseMatrix::new(3, vec![Vec::new(), Vec::new()]);
+        assert!(wiedemann_sequence(&matrix, 5, 0, 1, 4, None, 1).is_none());
+        assert!(block_wiedemann_dependencies_sparse(&matrix, &mut Lcg(5), 1).is_none());
     }
 }
