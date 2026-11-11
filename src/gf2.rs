@@ -35,13 +35,16 @@ pub use filter::{
 };
 #[path = "gf2/generator.rs"]
 mod generator;
+#[path = "gf2/strip.rs"]
+mod strip;
+pub use strip::{Strip, StripPart};
 #[path = "gf2/wiedemann.rs"]
 mod wiedemann;
 pub use wiedemann::{
     block_wiedemann_dependencies_sparse, matrix_fingerprint, wiedemann_finish,
     wiedemann_generators, wiedemann_sequence, wiedemann_sequence_bytes, wiedemann_solution,
-    wiedemann_terms, wiedemann_terms_most, wiedemann_terms_most_of, Generated, Generators,
-    Iterated, Sequence, WiedemannBytesError,
+    wiedemann_terms, wiedemann_terms_most, wiedemann_terms_most_of, Dimensions, Generated,
+    Generators, Iterated, Sequence, WiedemannBytesError,
 };
 
 /// Bits per storage word.
@@ -955,21 +958,34 @@ struct Dense {
 /// the tables are 64 KB; twice as long at 1 024, where they are 256 KB.
 const DENSE_COLUMNS: usize = 128;
 
-impl Dense {
-    /// Takes the densest columns out of the lists, `weights` each column's
-    /// count of relations. `by_relation` keeps the rest, numbered again in
-    /// their order; the rest's lists by column are returned beside; the
-    /// dense columns are numbered after them, heaviest first.
-    fn take(by_relation: &mut [Vec<u32>], weights: &[usize]) -> (Self, Vec<Vec<u32>>) {
+/// Where each column goes in a block over the columns once the densest are
+/// set apart: the rest keep their order and come first, and the dense
+/// follow them, heaviest first. A product and every strip of it take a
+/// column's word of the image from here, so that the strips' words, end to
+/// end, are the product's.
+struct Places {
+    /// The columns from the heaviest down, of two as heavy the later first.
+    order: Vec<usize>,
+    /// Each column's place.
+    number: Vec<u32>,
+    /// A dense column's bit among the dense, and `usize::MAX` for another.
+    bit: Vec<usize>,
+    /// How many are dense: the first so many of `order`.
+    dense: usize,
+}
+
+impl Places {
+    /// The places of columns of these `weights`, each its count of
+    /// relations.
+    fn of(weights: &[usize]) -> Self {
         let columns = weights.len();
-        let count = Self::count_for(columns);
-        let sparse = columns - count;
+        let dense = Dense::count_for(columns);
+        let sparse = columns - dense;
         let mut order: Vec<usize> = (0..columns).collect();
         order.sort_unstable_by_key(|&c| core::cmp::Reverse((weights[c], c)));
-        // Each column's number, and a dense column's bit.
         let mut number = vec![0u32; columns];
         let mut bit = vec![usize::MAX; columns];
-        for (j, &c) in order[..count].iter().enumerate() {
+        for (j, &c) in order[..dense].iter().enumerate() {
             bit[c] = j;
             number[c] = (sparse + j) as u32;
         }
@@ -980,6 +996,31 @@ impl Dense {
                 next += 1;
             }
         }
+        Self {
+            order,
+            number,
+            bit,
+            dense,
+        }
+    }
+
+    /// The columns in the order of their places.
+    fn in_order(&self) -> impl Iterator<Item = usize> + '_ {
+        let rest = (0..self.bit.len()).filter(|&column| self.bit[column] == usize::MAX);
+        rest.chain(self.order[..self.dense].iter().copied())
+    }
+}
+
+impl Dense {
+    /// Takes the densest columns out of the lists, `weights` each column's
+    /// count of relations. `by_relation` keeps the rest, numbered again in
+    /// their order; the rest's lists by column are returned beside; the
+    /// dense columns are numbered after them, heaviest first.
+    fn take(by_relation: &mut [Vec<u32>], weights: &[usize]) -> (Self, Vec<Vec<u32>>) {
+        let Places {
+            number, bit, dense, ..
+        } = &Places::of(weights);
+        let (count, sparse) = (*dense, weights.len() - dense);
         let bytes = count / 8;
         let mut masks = vec![0u8; by_relation.len() * bytes];
         for (r, row) in by_relation.iter_mut().enumerate() {
@@ -1117,42 +1158,20 @@ impl Sparse {
 
     fn build(mut by_relation: Vec<Vec<u32>>, columns: usize, threads: usize, both: bool) -> Self {
         assert!(
-            u32::try_from(by_relation.len()).is_ok() && u32::try_from(columns).is_ok(),
+            Self::indexes(by_relation.len(), columns),
             "{} rows by {columns} columns: the solver indexes both in thirty-two bits",
             by_relation.len()
         );
-        let mut number = vec![0u32; columns];
-        for &column in by_relation.iter().flatten() {
-            number[column as usize] = 1;
-        }
-        let mut set = 0;
-        for entry in &mut number {
-            set += core::mem::replace(entry, set);
-        }
+        let (number, columns) = Self::set_columns(&by_relation, columns);
+        let weights = Self::weights(&by_relation, &number, columns);
         for column in by_relation.iter_mut().flatten() {
             *column = number[*column as usize];
         }
-        let columns = set as usize;
-        let mut weights = vec![0usize; columns];
-        for &column in by_relation.iter().flatten() {
-            weights[column as usize] += 1;
-        }
         let (dense, by_column) = Dense::take(&mut by_relation, &weights);
         let relations = by_relation.len();
-        let useful = (relations.max(columns) / MINIMUM_FOLDS_PER_WORKER).max(1);
-        let threads = threads.min(crate::parallel::budget()).min(useful).max(1);
-        let runs = if threads == 1 {
-            1
-        } else {
-            threads * RUNS_PER_THREAD
-        };
-        let listed = |lists: &[Vec<u32>]| {
-            let lists = Lists::from_lists(lists);
-            let runs = Arc::new(lists.cuts(runs));
-            (Arc::new(lists), runs)
-        };
-        let (relation_lists, relation_runs) = if both {
-            listed(&by_relation)
+        let (threads, runs) = Self::threads_and_runs(relations, columns, threads);
+        let relation = if both {
+            Self::listed(&by_relation, runs)
         } else {
             // The dense pass takes the relations in these runs whether or
             // not `Mᵀ·y` is to be called, so the cuts are made from the
@@ -1161,7 +1180,70 @@ impl Sparse {
             drop(by_relation);
             (Arc::new(Lists::from_lists(&[])), runs)
         };
-        let (column_lists, column_runs) = listed(&by_column);
+        let column = Self::listed(&by_column, runs);
+        Self::of_lists((relations, columns), relation, column, dense, threads)
+    }
+
+    /// Whether a product's lists can index a matrix of this shape: its
+    /// relations and its columns are each counted in thirty-two bits.
+    fn indexes(relations: usize, columns: usize) -> bool {
+        u32::try_from(relations).is_ok() && u32::try_from(columns).is_ok()
+    }
+
+    /// The columns some relation sets, numbered in their order: each
+    /// declared column's number among them, a column none sets having that
+    /// of the next that is set, and how many are set.
+    fn set_columns(by_relation: &[Vec<u32>], columns: usize) -> (Vec<u32>, usize) {
+        let mut number = vec![0u32; columns];
+        for &column in by_relation.iter().flatten() {
+            number[column as usize] = 1;
+        }
+        let mut set = 0;
+        for entry in &mut number {
+            set += core::mem::replace(entry, set);
+        }
+        (number, set as usize)
+    }
+
+    /// Each set column's count of relations, of `set` columns numbered by
+    /// `number`.
+    fn weights(by_relation: &[Vec<u32>], number: &[u32], set: usize) -> Vec<usize> {
+        let mut weights = vec![0usize; set];
+        for &column in by_relation.iter().flatten() {
+            weights[number[column as usize] as usize] += 1;
+        }
+        weights
+    }
+
+    /// The threads a product of this shape is given a pool of, of those
+    /// offered, and the runs its lists are cut into for them.
+    fn threads_and_runs(relations: usize, columns: usize, threads: usize) -> (usize, usize) {
+        let useful = (relations.max(columns) / MINIMUM_FOLDS_PER_WORKER).max(1);
+        let threads = threads.min(crate::parallel::budget()).min(useful).max(1);
+        let runs = if threads == 1 {
+            1
+        } else {
+            threads * RUNS_PER_THREAD
+        };
+        (threads, runs)
+    }
+
+    /// Lists held flat, and their cuts into at most `runs` runs.
+    fn listed(lists: &[Vec<u32>], runs: usize) -> (Arc<Lists>, Arc<Vec<usize>>) {
+        let lists = Lists::from_lists(lists);
+        let runs = Arc::new(lists.cuts(runs));
+        (Arc::new(lists), runs)
+    }
+
+    /// The product of `relations` by `columns` whose entries these are,
+    /// each side its flat lists and their runs, on a pool of `threads`.
+    fn of_lists(
+        (relations, columns): (usize, usize),
+        (relation_lists, relation_runs): (Arc<Lists>, Arc<Vec<usize>>),
+        (column_lists, column_runs): (Arc<Lists>, Arc<Vec<usize>>),
+        dense: Dense,
+        threads: usize,
+    ) -> Self {
         Self {
             relations,
             columns,
@@ -1181,6 +1263,83 @@ impl Sparse {
             backward_pace: Mutex::new(Pace::new(threads)),
             step_pace: Mutex::new(Pace::new(threads)),
         }
+    }
+
+    /// Part `part` of `parts` of `M·x` for `M` of these rows: the words of
+    /// the image in a range of the columns' places, which is returned, with
+    /// how many columns some row sets. The places are those [`Self::build`]
+    /// gives the whole matrix, so the parts' images, end to end, are its
+    /// image. The ranges are cut where [`Lists::cuts`] would cut the
+    /// columns' lists into `parts` runs of about as many entries, a cut
+    /// among the dense columns moved down to a whole byte of their masks;
+    /// they follow from the rows and `parts` alone, and the parts past the
+    /// last cut are empty. A column of the range is held as the whole
+    /// product holds it, a list or a bit of the masks, and no other column
+    /// is held: the pass over the rows keeps what falls in the range.
+    fn strip(
+        rows: &[Vec<u32>],
+        columns: usize,
+        (part, parts): (usize, usize),
+        threads: usize,
+    ) -> (Self, core::ops::Range<usize>, usize) {
+        let (number, set) = Self::set_columns(rows, columns);
+        let weights = Self::weights(rows, &number, set);
+        let places = Places::of(&weights);
+        let sparse = set - places.dense;
+        let mut offsets = Vec::with_capacity(set + 1);
+        offsets.push(0);
+        let mut end = 0;
+        for column in places.in_order() {
+            end += weights[column];
+            offsets.push(end);
+        }
+        let cuts = Lists::cuts_from(&offsets, parts);
+        drop(offsets);
+        // A cut among the dense columns, down to a whole byte of them; a
+        // part past the last cut begins and ends at the last column.
+        let bound = |part: usize| {
+            let cut = cuts.get(part).copied().unwrap_or(set);
+            cut - cut.saturating_sub(sparse) % 8
+        };
+        let range = bound(part)..bound(part + 1);
+        // The range's columns that are lists, and its bits of the masks.
+        let lists = range.start.min(sparse)..range.end.min(sparse);
+        let bits = range.start.max(sparse) - sparse..range.end.max(sparse) - sparse;
+        let bytes = bits.len() / 8;
+        let mut by_column: Vec<Vec<u32>> = vec![Vec::new(); lists.len()];
+        for (column, &weight) in weights.iter().enumerate() {
+            let place = places.number[column] as usize;
+            if lists.contains(&place) {
+                by_column[place - lists.start].reserve_exact(weight);
+            }
+        }
+        let mut masks = vec![0u8; rows.len() * bytes];
+        for (relation, row) in rows.iter().enumerate() {
+            for &column in row {
+                let place = places.number[number[column as usize] as usize] as usize;
+                if lists.contains(&place) {
+                    by_column[place - lists.start].push(relation as u32);
+                } else if range.contains(&place) {
+                    let bit = place - sparse - bits.start;
+                    masks[relation * bytes + bit / 8] |= 1 << (bit % 8);
+                }
+            }
+        }
+        drop((number, weights, places));
+        let dense = Dense {
+            count: bits.len(),
+            first: lists.len(),
+            masks,
+        };
+        let relations = rows.len();
+        let (threads, runs) = Self::threads_and_runs(relations, range.len(), threads);
+        // The dense pass costs a relation what it costs another, so its
+        // runs are of as many relations each.
+        let relation_runs = Lists::cuts_of(std::iter::repeat_n(1, relations), runs);
+        let relation = (Arc::new(Lists::from_lists(&[])), Arc::new(relation_runs));
+        let column = Self::listed(&by_column, runs);
+        let strip = Self::of_lists((relations, range.len()), relation, column, dense, threads);
+        (strip, range, set)
     }
 
     fn relations(&self) -> usize {

@@ -205,14 +205,68 @@ pub fn wiedemann_terms_most_of(dimension: usize, of: usize) -> usize {
 /// A kept matrix's width can be ten times its live columns, and a length
 /// taken from it would be ten times what the generators need.
 fn dimension_of(matrix: &SparseMatrix) -> usize {
+    matrix.rows().len().max(live_columns(matrix))
+}
+
+/// The columns some row sets: a bit a declared column while it counts.
+fn live_columns(matrix: &SparseMatrix) -> usize {
     let mut touched = vec![0u64; matrix.columns().div_ceil(WIDTH)];
     for row in matrix.rows() {
         for &column in row {
             touched[column as usize / WIDTH] |= 1u64 << (column as usize % WIDTH);
         }
     }
-    let live: u32 = touched.iter().map(|word| word.count_ones()).sum();
-    matrix.rows().len().max(live as usize)
+    touched.iter().map(|word| word.count_ones() as usize).sum()
+}
+
+/// A matrix as a stage knows it that does not hold it: its relations, the
+/// columns some relation sets, and its [`matrix_fingerprint`]. The blocks
+/// of the stages are sized by the first two, and a kept stage is tied to
+/// its matrix by the third.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Dimensions {
+    relations: usize,
+    columns: usize,
+    fingerprint: u64,
+}
+
+impl Dimensions {
+    /// Those of `matrix`: two passes over its entries.
+    #[must_use]
+    pub fn of(matrix: &SparseMatrix) -> Self {
+        Self {
+            relations: matrix.rows().len(),
+            columns: live_columns(matrix),
+            fingerprint: matrix_fingerprint(matrix),
+        }
+    }
+
+    /// The relations: the words of a block a product reads.
+    #[must_use]
+    pub fn relations(&self) -> usize {
+        self.relations
+    }
+
+    /// The columns some relation sets: the words of a product's image.
+    #[must_use]
+    pub fn columns(&self) -> usize {
+        self.columns
+    }
+
+    /// [`matrix_fingerprint`] of the matrix.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        self.fingerprint
+    }
+
+    /// Those a strip finds as it is cut, which are [`Self::of`]'s.
+    pub(super) fn new(relations: usize, columns: usize, fingerprint: u64) -> Self {
+        Self {
+            relations,
+            columns,
+            fingerprint,
+        }
+    }
 }
 
 /// One slice of the sequence `aₖ = xᵀ·Bᵏ·y`: for lane slice `j` of `J`,
