@@ -3,6 +3,27 @@
 Releases are git tags; nothing here is published to crates.io. Entries record
 what a consumer must change, not everything that moved.
 
+## Unreleased
+
+### Added
+
+- **`gf2::Strip`, `gf2::StripPart`, `gf2::Dimensions`, and
+  `wiedemann_sequence_with`, `wiedemann_solution_with`,
+  `wiedemann_finish_with`.** A product `M·x` cut into strips, each holding
+  the entries of a range of the columns and making those words of the
+  image; the strips of one cut make the image one host makes, bit for
+  bit. The cut follows from the matrix and the count of parts alone. The
+  Wiedemann stages take a caller's product, so a host that holds the
+  blocks has its products made elsewhere.
+
+### Fixed
+
+- **`gf2::wiedemann_sequence` and `block_wiedemann_dependencies_sparse`
+  panicked on a matrix none of whose rows sets a column.** Such a matrix
+  passed the test for no rows or no columns and the supports were then
+  drawn modulo zero; it is declined, `None`, as a matrix with no columns
+  is.
+
 ## 0.4.0 — tagged `v0.4.0`
 
 ### Breaking
