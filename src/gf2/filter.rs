@@ -1012,7 +1012,7 @@ impl Filter {
             .sum();
         let claimed: u64 = retired
             .iter()
-            .map(|part| 56 + 4 * part.claimed.capacity() as u64)
+            .map(|part| (std::mem::size_of::<Retired>() + 4 * part.claimed.capacity()) as u64)
             .sum();
         self.note(
             4 * rows.len() as u64
@@ -1261,8 +1261,9 @@ impl Filter {
                     .collect()
             };
             let indices: Vec<usize> = (0..light.len()).collect();
-            // Planning holds a tree's members and its working, seventeen
-            // bytes a member, beside the plans so far.
+            // Planning holds a tree's members and its working, twenty-five
+            // bytes a member (its row, whether it is in the tree, and its
+            // nearest tree vertex with the weight), beside the plans so far.
             self.peak = self.peak.max(held + planned + 25 * u64::from(cap));
             let mut plans: Vec<Option<Plan>> =
                 crate::parallel::map_ordered(&indices, threads, |_, &k| match members(k)[..] {
