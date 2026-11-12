@@ -779,7 +779,8 @@ struct Filter {
     lists: Lists,
     /// Each column's weight; atomic for the same reason.
     occupants: Vec<AtomicU32>,
-    /// Which run of a retirement listed each column, [`NOT_LISTED`] for
+    /// Which run of a retirement claimed each column for its lists,
+    /// [`WRITTEN`] once that run has written it and [`NOT_LISTED`] for
     /// none, so that a column two retired rows held is listed once.
     listed: Vec<AtomicU32>,
     /// The most held at once so far, in requests: what the rows, the
@@ -793,6 +794,11 @@ struct Filter {
 
 /// A column no run of a retirement has listed.
 const NOT_LISTED: u32 = u32::MAX;
+
+/// A column the run that claimed it has written to its list: no run's
+/// number, so that neither that run nor another lists it again before the
+/// retirement's lists are whole.
+const WRITTEN: u32 = u32::MAX - 1;
 
 impl Filter {
     fn new(matrix: SparseMatrix, cap: usize) -> Self {
@@ -929,9 +935,10 @@ impl Filter {
     /// go of the weights; then, the weights standing, each run's claimed
     /// rows are read again for the columns now at one and at two, each
     /// list counted before it is made, so that every list here is one
-    /// request of its size. A column two retired rows held is listed
-    /// twice, which costs its readers nothing: a row pinned is retired
-    /// once, and a column bound is bound once.
+    /// request of its size. A column is listed once, by the first run to
+    /// claim it, however many retired rows held it and in whichever runs:
+    /// the lists together are no longer than the columns, which is what
+    /// their readers' room is sized by.
     fn retire_all(&mut self, rows: &[u32]) -> (Vec<u32>, Vec<u32>) {
         let threads = crate::parallel::budget();
         let length = rows.len().div_ceil(threads * CHUNKS_PER_THREAD).max(1);
@@ -965,6 +972,7 @@ impl Filter {
         // entries, each listed by the first run to see it: a run counts
         // the columns it claims, then lists them.
         let listed = &self.listed;
+        debug_assert!(retired.len() < WRITTEN as usize, "a run's number");
         let parts = crate::parallel::map_ordered(&retired, threads, |run, part| {
             let run = run as u32;
             let entries = || {
@@ -989,8 +997,10 @@ impl Filter {
             }
             let (mut ones, mut twos) = (Vec::with_capacity(ones), Vec::with_capacity(twos));
             for column in entries() {
-                if listed[column as usize].load(Ordering::Relaxed) == run {
-                    listed[column as usize].store(NOT_LISTED, Ordering::Relaxed);
+                if listed[column as usize]
+                    .compare_exchange(run, WRITTEN, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
                     if occupants[column as usize].load(Ordering::Relaxed) == 1 {
                         ones.push(column);
                     } else {
@@ -1004,6 +1014,11 @@ impl Filter {
             joined(parts.iter().map(|part| &part.0)),
             joined(parts.iter().map(|part| &part.1)),
         );
+        // The marks come off once every run has listed: taken off by the
+        // run that wrote them, a later run would claim the column again.
+        for &column in ones.iter().chain(&twos) {
+            listed[column as usize].store(NOT_LISTED, Ordering::Relaxed);
+        }
         // Beside what stands: the runs' bounds, the rows claimed, the
         // lists in parts and joined.
         let parts_bytes: u64 = parts
@@ -1083,6 +1098,10 @@ impl Filter {
             let rows = self.pinned(&singletons);
             let (next, two) = self.retire_all(&rows);
             self.beside -= 4 * singletons.capacity() as u64;
+            debug_assert!(
+                twos.len() + two.len() <= twos.capacity(),
+                "a column left at two a second time"
+            );
             twos.extend_from_slice(&two);
             singletons = next;
         }
@@ -2134,6 +2153,54 @@ mod tests {
                 .collect();
             let (pending, _) = filter.retire_all(&taken);
             filter.prune(pending, &mut Vec::with_capacity(filter.columns));
+        }
+    }
+
+    /// A retirement lists a column once, however many of the rows retired
+    /// held it and on whichever runs, and leaves no mark behind; and the
+    /// filter of a matrix whose pruning retires rows that share columns
+    /// takes back the charge it made for its list. Listed twice, the
+    /// columns left at two passed the room sized by the columns, and the
+    /// charge taken back was more than the charge made, an overflow where
+    /// overflow is checked (found by Codex, 2026-11-12).
+    #[test]
+    fn a_retirement_lists_a_column_once() {
+        let rows: Vec<Vec<u32>> = vec![
+            vec![0, 1, 4, 5],
+            vec![2, 7, 8],
+            vec![1, 2, 4, 7, 8],
+            vec![1, 2, 7, 8],
+            vec![1, 4, 6],
+            vec![2, 3, 7, 8],
+            vec![3, 4, 5],
+        ];
+        let sorted = |mut columns: Vec<u32>| {
+            columns.sort_unstable();
+            columns
+        };
+        for threads in [1, 2, 4] {
+            crate::parallel::with_budget(threads, || {
+                // Rows 0, 2 and 4 all hold columns 1 and 4, which they
+                // leave to one row each, as row 0 leaves column 5.
+                let mut filter = Filter::new(SparseMatrix::new(9, rows.clone()), 2);
+                let (ones, twos) = filter.retire_all(&[0, 2, 4]);
+                assert_eq!((sorted(ones), twos), (vec![1, 4, 5], vec![]), "{threads}");
+                // Rows 1 and 2 both hold columns 2, 7 and 8, and leave
+                // each to two rows.
+                let mut filter = Filter::new(SparseMatrix::new(9, rows.clone()), 2);
+                let (ones, twos) = filter.retire_all(&[1, 2]);
+                assert_eq!((ones, sorted(twos)), (vec![], vec![2, 7, 8]), "{threads}");
+                assert!(
+                    filter
+                        .listed
+                        .iter()
+                        .all(|mark| mark.load(Ordering::Relaxed) == NOT_LISTED),
+                    "a mark left on {threads} threads"
+                );
+                // The whole filter, whose pruning retires such rows.
+                let filtered = filter_merge(SparseMatrix::new(9, rows.clone()), 2, 128);
+                assert!(filtered.matrix().rows().len() <= rows.len());
+            });
         }
     }
 

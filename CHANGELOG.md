@@ -31,6 +31,15 @@ what a consumer must change, not everything that moved.
   drawn modulo zero; it is declined, `None`, as a matrix with no columns
   is.
 
+- **`gf2::filter_merge` and `filter_merge_within` counted a column twice
+  among those a round of pruning left to one row or to two, where rows
+  retired in different runs held it.** The list of the columns left at
+  two could then pass the room sized by the columns, and the charge
+  taken back for it be more than the charge made: a panic where overflow
+  is checked, and elsewhere a `peak_bytes`, and a limit's test, under by
+  what the list had grown. A column is listed once a retirement. Found by
+  Codex on seven rows over nine columns, which are the test.
+
 ## 0.4.0 — tagged `v0.4.0`
 
 ### Breaking
