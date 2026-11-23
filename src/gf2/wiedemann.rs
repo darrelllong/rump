@@ -1383,8 +1383,9 @@ pub fn wiedemann_solution(
     if slice >= generators.of || matrix.rows().is_empty() || matrix.columns() == 0 {
         return None;
     }
-    if dimension_of(matrix) != generators.dimension
-        || live_columns(matrix) != generators.columns
+    let columns = live_columns(matrix);
+    if matrix.rows().len().max(columns) != generators.dimension
+        || columns != generators.columns
         || matrix_fingerprint(matrix) != generators.matrix
     {
         return None;
