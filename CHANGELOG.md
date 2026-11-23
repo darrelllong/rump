@@ -23,6 +23,17 @@ what a consumer must change, not everything that moved.
   `GFW2D`), a part's of a stated length, so a host reads each strip's
   part off a stream and checks the cut before the first product.
 
+### Changed
+
+- **The Wiedemann stages take the form of `M·x` that Lanczos takes.**
+  `wiedemann_sequence`, `wiedemann_solution` and `wiedemann_finish`
+  time their product from the entries blocked against the lists and
+  keep the faster, where the products ahead repay the finding, as the
+  Lanczos solve has done; on twenty Cortex cores a product of a matrix
+  of a million rows is 6 ms where it was 37. On more than one thread
+  `wiedemann_sequence_bytes` states that trial too, by a bound, so a
+  caller admitting the stage against a memory is told more than before.
+
 ### Fixed
 
 - **`gf2::wiedemann_sequence` and `block_wiedemann_dependencies_sparse`

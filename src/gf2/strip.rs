@@ -290,7 +290,7 @@ mod tests {
 
     /// `M·x` as one host makes it.
     fn whole(matrix: &SparseMatrix, x: &[u64], threads: usize) -> Vec<u64> {
-        let product = Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads);
+        let product = Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads, 1);
         let image = Block::zeroed(product.columns());
         product.forward(&Block::of(x.iter().copied()), &image);
         image.words().collect()

@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 /// The smallest block measured, in bytes: within the first-level cache of
 /// every machine measured, the smallest of them 32 KB a core and two
 /// threads to the core.
-const FIRST_BLOCK: usize = 1 << 14;
+pub(crate) const FIRST_BLOCK: usize = 1 << 14;
 
 /// The largest block measured, in bytes. Past the last cache a read costs
 /// what memory costs, whatever the block's size; the largest cache to a

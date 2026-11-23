@@ -624,6 +624,36 @@ impl Sparse {
         ])
     }
 
+    /// A bound on what [`Self::blocked`] requests for a product of one
+    /// direction in `threads` parts, the lists still held: while a part is
+    /// made, a word an entry and two words a group, and its bytes, two an
+    /// entry, two more for each run's worth of places skipped between
+    /// entries and four a group, with the runs' bounds. A group is a
+    /// slice's run. The runs are [`RUN_OUTPUTS`] columns each and at most
+    /// one more a part; the slices are no shorter than the least block
+    /// the machine is measured with gives and, the form being tried only
+    /// on a block longer than a slice, the places skipped in all the
+    /// slices of a run fewer than two blocks' words.
+    fn blocked_bytes(shape: &Shape, threads: usize) -> Option<u64> {
+        let threads = threads as u64;
+        let runs = (shape.sparse() / RUN_OUTPUTS as u64).checked_add(threads)?;
+        let least = (crate::machine::FIRST_BLOCK / SLICE_SHARE / size_of::<u64>()) as u64;
+        let groups = (shape.rows / least + 1).checked_mul(runs)?;
+        let skipped = shape
+            .rows
+            .max(shape.set)
+            .checked_mul(2)?
+            .checked_mul(runs)?
+            / RUN_OUTPUTS as u64;
+        sum([
+            shape.sparse_entries.checked_mul(4 + 2),
+            groups.checked_mul(8 + 8 + 4),
+            skipped.checked_mul(2),
+            runs.checked_mul(16),
+            threads.checked_mul(2 * size_of::<Part>() as u64),
+        ])
+    }
+
     /// The bytes a pass of `M·x` requests and releases, the greater of its
     /// two halves, each with the arc over its closure: the fold's sums,
     /// `2 KiB` a run, on each thread; then the dense pass's tables,
@@ -1153,8 +1183,27 @@ impl Sparse {
     /// [`Self::from_lists`] for `M·x` alone: the entries by relation, which
     /// only `Mᵀ·y` reads, are not kept, which is half the entries' memory.
     /// `backward` and the Lanczos products are not to be called on it.
-    fn forward_only(by_relation: Vec<Vec<u32>>, columns: usize, threads: usize) -> Self {
-        Self::build(by_relation, columns, threads, false)
+    /// `ahead` products are to come, and the form of its entries is chosen
+    /// for them as Lanczos chooses its own ([`Self::choose`]): a product
+    /// over blocks written once is timed, and says what one takes.
+    fn forward_only(
+        by_relation: Vec<Vec<u32>>,
+        columns: usize,
+        threads: usize,
+        ahead: usize,
+    ) -> Self {
+        let sparse = Self::build(by_relation, columns, threads, false);
+        let (x, image) = (
+            Block::zeroed(sparse.relations),
+            Block::zeroed(sparse.columns),
+        );
+        sparse.forward(&x, &image);
+        let began = Instant::now();
+        sparse.forward(&x, &image);
+        sparse.choose(began.elapsed(), ahead, |entries, (forward, _)| {
+            sparse.folds.fold(forward, entries.0.clone(), &x, &image);
+        });
+        sparse
     }
 
     fn build(mut by_relation: Vec<Vec<u32>>, columns: usize, threads: usize, both: bool) -> Self {
@@ -1568,8 +1617,9 @@ impl Sparse {
     /// Finds which form of the products' entries is the faster on this
     /// machine, and has the products take it, if the solve ahead is long
     /// enough to repay the finding: `ahead` iterations of about
-    /// `iteration` each. `v` and `q` are blocks over the relations for the
-    /// trial to multiply.
+    /// `iteration` each. `product` makes what an iteration makes of the
+    /// entries, on the paces it is given: the caller's own products, over
+    /// its own blocks.
     ///
     /// Which is faster is the machine's to say. On the matrix of a
     /// 120-digit sieve the products blocked were 7.0 ms for 27.0 on twenty
@@ -1580,7 +1630,12 @@ impl Sparse {
     /// what [`gather_costs`](crate::machine::gather_costs) finds cheap to
     /// read from with every thread reading, and a block that is within one
     /// is left in its lists.
-    fn choose(&self, iteration: Duration, ahead: usize, v: &Arc<Block>, q: &Arc<Block>) {
+    fn choose(
+        &self,
+        iteration: Duration,
+        ahead: usize,
+        product: impl Fn(&(Entries, Entries), (&Mutex<Pace>, &Mutex<Pace>)),
+    ) {
         let threads = self.folds.threads();
         if threads == 1 || !repays(iteration, ahead) {
             return;
@@ -1593,16 +1648,13 @@ impl Sparse {
         let Some(blocked) = self.blocked(slice) else {
             return;
         };
-        let image = Block::zeroed(self.columns);
-        let av = Block::zeroed(self.relations);
         let shortest = |entries: &(Entries, Entries)| {
             let held = || Mutex::new(Pace::held(threads));
             let (forward, backward) = (held(), held());
             (0..PACE_WINDOW)
                 .map(|_| {
                     let began = Instant::now();
-                    let blocks = [v, q, &image, &av];
-                    self.products(entries.clone(), (&forward, &backward), blocks);
+                    product(entries, (&forward, &backward));
                     began.elapsed()
                 })
                 .min()
@@ -2606,7 +2658,14 @@ fn lanczos_observed<R: RandomSource + ?Sized>(
             // The blocks have been written once and the passes timed:
             // what an iteration takes is known, and how many are ahead.
             let iteration = began.elapsed() / PACE_WINDOW as u32;
-            matrix.choose(iteration, full_blocks.saturating_sub(iterations), &v0, &q);
+            // The trial makes `A·v0` again, into the blocks that hold it.
+            matrix.choose(
+                iteration,
+                full_blocks.saturating_sub(iterations),
+                |entries, paces| {
+                    matrix.products(entries.clone(), paces, [&v0, &q, &image, &av0]);
+                },
+            );
         }
         w2i = w1i;
         w1i = w0i;
@@ -3216,7 +3275,7 @@ mod tests {
             })
             .collect();
         let listed = Sparse::from_lists(rows.clone(), COLUMNS, 4);
-        let blocked = Sparse::from_lists(rows, COLUMNS, 4);
+        let blocked = Sparse::from_lists(rows.clone(), COLUMNS, 4);
         blocked.take(blocked.blocked(SLICE).expect("the entries are lists"));
         assert!(blocked.blocked(SLICE).is_none(), "blocked twice");
         let solved = |matrix: &Sparse| {
@@ -3225,6 +3284,17 @@ mod tests {
         let dependencies = solved(&listed).expect("the solve finds dependencies");
         assert!(!dependencies.is_empty());
         assert_eq!(solved(&blocked), Some(dependencies));
+        // And `M·x` where only that product is kept.
+        let forward = Sparse::forward_only(rows, COLUMNS, 4, 0);
+        let x = Block::of((1..=ROWS as u64).map(|i| i.wrapping_mul(MATRIX_SEED)));
+        let image = || {
+            let image = Block::zeroed(forward.columns());
+            forward.forward(&x, &image);
+            image.words().collect::<Vec<u64>>()
+        };
+        let from_lists = image();
+        forward.take(forward.blocked(SLICE).expect("the entries are lists"));
+        assert_eq!(image(), from_lists);
     }
 
     /// The faster form is looked for when the solve ahead is long enough

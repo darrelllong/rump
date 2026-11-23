@@ -816,7 +816,10 @@ pub fn wiedemann_sequence(
         (seed, slice, of),
         terms,
         from,
-        || Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads),
+        || {
+            let ahead = terms.saturating_sub(from.map_or(0, Sequence::terms));
+            Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads, ahead)
+        },
     )
 }
 
@@ -941,7 +944,13 @@ fn sequence_by<P: Product>(
 ///   supports `2048·of`, the slab `512·of·terms` and the last block's
 ///   copy `8M`; and at a term before, in place of that copy, the pass's
 ///   own requests: the fold's sums, `2 KiB` a run, or the dense tables
-///   and columns, `264·D` a thread, each with its closure's arc.
+///   and columns, `264·D` a thread, each with its closure's arc;
+/// - on more than one thread, where the entries' blocked form may be
+///   tried against the lists (`Sparse::choose`): the flat lists, the
+///   masks, the cuts and the records as above, two blocks, a pass's
+///   requests and a bound on what making the blocked form requests
+///   (`Sparse::blocked_bytes`). That term is a bound and no count: the
+///   blocked form's bytes follow the entries' places.
 ///
 /// The cuts are one run on one thread and eight a thread otherwise, and
 /// the pool has a handle and a parker a thread beyond the first;
@@ -974,7 +983,22 @@ pub fn wiedemann_sequence_bytes(
     ])?;
     let last = standing.checked_add(dimension.checked_mul(8)?)?;
     let passing = standing.checked_add(Sparse::forward_pass_bytes(&shape, threads)?)?;
-    taking.max(last).max(passing).checked_add(RECORDS)
+    let trying = if threads == 1 {
+        0
+    } else {
+        sum([
+            Sparse::held_bytes(&shape, false, threads),
+            dimension.checked_mul(16),
+            Some(2 * (16 + size_of::<Block>() as u64)),
+            Sparse::forward_pass_bytes(&shape, threads),
+            Sparse::blocked_bytes(&shape, threads),
+        ])?
+    };
+    taking
+        .max(last)
+        .max(passing)
+        .max(trying)
+        .checked_add(RECORDS)
 }
 
 /// Where the generator's iteration stopped: `A·F = G + Xᵗ·E` at `t`, with
@@ -1351,7 +1375,8 @@ pub fn wiedemann_solution(
     if slice >= generators.of || matrix.rows().is_empty() || matrix.columns() == 0 {
         return None;
     }
-    let mut sparse = Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads);
+    let rows = matrix.rows().to_vec();
+    let mut sparse = Sparse::forward_only(rows, matrix.columns(), threads, generators.degree());
     let (count, columns) = (sparse.relations(), sparse.columns());
     let dimension = count.max(columns);
     if dimension != generators.dimension
@@ -1480,7 +1505,8 @@ pub fn wiedemann_finish(
     if matrix.rows().is_empty() || matrix.columns() == 0 || partials.is_empty() {
         return None;
     }
-    let mut sparse = Sparse::forward_only(matrix.rows().to_vec(), matrix.columns(), threads);
+    let rows = matrix.rows().to_vec();
+    let mut sparse = Sparse::forward_only(rows, matrix.columns(), threads, POWERS);
     finish_by(&mut sparse, matrix, partials, threads)
 }
 
