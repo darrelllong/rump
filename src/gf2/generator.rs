@@ -750,8 +750,8 @@ mod tests {
                     );
                 }
             }
-            for c in 0..count {
-                let grew = state.degrees[c] - 1;
+            for (c, &degree) in state.degrees.iter().enumerate() {
+                let grew = degree - 1;
                 for index in grew + 1..pi.length() {
                     assert!(
                         pi.column(index, c).iter().all(|&word| word == 0),

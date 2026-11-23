@@ -255,9 +255,9 @@ impl QuotientLog {
 /// slot held the larger value, and the reduced slot alternates thereafter.
 fn replay_batch(state: &mut JacobiState, first_reduced_is_a: bool, log: &QuotientLog) {
     let d0 = u8::from(first_reduced_is_a);
-    for i in 0..log.len {
+    for (i, &q) in log.q_mod_4[..log.len].iter().enumerate() {
         let d = if i.is_multiple_of(2) { d0 } else { 1 - d0 };
-        state.update(d, log.q_mod_4[i]);
+        state.update(d, q);
     }
 }
 

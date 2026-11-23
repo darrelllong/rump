@@ -1724,10 +1724,9 @@ impl BigUint {
                 continue;
             }
             let mut carry = 0u128;
-            for j in (i + 1)..n {
-                let idx = i + j;
-                let acc = u128::from(out[idx]) + a_i * u128::from(value.limbs[j]) + carry;
-                out[idx] = low_u64(acc);
+            for (slot, &a_j) in out[2 * i + 1..i + n].iter_mut().zip(&value.limbs[i + 1..]) {
+                let acc = u128::from(*slot) + a_i * u128::from(a_j) + carry;
+                *slot = low_u64(acc);
                 carry = acc >> 64;
             }
             let mut idx = i + n;
