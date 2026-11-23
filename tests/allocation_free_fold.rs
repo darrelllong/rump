@@ -1,28 +1,36 @@
 //! A caller's field arithmetic on `BigUint` can run without touching the
 //! allocator: a Mersenne fold multiply built only from the into-storage and
 //! in-place operations makes no allocation once its buffers have their
-//! capacity. Counted through the global allocator, so a call that quietly
-//! allocates fails here rather than showing up as a profile.
+//! capacity. Counted through the global allocator on the test's own
+//! thread, so a call that quietly allocates fails here rather than showing
+//! up as a profile, and what the harness allocates beside the test does not.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 use rump::BigUint;
 
 struct Counting;
 
-static CALLS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// This thread's requests of the allocator.
+    static CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn note() {
+    let _ = CALLS.try_with(|calls| calls.set(calls.get() + 1));
+}
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        CALLS.fetch_add(1, Ordering::Relaxed);
+        note();
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        CALLS.fetch_add(1, Ordering::Relaxed);
+        note();
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -104,11 +112,11 @@ fn a_mersenne_fold_multiply_makes_no_allocation() {
         // before the counted region.
         let mut expected = a.clone();
         expected = expected.mul(&b).rem(&field.modulus);
-        let before = CALLS.load(Ordering::Relaxed);
+        let before = CALLS.with(Cell::get);
         for _ in 0..1_000 {
             field.mul(&mut out, &a, &b);
         }
-        let after = CALLS.load(Ordering::Relaxed);
+        let after = CALLS.with(Cell::get);
         assert_eq!(out, expected, "fold modulo 2^{k} - 1");
         assert_eq!(
             after - before,
