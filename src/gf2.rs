@@ -624,19 +624,19 @@ impl Sparse {
         ])
     }
 
-    /// A bound on what [`Self::blocked`] requests for a product of one
-    /// direction in `threads` parts, the lists still held: while a part is
-    /// made, a word an entry and two words a group, and its bytes, two an
+    /// Bounds on the entries of one product blocked ([`Self::blocked`]) in
+    /// `threads` parts: what the blocked form holds, and what making it
+    /// requests while the lists are still held. It holds two bytes an
     /// entry, two more for each run's worth of places skipped between
-    /// entries and four a group, with the runs' bounds. A group is a
+    /// entries, four a group and the runs' bounds; a part being made holds
+    /// a word an entry and two words a group besides. A group is a
     /// slice's run. The runs are [`RUN_OUTPUTS`] columns each and at most
     /// one more a part; the slices are no shorter than the least block
     /// the machine is measured with gives and, the form being tried only
     /// on a block longer than a slice, the places skipped in all the
     /// slices of a run fewer than two blocks' words.
-    fn blocked_bytes(shape: &Shape, threads: usize) -> Option<u64> {
-        let threads = threads as u64;
-        let runs = (shape.sparse() / RUN_OUTPUTS as u64).checked_add(threads)?;
+    fn blocked_bytes(shape: &Shape, threads: usize) -> Option<(u64, u64)> {
+        let runs = Self::blocked_runs(shape, threads)?;
         let least = (crate::machine::FIRST_BLOCK / SLICE_SHARE / size_of::<u64>()) as u64;
         let groups = (shape.rows / least + 1).checked_mul(runs)?;
         let skipped = shape
@@ -645,13 +645,25 @@ impl Sparse {
             .checked_mul(2)?
             .checked_mul(runs)?
             / RUN_OUTPUTS as u64;
-        sum([
-            shape.sparse_entries.checked_mul(4 + 2),
-            groups.checked_mul(8 + 8 + 4),
+        let held = sum([
+            shape.sparse_entries.checked_mul(2),
             skipped.checked_mul(2),
+            groups.checked_mul(4),
             runs.checked_mul(16),
-            threads.checked_mul(2 * size_of::<Part>() as u64),
-        ])
+            (threads as u64).checked_mul(2 * size_of::<Part>() as u64),
+        ])?;
+        let making = sum([
+            Some(held),
+            shape.sparse_entries.checked_mul(4),
+            groups.checked_add(threads as u64)?.checked_mul(16),
+        ])?;
+        Some((held, making))
+    }
+
+    /// The runs of a product's blocked entries in `threads` parts, at the
+    /// most.
+    fn blocked_runs(shape: &Shape, threads: usize) -> Option<u64> {
+        (shape.sparse() / RUN_OUTPUTS as u64).checked_add(threads as u64)
     }
 
     /// The bytes a pass of `M·x` requests and releases, the greater of its
@@ -662,7 +674,14 @@ impl Sparse {
     fn forward_pass_bytes(shape: &Shape, threads: usize) -> Option<u64> {
         let threads = threads as u64;
         let closure = 16 + 6 * size_of::<usize>() as u64;
-        let sums = Self::runs_for(threads as usize)?
+        // From the lists a thread's runs; blocked, on more than one
+        // thread, every run of the parts.
+        let runs = if threads == 1 {
+            1
+        } else {
+            Self::runs_for(threads as usize)?.max(Self::blocked_runs(shape, threads as usize)?)
+        };
+        let sums = runs
             .checked_mul(8 * (RUN_OUTPUTS as u64 + 1))?
             .checked_add(closure)?;
         let dense = sum([

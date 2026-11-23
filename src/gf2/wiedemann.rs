@@ -946,11 +946,14 @@ fn sequence_by<P: Product>(
 ///   own requests: the fold's sums, `2 KiB` a run, or the dense tables
 ///   and columns, `264·D` a thread, each with its closure's arc;
 /// - on more than one thread, where the entries' blocked form may be
-///   tried against the lists (`Sparse::choose`): the flat lists, the
-///   masks, the cuts and the records as above, two blocks, a pass's
-///   requests and a bound on what making the blocked form requests
-///   (`Sparse::blocked_bytes`). That term is a bound and no count: the
-///   blocked form's bytes follow the entries' places.
+///   tried against the lists and kept (`Sparse::choose`): the trial,
+///   which is the flat lists, the masks, the cuts and the records as
+///   above, two blocks, a pass's requests and what making the blocked
+///   form requests; and the recurrence with the blocked form held, its
+///   pass's sums a run each for every run of the parts. Both by
+///   `Sparse::blocked_bytes`, with the lists still counted beside the
+///   blocked form: bounds and no counts, for the blocked form's bytes
+///   follow the entries' places.
 ///
 /// The cuts are one run on one thread and eight a thread otherwise, and
 /// the pool has a handle and a parker a thread beyond the first;
@@ -983,16 +986,21 @@ pub fn wiedemann_sequence_bytes(
     ])?;
     let last = standing.checked_add(dimension.checked_mul(8)?)?;
     let passing = standing.checked_add(Sparse::forward_pass_bytes(&shape, threads)?)?;
+    // On more than one thread the entries may be tried blocked, and
+    // kept so: the trial beside a built product and two blocks, and the
+    // recurrence with the blocked form where the lists were.
     let trying = if threads == 1 {
         0
     } else {
-        sum([
+        let (held, making) = Sparse::blocked_bytes(&shape, threads)?;
+        let trial = sum([
             Sparse::held_bytes(&shape, false, threads),
             dimension.checked_mul(16),
             Some(2 * (16 + size_of::<Block>() as u64)),
             Sparse::forward_pass_bytes(&shape, threads),
-            Sparse::blocked_bytes(&shape, threads),
-        ])?
+            Some(making),
+        ])?;
+        trial.max(last.max(passing).checked_add(held)?)
     };
     taking
         .max(last)
