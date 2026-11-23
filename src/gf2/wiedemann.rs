@@ -1375,16 +1375,14 @@ pub fn wiedemann_solution(
     if slice >= generators.of || matrix.rows().is_empty() || matrix.columns() == 0 {
         return None;
     }
-    let rows = matrix.rows().to_vec();
-    let mut sparse = Sparse::forward_only(rows, matrix.columns(), threads, generators.degree());
-    let (count, columns) = (sparse.relations(), sparse.columns());
-    let dimension = count.max(columns);
-    if dimension != generators.dimension
-        || columns != generators.columns
+    if dimension_of(matrix) != generators.dimension
+        || live_columns(matrix) != generators.columns
         || matrix_fingerprint(matrix) != generators.matrix
     {
         return None;
     }
+    let rows = matrix.rows().to_vec();
+    let mut sparse = Sparse::forward_only(rows, matrix.columns(), threads, generators.degree());
     solution_by(&mut sparse, generators, slice, threads)
 }
 

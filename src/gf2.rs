@@ -1185,7 +1185,9 @@ impl Sparse {
     /// `backward` and the Lanczos products are not to be called on it.
     /// `ahead` products are to come, and the form of its entries is chosen
     /// for them as Lanczos chooses its own ([`Self::choose`]): a product
-    /// over blocks written once is timed, and says what one takes.
+    /// over blocks written once is timed, and says what one takes. Not on
+    /// one thread, nor with no more products ahead than the trial's own,
+    /// where no form is taken.
     fn forward_only(
         by_relation: Vec<Vec<u32>>,
         columns: usize,
@@ -1193,6 +1195,9 @@ impl Sparse {
         ahead: usize,
     ) -> Self {
         let sparse = Self::build(by_relation, columns, threads, false);
+        if sparse.folds.threads() == 1 || ahead <= 2 * PACE_WINDOW {
+            return sparse;
+        }
         let (x, image) = (
             Block::zeroed(sparse.relations),
             Block::zeroed(sparse.columns),
