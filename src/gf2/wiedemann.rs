@@ -945,10 +945,13 @@ fn sequence_by<P: Product>(
 ///   copy `8M`; and at a term before, in place of that copy, the pass's
 ///   own requests: the fold's sums, `2 KiB` a run, or the dense tables
 ///   and columns, `264·D` a thread, each with its closure's arc;
-/// - on more than one thread, where the entries' blocked form may be
+/// - on more than one thread and to terms enough that their products can
+///   repay it (`Sparse::tries`), where the entries' blocked form may be
 ///   tried against the lists and kept (`Sparse::choose`): the trial,
 ///   which is the flat lists, the masks, the cuts and the records as
-///   above, two blocks, a pass's requests and what making the blocked
+///   above, two blocks, and the greater of what the machine's measurement
+///   requests, a block to each thread of 32 MiB at most and a gibibyte
+///   between them, and of a pass's requests with what making the blocked
 ///   form requests; and the recurrence with the blocked form held, its
 ///   pass's sums a run each for every run of the parts. Both by
 ///   `Sparse::blocked_bytes`, with the lists still counted beside the
@@ -970,8 +973,9 @@ pub fn wiedemann_sequence_bytes(
     threads: usize,
 ) -> Option<u64> {
     let shape = Shape::of(matrix);
-    let (of, terms) = (of as u64, terms as u64);
     let threads = threads.max(1);
+    let tried = Sparse::tries(threads, terms);
+    let (of, terms) = (of as u64, terms as u64);
     let dimension = shape.rows.max(shape.set);
     let taking = sum([
         Shape::vectors(shape.rows, shape.entries),
@@ -986,21 +990,23 @@ pub fn wiedemann_sequence_bytes(
     ])?;
     let last = standing.checked_add(dimension.checked_mul(8)?)?;
     let passing = standing.checked_add(Sparse::forward_pass_bytes(&shape, threads)?)?;
-    // On more than one thread the entries may be tried blocked, and
-    // kept so: the trial beside a built product and two blocks, and the
-    // recurrence with the blocked form where the lists were.
-    let trying = if threads == 1 {
-        0
-    } else {
+    // Where the entries may be tried blocked, and kept so: the trial
+    // beside a built product and two blocks, which is the machine's
+    // measurement and then the blocked form's making and its passes; and
+    // the recurrence with the blocked form where the lists were.
+    let trying = if tried {
         let (held, making) = Sparse::blocked_bytes(&shape, threads)?;
+        let finding = crate::machine::gather_costs_bytes(threads)?
+            .max(Sparse::forward_pass_bytes(&shape, threads)?.checked_add(making)?);
         let trial = sum([
             Sparse::held_bytes(&shape, false, threads),
             dimension.checked_mul(16),
             Some(2 * (16 + size_of::<Block>() as u64)),
-            Sparse::forward_pass_bytes(&shape, threads),
-            Some(making),
+            Some(finding),
         ])?;
         trial.max(last.max(passing).checked_add(held)?)
+    } else {
+        0
     };
     taking
         .max(last)
@@ -2495,5 +2501,26 @@ mod tests {
         assert!(
             wiedemann_sequence_with(&Dimensions::of(&matrix), made, 5, 0, 1, 4, None).is_none()
         );
+    }
+
+    /// The statement counts a trial of the blocked form, the machine's
+    /// measurement within it, from the first count of terms whose products
+    /// can repay one and on more than one thread; and no product repays
+    /// one at the count before.
+    #[test]
+    fn the_statement_counts_a_trial_only_where_one_may_be_run() {
+        use super::super::{repays, TRIAL_ITERATIONS, TRIAL_REPAID};
+        use std::time::Duration;
+        let last = (TRIAL_REPAID * TRIAL_ITERATIONS) as usize;
+        assert!(!repays(Duration::from_secs(3_600), last));
+        assert!(repays(Duration::from_secs(10), last + 1));
+        let matrix = sieve_like(300, 280, 6, 11);
+        let stated = |terms, threads| {
+            wiedemann_sequence_bytes(&matrix, 1, terms, threads).expect("a statement")
+        };
+        let measurement = crate::machine::gather_costs_bytes(2).expect("a bound");
+        assert!(stated(last, 2) < measurement);
+        assert!(stated(last + 1, 1) < measurement);
+        assert!(stated(last + 1, 2) > measurement);
     }
 }

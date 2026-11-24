@@ -1188,6 +1188,15 @@ impl Sparse {
         Self::from_lists(by_relation, columns, threads)
     }
 
+    /// Whether [`Self::forward_only`] may try the blocked form, on
+    /// `threads` threads with `ahead` products to come: not on one thread,
+    /// nor where the products ahead cannot repay a trial however short a
+    /// product is, for [`repays`] asks more of them than [`TRIAL_REPAID`]
+    /// times a trial's [`TRIAL_ITERATIONS`].
+    fn tries(threads: usize, ahead: usize) -> bool {
+        threads > 1 && ahead > (TRIAL_REPAID * TRIAL_ITERATIONS) as usize
+    }
+
     /// From each relation's ascending column list, of `columns` columns.
     ///
     /// The columns are numbered again as those some relation sets, in their
@@ -1204,9 +1213,8 @@ impl Sparse {
     /// `backward` and the Lanczos products are not to be called on it.
     /// `ahead` products are to come, and the form of its entries is chosen
     /// for them as Lanczos chooses its own ([`Self::choose`]): a product
-    /// over blocks written once is timed, and says what one takes. Not on
-    /// one thread, nor with fewer products ahead than repay the trial
-    /// however short a product is ([`repays`]), where no form is taken.
+    /// over blocks written once is timed, and says what one takes. Not
+    /// where no form can be taken ([`Self::tries`]).
     fn forward_only(
         by_relation: Vec<Vec<u32>>,
         columns: usize,
@@ -1214,7 +1222,7 @@ impl Sparse {
         ahead: usize,
     ) -> Self {
         let sparse = Self::build(by_relation, columns, threads, false);
-        if sparse.folds.threads() == 1 || ahead < (TRIAL_REPAID * TRIAL_ITERATIONS) as usize {
+        if !Self::tries(sparse.folds.threads(), ahead) {
             return sparse;
         }
         let (x, image) = (

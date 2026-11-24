@@ -30,9 +30,11 @@ what a consumer must change, not everything that moved.
   time their product from the entries blocked against the lists and
   keep the faster, where the products ahead repay the finding, as the
   Lanczos solve has done; on twenty Cortex cores a product of a matrix
-  of a million rows is 6 ms where it was 37. On more than one thread
-  `wiedemann_sequence_bytes` states that trial too, by a bound, so a
-  caller admitting the stage against a memory is told more than before.
+  of a million rows is 6 ms where it was 37. Where a trial may be run,
+  on more than one thread and to more than 4 096 terms,
+  `wiedemann_sequence_bytes` states it too, by a bound, the machine's
+  measurement of up to a gibibyte within it, so a caller admitting the
+  stage against a memory is told more than before.
 
 ### Fixed
 

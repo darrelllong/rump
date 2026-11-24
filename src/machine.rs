@@ -161,6 +161,26 @@ pub fn gather_costs(threads: usize) -> GatherCosts {
     GatherCosts { threads, costs }
 }
 
+/// A bound on the bytes [`gather_costs`] requests at once on `threads`
+/// threads, for a caller that states what it holds; `None` past `u64`. To
+/// each thread its block, [`LAST_BLOCK`] at most and [`MOST_MEMORY`]
+/// between them, and its small block; its handle and its pair of costs;
+/// and a cost of every block measured, to each thread and to them all, in
+/// vectors that may have doubled. What the platform allocates to start a
+/// thread is outside it.
+pub(crate) fn gather_costs_bytes(threads: usize) -> Option<u64> {
+    let threads = threads.max(1) as u64;
+    let blocks = (LAST_BLOCK as u64)
+        .checked_mul(threads)?
+        .min(MOST_MEMORY as u64);
+    let measured = u64::from((LAST_BLOCK / FIRST_BLOCK).ilog2() + 1);
+    let handle = core::mem::size_of::<std::thread::ScopedJoinHandle<'_, (f64, f64)>>() as u64;
+    let each = FIRST_BLOCK as u64 + handle + 16 + 16 * measured;
+    each.checked_mul(threads)?
+        .checked_add(blocks)?
+        .checked_add(32 * measured)
+}
+
 /// The median of `values`, of which there is one at least.
 fn median(values: impl Iterator<Item = f64>) -> f64 {
     let mut values: Vec<f64> = values.collect();
